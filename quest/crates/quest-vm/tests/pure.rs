@@ -425,7 +425,7 @@ fn mirror_eval_equals_live_eval() {
         };
         let xs: Vec<i64> = (0..rng.next() % 5).map(|_| rng.small()).collect();
         set(&mut v, a, rng.small(), &xs, rng.small());
-        let m = v.mirror(&set_ab);
+        let m = v.mirror(&set_ab).unwrap();
         for _ in 0..3 {
             let x = int(rng.small());
             let live = v.eval_pure(t.eval, std::slice::from_ref(&x), 1_000, &mut host);
@@ -441,7 +441,7 @@ fn mirror_eval_equals_live_eval() {
 fn mirror_holds_only_its_set() {
     let t = program();
     let v = live(&t, 3, 4, &[10, 20], 9);
-    let m = v.mirror(&[t.xs, t.a, 9_999]);
+    let m = v.mirror(&[t.xs, t.a, 9_999]).unwrap();
     let want: BTreeMap<u16, WireValue> = [
         (t.a, int(3)),
         (t.xs, WireValue::List(vec![int(10), int(20)])),
@@ -453,7 +453,7 @@ fn mirror_holds_only_its_set() {
     // A part's VM gets exactly those globals.
     let mut part = live(&t, 0, 7, &[], 1);
     part.install_mirror(&m).unwrap();
-    assert_eq!(part.mirror(&[t.a, t.b, t.xs, t.u]).globals, {
+    assert_eq!(part.mirror(&[t.a, t.b, t.xs, t.u]).unwrap().globals, {
         let mut all = want.clone();
         all.insert(t.b, int(7));
         all.insert(t.u, int(1));
@@ -468,6 +468,7 @@ fn install_mirror_is_undone_by_rollback() {
     let cp = v.checkpoint();
     let before = state(&v);
     let m = Mirror {
+        program: t.prog.content_hash(),
         globals: [
             (t.a, int(77)),
             (t.xs, WireValue::List(vec![int(5), int(6)])),
@@ -476,7 +477,7 @@ fn install_mirror_is_undone_by_rollback() {
         .collect(),
     };
     v.install_mirror(&m).unwrap();
-    assert_eq!(v.mirror(&[t.a, t.xs]), m);
+    assert_eq!(v.mirror(&[t.a, t.xs]).unwrap(), m);
     assert_eq!(
         v.eval_pure(t.eval, &[int(1)], 1_000, &mut RecordingHost::default()),
         Ok(int(77 + 4 + 2))
@@ -488,9 +489,11 @@ fn install_mirror_is_undone_by_rollback() {
     // A mirror that does not fit the program changes nothing.
     for bad in [
         Mirror {
+            program: t.prog.content_hash(),
             globals: [(t.a, int(1)), (9_999, int(1))].into_iter().collect(),
         },
         Mirror {
+            program: t.prog.content_hash(),
             globals: [(t.a, int(1)), (t.xs, int(1))].into_iter().collect(),
         },
     ] {
@@ -502,6 +505,7 @@ fn install_mirror_is_undone_by_rollback() {
 #[test]
 fn mirror_hash_ignores_order() {
     let mut fwd = Mirror {
+        program: 0,
         globals: BTreeMap::new(),
     };
     let mut back = fwd.clone();
@@ -527,9 +531,11 @@ fn mirror_hash_ignores_order() {
     assert_ne!(mirror_hash(&moved), mirror_hash(&fwd));
     // A list's items are not a struct's fields.
     let l = Mirror {
+        program: 0,
         globals: [(0, WireValue::List(vec![int(1)]))].into_iter().collect(),
     };
     let s = Mirror {
+        program: 0,
         globals: [(
             0,
             WireValue::Struct {
@@ -560,12 +566,14 @@ fn install_mirror_mid_task_is_busy() {
         Status::Busy
     );
     let m = Mirror {
+        program: t.prog.content_hash(),
         globals: [(t.a, int(77))].into_iter().collect(),
     };
     let paused = state(&v);
     // Not now (retry later), unlike a mirror that can never fit.
     assert_eq!(v.install_mirror(&m), Err(LoadError::Busy));
     let bad = Mirror {
+        program: t.prog.content_hash(),
         globals: [(9_999, int(1))].into_iter().collect(),
     };
     assert!(matches!(v.install_mirror(&bad), Err(LoadError::Invalid(_))));
@@ -575,7 +583,7 @@ fn install_mirror_mid_task_is_busy() {
         Status::Idle
     );
     v.install_mirror(&m).unwrap();
-    assert_eq!(v.mirror(&[t.a]), m);
+    assert_eq!(v.mirror(&[t.a]).unwrap(), m);
 }
 
 #[test]
@@ -589,14 +597,15 @@ fn pure_eval_with_zombies_pending_costs_what_the_mirror_does() {
         v.deliver("Ping", &ping(3, 4, &[5], 9));
         let r = v.tick(1, fuel, &mut RecordingHost::default());
         if r.status == Status::Busy
-            && v.mirror(&[t.xs]).globals[&t.xs] == WireValue::List(vec![int(5)])
+            && v.mirror(&[t.xs])
+                .is_ok_and(|m| m.globals[&t.xs] == WireValue::List(vec![int(5)]))
         {
             found = Some(v);
             break;
         }
     }
     let mut v = found.expect("a tick that ends with zombies pending");
-    let m = v.mirror(&[t.a, t.b, t.xs]);
+    let m = v.mirror(&[t.a, t.b, t.xs]).unwrap();
     let mut host = RecordingHost::default();
     let least = (0..1_000)
         .find(|&f| {
@@ -613,6 +622,7 @@ fn pure_eval_with_zombies_pending_costs_what_the_mirror_does() {
 #[test]
 fn mirror_tells_signed_zeros_apart() {
     let one = |x: f64| Mirror {
+        program: 0,
         globals: [(0, WireValue::List(vec![WireValue::Float(x)]))]
             .into_iter()
             .collect(),
@@ -624,4 +634,65 @@ fn mirror_tells_signed_zeros_apart() {
     assert_eq!(mirror_hash(&one(f64::NAN)), mirror_hash(&one(other_nan)));
     assert_eq!(one(f64::NAN), one(other_nan));
     assert_eq!(one(1.5), one(1.5));
+}
+
+/// Review A1 (whole-branch, Task 52): a mirror installed while the part's initialisers were still pending
+/// was overwritten by the initialiser that ran after it, and its sender (deduplicating by hash) never sent
+/// it again. The install waits (`Busy`) until every initialiser ran; the mirror then stays.
+#[test]
+fn a_mirror_outlives_the_initialisers() {
+    let t = program();
+    let m = live(&t, 3, 4, &[10, 20], 9).mirror(&[t.xs]).unwrap();
+    let mut part = vm(&t.prog);
+    let mut installed = false;
+    for now in 0..4 {
+        if !installed {
+            installed = part.install_mirror(&m).is_ok();
+        }
+        part.tick(now, u64::MAX, &mut RecordingHost::default());
+    }
+    assert!(installed);
+    assert_eq!(part.mirror(&[t.xs]).unwrap(), m);
+}
+
+/// Review A1: a home still initialising has no mirror to give (its globals are not set yet).
+#[test]
+fn no_mirror_before_the_initialisers() {
+    let t = program();
+    let mut v = vm(&t.prog);
+    assert_eq!(v.mirror(&[t.xs]), Err(LoadError::Busy));
+    v.tick(0, u64::MAX, &mut RecordingHost::default());
+    assert_eq!(
+        v.mirror(&[t.xs]).unwrap().globals[&t.xs],
+        WireValue::List(vec![])
+    );
+}
+
+/// Review A2 (whole-branch, Task 52): a mirror names globals by index, so one taken from another program
+/// (the home and a part migrate at different ticks) wrote the wrong globals. A mirror carries its
+/// program's content hash; another program refuses it.
+#[test]
+fn a_mirror_of_another_program_is_refused() {
+    let t = program();
+    let m = live(&t, 3, 4, &[10], 9).mirror(&[t.a, t.b, t.xs]).unwrap();
+    let mut other = (*t.prog).clone();
+    other.strings.push("an edit".into());
+    let other = Arc::new(other);
+    let mut part = vm(&other);
+    part.tick(0, u64::MAX, &mut RecordingHost::default());
+    let before = state(&part);
+    assert!(matches!(
+        part.install_mirror(&m),
+        Err(LoadError::Invalid(_))
+    ));
+    assert_eq!(state(&part), before);
+    let mut host = RecordingHost::default();
+    assert_eq!(
+        m.eval_pure(&other, t.eval, &[int(2)], 1_000, &mut host),
+        Err(PureFault::BadCall)
+    );
+    assert_eq!(
+        m.eval_pure(&t.prog, t.eval, &[int(2)], 1_000, &mut host),
+        Ok(int(3 * 2 + 4 + 1))
+    );
 }

@@ -159,8 +159,11 @@ fn write_value(
                     && variants[0].0 == "None"
                     && variants[1].0 == "Some";
                 // The program's errors (codegen carry-over 9) print by their name alone; a host enum's
-                // variant is already `Enum::Variant`.
-                if is_option || name == ERROR_ENUM_NAME || vname.contains("::") {
+                // variant is already `Enum::Variant` (of its own enum's name).
+                let qualified = vname
+                    .strip_prefix(name.as_str())
+                    .is_some_and(|rest| rest.starts_with("::"));
+                if is_option || name == ERROR_ENUM_NAME || qualified {
                     out.push_str(vname);
                 } else {
                     out.push_str(name);

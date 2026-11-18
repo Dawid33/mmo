@@ -22,6 +22,9 @@ pub enum FaultKind {
     TooManyTimers,
     PromiseAlreadyAwaited,
     HostFault,
+    /// The quest's transitions chained into more stages than it has (a cycle, `A → B → A`): the chain
+    /// stops where it stands.
+    TransitionCycle,
     /// Memory that does not parse: sets the instance `Failed`, no abort is attempted.
     Corrupt,
 }
@@ -59,6 +62,7 @@ impl FaultKind {
             FaultKind::TooManyTimers => "too many timers",
             FaultKind::PromiseAlreadyAwaited => "promise already awaited",
             FaultKind::HostFault => "host fault",
+            FaultKind::TransitionCycle => "the quest's transitions cycle",
             FaultKind::Corrupt => "corrupt memory",
         }
     }

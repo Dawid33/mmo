@@ -76,6 +76,8 @@ pub struct Vm {
     /// Set only for the length of a [`Vm::eval_pure`] (`pure`): the run loop stops at an impure
     /// instruction. Never state: false whenever no `eval_pure` is running.
     pub(crate) pure_eval: bool,
+    /// Set only for the length of a [`Vm::initialise`]: no task but an initialiser starts. Never state.
+    pub(crate) inits_only: bool,
 }
 
 impl std::fmt::Debug for Vm {
@@ -338,6 +340,7 @@ impl Vm {
             roles,
             orphans: Vec::new(),
             pure_eval: false,
+            inits_only: false,
         }
     }
 
@@ -374,6 +377,16 @@ impl Vm {
     /// ([`Vm::timers`]), even when it is idle.
     pub fn tick(&mut self, now: u64, fuel: u64, host: &mut dyn Host) -> TickReport {
         self.sched_tick(now, fuel, host)
+    }
+
+    /// [`Vm::tick`] that starts no task but the pending initialisers (a placement: the globals set
+    /// before anything reads or mirrors them). An initialiser it leaves unfinished (out of fuel) goes on
+    /// at the next tick, which then starts the rest as usual.
+    pub fn initialise(&mut self, now: u64, fuel: u64, host: &mut dyn Host) -> TickReport {
+        self.inits_only = true;
+        let r = self.sched_tick(now, fuel, host);
+        self.inits_only = false;
+        r
     }
 
     /// Answers the promise `id` (design D7, spec §8.2): `Ok` with the value, `Err` with an error of the

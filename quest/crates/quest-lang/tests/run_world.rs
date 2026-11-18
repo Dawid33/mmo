@@ -1084,3 +1084,40 @@ fn talk_during_a_multi_tick_setup_reads_the_placed_mirror() {
     let out = run(&mut w, "1 talk 1 3\n2 done 1\n");
     assert_eq!(out, ["[1] Hal: flag is 0", "[1] end Hal: Finished"]);
 }
+
+/// Review A2 (whole-branch, Task 52): an edit kept the mirrors pending for the parts (and what was sent)
+/// from the old program, whose global indices mean other globals in the new one: one held back by a part
+/// mid-segment was installed after the edit.
+#[test]
+fn an_edit_drops_the_old_programs_pending_mirrors() {
+    let src = SLOW_PART.replace(
+        "    stage S:\n",
+        "    event Slow:\n        n: int\n    @on(Slow)\n    fn slow(e):\n        let i = 0\n        while i < 300:\n            i = i + 1\n    stage S:\n",
+    );
+    let (p, lines) = compiled(&src);
+    let people = parse_people(PART_PEOPLE).expect("people");
+    let roles = roles(PART_PEOPLE, &[("pet", "Creature(7)")]);
+    let mut w = World::new(p, people, roles, StubConfig::default(), 200, MEM).expect("placed");
+    w.set_lines(lines);
+    let edited = src.replace(
+        "    let count = 0\n",
+        "    let extra = 7\n    let count = 0\n",
+    );
+    w.set_edit(Box::new(move |_: &str| Ok(compiled(&edited))));
+    // The bump's mirror waits for the part (mid-segment from 2); the edit comes meanwhile, with the home
+    // mid-segment at the end of its tick (no new mirror is taken then).
+    let out = run(
+        &mut w,
+        "1 near 1 7\n2 event M::Bump n=1\n3 event M::Slow n=0\n3 edit v2\n40 near 1 7\n",
+    );
+    assert!(
+        !out.iter().any(|l| l.contains("refused")),
+        "{}",
+        out.join("\n")
+    );
+    assert!(
+        out.last().is_some_and(|l| l.ends_with("part sees 1")),
+        "{}",
+        out.join("\n")
+    );
+}

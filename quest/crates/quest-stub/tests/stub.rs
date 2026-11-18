@@ -672,3 +672,40 @@ fn clone_is_a_snapshot() {
     assert_eq!(run(&mut r), first);
     let _: &Vm = &r.vm;
 }
+
+/// Review A6 (whole-branch, Task 52): a valid program was checked against the host API's version only, so
+/// a host site's kind, parameters and errors were whatever the bytes said — a command called as a query,
+/// a fallible fn without its check. The runner refuses a program whose sites do not fit the API.
+#[test]
+fn a_site_that_does_not_fit_the_api_is_refused() {
+    let site_as = |kind: HostFnKind, params: usize, raises: Vec<String>| {
+        let mut pb = ProgramBuilder::new(stub_api().version);
+        let str_ty = pb.ty(TypeDesc::Str);
+        let unit = pb.ty(TypeDesc::Unit);
+        pb.ty(TypeDesc::Enum {
+            name: quest_vm::types::ERROR_ENUM_NAME.into(),
+            variants: vec![("NotFound".to_string(), vec![])],
+        });
+        pb.fallible_host_site(F_LOG, kind, vec![str_ty; params], unit, raises);
+        let mut f = pb.func("main", 0);
+        f.emit(Op::Ret, 0u16, 0u16, 0u16);
+        let main = f.fn_ref();
+        f.end();
+        pb.main(main);
+        Arc::new(pb.finish().expect("program"))
+    };
+    assert!(Runner::new(site_as(HostFnKind::Command, 1, vec![]), 1 << 20, cfg()).is_ok());
+    for bad in [
+        site_as(HostFnKind::Query, 1, vec![]),
+        site_as(HostFnKind::Command, 2, vec![]),
+        site_as(HostFnKind::Command, 1, vec!["NotFound".into()]),
+    ] {
+        assert!(
+            matches!(
+                Runner::new(bad, 1 << 20, cfg()),
+                Err(quest_vm::LoadError::Invalid(_))
+            ),
+            "a misfitting site loads"
+        );
+    }
+}

@@ -19,8 +19,8 @@ use std::hash::Hasher;
 use state_hash::StateHash;
 
 use crate::consts::{
-    GRAPH_STEPS_MAX, LINE_BASE_TICKS, LINE_MAX_TICKS, LINE_MIN_TICKS, LINE_TICKS_PER_CHAR,
-    STRUCT_FIELDS_MAX,
+    DIALOGUE_NODES_MAX, GRAPH_STEPS_MAX, GROUP_MEMBERS_MAX, LINE_BASE_TICKS, LINE_MAX_TICKS,
+    LINE_MIN_TICKS, LINE_TICKS_PER_CHAR, STRUCT_FIELDS_MAX,
 };
 use crate::program::{ID_TABLE_MAX, Parse, Program, ProgramError, Reader, Writer, invalid};
 use crate::types::{TypeDesc, TypeId};
@@ -902,7 +902,7 @@ impl Check<'_> {
         if exits.windows(2).any(|w| w[0] == w[1]) {
             return invalid(format!("dialogue {name}: two exits share a name"));
         }
-        if d.nodes.is_empty() || d.nodes.len() > ID_TABLE_MAX as usize {
+        if d.nodes.is_empty() || d.nodes.len() > DIALOGUE_NODES_MAX {
             return invalid(format!("dialogue {name}: no nodes, or too many"));
         }
         if let Some(f) = d.target {
@@ -920,11 +920,19 @@ impl Check<'_> {
                 self.pure_fn(d, f, Ret::Bool, "the topic's condition")?;
             }
         }
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeMap::new();
         let mut first = Vec::with_capacity(d.nodes.len());
         for n in &d.nodes {
             self.cond(di, d, &n.cond)?;
-            first.push(seen.insert(n.name.as_str()));
+            let members = seen.entry(n.name.as_str()).or_insert(0usize);
+            first.push(*members == 0);
+            *members += 1;
+            if *members > GROUP_MEMBERS_MAX {
+                return invalid(format!(
+                    "dialogue {name}: node group {} has too many members",
+                    n.name
+                ));
+            }
         }
         self.group_first[di] = first;
         Ok(())
@@ -948,6 +956,11 @@ impl Check<'_> {
                 self.cond(di, d, cond)?;
             }
             StepDef::Group { site, members } => {
+                if members.len() > GROUP_MEMBERS_MAX {
+                    return invalid(format!(
+                        "dialogue {name}: a line group has too many members"
+                    ));
+                }
                 self.sites[di].push(*site);
                 for m in members {
                     self.line(d, &m.line)?;
@@ -1072,7 +1085,8 @@ impl Check<'_> {
 /// cast's arity (`bool` for a condition, `str` for a substitution, the field's type for a script event's
 /// argument); every block inside the steps, the blocks a tree under the nodes, each step in exactly one
 /// block; jumps, detours, exits and follow-ups in range; no `choice` or `detour` in a scene; sites unique
-/// per dialogue; at most `GRAPH_STEPS_MAX` steps.
+/// per dialogue; at most `GRAPH_STEPS_MAX` steps, `DIALOGUE_NODES_MAX` nodes a dialogue and
+/// `GROUP_MEMBERS_MAX` members a node or line group.
 pub(crate) fn validate(p: &Program) -> Result<(), ProgramError> {
     let g = &p.dialogues;
     if g.steps.len() > GRAPH_STEPS_MAX || g.dialogues.len() > ID_TABLE_MAX as usize {

@@ -27,7 +27,7 @@ pub(super) struct DialogueMirror {
     pub(super) mirror: Mirror,
     hash: u64,
     /// A scratch instance holding the mirror, made at its first evaluation.
-    scratch: Option<Vm>,
+    scratch: Option<MirrorVm>,
 }
 
 /// The host a pure evaluation sees: the people's queries only.
@@ -89,10 +89,10 @@ impl Core {
         let set = self.dialogue_set();
         for (k, inst) in self.insts.iter().enumerate() {
             let Ok(k) = u32::try_from(k) else { break };
-            if inst.runner.vm.in_segment() {
+            // Mid-segment or still initialising: it keeps its last.
+            let Ok(mirror) = inst.runner.vm.mirror(&set) else {
                 continue;
-            }
-            let mirror = inst.runner.vm.mirror(&set);
+            };
             let hash = hash_of(&mirror);
             if self.mirrors.get(&k).is_none_or(|d| d.hash != hash) {
                 self.mirrors.insert(
@@ -112,8 +112,7 @@ impl Core {
         self.mirrors.get(&i)?.mirror.globals.get(&global)
     }
 
-    /// Evaluates fn `f` of instance `i` over its dialogue mirror (`Vm::eval_pure` on a scratch instance
-    /// holding it). No mirror, or one the scratch instance refuses, is `BadCall`.
+    /// Evaluates fn `f` of instance `i` over its dialogue mirror (on a `MirrorVm` holding it). No mirror, or one the scratch instance refuses, is `BadCall`.
     pub(super) fn eval_at(
         &mut self,
         i: usize,
@@ -139,8 +138,7 @@ impl Core {
         };
         if d.scratch.is_none() {
             let cfg = vm_config(*mem_bytes, id, roles.clone());
-            let mut vm = Vm::new(Arc::clone(program), cfg).map_err(|_| PureFault::BadCall)?;
-            vm.install_mirror(&d.mirror)
+            let vm = MirrorVm::new(Arc::clone(program), cfg, &d.mirror)
                 .map_err(|_| PureFault::BadCall)?;
             d.scratch = Some(vm);
         }

@@ -25,8 +25,9 @@
 //! sent) and is reported once per fault site (instance and fn) per conversation. Group members are picked
 //! by the dialogue's `@pick`; the `random_*` tie-break is [`roll`]`(now, hash(qualified name, site), member)`.
 //! A choice with no option to offer says nothing and the walk goes on after it. A walk longer than
-//! [`BATCH_STEPS_MAX`] steps, or a return stack past [`DIALOGUE_STACK_MAX`], ends `TooDeep`; an empty node
-//! group (an entry, a `->`) ends `Finished`.
+//! [`BATCH_STEPS_MAX`] steps, one call's evaluations past `RUNNER_EVALS_MAX` (whatever it reached since is
+//! withdrawn), or a return stack past [`DIALOGUE_STACK_MAX`], ends `TooDeep`; an empty node group (an entry,
+//! a `->`) ends `Finished`.
 //!
 //! **Picks.** An offer carries a serial; a pick names it. A pick of an older serial is `Stale` and the
 //! current offer is re-sent; a menu pick of a topic no longer attached or eligible is `Stale` too, with the
@@ -51,7 +52,7 @@ use crate::consts::{BATCH_STEPS_MAX, CONVERSATION_LINGER_TICKS, DIALOGUE_STACK_M
 use crate::dialogue::{Block, DialogueGraph, DialogueKind, StepDef};
 use crate::dialogue_eval::{
     Advance, Common, Eval, Frame, OnceRec, PickKey, Rebound, advance, group, len_u32, rebind_frame,
-    step_at, with_def,
+    spent, step_at, with_def,
 };
 pub use crate::dialogue_eval::{Records, roll};
 use crate::pure::PureFault;
@@ -548,6 +549,8 @@ struct Walk<'a> {
     rec: &'a mut Records,
     out: Batch,
     steps: u32,
+    /// The call's pure evaluations (`RUNNER_EVALS_MAX`).
+    evals: u32,
 }
 
 /// What the walk of one step decided.
@@ -568,6 +571,7 @@ impl<'a> Walk<'a> {
             rec,
             out: Batch::default(),
             steps: 0,
+            evals: 0,
         }
     }
 
@@ -583,6 +587,17 @@ impl<'a> Walk<'a> {
             cast: &self.c.cast,
             reported: &mut self.c.reported,
             now: self.c.now,
+            evals: &mut self.evals,
+        }
+    }
+
+    /// Once the call's evaluations ran out, whatever the walk reached since (a menu or an offer missing
+    /// what a refused condition hid, a pause) is withdrawn: the conversation ends `TooDeep`.
+    fn check_spent(&mut self) {
+        if spent(self.evals) && !matches!(self.c.state, ConvState::Ended { .. } | ConvState::Closed)
+        {
+            self.out.offer = None;
+            self.end(EndReason::TooDeep);
         }
     }
 
@@ -678,6 +693,7 @@ impl<'a> Walk<'a> {
             .collect();
         let keys = topics.into_iter().map(|(_, n, _, i, _)| (i, n)).collect();
         self.offer(true, options, None, Waiting::Menu(keys));
+        self.check_spent();
     }
 
     fn offer(
@@ -719,14 +735,15 @@ impl<'a> Walk<'a> {
     /// Walks until an offer, a pause or the end.
     fn run(&mut self) {
         while self.c.state == ConvState::Running {
-            if self.steps >= BATCH_STEPS_MAX {
+            if self.steps >= BATCH_STEPS_MAX || spent(self.evals) {
                 return self.end(EndReason::TooDeep);
             }
             self.steps += 1;
             if let Flow::Stop = self.step() {
-                return;
+                break;
             }
         }
+        self.check_spent();
     }
 
     fn push(&mut self, block: Block, via: usize) {
@@ -738,7 +755,12 @@ impl<'a> Walk<'a> {
     fn step(&mut self) -> Flow {
         let depth = self.c.frames.len();
         let Walk {
-            c, env, rec, out, ..
+            c,
+            env,
+            rec,
+            out,
+            evals,
+            ..
         } = self;
         let Some(f) = c.frames.last_mut() else {
             self.hub();
@@ -763,6 +785,7 @@ impl<'a> Walk<'a> {
             cast: &c.cast,
             reported: &mut c.reported,
             now: c.now,
+            evals,
         };
         let step = match ev.common_step(f, step, depth, &mut out.lines, &mut out.emits) {
             // A conversation's lines are not timed: the batch goes on.
@@ -966,6 +989,7 @@ impl<'a> Walk<'a> {
             return false;
         }
         self.offer(false, lines, timeout_at, Waiting::Choice(offered));
+        self.check_spent();
         true
     }
 }

@@ -133,6 +133,8 @@ struct Env {
     insts: BTreeMap<u32, Inst>,
     world: World,
     reports: Vec<(InstanceId, PureFault)>,
+    /// Pure evaluations asked of the env.
+    evals: u32,
 }
 
 impl Env {
@@ -142,6 +144,7 @@ impl Env {
             insts: BTreeMap::new(),
             world: World::default(),
             reports: Vec::new(),
+            evals: 0,
         }
     }
 
@@ -208,7 +211,7 @@ impl Env {
         let all: Vec<u16> = (0..inst.prog.globals.len())
             .map(|g| u16::try_from(g).unwrap())
             .collect();
-        inst.mirror = Some(inst.runner.vm.mirror(&all));
+        inst.mirror = Some(inst.runner.vm.mirror(&all).expect("a settled instance"));
     }
 }
 
@@ -234,6 +237,7 @@ impl DialogueEnv for Env {
         args: &[WireValue],
         depth: u32,
     ) -> Result<WireValue, PureFault> {
+        self.evals += 1;
         let Some(inst) = self.insts.get_mut(&i.0) else {
             return Err(PureFault::BadCall);
         };
@@ -578,6 +582,36 @@ fn too_deep_ends() {
         0,
     );
     assert_eq!(ended(&b), (EndReason::TooDeep, "spin", "done"));
+}
+
+/// Review A3 (whole-branch, Task 52): one call was bounded in steps, not in evaluations — a `->` loop
+/// over a large node group evaluated every member's condition at each of `BATCH_STEPS_MAX` steps.
+#[test]
+fn one_call_makes_a_bounded_number_of_evaluations() {
+    let mut src = String::from("let n = 0\ndialogue spin(p: Player, npc: Person):\n");
+    for k in 0..60 {
+        src.push_str(&format!(
+            "    node a when n < 0:\n        npc: \"no\" @spin.no{k}\n"
+        ));
+    }
+    src.push_str("    node a:\n        -> a\n");
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", &src)]));
+    let att = env.att(1, &["spin"]);
+    let (_, b) = Conversation::start(
+        &mut env,
+        &att,
+        &mut Records::default(),
+        player(1),
+        person(1),
+        0,
+    );
+    assert_eq!(ended(&b), (EndReason::TooDeep, "spin", "done"));
+    assert!(
+        env.evals <= quest_vm::consts::RUNNER_EVALS_MAX,
+        "{} evaluations in one call",
+        env.evals
+    );
 }
 
 const DEBT: &str = r#"dialogue haggle(p: Player, npc: Person) exits agreed, refused:

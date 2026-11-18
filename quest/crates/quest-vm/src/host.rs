@@ -171,3 +171,133 @@ pub enum AbortCause {
         stack: Vec<SrcLoc>,
     },
 }
+
+// ---- a program against the API --------------------------------------------------------------------------
+
+impl crate::program::Program {
+    /// Whether the program fits `api` beyond its version (spec §6.4): every host site names a fn of the
+    /// API, of its kind, with its parameters (the receiver first) and result, declaring exactly its errors
+    /// (none for a promise, whose errors are the promise's own); every host `emit` of a dialogue names an
+    /// event of the API with an argument of its type per field. A host binds no program that does not:
+    /// the VM trusts a site's kind and errors when it calls the host (`Host::check` only for a fallible
+    /// site), and the dialogue runner a host event's index.
+    pub fn check_api(&self, api: &HostApi) -> Result<(), crate::program::ProgramError> {
+        use crate::dialogue::StepDef;
+        let bad = |why: String| Err(crate::program::ProgramError::Invalid(why));
+        let types = &self.types;
+        for (i, s) in self.host_sites.iter().enumerate() {
+            let Some(hf) = api.fns.get(usize::from(s.host_fn)) else {
+                return bad(format!(
+                    "host site {i} names host fn {}, which the API lacks",
+                    s.host_fn
+                ));
+            };
+            let name = &hf.name;
+            if s.kind != hf.kind {
+                return bad(format!(
+                    "host site {i} calls `{name}` as another kind of fn"
+                ));
+            }
+            let receiver = hf.receiver.iter().map(|r| receiver_ty(api, r));
+            let want: Vec<HostTy> = receiver
+                .chain(hf.params.iter().map(|p| p.1.clone()))
+                .collect();
+            if s.params.len() != want.len()
+                || !s
+                    .params
+                    .iter()
+                    .zip(&want)
+                    .all(|(&t, h)| host_ty_fits(types, h, t))
+            {
+                return bad(format!("host site {i} passes `{name}` other parameters"));
+            }
+            let ret = match (s.kind, types.desc(s.ret)) {
+                (HostFnKind::Command, Ok(crate::types::TypeDesc::Unit)) => true,
+                (HostFnKind::Command, _) => false,
+                (HostFnKind::Promise, Ok(crate::types::TypeDesc::Promise(v))) => {
+                    host_ty_fits(types, &hf.ret, *v)
+                }
+                _ => host_ty_fits(types, &hf.ret, s.ret),
+            };
+            if !ret {
+                return bad(format!("host site {i} takes another result from `{name}`"));
+            }
+            let mut declared = hf.raises.clone();
+            declared.sort_unstable();
+            let mut raises = s.raises.clone();
+            raises.sort_unstable();
+            let fits = match s.kind {
+                HostFnKind::Promise => raises.is_empty(),
+                _ => raises == declared,
+            };
+            if !fits {
+                return bad(format!("host site {i} declares other errors than `{name}`"));
+            }
+        }
+        for s in &self.dialogues.steps {
+            let StepDef::Emit {
+                event,
+                script: false,
+                args,
+            } = s
+            else {
+                continue;
+            };
+            let Some(e) = api.events.get(usize::from(*event)) else {
+                return bad(format!(
+                    "an emit names host event {event}, which the API lacks"
+                ));
+            };
+            let fits = e.fields.len() == args.len()
+                && args.iter().zip(&e.fields).all(|(&f, (_, h))| {
+                    self.fns
+                        .get(usize::from(f))
+                        .and_then(|f| f.sig.as_ref())
+                        .is_some_and(|sig| host_ty_fits(types, h, sig.ret))
+                });
+            if !fits {
+                return bad(format!("an emit of `{}` passes other fields", e.name));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The type of a receiver named `name`: the API's struct or enum of that name (anything when it has none).
+fn receiver_ty(api: &HostApi, name: &str) -> HostTy {
+    if api.structs.iter().any(|s| s.name == name) {
+        HostTy::Struct(name.to_string())
+    } else if api.enums.iter().any(|e| e.name == name) {
+        HostTy::Enum(name.to_string())
+    } else {
+        HostTy::Infer
+    }
+}
+
+/// Whether the program's type `t` is one a value of host type `h` takes: the same shape, a struct or enum
+/// by its name, anything for an open type (`Value`, `Infer`, `Event`).
+fn host_ty_fits(types: &crate::types::TypeTable, h: &HostTy, t: crate::types::TypeId) -> bool {
+    use crate::types::TypeDesc as D;
+    let Ok(d) = types.desc(t) else {
+        return false;
+    };
+    match (h, d) {
+        (HostTy::Value | HostTy::Infer | HostTy::Event, _) => true,
+        (HostTy::Unit, D::Unit)
+        | (HostTy::Int, D::Int)
+        | (HostTy::Float, D::Float)
+        | (HostTy::Bool, D::Bool)
+        | (HostTy::Str | HostTy::Dialogue, D::Str) => true,
+        (HostTy::List(h), D::List(e)) => host_ty_fits(types, h, *e),
+        (HostTy::Option(h), D::Enum { name, variants }) => {
+            name == "Option"
+                && matches!(variants.as_slice(), [(none, n), (some, s)]
+                    if none == "None" && n.is_empty() && some == "Some"
+                        && matches!(s.as_slice(), [(_, v)] if host_ty_fits(types, h, *v)))
+        }
+        (HostTy::Struct(n), D::Struct { name, .. }) | (HostTy::Enum(n), D::Enum { name, .. }) => {
+            n == name
+        }
+        _ => false,
+    }
+}

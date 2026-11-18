@@ -36,7 +36,8 @@
 //! language's `SceneEnd` has no `Edited`); a path that no longer resolves restarts its node.
 //!
 //! **Bounded.** One call walks at most [`BATCH_STEPS_MAX`] steps; a late tick that has more to catch up on
-//! goes on at the next call.
+//! goes on at the next call. One call makes at most `RUNNER_EVALS_MAX` evaluations: the one past it ends the
+//! scene `Finished`.
 //!
 //! **Hearing** (lines go to the clients within `HEAR_RANGE_BLOCKS` of the speaker) and **one activity per
 //! NPC** (a scene is cast only from idle people) are the caller's. A bark (`bark(npc, d)`) is a play of a
@@ -50,7 +51,7 @@ use state_hash::StateHash;
 use crate::consts::{BATCH_STEPS_MAX, SCENE_FOLLOW_UPS_MAX};
 use crate::dialogue::{DialogueKind, StepDef};
 use crate::dialogue_eval::{
-    Advance, Common, Eval, Frame, Rebound, advance, find, group, rebind_frame, with_def,
+    Advance, Common, Eval, Frame, Rebound, advance, find, group, rebind_frame, spent, with_def,
 };
 use crate::dialogue_run::{Attachment, DialogueEnv, Emitted, InstanceId, Records, SaidLine};
 use crate::pure::PureFault;
@@ -148,10 +149,11 @@ impl ScenePlay {
     pub fn tick(&mut self, env: &mut dyn DialogueEnv, rec: &mut Records, now: u64) -> SceneOut {
         let mut out = SceneOut::default();
         let mut budget = 0u32;
+        let mut evals = 0u32;
         let mut fresh = true;
         while self.state != State::Ended && now >= self.next_at {
             let base = self.next_at;
-            match self.beat(env, rec, base, &mut out, &mut budget, fresh) {
+            match self.beat(env, rec, base, &mut out, &mut budget, &mut evals, fresh) {
                 Beat::Wait(at) => {
                     self.next_at = at;
                     // Only a wait that moves the clock: a zero-tick loop must not pass for progress.
@@ -290,6 +292,7 @@ impl ScenePlay {
         env: &mut dyn DialogueEnv,
         rec: &mut Records,
         at: u64,
+        evals: &mut u32,
     ) -> Result<(), SceneReason> {
         let want = env
             .graph(self.instance)
@@ -308,8 +311,10 @@ impl ScenePlay {
             cast: &self.cast,
             reported: &mut self.reported,
             now: at,
+            evals: &mut *evals,
         }
         .entry(i, &name, 1)
+        .filter(|_| !spent(*evals))
         .ok_or(SceneReason::Finished)?;
         self.frame = with_def(&*env, i, &name, |di, d| Frame::at(i, di, d, node)).flatten();
         if self.frame.is_none() {
@@ -319,8 +324,10 @@ impl ScenePlay {
         Ok(())
     }
 
-    /// One beat at tick `at` (module docs). `budget` counts the call's steps; `fresh`: the clock has not
-    /// moved in this call yet.
+    /// One beat at tick `at` (module docs). `budget` counts the call's steps, `evals` its evaluations
+    /// (past `RUNNER_EVALS_MAX` the scene ends `Finished`); `fresh`: the clock has not moved in this call
+    /// yet.
+    #[allow(clippy::too_many_arguments)]
     fn beat(
         &mut self,
         env: &mut dyn DialogueEnv,
@@ -328,14 +335,18 @@ impl ScenePlay {
         at: u64,
         out: &mut SceneOut,
         budget: &mut u32,
+        evals: &mut u32,
         fresh: bool,
     ) -> Beat {
         if self.state == State::Opening
-            && let Err(reason) = self.open(env, rec, at)
+            && let Err(reason) = self.open(env, rec, at, evals)
         {
             return Beat::End(reason);
         }
         loop {
+            if spent(*evals) {
+                return Beat::End(SceneReason::Finished);
+            }
             if *budget >= BATCH_STEPS_MAX {
                 // A whole call's steps without the clock moving: a loop that never takes a tick.
                 return if fresh {
@@ -361,6 +372,7 @@ impl ScenePlay {
                 cast: &self.cast,
                 reported: &mut self.reported,
                 now: at,
+                evals: &mut *evals,
             };
             let step = match ev.common_step(f, step, 1, &mut out.lines, &mut out.emits) {
                 Common::Said(ticks) => return Beat::Wait(at.saturating_add(u64::from(ticks))),

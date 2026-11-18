@@ -40,6 +40,14 @@ pub fn vm_config(mem_bytes: u32, instance: u16, roles: Vec<(String, WireValue)>)
     }
 }
 
+/// Whether `program` fits the stub's API (`Program::check_api`): what every runner, edit and load checks
+/// before an instance of it is made.
+pub fn bind(program: &Program) -> Result<(), LoadError> {
+    program
+        .check_api(&stub_api())
+        .map_err(|e| LoadError::Invalid(format!("the program does not fit the host API: {e}")))
+}
+
 pub struct Runner {
     pub vm: Vm,
     pub host: StubHost,
@@ -65,6 +73,7 @@ impl Runner {
         instance: u16,
         roles: Vec<(String, WireValue)>,
     ) -> Result<Runner, LoadError> {
+        bind(&program)?;
         let vm = Vm::new(program, vm_config(mem_bytes, instance, roles))?;
         Ok(Runner {
             vm,

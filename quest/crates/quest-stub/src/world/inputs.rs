@@ -76,11 +76,20 @@ impl World {
             Some(_) => return self.say(format!("kill: {victim} is already dead")),
             None => return self.say(format!("kill: no entity {victim}")),
         }
+        // `by`'s type as the program's `Killed` has it (its option's field name).
+        let program = Arc::clone(&self.core.program);
+        let by_ty = program
+            .handlers
+            .iter()
+            .find(|h| h.event == "Killed")
+            .and_then(|h| match program.types.desc(h.event_ty) {
+                Ok(TypeDesc::Struct { fields, .. }) => {
+                    fields.iter().find(|(n, _)| n == "by").map(|(_, t)| *t)
+                }
+                _ => None,
+            });
         let by = match by.map(|b| self.core.people.handle(b)) {
-            Some(Some(p)) => WireValue::Variant {
-                name: "Some".into(),
-                fields: vec![("value".into(), p)],
-            },
+            Some(Some(p)) => some_of(&program, by_ty, p),
             Some(None) => return self.say("kill: an unknown killer".into()),
             None => bare("None"),
         };
@@ -166,6 +175,7 @@ impl World {
         program: Arc<Program>,
         lines: BTreeMap<String, String>,
     ) -> Result<(), String> {
+        crate::runner::bind(&program).map_err(|e| format!("{e:?}"))?;
         let mut vms = Vec::new();
         for (k, inst) in self.core.insts.iter().enumerate() {
             let id = u16::try_from(k).map_err(|_| "too many instances".to_string())?;
@@ -190,7 +200,11 @@ impl World {
         self.core.program = program;
         self.lines = lines;
         self.say("edited".into());
-        // The mirrors of the old program name its globals: take them again before anything evaluates.
+        // The mirrors of the old program name its globals: none still waiting for a part is installed, the
+        // parts get the new program's at once, and the dialogue mirrors are taken again before anything
+        // evaluates.
+        self.pending_mirrors.clear();
+        self.sent.clear();
         self.core.mirrors.clear();
         self.core.take_mirrors();
         let npcs: Vec<i64> = self.talks.keys().copied().collect();

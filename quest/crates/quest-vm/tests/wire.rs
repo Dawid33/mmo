@@ -697,3 +697,29 @@ fn failed_from_wire_leaks_nothing() {
         assert_eq!(h.used_words(&st).unwrap(), before, "{w:?}");
     }
 }
+
+/// Review A (whole-branch, Task 52, minor): any variant name holding `::` printed as a host enum's,
+/// without its enum's name. Only `Enum::Variant` of its own enum is one.
+#[test]
+fn only_a_host_enums_own_variant_prints_bare() {
+    let t = TypeTable(vec![
+        TypeDesc::Enum {
+            name: "Occupation".into(),
+            variants: vec![("Occupation::Smith".into(), vec![])],
+        },
+        TypeDesc::Enum {
+            name: "E".into(),
+            variants: vec![("X::Y".into(), vec![])],
+        },
+    ]);
+    let (mut st, h) = setup();
+    let bare = |n: &str| WireValue::Variant {
+        name: n.into(),
+        fields: vec![],
+    };
+    assert_eq!(
+        show_in(&mut st, h, &t, 0, &bare("Occupation::Smith"), true),
+        "Occupation::Smith"
+    );
+    assert_eq!(show_in(&mut st, h, &t, 1, &bare("X::Y"), true), "E::X::Y");
+}

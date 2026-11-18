@@ -53,7 +53,7 @@ use quest_vm::scene_run::{SceneOut, ScenePlay, SceneReason, cast_ambient};
 use quest_vm::types::TypeDesc;
 use quest_vm::vm::{Delivery, Status};
 use quest_vm::wire::{WireValue, fits};
-use quest_vm::{Fnv64, LoadError, Mirror, PureFault, Vm};
+use quest_vm::{Fnv64, LoadError, Mirror, MirrorVm, PureFault, Vm};
 use state_hash::StateHash;
 
 use crate::api::*;
@@ -161,6 +161,25 @@ fn bare(name: &str) -> WireValue {
     }
 }
 
+/// `Some(v)` of the option type `ty` of `program`, its field named as the type names it (`value` when the
+/// type is not an option).
+fn some_of(program: &Program, ty: Option<quest_vm::types::TypeId>, v: WireValue) -> WireValue {
+    let field = ty
+        .and_then(|t| match program.types.desc(t) {
+            Ok(TypeDesc::Enum { variants, .. }) => variants
+                .iter()
+                .find(|(n, _)| n == "Some")
+                .and_then(|(_, fs)| fs.first())
+                .map(|(f, _)| f.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "value".into());
+    WireValue::Variant {
+        name: "Some".into(),
+        fields: vec![(field, v)],
+    }
+}
+
 fn hash_of<T: StateHash + ?Sized>(t: &T) -> u64 {
     let mut h = Fnv64::default();
     t.state_hash(&mut h);
@@ -242,6 +261,7 @@ impl World {
             edit: None,
         };
         w.core.insts.append(&mut insts);
+        w.initialise();
         w.check_placement()?;
         for (k, name) in parts.into_iter().enumerate() {
             let id = u16::try_from(k + 1).map_err(|_| "too many parts".to_string())?;
@@ -258,10 +278,23 @@ impl World {
         for inst in &mut w.core.insts {
             inst.runner.host.in_world = true;
         }
+        w.initialise();
         // The placed state is what a talk before the first commit reads (a `Setup` running over several
         // ticks takes no mirror until it ends).
         w.core.take_mirrors();
         Ok(w)
+    }
+
+    /// Every instance's pending initialisers run (`Vm::initialise`, one tick's fuel): the placed state, set
+    /// before `requires` and `where` read it or a mirror is taken of it. One that does not finish goes on
+    /// at the first tick (no mirror until then).
+    fn initialise(&mut self) {
+        let (now, fuel) = (self.core.now, self.fuel);
+        for inst in &mut self.core.insts {
+            if inst.runner.vm.status() != Status::Failed {
+                inst.runner.vm.initialise(now, fuel, &mut inst.runner.host);
+            }
+        }
     }
 
     /// The `requires` conditions, then each bound role's `where`, over the home as it is.
@@ -299,14 +332,11 @@ impl World {
             for (j, earlier) in q.roles[..k].iter().enumerate() {
                 let given = self.core.roles.iter().find(|(n, _)| *n == earlier.name);
                 let plain = given.map(|(_, v)| v.clone());
+                let ty = params.get(j).copied();
                 let wrapped = match &plain {
-                    Some(v) => WireValue::Variant {
-                        name: "Some".into(),
-                        fields: vec![("value".into(), v.clone())],
-                    },
+                    Some(v) => some_of(&program, ty, v.clone()),
                     None => bare("None"),
                 };
-                let ty = params.get(j).copied();
                 let fit = |v: &WireValue| ty.is_some_and(|t| fits(&program.types, t, v));
                 args.push(match plain {
                     Some(v) if fit(&v) => v,
@@ -416,6 +446,7 @@ impl World {
         self.pending.clear();
         self.pending_mirrors.clear();
         self.sent.clear();
+        self.initialise();
         self.core.mirrors.clear();
         self.core.take_mirrors();
         Ok(())
@@ -776,6 +807,7 @@ impl World {
         self.pending_mirrors.clear();
         self.sent.clear();
         self.say("reaped".into());
+        self.initialise();
         if let Err(e) = self.check_placement() {
             self.say(format!("reaped for good: {e}"));
             self.outcome = Outcome::Reaped;
@@ -794,13 +826,13 @@ impl World {
         let Some(home) = self.core.insts.first() else {
             return;
         };
-        // A segment in progress has not committed what the mirror would show.
-        if home.runner.vm.in_segment() {
-            return;
-        }
         for (k, part) in q.parts.iter().enumerate() {
             let Ok(id) = u16::try_from(k + 1) else { break };
-            let m = home.runner.vm.mirror(&part.read_set);
+            // A segment in progress has not committed what the mirror would show, and globals still
+            // initialising are not set: the next tick's.
+            let Ok(m) = home.runner.vm.mirror(&part.read_set) else {
+                return;
+            };
             let h = hash_of(&m);
             if self.sent.get(&id) != Some(&h) {
                 self.sent.insert(id, h);

@@ -145,6 +145,8 @@ fn load_state(
         ));
     }
     let same = old.content_hash() == program.content_hash();
+    // The file's program is bytes from outside: it must fit the host API like any other.
+    quest_stub::bind(&old).map_err(|e| format!("{e:?}"))?;
     let old = Arc::new(old);
     let mut vms = Vec::new();
     for (k, (save, cfg)) in saves.into_iter().zip(cfgs).enumerate() {

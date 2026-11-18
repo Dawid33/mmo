@@ -70,6 +70,17 @@ pub const CONVERSATION_LINGER_TICKS: u64 = 200;
 /// within it (`-> start` with no choice in between) ends the conversation `TooDeep`.
 pub const BATCH_STEPS_MAX: u32 = 4_096;
 
+/// Pure evaluations (conditions, substitutions, targets, `once per` keys, emit arguments) one call of a
+/// runner may make: the one past it is not made, and the call ends a conversation `TooDeep`, a scene
+/// `Finished`. With [`COND_FUEL`] each, it bounds a call's fuel.
+pub const RUNNER_EVALS_MAX: u32 = 1_024;
+
+/// Members of one node group or line group (`dialogue::validate`): what one pick evaluates.
+pub const GROUP_MEMBERS_MAX: usize = 64;
+
+/// Nodes of one dialogue (`dialogue::validate`).
+pub const DIALOGUE_NODES_MAX: usize = 1_024;
+
 /// Follow-ups one scene play may take (`-> other_scene`): the one past it ends the play instead.
 pub const SCENE_FOLLOW_UPS_MAX: u32 = 16;
 
@@ -120,6 +131,9 @@ mod tests {
         assert_eq!(DIALOGUE_STACK_MAX, 16);
         assert_eq!(CONVERSATION_LINGER_TICKS, 200);
         assert_eq!(BATCH_STEPS_MAX, 4_096);
+        assert_eq!(RUNNER_EVALS_MAX, 1_024);
+        assert_eq!(GROUP_MEMBERS_MAX, 64);
+        assert_eq!(DIALOGUE_NODES_MAX, 1_024);
         assert_eq!(SCENE_FOLLOW_UPS_MAX, 16);
         assert_eq!(LINE_BASE_TICKS, 30);
         assert_eq!(LINE_TICKS_PER_CHAR, 1);

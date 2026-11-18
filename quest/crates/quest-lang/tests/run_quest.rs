@@ -1091,3 +1091,25 @@ fn transition_chain_runs_at_once() {
     ev(&mut r, "Go", 0);
     assert_eq!(stage(&r.vm, &p), "C");
 }
+
+/// Review A (whole-branch, Task 52, minor): transitions that lead back to a stage already left in the
+/// chain (A → B → A, both always holding) re-armed forever, the instance busy every tick, with no report.
+/// A chain that would enter more stages than the quest has stops, reported.
+#[test]
+fn a_transition_cycle_stops_and_is_reported() {
+    let p = program(
+        "quest Q:\n    role farmer: Person\n    let flip = true\n    stage A:\n        -> B when flip\n    stage B:\n        -> A when flip\n",
+    );
+    let mut r = Runner::for_instance(Arc::clone(&p), MEM, StubConfig::default(), 0, roles())
+        .expect("the program loads");
+    for _ in 0..20 {
+        r.step(FUEL);
+    }
+    assert_eq!(r.vm.status(), Status::Idle);
+    assert!(
+        r.host.reports.iter().any(|x| matches!(x,
+            Report::HandlerAborted { task, .. } if task.contains("transitions"))),
+        "{:?}",
+        r.host.reports
+    );
+}

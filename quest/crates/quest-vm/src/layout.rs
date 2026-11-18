@@ -181,8 +181,8 @@ pub enum LoadError {
     },
     ProgramMismatch,
     Invalid(String),
-    /// Not now: a task is paused mid-segment (`Vm::install_mirror`). Keep the request and retry at the next
-    /// idle tick boundary; nothing is wrong with it.
+    /// Not now: a task is paused mid-segment, or initialisers are still pending (`Vm::install_mirror`,
+    /// `Vm::mirror`). Keep the request and retry at the next tick boundary; nothing is wrong with it.
     Busy,
     /// A role of the quest that `VmConfig::roles` does not give, gives twice, or gives a value that does
     /// not fit; or a role the program does not have. Names the role.

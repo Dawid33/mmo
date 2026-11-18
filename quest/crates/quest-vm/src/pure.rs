@@ -8,10 +8,14 @@
 //! effect beyond the memory (`interp::impure`), and nothing is reported.
 //!
 //! A [`Mirror`] is the values of a set of globals (a read set: `QuestInfo::read_set`,
-//! `PartInfo::read_set`), keyed by global index, as wire values. The region holding an NPC evaluates
-//! conditions against it ([`Mirror::eval_pure`]); a part's instance takes it into its own globals
-//! ([`Vm::install_mirror`]). There is no change tracking: a sender compares the mirror's
-//! [`StateHash`] with what it sent last.
+//! `PartInfo::read_set`), keyed by global index, as wire values, with the content hash of the program it
+//! was taken from (an index means nothing in another program: every install and evaluation refuses a
+//! mirror of another program). The region holding an NPC evaluates conditions against it — on a
+//! [`MirrorVm`], the one scratch-instance path ([`Mirror::eval_pure`] makes one per call); a part's
+//! instance takes it into its own globals ([`Vm::install_mirror`]). There is no change tracking: a sender
+//! compares the mirror's [`StateHash`] with what it sent last. Neither a mirror is taken nor one installed
+//! while the instance's initialisers are pending ([`LoadError::Busy`]): the globals are not set yet, and an
+//! initialiser that ran after an install would overwrite it.
 
 use std::collections::BTreeMap;
 use std::hash::Hasher;
@@ -24,8 +28,8 @@ use crate::fault::FaultKind;
 use crate::host::Host;
 use crate::interp::{Exec, Fault, Meter};
 use crate::layout::{
-    H_CURRENT_FN, H_PC, H_STATUS, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL, LoadError,
-    STATUS_RUNNING,
+    H_CURRENT_FN, H_INIT_CURSOR, H_PC, H_STATUS, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL,
+    LoadError, STATUS_RUNNING,
 };
 use crate::object::obj;
 use crate::program::{FnSig, Program};
@@ -56,16 +60,19 @@ pub enum PureFault {
     BadCall,
 }
 
-/// The values of a set of globals, by global index (`Program::globals`). Equal when their values are
-/// equal by representation ([`WireValue::bit_eq`]), as their hashes are: `-0.0` is a change from `0.0`.
+/// The values of a set of globals, by global index (`Program::globals`), of the program whose
+/// `Program::content_hash` is `program`. Equal when their programs are and their values are equal by
+/// representation ([`WireValue::bit_eq`]), as their hashes are: `-0.0` is a change from `0.0`.
 #[derive(Clone, Debug)]
 pub struct Mirror {
+    pub program: u64,
     pub globals: BTreeMap<u16, WireValue>,
 }
 
 impl PartialEq for Mirror {
     fn eq(&self, other: &Mirror) -> bool {
-        self.globals.len() == other.globals.len()
+        self.program == other.program
+            && self.globals.len() == other.globals.len()
             && self
                 .globals
                 .iter()
@@ -78,14 +85,15 @@ impl Eq for Mirror {}
 
 impl StateHash for Mirror {
     fn state_hash<H: Hasher>(&self, h: &mut H) {
+        self.program.state_hash(h);
         self.globals.state_hash(h);
     }
 }
 
 impl Mirror {
-    /// Evaluates fn `f` against the mirror: a scratch instance of `program` (the home, default memory)
-    /// whose globals in the mirror hold its values — the others are never set (a pure fn reads only its
-    /// read set) — then [`Vm::eval_pure`] on it. No role is installed but those in the mirror.
+    /// Evaluates fn `f` against the mirror on a [`MirrorVm`] made for this one call (the home, default
+    /// memory, no roles but those in the mirror). A mirror of another program, or one that does not fit
+    /// it, is `BadCall`.
     pub fn eval_pure(
         &self,
         program: &Arc<Program>,
@@ -102,9 +110,45 @@ impl Mirror {
             instance: 0,
             roles: Vec::new(),
         };
-        let mut vm = Vm::fresh(Arc::clone(program), cfg).map_err(|_| PureFault::BadCall)?;
-        vm.install_mirror(self).map_err(|_| PureFault::BadCall)?;
-        vm.eval_pure(f, args, fuel, host)
+        MirrorVm::new(Arc::clone(program), cfg, self)
+            .map_err(|_| PureFault::BadCall)?
+            .eval_pure(f, args, fuel, host)
+    }
+}
+
+/// A scratch instance holding a mirror: where a pure fn of the program is evaluated over mirrored state
+/// (spec §5.11 "Conditions run … over mirrored script state"), the one such path. Its globals in the
+/// mirror hold its values, the roles of its `VmConfig` (if any are given) theirs; the others are never set
+/// (a pure fn reads only its read set) — no initialiser ever runs on it, it runs nothing but
+/// [`MirrorVm::eval_pure`], which leaves it as it was. Keep one while the mirror does not change.
+#[derive(Debug)]
+pub struct MirrorVm {
+    vm: Vm,
+}
+
+impl MirrorVm {
+    /// A scratch instance of `program` under `cfg` holding `m`. A mirror of another program, one that does
+    /// not fit, or a refused program or role is the error.
+    pub fn new(program: Arc<Program>, cfg: VmConfig, m: &Mirror) -> Result<MirrorVm, LoadError> {
+        let mut vm = Vm::fresh(program, cfg)?;
+        if !vm.roles.is_empty() {
+            vm.install_roles()?;
+        }
+        vm.check_mirror(m)?;
+        vm.write_mirror(m)?;
+        vm.store.mem.clear_log();
+        Ok(MirrorVm { vm })
+    }
+
+    /// [`Vm::eval_pure`] on the scratch instance.
+    pub fn eval_pure(
+        &mut self,
+        f: u16,
+        args: &[WireValue],
+        fuel: u64,
+        host: &mut dyn Host,
+    ) -> Result<WireValue, PureFault> {
+        self.vm.eval_pure(f, args, fuel, host)
     }
 }
 
@@ -226,9 +270,20 @@ impl Vm {
         }
     }
 
+    /// Whether an initialiser is still to run (a global not set yet).
+    fn inits_pending(&self) -> bool {
+        self.header(H_INIT_CURSOR)
+            .map_or(true, |c| c < self.program.globals.len() as u64)
+    }
+
     /// The globals of `set` (indices into `Program::globals`) as wire values. An index the program lacks,
-    /// or a global whose value cannot be read out (too large, or not set yet), is left out.
-    pub fn mirror(&self, set: &[u16]) -> Mirror {
+    /// or a global whose value cannot be read out (too large), is left out. `Busy` while a task's segment
+    /// is open (its writes are not committed) or an initialiser is pending (a global not set yet): take
+    /// it again later.
+    pub fn mirror(&self, set: &[u16]) -> Result<Mirror, LoadError> {
+        if self.store.segment_is_open() || self.inits_pending() {
+            return Err(LoadError::Busy);
+        }
         let p = &self.program;
         let mut globals = BTreeMap::new();
         for &i in set {
@@ -242,17 +297,36 @@ impl Vm {
                 globals.insert(i, w);
             }
         }
-        Mirror { globals }
+        Ok(Mirror {
+            program: self.program_hash,
+            globals,
+        })
     }
 
     /// Overwrites the globals of `m` with its values (a part's instance taking the home's mirror). Every
-    /// write goes through the undo log, so a rollback undoes it. All or nothing: a global the program
-    /// lacks, a value that does not fit its global's type, or a full heap is `Invalid` and changes nothing.
-    /// `Busy` while a task's segment is open (a task paused on fuel): the task reads one mirror from its
-    /// start to its end, and its abort would otherwise undo the install too; the caller keeps the mirror
-    /// and retries between tasks.
+    /// write goes through the undo log, so a rollback undoes it. All or nothing: a mirror of another
+    /// program, a global the program lacks, a value that does not fit its global's type, or a full heap is
+    /// `Invalid` and changes nothing. `Busy` while a task's segment is open (a task paused on fuel): the
+    /// task reads one mirror from its start to its end, and its abort would otherwise undo the install
+    /// too; and while an initialiser is pending, which would overwrite it. The caller keeps the mirror and
+    /// retries between tasks.
     pub fn install_mirror(&mut self, m: &Mirror) -> Result<(), LoadError> {
-        let p = Arc::clone(&self.program);
+        self.check_mirror(m)?;
+        if self.store.segment_is_open() || self.inits_pending() {
+            return Err(LoadError::Busy);
+        }
+        self.write_mirror(m)
+    }
+
+    /// Whether `m` fits this instance's program: taken from it, naming its globals, each value fitting.
+    fn check_mirror(&self, m: &Mirror) -> Result<(), LoadError> {
+        let p = &self.program;
+        if m.program != self.program_hash {
+            return Err(LoadError::Invalid(format!(
+                "the mirror is of program {:016x}, not of this one",
+                m.program
+            )));
+        }
         for (&i, w) in &m.globals {
             let Some(g) = p.globals.get(usize::from(i)) else {
                 return Err(LoadError::Invalid(format!(
@@ -266,9 +340,13 @@ impl Vm {
                 )));
             }
         }
-        if self.store.segment_is_open() {
-            return Err(LoadError::Busy);
-        }
+        Ok(())
+    }
+
+    /// [`Vm::install_mirror`]'s writes of a checked mirror (`check_mirror`), whatever the instance is
+    /// doing; all or nothing.
+    fn write_mirror(&mut self, m: &Mirror) -> Result<(), LoadError> {
+        let p = Arc::clone(&self.program);
         let cp = self.store.mem.checkpoint();
         for (&i, w) in &m.globals {
             let g = &p.globals[usize::from(i)];

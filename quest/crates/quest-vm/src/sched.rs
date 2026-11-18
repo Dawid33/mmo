@@ -40,7 +40,9 @@
 //! In the home of a quest program (`H_OWNER` 0), every committed segment of a handler, of `main` or of the
 //! start sets `H_TRANSITIONS`; the next task to start is then `QuestInfo::transitions_fn` (after any
 //! pending initialiser), in the same tick and on the same fuel. Its own segment sets it again only when it
-//! entered a stage (the stage word changed), so a chain of transitions that already hold runs at once.
+//! entered a stage (the stage word changed), so a chain of transitions that already hold runs at once — up
+//! to as many stages as the quest has: one more is a cycle (`A → B → A`), which stops where it stands,
+//! reported (`FaultKind::TransitionCycle`).
 //!
 //! # Tasks and segments
 //! A task runs one function from its entry until its `Ret` on the sentinel link: the pending
@@ -134,6 +136,8 @@ const TASK_TRANSITIONS: u64 = 5;
 /// A transitions task's argument when the stage word does not fit a `u16` (an immediate is odd, so 0 is
 /// never a stage).
 const STAGE_UNKNOWN: u16 = 0;
+/// `H_TRANSITIONS`: bit 0 = a run is due; the rest = how many stages the chain entered so far.
+const TRANSITIONS_ARMED: u64 = 1;
 // `H_QUEST_START`.
 pub(crate) const QSTART_NONE: u64 = 0;
 pub(crate) const QSTART_WANTED: u64 = 1;
@@ -229,7 +233,7 @@ impl Vm {
         Ok(self.task_in_progress()?
             || init_pending
             || self.header(H_QUEST_START)? == QSTART_WANTED
-            || self.header(H_TRANSITIONS)? != 0
+            || self.header(H_TRANSITIONS)? & TRANSITIONS_ARMED != 0
             || self.header(H_MAIN)? == MAIN_WANTED
             || self.header(H_EV_HANDLER)? != 0
             || self.header(H_QUEUE_COUNT)? != 0
@@ -485,11 +489,16 @@ impl Vm {
         if cursor != p.globals.len() as u64 {
             return corrupt("init cursor out of range");
         }
-        if self.header(H_TRANSITIONS)? != 0 {
+        if self.inits_only {
+            return Ok(false);
+        }
+        let transitions = self.header(H_TRANSITIONS)?;
+        if transitions & TRANSITIONS_ARMED != 0 {
             let Some(q) = &p.quest else {
                 return corrupt("quest transitions in a program without a quest");
             };
-            self.set_header(H_TRANSITIONS, 0)?;
+            // Disarmed; the chain's length stays for `end_task`.
+            self.set_header(H_TRANSITIONS, transitions & !TRANSITIONS_ARMED)?;
             // The task's argument is the stage it starts in (`end_task` re-arms when it changed).
             let stage = self.stage_word(q.stage_global)?;
             self.begin_task(TASK_TRANSITIONS, stage, q.transitions_fn)?;
@@ -788,13 +797,33 @@ impl Vm {
                 }
             }
             // A run that entered a stage re-arms: the new stage's own transition may already hold (a
-            // chain). One that entered none does not, so a run never repeats itself; fuel bounds a cycle.
+            // chain). One that entered none does not, so a run never repeats itself. A chain that would
+            // enter more stages than the quest has went round a cycle: it stops there, reported.
             TASK_TRANSITIONS => {
+                let chain = self.header(H_TRANSITIONS)? >> 1;
+                self.set_header(H_TRANSITIONS, 0)?;
                 if let Some(q) = &p.quest
                     && t.arg != STAGE_UNKNOWN
                     && self.stage_word(q.stage_global)? != t.arg
                 {
-                    self.set_header(H_TRANSITIONS, 1)?;
+                    if chain + 1 >= q.stages.len() as u64 {
+                        let report = self.report_for(
+                            t,
+                            AbortCause::Fault {
+                                kind: FaultKind::TransitionCycle,
+                                message: format!(
+                                    "the transitions entered {} stages in a row, as many as {} has: they \
+                                     cycle",
+                                    chain + 1,
+                                    q.name
+                                ),
+                                stack: Vec::new(),
+                            },
+                        );
+                        host.report(report);
+                    } else {
+                        self.set_header(H_TRANSITIONS, (chain + 1) << 1 | TRANSITIONS_ARMED)?;
+                    }
                 }
             }
             _ => {}

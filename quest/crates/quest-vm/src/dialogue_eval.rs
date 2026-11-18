@@ -8,6 +8,7 @@ use std::hash::Hasher;
 
 use state_hash::StateHash;
 
+use crate::consts::RUNNER_EVALS_MAX;
 use crate::dialogue::{
     Block, CondDef, DialogueDef, DialogueGraph, LineDef, MemberDef, Pick, Speaker, StepDef,
 };
@@ -358,13 +359,22 @@ pub(crate) enum Common {
     Other(StepDef),
 }
 
-/// Evaluation over a cast: the env, the NPC's (or lead's) records, the fault sites already reported.
+/// Evaluation over a cast: the env, the NPC's (or lead's) records, the fault sites already reported, the
+/// call's evaluations so far ([`spent`]).
 pub(crate) struct Eval<'s> {
     pub env: &'s mut dyn DialogueEnv,
     pub rec: &'s mut Records,
     pub cast: &'s [WireValue],
     pub reported: &'s mut BTreeSet<(InstanceId, u32)>,
     pub now: u64,
+    pub evals: &'s mut u32,
+}
+
+/// Whether a call's evaluations ran out: one past [`RUNNER_EVALS_MAX`] was asked for (and not made). The
+/// runner then ends the call (a conversation `TooDeep`, a scene `Finished`): what it evaluated since is
+/// not to be trusted.
+pub(crate) fn spent(evals: u32) -> bool {
+    evals > RUNNER_EVALS_MAX
 }
 
 impl Eval<'_> {
@@ -375,8 +385,14 @@ impl Eval<'_> {
         }
     }
 
-    /// Fn `f` of instance `i` on the cast; `None` (reported) on a fault.
+    /// Fn `f` of instance `i` on the cast; `None` (reported) on a fault, and `None` (not made, not
+    /// reported) once the call's evaluations ran out ([`spent`]).
     pub(crate) fn eval(&mut self, i: InstanceId, f: u16, depth: usize) -> Option<WireValue> {
+        if *self.evals >= RUNNER_EVALS_MAX {
+            *self.evals = RUNNER_EVALS_MAX.saturating_add(1);
+            return None;
+        }
+        *self.evals += 1;
         match self.env.eval(i, f, self.cast, len_u32(depth)) {
             Ok(v) => Some(v),
             Err(e) => {

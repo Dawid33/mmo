@@ -45,7 +45,7 @@ pub use layout::{Layout, LoadError};
 pub use mem::{Checkpoint, Mem, MemError, RollbackError};
 pub use migrate::{MigrateError, MigrationReport, Orphan};
 pub use program::{Program, ProgramError};
-pub use pure::{Mirror, PureFault};
+pub use pure::{Mirror, MirrorVm, PureFault};
 pub use save::SAVE_MAGIC;
 pub use store::Store;
 pub use vm::{DebugRun, Delivery, Resolved, RunEnd, Status, TickReport, Vm, VmConfig};
