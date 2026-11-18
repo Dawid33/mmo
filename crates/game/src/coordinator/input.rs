@@ -182,10 +182,12 @@ impl Coordinator {
         self.history.clear_content_dirty();
         self.version = version;
         self.reapply_cut_config();
-        if self.reads_applied != self.reads_committed {
-            // A successions read applied since the last commit is lost with the rebase: owed
-            // again — before the replay, so that no replayed `Attach` is answered from it.
-            // (Everything else the row says of the successions reached it committed.)
+        if self.reads_applied != self.reads_committed || self.successions_reading() {
+            // A successions read applied since the last commit is lost with the rebase, and one
+            // still out may predate what the newer row closed (fix round 1): owed again — before
+            // the replay, so that no replayed `Attach` is answered from it — and the one out is
+            // stale (its answer dropped). (Everything else the row says of the successions
+            // reached it committed.)
             self.successions_owed();
             self.reads_committed = self.reads_applied;
         }

@@ -5089,6 +5089,41 @@ fn a_reread_abandons_only_runs_opened_before_it() {
     assert_eq!(succession_done(&commit_routed(&mut c)), vec![(Target::Every, game::SuccessionId(1), false)]);
 }
 
+/// Elastic 2b Task 6 fix round 1: a successions read out across a rebase is stale — the rebased
+/// row may have closed a run the read still lists. The ticker reads at v (run R open); another
+/// replica closes R at v + 1; the ticker's write conflicts and it rebases. A new read is owed, and
+/// the old read's answer, listing R, never opens R again.
+#[test]
+fn a_read_out_across_a_rebase_never_reopens_a_closed_run() {
+    let mut c = succeeding(3);
+    read_leases(&mut c, 3, &[h(2)], &[], 1_000);
+    let d = c.declare_wanted(1_000).expect("host 2 is declared");
+    written(&mut c).expect("the declaration commits");
+    let mine = CallStamp { replica: c.replica(), version: c.version() };
+    let list = store_declares(&d, 3, 1, game::CutId(0));
+    c.apply(Input::Decision(DecisionAnswer::Declared { stamp: mine, outcome: Ok(game::Declared::Done(list.clone())) }), 1_100);
+    commit_routed(&mut c);
+    assert_eq!(c.successions_open_count(), 1, "run R is open");
+    let mut row = Row::of(&c);
+    // The ticker hands a read out at v.
+    c.successions_reread();
+    assert!(c.take_successions_reread(), "a read is out");
+    let issued_at = c.version();
+    // Another replica closes R at v + 1 (a rollback abandons it).
+    let mut b = row.replica(2);
+    b.rolled_back(c.world_generation());
+    row.write(&mut b).expect("B closes R");
+    // The ticker's write conflicts; it rebases onto the row that closed R.
+    c.handle(h(1), HostMsg::LandWanted { sr: (7, 0) }, 1_200);
+    let _lost = row.write(&mut c).expect_err("the ticker's write conflicts");
+    row.rebase(&mut c);
+    assert_eq!(c.successions_open_count(), 0, "the row closed R");
+    assert!(c.take_successions_reread(), "a new read is owed: the one out may predate the close");
+    // The old read's answer arrives anyway: it lists R.
+    c.apply(Input::SuccessionsOpen { list, issued_at_version: issued_at }, 1_300);
+    assert_eq!(c.successions_open_count(), 0, "a read issued before the rebase never re-opens R");
+}
+
 /// Elastic 2b Task 6 (audit H7): a `hosts` read forgets an absent id only if the read could have
 /// shown it (below the read's next id: it was pruned) and no live replica's attachment holds it —
 /// never a host attached to another replica, nor one registered after the read was issued.

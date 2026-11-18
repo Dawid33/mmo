@@ -325,6 +325,11 @@ pub(super) struct SuccessionRuns {
     /// and not answered.
     #[serde(skip)]
     reading: bool,
+    /// The row version this replica last came to owe a read at ([`Coordinator::successions_owed`]):
+    /// an answer to a read issued at an older version is stale — dropped (Task 6 fix round 1: a
+    /// read out across a rebase may list a run the rebased row closed).
+    #[serde(skip)]
+    read_floor: u64,
     /// Runs this replica settled or abandoned while a read was out: a read that still lists one
     /// (it ran before the close) does not open it again.
     #[serde(skip)]
@@ -391,6 +396,7 @@ impl Default for SuccessionRuns {
             enabled: false,
             known: true,
             reading: false,
+            read_floor: 0,
             closed_while_reading: BTreeSet::new(),
             declaring: None,
             open: BTreeMap::new(),
@@ -423,6 +429,7 @@ impl SuccessionRuns {
             enabled,
             known,
             reading,
+            read_floor,
             closed_while_reading,
             declaring: _,
             open: _,
@@ -446,6 +453,7 @@ impl SuccessionRuns {
         self.enabled = *enabled;
         self.known = *known;
         self.reading = *reading;
+        self.read_floor = *read_floor;
         self.closed_while_reading = closed_while_reading.clone();
         self.rollback_retry_ms = *rollback_retry_ms;
         self.declared_at_read = *declared_at_read;
@@ -502,10 +510,17 @@ impl super::Coordinator {
     }
 
     /// This replica owes a read of the open successions (a start, a rebase of the ticker, a new
-    /// ticker): until it is answered they are not known here.
+    /// ticker): until it is answered they are not known here. A read out now is stale: its answer
+    /// is dropped (issued below this version), and the runtime drops it on the next hand-out.
     pub(super) fn successions_owed(&mut self) {
         self.successions.known = false;
         self.successions.reading = false;
+        self.successions.read_floor = self.version;
+    }
+
+    /// Whether a successions read is handed out and not answered.
+    pub(super) fn successions_reading(&self) -> bool {
+        self.successions.reading
     }
 
     /// Whether this replica knows the store's open successions: read and nothing asked for a
@@ -597,6 +612,13 @@ impl super::Coordinator {
     /// with the process that asked) — has its predecessor taken out of the view as a
     /// declaration's is; never one this replica settled or abandoned while the read was out.
     pub(super) fn on_successions_open(&mut self, list: Vec<Succession>, issued_at: u64, now_ms: u64) {
+        if issued_at < self.successions.read_floor {
+            log::debug!(
+                "coordinator: a successions read issued at version {issued_at}, before the read owed at {}: stale, dropped",
+                self.successions.read_floor
+            );
+            return;
+        }
         self.reads_applied += 1;
         self.clock_ms = self.clock_ms.max(now_ms);
         self.successions.known = true;
