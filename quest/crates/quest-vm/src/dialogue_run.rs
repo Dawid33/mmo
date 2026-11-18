@@ -42,16 +42,18 @@
 //! again in an edited graph: a dialogue or node that is gone ends `Edited`; a path that no longer resolves
 //! restarts its node in the current dialogue, and ends `Edited` in a caller (whose detour would be lost).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::hash::Hasher;
 
 use state_hash::StateHash;
 
 use crate::consts::{BATCH_STEPS_MAX, CONVERSATION_LINGER_TICKS, DIALOGUE_STACK_MAX};
-use crate::dialogue::{
-    Block, CondDef, DialogueDef, DialogueGraph, DialogueKind, LineDef, Pick, Speaker, StepDef,
+use crate::dialogue::{Block, DialogueGraph, DialogueKind, StepDef};
+use crate::dialogue_eval::{
+    Advance, Common, Cursor, Eval, Frame, OnceRec, PickKey, advance, find, group, len_u32, step_at,
+    with_def,
 };
-use crate::hash::Fnv64;
+pub use crate::dialogue_eval::{Records, roll};
 use crate::pure::PureFault;
 use crate::wire::WireValue;
 
@@ -100,69 +102,9 @@ pub trait DialogueEnv {
     fn program_key(&self, i: InstanceId) -> Option<u64>;
 }
 
-/// Records of one NPC: `once` sites and pick counts, per (instance, dialogue qualified name).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Records {
-    by: BTreeMap<(InstanceId, String), DialogueRecords>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct DialogueRecords {
-    /// `once` sites used, with the hash of the `per` value.
-    once: BTreeSet<(u32, Option<u64>)>,
-    /// How often each group member was picked.
-    picks: BTreeMap<PickKey, u32>,
-}
-
-/// A `once` record: its site and the hash of its `per` value.
-type OnceRec = (u32, Option<u64>);
-
 /// A greeting candidate's rank, the smallest first: (score negated, picks, qualified name, program key,
 /// node, instance).
 type GreetRank = (i32, u32, String, Option<u64>, usize, InstanceId);
-
-/// A node group, as a pick of it needs it: the dialogue's qualified name and `@pick`, the group's name,
-/// and each member's node index, condition and score.
-#[derive(Clone)]
-struct Group {
-    dialogue: String,
-    pick: Pick,
-    name: String,
-    members: Vec<(usize, CondDef, u8)>,
-}
-
-/// A group member: a node by its group's name and its index in the group, or a line group's member.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum PickKey {
-    Node { name: String, member: u32 },
-    Line { site: u32, member: u32 },
-}
-
-impl Records {
-    fn of(&self, i: InstanceId, d: &str) -> Option<&DialogueRecords> {
-        self.by.get(&(i, d.to_string()))
-    }
-
-    fn of_mut(&mut self, i: InstanceId, d: &str) -> &mut DialogueRecords {
-        self.by.entry((i, d.to_string())).or_default()
-    }
-
-    fn once_used(&self, i: InstanceId, d: &str, site: u32, per: Option<u64>) -> bool {
-        self.of(i, d).is_some_and(|r| r.once.contains(&(site, per)))
-    }
-
-    fn picks(&self, i: InstanceId, d: &str, key: &PickKey) -> u32 {
-        self.of(i, d)
-            .and_then(|r| r.picks.get(key))
-            .copied()
-            .unwrap_or(0)
-    }
-
-    fn picked(&mut self, i: InstanceId, d: &str, key: PickKey) {
-        let n = self.of_mut(i, d).picks.entry(key).or_insert(0);
-        *n = n.saturating_add(1);
-    }
-}
 
 /// Why a conversation ended (the host's `EndReason`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,8 +197,8 @@ pub enum PickRefused {
 /// A player's conversation with an NPC.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conversation {
-    player: WireValue,
-    npc: WireValue,
+    /// `p, npc`: the cast every fn of a conversation takes.
+    cast: [WireValue; 2],
     /// The return stack: the current dialogue last. Empty at the topic menu.
     frames: Vec<Frame>,
     /// The attached dialogues, by (instance, qualified name), sorted.
@@ -287,31 +229,6 @@ enum Reoffer {
     Walk,
 }
 
-/// A refused emit's fault site (above any fn id).
-const EMIT_SITE: u32 = 1 << 16;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Frame {
-    instance: InstanceId,
-    /// The dialogue's index in its graph (re-found by `name` on a rebind).
-    dialogue: u16,
-    name: String,
-    /// The node's group name and its index in the group.
-    node: String,
-    member: u32,
-    /// The blocks being walked: the node's body first, then each nested block by its index among the
-    /// blocks of the step before its parent's `next` (`StepDef::blocks`).
-    cursors: Vec<Cursor>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Cursor {
-    block: Block,
-    /// The next step's offset in the block.
-    next: u32,
-    via: u32,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct Pending {
     offer: Offer,
@@ -324,80 +241,6 @@ enum Waiting {
     Menu(Vec<(InstanceId, String)>),
     /// The offered options' indices in the choice step (the step before the top cursor's `next`).
     Choice(Vec<u32>),
-}
-
-/// The stateless roll the `random_*` strategies break ties with: FNV-1a of the three.
-pub fn roll(tick: u64, key: u64, salt: u64) -> u64 {
-    let mut h = Fnv64::default();
-    h.write_u64(tick);
-    h.write_u64(key);
-    h.write_u64(salt);
-    h.finish()
-}
-
-/// The roll key of a dialogue's site: `hash(qualified name, site)`.
-fn site_key(dialogue: &str, site: u32) -> u64 {
-    let mut h = Fnv64::default();
-    dialogue.state_hash(&mut h);
-    site.state_hash(&mut h);
-    h.finish()
-}
-
-fn value_hash(v: &WireValue) -> u64 {
-    let mut h = Fnv64::default();
-    v.state_hash(&mut h);
-    h.finish()
-}
-
-fn len_u32(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
-}
-
-/// The dialogue named `name` in `g`.
-fn find<'g>(g: &'g DialogueGraph, name: &str) -> Option<(u16, &'g DialogueDef)> {
-    g.dialogues
-        .iter()
-        .enumerate()
-        .find(|(_, d)| d.name == name)
-        .and_then(|(k, d)| Some((u16::try_from(k).ok()?, d)))
-}
-
-/// The members of the node group `group` (the index of a node; its name names the group): node indices.
-fn group_members(d: &DialogueDef, group: usize) -> Vec<usize> {
-    let Some(name) = d.nodes.get(group).map(|n| &n.name) else {
-        return Vec::new();
-    };
-    (0..d.nodes.len())
-        .filter(|&k| &d.nodes[k].name == name)
-        .collect()
-}
-
-/// A candidate of a group pick.
-struct Cand {
-    /// Its index in the candidates' source order.
-    pos: usize,
-    score: u8,
-    picks: u32,
-    key: u64,
-}
-
-/// The candidate `pick` chooses: `First` the first; `Best` the highest score; `BestLeastRecent` then the
-/// fewest picks; `RandomBestLeastRecent` then the lowest roll; ties by source order.
-fn choose(pick: Pick, now: u64, cands: &[Cand]) -> Option<usize> {
-    let rank = |c: &Cand| -> (i32, u32, u64, usize) {
-        match pick {
-            Pick::First => (0, 0, 0, c.pos),
-            Pick::Best => (-i32::from(c.score), 0, 0, c.pos),
-            Pick::BestLeastRecent => (-i32::from(c.score), c.picks, 0, c.pos),
-            Pick::RandomBestLeastRecent => (
-                -i32::from(c.score),
-                c.picks,
-                roll(now, c.key, c.pos as u64),
-                c.pos,
-            ),
-        }
-    };
-    cands.iter().min_by_key(|c| rank(c)).map(|c| c.pos)
 }
 
 impl Conversation {
@@ -413,8 +256,7 @@ impl Conversation {
         now: u64,
     ) -> (Conversation, Batch) {
         let mut c = Conversation {
-            player,
-            npc,
+            cast: [player, npc],
             frames: Vec::new(),
             attached: Vec::new(),
             pending: None,
@@ -484,7 +326,7 @@ impl Conversation {
                 }
                 w.c.pending = None;
                 w.c.state = ConvState::Running;
-                match w.entry(i, &name, 1) {
+                match w.ev().entry(i, &name, 1) {
                     Some(node) => w.enter(i, &name, node),
                     None => {
                         // A top-level run whose entry group is empty: it ends, and so does the
@@ -794,167 +636,15 @@ impl<'a> Walk<'a> {
         self.c.now
     }
 
-    /// `f` of dialogue `name` of `i`, borrowed (nothing cloned but what `f` returns).
-    fn with_def<R>(
-        &self,
-        i: InstanceId,
-        name: &str,
-        f: impl FnOnce(u16, &DialogueDef) -> R,
-    ) -> Option<R> {
-        let g = self.env.graph(i)?;
-        find(g, name).map(|(k, d)| f(k, d))
-    }
-
-    /// The node group `group` of dialogue `name` of `i`.
-    fn group(&self, i: InstanceId, name: &str, group: usize) -> Option<Group> {
-        self.with_def(i, name, |_, d| {
-            Some(Group {
-                dialogue: d.name.clone(),
-                pick: d.pick,
-                name: d.nodes.get(group)?.name.clone(),
-                members: group_members(d, group)
-                    .into_iter()
-                    .map(|n| (n, d.nodes[n].cond.clone(), d.nodes[n].score))
-                    .collect(),
-            })
-        })
-        .flatten()
-    }
-
-    // ---- evaluation ------------------------------------------------------------------------------------
-
-    fn fault(&mut self, i: InstanceId, site: u32, fault: PureFault) {
-        if self.c.reported.insert((i, site)) {
-            self.env.report(i, fault);
+    /// Evaluation over the conversation's cast.
+    fn ev(&mut self) -> Eval<'_> {
+        Eval {
+            env: &mut *self.env,
+            rec: &mut *self.rec,
+            cast: &self.c.cast,
+            reported: &mut self.c.reported,
+            now: self.c.now,
         }
-    }
-
-    /// Fn `f` of instance `i` on the cast; `None` (reported) on a fault.
-    fn eval(&mut self, i: InstanceId, f: u16, depth: usize) -> Option<WireValue> {
-        let args = [self.c.player.clone(), self.c.npc.clone()];
-        match self.env.eval(i, f, &args, len_u32(depth)) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                self.fault(i, u32::from(f), e);
-                None
-            }
-        }
-    }
-
-    fn truth(&mut self, i: InstanceId, f: u16, depth: usize) -> bool {
-        match self.eval(i, f, depth) {
-            Some(WireValue::Bool(b)) => b,
-            Some(_) => {
-                self.fault(i, u32::from(f), PureFault::BadCall);
-                false
-            }
-            None => false,
-        }
-    }
-
-    /// Whether `cond` holds in dialogue `d` of `i`; `Some(once record to make when it is taken)`.
-    fn holds(
-        &mut self,
-        i: InstanceId,
-        d: &str,
-        cond: &CondDef,
-        depth: usize,
-    ) -> Option<Option<OnceRec>> {
-        let once = match &cond.once {
-            Some(o) => {
-                let per = match o.per {
-                    Some(f) => Some(value_hash(&self.eval(i, f, depth)?)),
-                    None => None,
-                };
-                if self.rec.once_used(i, d, o.site, per) {
-                    return None;
-                }
-                Some((o.site, per))
-            }
-            None => None,
-        };
-        if let Some(g) = cond.guard
-            && !self.truth(i, g, depth)
-        {
-            return None;
-        }
-        Some(once)
-    }
-
-    fn mark(&mut self, i: InstanceId, d: &str, once: Option<OnceRec>) {
-        if let Some(k) = once {
-            self.rec.of_mut(i, d).once.insert(k);
-        }
-    }
-
-    /// Line `l` of instance `i`, its speaker and substitutions evaluated now.
-    fn line(&mut self, i: InstanceId, l: &LineDef, depth: usize) -> SaidLine {
-        let speaker = match l.speaker {
-            Speaker::Cast(0) => self.c.player.clone(),
-            Speaker::Cast(1) => self.c.npc.clone(),
-            Speaker::Cast(_) => WireValue::Unit,
-            Speaker::Fn(f) => self.eval(i, f, depth).unwrap_or_default(),
-        };
-        let args = l
-            .subst
-            .iter()
-            .map(|&f| {
-                self.eval(i, f, depth)
-                    .unwrap_or_else(|| WireValue::Str(String::new()))
-            })
-            .collect();
-        SaidLine {
-            instance: i,
-            id: l.id.clone(),
-            speaker,
-            args,
-        }
-    }
-
-    // ---- greetings, topics, entries ----------------------------------------------------------------
-
-    /// The node a dialogue's group `group` picks by its `@pick` (`None`: an empty group), evaluated at
-    /// `depth`; its once record and pick are made.
-    fn pick_node(&mut self, i: InstanceId, g: &Group, depth: usize) -> Option<usize> {
-        let d = &g.dialogue;
-        let mut cands = Vec::new();
-        let mut onces = Vec::new();
-        for (pos, (n, cond, score)) in g.members.iter().enumerate() {
-            if let Some(once) = self.holds(i, d, cond, depth) {
-                let key = PickKey::Node {
-                    name: g.name.clone(),
-                    member: len_u32(pos),
-                };
-                cands.push(Cand {
-                    pos,
-                    score: *score,
-                    picks: self.rec.picks(i, d, &key),
-                    key: site_key(d, len_u32(*n)),
-                });
-                onces.push((pos, once));
-            }
-            if g.pick == Pick::First && !cands.is_empty() {
-                break;
-            }
-        }
-        let pos = choose(g.pick, self.now(), &cands)?;
-        let once = onces.iter().find(|(p, _)| *p == pos).and_then(|(_, o)| *o);
-        self.mark(i, d, once);
-        self.rec.picked(
-            i,
-            d,
-            PickKey::Node {
-                name: g.name.clone(),
-                member: len_u32(pos),
-            },
-        );
-        g.members.get(pos).map(|m| m.0)
-    }
-
-    /// The entry node of dialogue `name` of `i` (its first node's group), entered at `depth`.
-    fn entry(&mut self, i: InstanceId, name: &str, depth: usize) -> Option<usize> {
-        let g = self.group(i, name, 0)?;
-        self.pick_node(i, &g, depth)
     }
 
     /// The greeting pool's pick (module docs): (instance, dialogue, node).
@@ -962,15 +652,15 @@ impl<'a> Walk<'a> {
         let mut best: Option<(GreetRank, Option<OnceRec>)> = None;
         let mut picked: Option<(String, usize)> = None;
         for (i, name) in self.c.attached.clone() {
-            if self.with_def(i, &name, |_, d| d.topic.is_some()) != Some(false) {
+            if with_def(&*self.env, i, &name, |_, d| d.topic.is_some()) != Some(false) {
                 continue;
             }
-            let Some(g) = self.group(i, &name, 0) else {
+            let Some(g) = group(&*self.env, i, &name, 0) else {
                 continue;
             };
             let key = self.env.program_key(i);
             for (pos, (n, cond, score)) in g.members.iter().enumerate() {
-                let Some(once) = self.holds(i, &g.dialogue, cond, 1) else {
+                let Some(once) = self.ev().holds(i, &g.dialogue, cond, 1) else {
                     continue;
                 };
                 let pk = PickKey::Node {
@@ -993,7 +683,7 @@ impl<'a> Walk<'a> {
         }
         let ((_, _, name, _, n, i), once) = best?;
         let (group, member) = picked?;
-        self.mark(i, &name, once);
+        self.rec.mark(i, &name, once);
         self.rec.picked(
             i,
             &name,
@@ -1010,8 +700,8 @@ impl<'a> Walk<'a> {
         if !self.c.attached.iter().any(|(j, n)| *j == i && n == name) {
             return false;
         }
-        match self.with_def(i, name, |_, d| d.topic.as_ref().map(|t| t.cond)) {
-            Some(Some(cond)) => cond.is_none_or(|f| self.truth(i, f, 1)),
+        match with_def(&*self.env, i, name, |_, d| d.topic.as_ref().map(|t| t.cond)) {
+            Some(Some(cond)) => cond.is_none_or(|f| self.ev().truth(i, f, 1)),
             _ => false,
         }
     }
@@ -1020,10 +710,10 @@ impl<'a> Walk<'a> {
     fn hub(&mut self) {
         let mut topics = Vec::new();
         for (i, name) in self.c.attached.clone() {
-            let Some(Some(t)) = self.with_def(i, &name, |_, d| d.topic.clone()) else {
+            let Some(Some(t)) = with_def(&*self.env, i, &name, |_, d| d.topic.clone()) else {
                 continue;
             };
-            if t.cond.is_none_or(|f| self.truth(i, f, 1)) {
+            if t.cond.is_none_or(|f| self.ev().truth(i, f, 1)) {
                 let key = self.env.program_key(i);
                 topics.push((t.priority, name, key, i, t.text));
             }
@@ -1045,7 +735,7 @@ impl<'a> Walk<'a> {
         }
         let options = topics
             .iter()
-            .map(|(_, _, _, i, text)| self.line(*i, text, 1))
+            .map(|(_, _, _, i, text)| self.ev().line(*i, text, 1))
             .collect();
         let keys = topics.into_iter().map(|(_, n, _, i, _)| (i, n)).collect();
         self.offer(true, options, None, Waiting::Menu(keys));
@@ -1072,26 +762,10 @@ impl<'a> Walk<'a> {
 
     /// Pushes a frame running node `node` of dialogue `name` of `i`.
     fn enter(&mut self, i: InstanceId, name: &str, node: usize) {
-        let found = self.with_def(i, name, |di, d| {
-            let n = d.nodes.get(node)?;
-            let member = d.nodes[..node].iter().filter(|m| m.name == n.name).count();
-            Some((di, n.name.clone(), n.body, member))
-        });
-        let Some(Some((di, node_name, body, member))) = found else {
-            return self.end(EndReason::Edited);
-        };
-        self.c.frames.push(Frame {
-            instance: i,
-            dialogue: di,
-            name: name.to_string(),
-            node: node_name,
-            member: len_u32(member),
-            cursors: vec![Cursor {
-                block: body,
-                next: 0,
-                via: 0,
-            }],
-        });
+        match with_def(&*self.env, i, name, |di, d| Frame::at(i, di, d, node)).flatten() {
+            Some(f) => self.c.frames.push(f),
+            None => self.end(EndReason::Edited),
+        }
     }
 
     // ---- the walk ------------------------------------------------------------------------------------
@@ -1116,93 +790,47 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The step after the top cursor's `next` (the step a nested block belongs to), cloned.
-    fn step_at(&self, i: InstanceId, block: Block, offset: u32) -> Option<StepDef> {
-        let g = self.env.graph(i)?;
-        let s = usize::try_from(block.first.checked_add(offset)?).ok()?;
-        g.steps.get(s).cloned()
-    }
-
     fn push(&mut self, block: Block, via: usize) {
         if let Some(f) = self.c.frames.last_mut() {
-            f.cursors.push(Cursor {
-                block,
-                next: 0,
-                via: len_u32(via),
-            });
+            f.push(block, via);
         }
     }
 
     fn step(&mut self) -> Flow {
         let depth = self.c.frames.len();
-        let Some(f) = self.c.frames.last_mut() else {
+        let Walk {
+            c, env, rec, out, ..
+        } = self;
+        let Some(f) = c.frames.last_mut() else {
             self.hub();
             return Flow::Stop;
         };
-        let (i, name) = (f.instance, f.name.clone());
-        let Some(cur) = f.cursors.last_mut() else {
-            self.leave_dialogue(0);
-            return Flow::Next;
+        let step = match advance(&**env, f) {
+            Advance::Step(s) => s,
+            Advance::Popped => return Flow::Next,
+            Advance::Empty => {
+                self.leave_dialogue(0);
+                return Flow::Next;
+            }
+            Advance::Missing => {
+                self.end(EndReason::Edited);
+                return Flow::Stop;
+            }
         };
-        if cur.next >= cur.block.len {
-            f.cursors.pop();
-            return Flow::Next;
-        }
-        let (block, offset) = (cur.block, cur.next);
-        cur.next += 1;
-        let Some(step) = self.step_at(i, block, offset) else {
-            self.end(EndReason::Edited);
-            return Flow::Stop;
+        let (i, name) = (f.instance, f.name.clone());
+        let mut ev = Eval {
+            env: &mut **env,
+            rec,
+            cast: &c.cast,
+            reported: &mut c.reported,
+            now: c.now,
+        };
+        let step = match ev.common_step(f, step, depth, &mut out.lines, &mut out.emits) {
+            // A conversation's lines are not timed: the batch goes on.
+            Common::Said(_) | Common::Next => return Flow::Next,
+            Common::Other(step) => step,
         };
         match step {
-            StepDef::Line { line, cond } => {
-                if let Some(once) = self.holds(i, &name, &cond, depth) {
-                    self.mark(i, &name, once);
-                    let l = self.line(i, &line, depth);
-                    self.out.lines.push(l);
-                }
-            }
-            StepDef::Group { site, members } => {
-                let mut cands = Vec::new();
-                let mut onces = Vec::new();
-                let pick = self
-                    .with_def(i, &name, |_, d| d.pick)
-                    .unwrap_or(Pick::BestLeastRecent);
-                for (pos, m) in members.iter().enumerate() {
-                    if let Some(once) = self.holds(i, &name, &m.cond, depth) {
-                        let key = PickKey::Line {
-                            site,
-                            member: len_u32(pos),
-                        };
-                        cands.push(Cand {
-                            pos,
-                            score: m.score,
-                            picks: self.rec.picks(i, &name, &key),
-                            key: site_key(&name, site),
-                        });
-                        onces.push((pos, once));
-                        if pick == Pick::First {
-                            break;
-                        }
-                    }
-                }
-                if let Some(pos) = choose(pick, self.now(), &cands) {
-                    let once = onces.iter().find(|(p, _)| *p == pos).and_then(|(_, o)| *o);
-                    self.mark(i, &name, once);
-                    self.rec.picked(
-                        i,
-                        &name,
-                        PickKey::Line {
-                            site,
-                            member: len_u32(pos),
-                        },
-                    );
-                    let m = &members[pos];
-                    let l = self.line(i, &m.line, depth);
-                    self.out.lines.push(l);
-                    self.push(m.body, pos);
-                }
-            }
             StepDef::Choice {
                 timeout, options, ..
             } => {
@@ -1214,10 +842,10 @@ impl<'a> Walk<'a> {
                     {
                         continue;
                     }
-                    if o.guard.is_some_and(|g| !self.truth(i, g, depth)) {
+                    if o.guard.is_some_and(|g| !self.ev().truth(i, g, depth)) {
                         continue;
                     }
-                    lines.push(self.line(i, &o.text, depth));
+                    lines.push(self.ev().line(i, &o.text, depth));
                     offered.push(len_u32(k));
                 }
                 if !offered.is_empty() {
@@ -1226,33 +854,17 @@ impl<'a> Walk<'a> {
                     return Flow::Stop;
                 }
             }
-            StepDef::When { cond, body } => {
-                if let Some(once) = self.holds(i, &name, &cond, depth) {
-                    self.mark(i, &name, once);
-                    self.push(body, 0);
-                }
-            }
-            StepDef::Once { once, body } => {
-                let cond = CondDef {
-                    once: Some(once),
-                    guard: None,
-                };
-                if let Some(once) = self.holds(i, &name, &cond, depth) {
-                    self.mark(i, &name, once);
-                    self.push(body, 0);
-                }
-            }
-            StepDef::Jump { group } => {
-                if self.with_def(i, &name, |_, _| ()).is_none() {
+            StepDef::Jump { group: g } => {
+                if with_def(&*self.env, i, &name, |_, _| ()).is_none() {
                     self.end(EndReason::Edited);
                     return Flow::Stop;
                 }
-                let Some(g) = self.group(i, &name, usize::from(group)) else {
+                let Some(g) = group(&*self.env, i, &name, usize::from(g)) else {
                     // A group that does not exist is an empty one.
                     self.end(EndReason::Finished);
                     return Flow::Stop;
                 };
-                match self.pick_node(i, &g, depth) {
+                match self.ev().pick_node(i, &g, depth) {
                     Some(n) => {
                         self.c.frames.pop();
                         self.enter(i, &name, n);
@@ -1277,7 +889,7 @@ impl<'a> Walk<'a> {
                     self.end(EndReason::Edited);
                     return Flow::Stop;
                 };
-                match self.entry(i, &callee, depth + 1) {
+                match self.ev().entry(i, &callee, depth + 1) {
                     Some(n) => self.enter(i, &callee, n),
                     None => {
                         self.end(EndReason::Finished);
@@ -1285,11 +897,6 @@ impl<'a> Walk<'a> {
                     }
                 }
             }
-            StepDef::Emit {
-                event,
-                script,
-                args,
-            } => self.emit(i, event, script, &args, depth),
             StepDef::Return { exit } => self.leave_dialogue(exit),
             StepDef::Pause { ticks } => {
                 self.c.state = ConvState::Paused {
@@ -1297,36 +904,16 @@ impl<'a> Walk<'a> {
                 };
                 return Flow::Stop;
             }
-            // A scene's step: nothing in a conversation.
-            StepDef::FollowUp { .. } => {}
+            // A scene's step: nothing in a conversation. (Lines, groups, `when`, `once` and `emit` were
+            // walked above.)
+            StepDef::FollowUp { .. }
+            | StepDef::Line { .. }
+            | StepDef::Group { .. }
+            | StepDef::When { .. }
+            | StepDef::Once { .. }
+            | StepDef::Emit { .. } => {}
         }
         Flow::Next
-    }
-
-    fn emit(&mut self, i: InstanceId, event: u16, script: bool, args: &[u16], depth: usize) {
-        let shape = self
-            .env
-            .event(i, event, script)
-            .filter(|s| s.fields.len() == args.len());
-        let Some(shape) = shape else {
-            return self.fault(i, EMIT_SITE | u32::from(event), PureFault::BadCall);
-        };
-        let mut fields = Vec::with_capacity(args.len());
-        for (name, &f) in shape.fields.iter().zip(args) {
-            match self.eval(i, f, depth) {
-                Some(v) => fields.push((name.clone(), v)),
-                // Reported: the emit is not sent.
-                None => return,
-            }
-        }
-        self.out.emits.push(Emitted {
-            instance: i,
-            event: shape.name.clone(),
-            value: WireValue::Struct {
-                name: shape.name,
-                fields,
-            },
-        });
     }
 
     /// The current dialogue leaves through exit `exit`: back to the caller's detour (its arm), or to the
@@ -1335,12 +922,11 @@ impl<'a> Walk<'a> {
         let Some(f) = self.c.frames.pop() else {
             return;
         };
-        let exit_name = self
-            .with_def(f.instance, &f.name, |_, d| {
-                d.exits.get(usize::from(exit)).cloned()
-            })
-            .flatten()
-            .unwrap_or_else(|| "done".into());
+        let exit_name = with_def(&*self.env, f.instance, &f.name, |_, d| {
+            d.exits.get(usize::from(exit)).cloned()
+        })
+        .flatten()
+        .unwrap_or_else(|| "done".into());
         let Some(caller) = self.c.frames.last() else {
             // A top-level run ends: back to the menu.
             self.c.ran = true;
@@ -1358,7 +944,7 @@ impl<'a> Walk<'a> {
         let Some(StepDef::Detour { arms, .. }) = cur
             .next
             .checked_sub(1)
-            .and_then(|o| self.step_at(caller.instance, cur.block, o))
+            .and_then(|o| step_at(&*self.env, caller.instance, cur.block, o))
         else {
             return;
         };
@@ -1379,7 +965,7 @@ impl<'a> Walk<'a> {
             return self.end(EndReason::Edited);
         };
         if let Some(site) = opt.once {
-            self.mark(i, &name, Some((site, None)));
+            self.rec.mark(i, &name, Some((site, None)));
         }
         self.push(opt.body, usize::try_from(o).unwrap_or(usize::MAX));
     }
@@ -1388,7 +974,7 @@ impl<'a> Walk<'a> {
     fn current_choice(&self) -> Option<(InstanceId, String, StepDef)> {
         let f = self.c.frames.last()?;
         let cur = f.cursors.last()?;
-        let s = self.step_at(f.instance, cur.block, cur.next.checked_sub(1)?)?;
+        let s = step_at(&*self.env, f.instance, cur.block, cur.next.checked_sub(1)?)?;
         Some((f.instance, f.name.clone(), s))
     }
 
@@ -1431,10 +1017,10 @@ impl<'a> Walk<'a> {
             {
                 continue;
             }
-            if o.guard.is_some_and(|g| !self.truth(i, g, depth)) {
+            if o.guard.is_some_and(|g| !self.ev().truth(i, g, depth)) {
                 continue;
             }
-            lines.push(self.line(i, &o.text, depth));
+            lines.push(self.ev().line(i, &o.text, depth));
             offered.push(len_u32(k));
         }
         if offered.is_empty() {
@@ -1450,36 +1036,6 @@ impl<'a> Walk<'a> {
 impl StateHash for InstanceId {
     fn state_hash<H: Hasher>(&self, h: &mut H) {
         self.0.state_hash(h);
-    }
-}
-
-impl StateHash for Records {
-    fn state_hash<H: Hasher>(&self, h: &mut H) {
-        self.by.state_hash(h);
-    }
-}
-
-impl StateHash for DialogueRecords {
-    fn state_hash<H: Hasher>(&self, h: &mut H) {
-        self.once.state_hash(h);
-        self.picks.state_hash(h);
-    }
-}
-
-impl StateHash for PickKey {
-    fn state_hash<H: Hasher>(&self, h: &mut H) {
-        match self {
-            PickKey::Node { name, member } => {
-                h.write_u8(0);
-                name.state_hash(h);
-                member.state_hash(h);
-            }
-            PickKey::Line { site, member } => {
-                h.write_u8(1);
-                site.state_hash(h);
-                member.state_hash(h);
-            }
-        }
     }
 }
 
@@ -1561,8 +1117,8 @@ impl StateHash for Ended {
 
 impl StateHash for Conversation {
     fn state_hash<H: Hasher>(&self, h: &mut H) {
-        self.player.state_hash(h);
-        self.npc.state_hash(h);
+        self.cast[0].state_hash(h);
+        self.cast[1].state_hash(h);
         self.frames.state_hash(h);
         self.attached.state_hash(h);
         self.pending.state_hash(h);
@@ -1572,25 +1128,6 @@ impl StateHash for Conversation {
         self.reported.state_hash(h);
         self.now.state_hash(h);
         self.reoffer.state_hash(h);
-    }
-}
-
-impl StateHash for Frame {
-    fn state_hash<H: Hasher>(&self, h: &mut H) {
-        self.instance.state_hash(h);
-        self.dialogue.state_hash(h);
-        self.name.state_hash(h);
-        self.node.state_hash(h);
-        self.member.state_hash(h);
-        self.cursors.state_hash(h);
-    }
-}
-
-impl StateHash for Cursor {
-    fn state_hash<H: Hasher>(&self, h: &mut H) {
-        self.block.state_hash(h);
-        self.next.state_hash(h);
-        self.via.state_hash(h);
     }
 }
 

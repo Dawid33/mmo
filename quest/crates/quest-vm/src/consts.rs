@@ -65,6 +65,9 @@ pub const CONVERSATION_LINGER_TICKS: u64 = 200;
 /// within it (`-> start` with no choice in between) ends the conversation `TooDeep`.
 pub const BATCH_STEPS_MAX: u32 = 4_096;
 
+/// Follow-ups one scene play may take (`-> other_scene`): the one past it ends the play instead.
+pub const SCENE_FOLLOW_UPS_MAX: u32 = 16;
+
 /// A timed line's duration: this many ticks, plus [`LINE_TICKS_PER_CHAR`] per character of its text.
 pub const LINE_BASE_TICKS: u32 = 30;
 
@@ -111,6 +114,7 @@ mod tests {
         assert_eq!(DIALOGUE_STACK_MAX, 16);
         assert_eq!(CONVERSATION_LINGER_TICKS, 200);
         assert_eq!(BATCH_STEPS_MAX, 4_096);
+        assert_eq!(SCENE_FOLLOW_UPS_MAX, 16);
         assert_eq!(LINE_BASE_TICKS, 30);
         assert_eq!(LINE_TICKS_PER_CHAR, 1);
         assert_eq!(LINE_MIN_TICKS, 30);
