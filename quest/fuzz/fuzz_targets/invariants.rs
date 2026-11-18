@@ -27,11 +27,11 @@
 //!   output (without its tick stamps), outcome, completions, people and each instance's script state. The
 //!   script's inputs are given in order, each tick's batch once the world is quiescent, not at their ticks
 //!   (a budget moves when a handler's effect lands; a timed input would meet another state);
-//! - **save/load**: every instance saved before tick `k` (the first tick from `k` with no instance
-//!   mid-segment: the stub's `World::load_vms` takes the dialogue mirrors again) and loaded in its place,
-//!   the world goes on as the uninterrupted one: the same output, outcome, completions and people, every
-//!   instance's globals equal by value, and at the end the same `World::hash64` (`load_vms` keeps what each
-//!   part was sent while the part still holds it, so no unchanged mirror is installed again).
+//! - **save/load**: every instance saved before tick `k` (mid-segment or not) and the world-side state
+//!   (`World::saved`, through its bytes), both loaded in their place: the world goes on as the
+//!   uninterrupted one — the same output, outcome, completions and people, every instance's globals equal by
+//!   value, and at the end the same `World::hash64` (what each part was sent and the dialogue mirrors are
+//!   saved state, kept as they are).
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -42,8 +42,8 @@ use quest_corpus::generate::program_from_seed;
 use quest_corpus::{Case, RUN, config_of, is_world, tree_of};
 use quest_lang::{SourceTree, compile, render};
 use quest_stub::{
-    FailureKind, FailureRule, Input, People, Runner, StubConfig, StubHost, World, parse_people,
-    parse_script, parse_wire, vm_config,
+    FailureKind, FailureRule, Input, People, Runner, StubConfig, StubHost, World, WorldSaved,
+    parse_people, parse_script, parse_wire, vm_config,
 };
 use quest_vm::consts::MEM_BYTES_DEFAULT;
 use quest_vm::host::Report;
@@ -655,11 +655,7 @@ fn world_case(i: &In) {
     let mut saved = None;
     for _ in 0..WORLD_TICKS {
         let now = plain.now();
-        // `World::load_vms` takes the dialogue mirrors again: not while an instance is mid-segment.
-        let busy = (0..resumed.instances())
-            .filter_map(|k| resumed.vm(u16::try_from(k).ok()?))
-            .any(|vm| vm.in_segment());
-        if saved.is_none() && now >= k && !busy {
+        if saved.is_none() && now >= k {
             saved = Some(now);
             let program = Arc::clone(resumed.program());
             let vms: Vec<Vm> = (0..resumed.instances())
@@ -674,8 +670,12 @@ fn world_case(i: &In) {
                     )
                 })
                 .collect();
-            // The world's own state loaded back: a `Setup` it has due (the first, or a repeatable's after
-            // its cooldown) is still owed (Task 55, `regressions/invariants/repeat-setup`).
+            // The world-side state through its bytes, as `quest run --save` / `--load` keep it: a `Setup`
+            // it has due (the first, or a repeatable's after its cooldown: Task 55,
+            // `regressions/invariants/repeat-setup`), what each part was sent, the dialogue mirrors.
+            let world = WorldSaved::from_bytes(&resumed.saved().to_bytes())
+                .unwrap_or_else(|e| panic!("{name}: the world state does not read back: {e}"));
+            resumed.restore(world);
             let setup = resumed.setup_due();
             resumed
                 .load_vms(vms, setup)

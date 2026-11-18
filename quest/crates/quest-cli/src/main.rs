@@ -64,6 +64,9 @@ const STATE_MAGIC: [u8; 8] = *b"QSSTATE1";
 /// A state file of several instances (a quest's home and parts, in id order): this magic, the program as in
 /// `QSSTATE1`, a `u32` count, then each instance's save (a `u32` length and the bytes).
 const STATES_MAGIC: [u8; 8] = *b"QSSTATE2";
+/// A world's state file: `QSSTATE2`'s layout under this magic, then the world-side state
+/// (`quest_stub::WorldSaved`, a `u32` length and the bytes).
+const WORLD_MAGIC: [u8; 8] = *b"QSSTATE3";
 
 fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     // A program's or a VM's bytes are far below 4 GiB.
@@ -71,19 +74,25 @@ fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn state_file(program: &Program, vms: &[&Vm]) -> Vec<u8> {
+fn state_file(program: &Program, vms: &[&Vm], world: Option<&[u8]>) -> Vec<u8> {
     let code = program.to_bytes();
-    if let [vm] = vms {
+    if let ([vm], None) = (vms, world) {
         let mut out = STATE_MAGIC.to_vec();
         push_bytes(&mut out, &code);
         out.extend_from_slice(&vm.save());
         return out;
     }
-    let mut out = STATES_MAGIC.to_vec();
+    let mut out = match world {
+        Some(_) => WORLD_MAGIC.to_vec(),
+        None => STATES_MAGIC.to_vec(),
+    };
     push_bytes(&mut out, &code);
     out.extend_from_slice(&(vms.len() as u32).to_le_bytes());
     for vm in vms {
         push_bytes(&mut out, &vm.save());
+    }
+    if let Some(world) = world {
+        push_bytes(&mut out, world);
     }
     out
 }
@@ -98,20 +107,23 @@ fn take_bytes(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
     Ok(rest.split_at(len))
 }
 
-/// A state file's program and its instances' saves.
-fn read_state(bytes: &[u8]) -> Result<(Program, Vec<&[u8]>), String> {
-    let (several, rest) = match (
-        bytes.strip_prefix(&STATE_MAGIC[..]),
-        bytes.strip_prefix(&STATES_MAGIC[..]),
-    ) {
-        (Some(rest), _) => (false, rest),
-        (_, Some(rest)) => (true, rest),
-        _ => return Err("not a quest state file".into()),
+/// A state file's program, its instances' saves and its world-side state (a world's file only).
+type StateParts<'a> = (Program, Vec<&'a [u8]>, Option<&'a [u8]>);
+
+fn read_state(bytes: &[u8]) -> Result<StateParts<'_>, String> {
+    let (several, world, rest) = if let Some(rest) = bytes.strip_prefix(&STATE_MAGIC[..]) {
+        (false, false, rest)
+    } else if let Some(rest) = bytes.strip_prefix(&STATES_MAGIC[..]) {
+        (true, false, rest)
+    } else if let Some(rest) = bytes.strip_prefix(&WORLD_MAGIC[..]) {
+        (true, true, rest)
+    } else {
+        return Err("not a quest state file".into());
     };
     let (code, mut rest) = take_bytes(rest)?;
     let old = Program::from_bytes(code).map_err(|e| format!("{e:?}"))?;
     if !several {
-        return Ok((old, vec![rest]));
+        return Ok((old, vec![rest], None));
     }
     let (n, tail) = rest.split_first_chunk::<4>().ok_or("truncated")?;
     rest = tail;
@@ -121,10 +133,32 @@ fn read_state(bytes: &[u8]) -> Result<(Program, Vec<&[u8]>), String> {
         saves.push(save);
         rest = tail;
     }
+    let mut world_state = None;
+    if world {
+        let (w, tail) = take_bytes(rest)?;
+        world_state = Some(w);
+        rest = tail;
+    }
     if !rest.is_empty() {
         return Err("unexpected bytes after the last instance".into());
     }
-    Ok((old, saves))
+    Ok((old, saves, world_state))
+}
+
+/// A world's state file's world-side state for `program` (`None` in an instances-only file): as saved when
+/// the file holds `program`; when it holds another (a migration), only the `Setup` due — what each part was
+/// sent and the dialogue mirrors were of the old program.
+fn world_state(bytes: &[u8], program: &Program) -> Result<Option<quest_stub::WorldSaved>, String> {
+    let (old, _, world) = read_state(bytes)?;
+    let Some(world) = world else {
+        return Ok(None);
+    };
+    let mut saved = quest_stub::WorldSaved::from_bytes(world)?;
+    if old.content_hash() != program.content_hash() {
+        saved.sent.clear();
+        saved.mirrors.clear();
+    }
+    Ok(Some(saved))
 }
 
 /// The instances in a state file, for `program`, one per `cfgs` entry (`names` label a migration report's
@@ -136,7 +170,7 @@ fn load_state(
     cfgs: Vec<VmConfig>,
     names: &[String],
 ) -> Result<Vec<Vm>, String> {
-    let (old, saves) = read_state(bytes)?;
+    let (old, saves, _) = read_state(bytes)?;
     if saves.len() != cfgs.len() {
         return Err(format!(
             "the state holds {} instances, the program has {}",
@@ -618,7 +652,7 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
         }
     }
     if let Some(file) = &opts.save
-        && let Err(e) = write_state(file, &state_file(&program, &[&runner.vm]))
+        && let Err(e) = write_state(file, &state_file(&program, &[&runner.vm], None))
     {
         eprintln!("quest: {file}: {e}");
         return ExitCode::from(EXIT_NO_INPUT);

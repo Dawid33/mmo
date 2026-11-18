@@ -1250,3 +1250,135 @@ fn a_loaded_world_goes_on_with_the_same_hash() {
         assert_eq!(resumed.output(), plain.output());
     }
 }
+
+/// `PART_QUEST` with a `str` global the part reads and a part handler long enough to be mid-segment at a
+/// small fuel per tick.
+const PART_QUEST_SLOW: &str = r#"quest Q:
+    role pet: Creature
+    let count = 0
+    let tag = "none"
+    event Seen:
+        n: int
+    event Bump:
+        n: int
+    @on(Bump)
+    fn bump(e):
+        count = count + e.n
+        tag = f"n{e.n}"
+    @on(Seen)
+    fn seen(e):
+        print(f"home saw {e.n}")
+    stage Watching:
+        @on(Entered)
+        fn watching(e):
+            pass
+    part watch on pet:
+        @on(PlayerNear)
+        fn near(e):
+            let i = 0
+            while i < 400:
+                i = i + 1
+            print(f"part sees {count} {tag}")
+            emit Seen(n=count)
+"#;
+
+/// Task 55 final review: `load_vms` re-derived what each part was sent and re-took the dialogue mirrors, so
+/// a world saved while a part was mid-segment (its mirror unreadable) dropped the record, sent the home's
+/// mirror again and installed its `str` anew: the part's memory parted for good. What was sent and the
+/// last dialogue mirrors are saved state, kept as they are.
+#[test]
+fn a_world_saved_mid_segment_goes_on_with_the_same_hash() {
+    let (p, lines) = compiled(PART_QUEST_SLOW);
+    let people = parse_people(PART_PEOPLE).expect("people");
+    let roles_text = [("pet", "Creature(7)")];
+    let make = || {
+        let mut w = World::new(
+            Arc::clone(&p),
+            people.clone(),
+            roles(PART_PEOPLE, &roles_text),
+            StubConfig::default(),
+            300,
+            MEM,
+        )
+        .expect("placed");
+        w.set_lines(lines.clone());
+        w
+    };
+    let script = parse_script("2 event Q::Bump n=5\n6 near 1 7\n").expect("script");
+    for at in [7, 8, 9] {
+        let (mut plain, mut resumed) = (make(), make());
+        let mut mid_segment = false;
+        for tick in 0..60 {
+            if tick == at {
+                mid_segment = resumed.vm(1).expect("the part").in_segment();
+                let vms = (0..resumed.instances())
+                    .map(|k| {
+                        let id = u16::try_from(k).unwrap();
+                        let cfg = quest_stub::vm_config(MEM, id, roles(PART_PEOPLE, &roles_text));
+                        let bytes = resumed.vm(id).expect("an instance").save();
+                        quest_vm::Vm::load(Arc::clone(&p), cfg, &bytes).expect("loads")
+                    })
+                    .collect();
+                let setup = resumed.setup_due();
+                resumed.load_vms(vms, setup).expect("the saves load");
+            }
+            let inputs: Vec<Input> = script
+                .iter()
+                .filter(|(t, _)| *t == tick)
+                .map(|(_, i)| i.clone())
+                .collect();
+            plain.step(&inputs);
+            resumed.step(&inputs);
+        }
+        assert!(mid_segment, "saved before tick {at}: the part was not mid-segment");
+        assert_eq!(resumed.output(), plain.output(), "saved before tick {at}");
+        assert_eq!(resumed.hash64(), plain.hash64(), "saved before tick {at}");
+    }
+}
+
+/// The same finding through a saved file (`quest run --save` / `--load`): the world-side state goes with the
+/// instances' saves and a fresh world given both keeps it as it was — not re-derived from the loaded VMs.
+#[test]
+fn a_world_state_file_keeps_what_was_sent_and_the_mirrors() {
+    let (p, _) = compiled(PART_QUEST_SLOW);
+    let roles_text = [("pet", "Creature(7)")];
+    let make = || {
+        World::new(
+            Arc::clone(&p),
+            parse_people(PART_PEOPLE).expect("people"),
+            roles(PART_PEOPLE, &roles_text),
+            StubConfig::default(),
+            300,
+            MEM,
+        )
+        .expect("placed")
+    };
+    let script = parse_script("2 event Q::Bump n=5\n6 near 1 7\n").expect("script");
+    let mut w = make();
+    for tick in 0..7 {
+        let inputs: Vec<Input> = script
+            .iter()
+            .filter(|(t, _)| *t == tick)
+            .map(|(_, i)| i.clone())
+            .collect();
+        w.step(&inputs);
+    }
+    assert!(w.vm(1).expect("the part").in_segment());
+    let saved = w.saved();
+    let bytes = saved.to_bytes();
+    let back = quest_stub::WorldSaved::from_bytes(&bytes).expect("reads back");
+    assert_eq!(back, saved);
+    let vms = (0..w.instances())
+        .map(|k| {
+            let id = u16::try_from(k).unwrap();
+            let cfg = quest_stub::vm_config(MEM, id, roles(PART_PEOPLE, &roles_text));
+            quest_vm::Vm::load(Arc::clone(&p), cfg, &w.vm(id).expect("an instance").save())
+                .expect("loads")
+        })
+        .collect();
+    let mut fresh = make();
+    fresh.restore(back);
+    let setup = fresh.setup_due();
+    fresh.load_vms(vms, setup).expect("the saves load");
+    assert_eq!(fresh.saved(), saved);
+}

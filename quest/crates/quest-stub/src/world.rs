@@ -64,11 +64,13 @@ use crate::runner::{Runner, vm_config};
 
 mod env;
 mod inputs;
+mod saved;
 mod scenes;
 mod talk;
 
 use env::Core;
 pub use env::DialogueWorld;
+pub use saved::WorldSaved;
 
 use talk::{Talk, conv_over, conv_quiet};
 
@@ -491,8 +493,9 @@ impl World {
     /// Every instance's VM replaced, in id order (a loaded or migrated state; each must be made with
     /// [`crate::vm_config`] of its instance, the world's memory and its roles). `setup`: the `Setup` the world
     /// has due ([`World::setup_due`]) is still delivered at its tick (a reset state); otherwise it is dropped
-    /// (the state already had it). The dialogue mirrors are
-    /// taken again from the new VMs.
+    /// (the state already had it). What each part was sent and the dialogue mirrors are kept (saved state,
+    /// [`World::saved`]): a dialogue mirror is taken again only from a VM that shows another, a part's
+    /// record dropped only where the part shows another mirror.
     pub fn load_vms(&mut self, vms: Vec<Vm>, setup: bool) -> Result<(), String> {
         if vms.len() != self.core.insts.len() {
             return Err(format!(
@@ -507,10 +510,11 @@ impl World {
         if !setup {
             self.setup_at = None;
         }
-        // What each part was sent stays known while the part still holds it (the same world's own state
-        // loaded back): sending an unchanged mirror again would install equal values anew, and the part's
-        // memory, not its values, would part from a run that was never saved. A record the loaded state
-        // does not bear out (another state, a migrated program) is dropped, and that part sent the home's.
+        // What each part was sent and each instance's last dialogue mirror are saved state, kept as they
+        // are: sending an unchanged mirror again would install equal values anew, and the part's memory,
+        // not its values, would part from a run that was never saved. Only a record the loaded state
+        // contradicts (another state, a migrated program) is dropped, and that part sent the home's; a part
+        // that cannot say (mid-segment, initialising) keeps its record, as an instance its dialogue mirror.
         let program = Arc::clone(self.core.env.program());
         let parts = program
             .quest
@@ -522,11 +526,13 @@ impl World {
             let Some(part) = usize::from(id).checked_sub(1).and_then(|k| parts.get(k)) else {
                 continue;
             };
-            if self.mirror_held(id, &part.read_set) == Some(h) {
+            if self
+                .mirror_held(id, &part.read_set)
+                .is_none_or(|held| held == h)
+            {
                 self.sent.insert(id, h);
             }
         }
-        self.core.env.clear_mirrors();
         self.core.take_mirrors();
         Ok(())
     }

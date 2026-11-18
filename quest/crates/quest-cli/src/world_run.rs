@@ -16,7 +16,7 @@ use quest_vm::{Status, Vm};
 
 use crate::{
     Answer, EXIT_ABORTED, EXIT_NO_INPUT, EXIT_TICK_LIMIT, RunOpts, load_state, parse_answer,
-    print_report, read_tree, role_values, state_file, write_state,
+    print_report, read_tree, role_values, state_file, world_state, write_state,
 };
 
 /// The tick `--talk` talks at.
@@ -200,8 +200,17 @@ pub(crate) fn run_world(
             })
             .collect();
         let vms = load_state(&bytes, Arc::clone(&program), cfgs, &names).map_err(cannot)?;
-        // A loaded state already had its `Setup`; a reset one is given it again (below).
-        w.load_vms(vms, false).map_err(cannot)?;
+        // The world-side state put back first (`load_vms` keeps it): the `Setup` it had due, what each part
+        // was sent, the dialogue mirrors. A file without it (instances only) already had its `Setup`; a
+        // reset one is given it again (below).
+        let setup = match world_state(&bytes, &program).map_err(cannot)? {
+            Some(saved) => {
+                w.restore(saved);
+                w.setup_due()
+            }
+            None => false,
+        };
+        w.load_vms(vms, setup).map_err(cannot)?;
     }
     if opts.reset {
         w.reset().map_err(|e| {
@@ -270,7 +279,10 @@ pub(crate) fn run_world(
             .filter_map(|k| w.vm(u16::try_from(k).ok()?))
             .collect();
         // The program the instances run now: an `edit` may have replaced the start-up one.
-        if let Err(e) = write_state(file, &state_file(w.program(), &vms)) {
+        if let Err(e) = write_state(
+            file,
+            &state_file(w.program(), &vms, Some(&w.saved().to_bytes())),
+        ) {
             eprintln!("quest: {file}: {e}");
             return Err(ExitCode::from(EXIT_NO_INPUT));
         }

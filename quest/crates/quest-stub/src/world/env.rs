@@ -185,6 +185,33 @@ impl DialogueWorld {
         self.instances = count;
     }
 
+    /// Each instance's dialogue mirror as it stands (saved state: [`crate::WorldSaved`]).
+    pub fn saved_mirrors(&self) -> BTreeMap<u32, Mirror> {
+        self.mirrors
+            .iter()
+            .map(|(i, d)| (*i, d.mirror.clone()))
+            .collect()
+    }
+
+    /// Puts back [`DialogueWorld::saved_mirrors`]: each instance's mirror replaced as saved (one a loaded VM
+    /// shows another of is taken again by the next [`DialogueWorld::take_mirrors`]).
+    pub fn restore_mirrors(&mut self, mirrors: BTreeMap<u32, Mirror>) {
+        self.mirrors = mirrors
+            .into_iter()
+            .map(|(i, mirror)| {
+                let hash = hash_of(&mirror);
+                (
+                    i,
+                    DialogueMirror {
+                        mirror,
+                        hash,
+                        scratch: None,
+                    },
+                )
+            })
+            .collect();
+    }
+
     /// A global of instance `i`'s dialogue mirror.
     pub fn mirrored(&self, i: u32, global: u16) -> Option<&WireValue> {
         self.mirrors.get(&i)?.mirror.globals.get(&global)

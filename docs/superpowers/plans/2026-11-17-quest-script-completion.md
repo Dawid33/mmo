@@ -1491,10 +1491,11 @@ script_at: BTreeMap<ScriptInstanceId, RegionCoords>
   `MirrorVm` per mirror (kept while the mirror is unchanged; the one scratch path, Task 62), not a fresh VM per
   call. A mirror carries its program's content hash: one of another program (home and part migrated at
   different ticks) is refused by `Vm::install_mirror` and `MirrorVm::new` — the sender re-sends after an edit.
-  What each part was last sent (the mirror's hash) is saved state of the home's: a load keeps it while the part's
-  mirror on its way or its held values still match it, and sends only where they do not — re-sending an unchanged
-  mirror installs equal values anew and the part's memory parts from a run never saved (the stub's
-  `World::load_vms`, Task 55).
+  What each part was last sent (the mirror's hash), each instance's last dialogue mirror and a repeatable's due
+  `Setup` tick (`setup_at`) are saved state, kept as is: a load never re-derives or re-takes them (a part or
+  instance mid-segment cannot give them again), and drops a record only where the loaded state shows another —
+  re-sending an unchanged mirror installs equal values anew and the part's memory parts from a run never saved
+  (the stub's `World::saved` / `restore` / `load_vms`, Task 55).
 - The conversation, the attachments and the mirrors are **carried state of the NPC** (`Carried.talk`); the sender
   re-targets when it learns the NPC moved (the manager's `script_at` / entity routing).
 - Between hosts a `ScriptMsg` is a `Reliable` peer message and is **journalled** (the peer-journal rule: a new
