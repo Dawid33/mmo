@@ -39,6 +39,12 @@
 #   DEV_R3_LOGIN_LOG (target/dev-login/login.log), DEV_R3_PIN_WAIT_SECS (180),
 #   DEV_R3_HOST_STOP_SECS (95: a host's own bound on its exit, see below), DEV_R3_STOP_SECS (60),
 #   DEV_R3_RESTART_MAX (3), DEV_R3_RESTART_WINDOW_SECS (60), DEV_R3_RESTART_BACKOFF_SECS (1).
+# Coordinator replicas (Elastic 2b; `just coordinators=2 dev-r3`): DEV_R3_REPLICAS is a `|`-separated
+# list of env-word lists, one more coordinator each (its own VOXEL_COORDINATOR_BIND / VOXEL_LOGIN_LINK_BIND;
+# the same certificate files as the first, which has written them by then), started once the first
+# coordinator's pin exists, stopped with it, and any one ending takes the stack down like it.
+# DEV_R3_LOGIN_LINK (127.0.0.1:6490) is the login link target world `dev` is registered with (the
+# comma-separated addresses of every replica's login listener).
 set -uo pipefail
 
 # `wait -n -p` (the watch) needs bash 5.1.
@@ -71,6 +77,9 @@ stop_secs=${DEV_R3_STOP_SECS:-60}
 restart_max=${DEV_R3_RESTART_MAX:-3}
 restart_window=${DEV_R3_RESTART_WINDOW_SECS:-60}
 restart_backoff=${DEV_R3_RESTART_BACKOFF_SECS:-1}
+login_link=${DEV_R3_LOGIN_LINK:-127.0.0.1:6490}
+replica_envs=()
+if [ -n "${DEV_R3_REPLICAS:-}" ]; then IFS='|' read -ra replica_envs <<<"$DEV_R3_REPLICAS"; fi
 
 # Never fails (a closed terminal must not end a stop part-way).
 say() { echo "dev-r3: $*" 2>/dev/null || true; }
@@ -83,6 +92,7 @@ rm -f "$pin" "$login_pin" "$dir"/host-*.pid "$dir/stopping"
 
 lpid=""
 cpid=""
+xpids=()
 rpid=""
 hpids=()
 interrupted=0
@@ -174,6 +184,11 @@ stop() {
         kill -TERM "$cpid" 2>/dev/null || true
         wait_gone "$stop_secs" "the coordinator" "$server" "$cpid"
     fi
+    if [ "${#xpids[@]}" -gt 0 ]; then
+        say "stopping the other coordinator replicas"
+        kill -TERM "${xpids[@]}" 2>/dev/null || true
+        wait_gone "$stop_secs" "the other coordinator replicas" "$server" "${xpids[@]}"
+    fi
     if [ -n "$lpid" ] && ours "$lpid" "$login"; then
         say "stopping the login service"
         kill -TERM "$lpid" 2>/dev/null || true
@@ -250,8 +265,8 @@ lpid=$!
 (
     until [ -s "$login_pin" ]; do sleep 0.5; done
     "$login" world add dev --name "Dev world" \
-        --link 127.0.0.1:6490 --link-cert "$(cat "$login_pin")" >/dev/null &&
-        say "world dev registered with the coordinator's login link (127.0.0.1:6490)"
+        --link "$login_link" --link-cert "$(cat "$login_pin")" >/dev/null &&
+        say "world dev registered with the coordinator's login link ($login_link)"
 ) &
 rpid=$!
 read -ra coord_words <<<"$coord_env"
@@ -275,6 +290,12 @@ until [ -s "$pin" ]; do
     fi
     sleep 0.5
 done
+for n in "${!replica_envs[@]}"; do
+    read -ra rwords <<<"${replica_envs[$n]}"
+    env "${rwords[@]}" RUST_BACKTRACE=1 setsid "$server" >"$dir/coordinator-$((n + 1)).log" 2>&1 </dev/null &
+    xpids[n]=$!
+    say "coordinator replica $((n + 1)) ($dir/coordinator-$((n + 1)).log)"
+done
 for n in "${!host_envs[@]}"; do
     read -ra words <<<"${host_envs[$n]}"
     host_loop "$n" "${words[@]}" &
@@ -290,7 +311,7 @@ while :; do
     if [ "$interrupted" = 1 ]; then exit 0; fi
     ended=""
     rc=0
-    wait -n -p ended "${hpids[@]}" "$cpid" "$lpid" || rc=$?
+    wait -n -p ended "${hpids[@]}" "${xpids[@]}" "$cpid" "$lpid" || rc=$?
     if [ "$interrupted" = 1 ]; then exit 0; fi
     if [ -z "$ended" ]; then continue; fi
     what="?"
@@ -298,6 +319,9 @@ while :; do
     if [ "$ended" = "$lpid" ]; then what="the login service ($login_log)"; fi
     for n in "${!hpids[@]}"; do
         if [ "$ended" = "${hpids[$n]}" ]; then what="host $n ($dir/host-$n.log)"; fi
+    done
+    for n in "${!xpids[@]}"; do
+        if [ "$ended" = "${xpids[$n]}" ]; then what="coordinator replica $((n + 1)) ($dir/coordinator-$((n + 1)).log)"; fi
     done
     say "$what ended ($rc): stopping the stack" >&2
     exit 1

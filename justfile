@@ -88,6 +88,14 @@ test_blocks := if region_blocks == "" { "64" } else { region_blocks }
 play_blocks := if region_blocks == "" { "256" } else { region_blocks }
 export VOXEL_REGION_BLOCKS := test_blocks
 
+# Coordinator replicas of the dev split worlds (Elastic 2b): `just coordinators=2 dev-r3` runs
+# two (1..4), replica n on 127.0.0.1:6480+n (login link 6490+n), ALL sharing one certificate
+# (`coordinator.cert-sha256` and its `.cert`/`.key`, `login-link.cert-sha256`: a host's pin is
+# fixed per dialer), and every host dials `127.0.0.1:6480,127.0.0.1:6481` — it tries them in
+# turn. `just coordinators=2 host N` must be given the same number; `just coordinator
+# claim <n>` starts replica n by hand.
+coordinators := "1"
+
 # Sim-chunk edge in BLOCKS — a BUILD-time constant (`game::CHUNK_BLOCKS`,
 # crates/game/src/block.rs; exactly 2 or 16 (the sizes with pinned
 # goldens), anything else fails the build). A chunk owns one entity, one rapier body and one collider set; the
@@ -1248,7 +1256,11 @@ _dev-r2-token: (_dev-token dev_r2_dir)
 # `static` (ONE host, as `dev-r2`: under target/dev-r2/); give `host` the same word. The
 # coordinator declares a dead host's succession only under `claim` and refuses a host whose
 # VOXEL_OWNERSHIP says otherwise. It reads no host count.
-coordinator ownership="claim": (_dev-token (if ownership == "static" { dev_r2_dir } else { dev_r3_dir }))
+# `replica` (0..3, a whole number, positional: `just coordinator claim 1`) starts ANOTHER coordinator replica
+# of the same world (Elastic 2b): replica n listens for hosts on 127.0.0.1:6480+n and for login on 6490+n, and
+# shares replica 0's certificate files (start replica 0 first: it makes them), so one pin fits every replica;
+# hosts started with `just coordinators=<count> host …` dial all of them in turn.
+coordinator ownership="claim" replica="0": (_dev-token (if ownership == "static" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
@@ -1258,10 +1270,15 @@ coordinator ownership="claim": (_dev-token (if ownership == "static" { dev_r2_di
         claim | static) ;;
         *) echo "coordinator: ownership is claim or static (the argument of just coordinator), not {{ownership}}" >&2; exit 1 ;;
     esac
+    case "{{replica}}" in
+        0 | 1 | 2 | 3) ;;
+        *) echo "coordinator: replica is 0..3, given positionally (just coordinator claim 1), not {{replica}}" >&2; exit 1 ;;
+    esac
     VOXEL_ROLE=coordinator VOXEL_OWNERSHIP={{ownership}} VOXEL_WORLD_ID=dev VOXEL_WORLD_DB={{dev_database_url}} \
         VOXEL_SERVICE_TOKEN_FILE=$dir/service-token \
         VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
-        VOXEL_LOGIN_LINK_BIND=127.0.0.1:6490 VOXEL_LOGIN_LINK_CERT_HASH_FILE=$dir/login-link.cert-sha256 \
+        VOXEL_COORDINATOR_BIND=127.0.0.1:$((6480 + {{replica}})) \
+        VOXEL_LOGIN_LINK_BIND=127.0.0.1:$((6490 + {{replica}})) VOXEL_LOGIN_LINK_CERT_HASH_FILE=$dir/login-link.cert-sha256 \
         RUST_BACKTRACE=1 ./target/debug/server
 
 # The environment of dev host $1 (`host`, `dev-r3`), as `NAME=value` words: peer delay $2 ms,
@@ -1293,6 +1310,13 @@ printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=$own VOXEL_HOST_NAME=h$i VOXEL_WORL
     VOXEL_SERVER_PORT=$((6466 + 10 * i)) VOXEL_WT_PORT=$((6467 + 10 * i)) VOXEL_PEER_BIND=127.0.0.1:$((6500 + i)) \
     VOXEL_PEER_CERT_HASH_FILE=$dir/h$i.peer.cert-sha256 VOXEL_ADVERTISE_WT=https://127.0.0.1:$((6467 + 10 * i))/ \
     VOXEL_PEER_LINK_DELAY_MS=$2
+# $6 = coordinator replicas (default 1): the host dials all of them, one target naming each.
+c=${6:-1}
+if [ "$c" -gt 1 ]; then
+    t=127.0.0.1:6480 k=1
+    while [ "$k" -lt "$c" ]; do t=$t,127.0.0.1:$((6480 + k)); k=$((k + 1)); done
+    printf '%s ' VOXEL_COORDINATOR_ADDR=$t
+fi
 if [ "$own" = claim ]; then
     printf '%s ' VOXEL_AUTH=jwt VOXEL_LOGIN_URL=http://127.0.0.1:8790
 fi
@@ -1333,7 +1357,7 @@ host index="0" delay="0" ownership="claim": (_dev-hosts-check index "6" delay "1
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build --bin server
-    env {{ shell(host_env_sh, index, delay, if ownership == "static" { dev_r2_dir } else { dev_r3_dir }, dev_database_url, ownership) }} \
+    env {{ shell(host_env_sh, index, delay, if ownership == "static" { dev_r2_dir } else { dev_r3_dir }, dev_database_url, ownership, coordinators) }} \
         RUST_BACKTRACE=1 ./target/debug/server
 
 # The split world with login: the dev Keycloak (`kc-up`) and Postgres (`pg-up`), the `dev-login`
@@ -1395,11 +1419,11 @@ dev-r2: kc-up pg-up _dev-login-setup _dev-r2-token
         RUST_BACKTRACE=1 ./target/debug/server
 
 # The `dev-r3` host arguments: one single-quoted env-word list per host 0..$1, joined by
-# ` \` line ends (delay $2, dir $3, store $4, `host_env_sh` $5; ownership `claim`).
+# ` \` line ends (delay $2, dir $3, store $4, `host_env_sh` $5, coordinator replicas $6, default 1; ownership `claim`).
 dev_r3_launch_sh := '''
 i=0
 while [ "$i" -lt "$1" ]; do
-    words=$(sh -c "$5" sh "$i" "$2" "$3" "$4" claim) || exit 1
+    words=$(sh -c "$5" sh "$i" "$2" "$3" "$4" claim "${6:-1}") || exit 1
     i=$((i + 1))
     if [ "$i" -lt "$1" ]; then printf "'%s' %s\n" "$words" '\'; else printf "'%s'" "$words"; fi
 done
@@ -1446,9 +1470,17 @@ dev-r3 hosts="2" delay="0": (_dev-hosts-check "0" hosts delay "2") kc-up pg-up _
     export VOXEL_OIDC_ISSUER={{dev_oidc_issuer}}
     {{cap}} {{cargo}} build --bin server --bin worldctl
     ./target/debug/worldctl clock-reset {{dev_database_url}}
-    DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} exec scripts/dev_r3.sh {{dev_r3_dir}} \
-        '{{ shell(dev_r3_coordinator_sh, dev_r3_dir, dev_database_url) }}' \
-        {{ shell(dev_r3_launch_sh, hosts, delay, dev_r3_dir, dev_database_url, host_env_sh) }}
+    # `coordinators=<n>` (1..4): replicas 1..n-1 are the same words on their own ports (they share replica 0's certificates).
+    case "{{coordinators}}" in 1 | 2 | 3 | 4) ;; *) echo "dev-r3: coordinators is 1..4 (just coordinators=2 dev-r3), not {{coordinators}}" >&2; exit 1 ;; esac
+    words='{{ shell(dev_r3_coordinator_sh, dev_r3_dir, dev_database_url) }}'
+    replicas="" link=127.0.0.1:6490
+    for ((k = 1; k < {{coordinators}}; k++)); do
+        replicas="$replicas${replicas:+|}$words VOXEL_COORDINATOR_BIND=127.0.0.1:$((6480 + k)) VOXEL_LOGIN_LINK_BIND=127.0.0.1:$((6490 + k))"
+        link=$link,127.0.0.1:$((6490 + k))
+    done
+    DEV_R3_REPLICAS="$replicas" DEV_R3_LOGIN_LINK="$link" DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} exec scripts/dev_r3.sh {{dev_r3_dir}} \
+        "$words" \
+        {{ shell(dev_r3_launch_sh, hosts, delay, dev_r3_dir, dev_database_url, host_env_sh, coordinators) }}
 
 # `go-nogo-r3`'s own state (logs, login, pins) and its own world database on the dev Postgres.
 go_nogo_dir := "target/go-nogo-r3"

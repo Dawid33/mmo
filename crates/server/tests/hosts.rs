@@ -2240,10 +2240,20 @@ fn spare_replica(
     db: &PgDb,
     dir: &std::path::Path,
 ) -> (server::coordinator_rt::ListeningCoordinator, StoreHandle, PathBuf) {
+    let cert = dir.join("replica-b").join("coordinator.cert-sha256");
+    spare_replica_with_cert(w, db, cert)
+}
+
+/// [`spare_replica`] with its pin file at `cert`: A's own file makes B share A's identity (as
+/// every replica of a deployed world does), so one host pin fits both.
+fn spare_replica_with_cert(
+    w: &mut World,
+    db: &PgDb,
+    cert: PathBuf,
+) -> (server::coordinator_rt::ListeningCoordinator, StoreHandle, PathBuf) {
     let store = db.open();
     let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
     assert!(!start.alone, "A beats its row: B is not alone");
-    let cert = dir.join("replica-b").join("coordinator.cert-sha256");
     std::fs::create_dir_all(cert.parent().unwrap()).unwrap();
     let tick = w.pair.tick.clone();
     let cuts = server::coordinator_rt::WorldCuts {
@@ -2468,5 +2478,67 @@ fn a_cut_spans_hosts_on_two_replicas() {
 
     assert_eq!(b.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
     b_store.shutdown();
+    w.stop(&dir);
+}
+
+/// Elastic 2b Task 7: both hosts dial `A,B` (one target naming both replicas, one shared
+/// identity) and attach to A. A dies without a word; each host's dialer finds the link down,
+/// tries B after A, and `Attach`es there. Its next `Request` is granted once, by B.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_whose_replica_dies_reattaches_to_another() {
+    install_props();
+    let Some(db) = PgDb::create("repdial") else { return };
+    let dir = scratch("repdial");
+    let mut w = world(&db, &dir);
+    let a_cert = w.cert.clone();
+    let (b, b_store, b_cert) = spare_replica_with_cert(&mut w, &db, a_cert.clone());
+    assert_eq!(b_cert, a_cert, "one identity for both replicas");
+    let b_id = *live_of(&b).iter().last().expect("B is live");
+    let a_addr = w.coordinator.as_ref().expect("A runs").addr;
+    let target = svc_link::LinkTarget::parse(&format!("{a_addr},{}", b.addr)).unwrap();
+    for sim in &w.pair.sims {
+        w.switches[sim.ordinal.0 as usize].replace(quic_world_link_to(target.clone(), a_cert.clone(), sim.ordinal, sim.boot, sim.reg));
+    }
+    let both: std::collections::BTreeSet<HostId> = [HostId(0), HostId(1)].into_iter().collect();
+    let deadline = Instant::now() + WAIT;
+    while w.coordinator.as_ref().unwrap().thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("A answers") != std::collections::BTreeSet::new()
+        || !w.pair.sims.iter().all(|s| s.manager.world_attached())
+    {
+        assert!(Instant::now() < deadline, "the hosts never attached (to A, the first address)");
+        w.pair.round();
+    }
+
+    // A dies; the hosts' links are NOT touched: their dialers must find B themselves.
+    let a = w.coordinator.take().expect("A runs");
+    a.thread.kill();
+    let deadline = Instant::now() + Duration::from_millis(svc_link::LINK_RETRY_MAX_MS) + WAIT;
+    while b.thread.inspect(move |c| c.hosts_attached_to(b_id), WAIT).expect("B answers") != both {
+        assert!(Instant::now() < deadline, "the hosts never re-attached to B");
+        w.pair.round();
+    }
+    w.pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
+
+    // A request of host 0, over the rotated link, is granted once.
+    let (player, _) = w.claims[0].store().resolve_player("rotation-test-player").unwrap();
+    let site = b
+        .thread
+        .inspect(|c| {
+            let h = c.history();
+            h.sites().find(|s| s.abandoned.is_none() && !h.living_members(s.id).is_empty()).expect("a populated site").id
+        }, WAIT)
+        .expect("B answers");
+    let id = game::RequestId { host: HostId(0), boot: 1000, seq: 9_100 };
+    let req = game::WorldRequest::StartAdventure(site);
+    game::WorldLink::send(&mut w.switches[0].clone(), game::HostMsg::Request { id, player, hop: 1, req });
+    let claim = game::Claim::Adventure(site);
+    let deadline = Instant::now() + WAIT;
+    while b.thread.inspect(move |c| c.claim_of(player), WAIT).flatten() != Some(claim) {
+        assert!(Instant::now() < deadline, "B never granted the request");
+        w.pair.round();
+    }
+    w.coordinator = Some(b);
+    let old = std::mem::replace(&mut w.store, b_store);
+    old.shutdown();
     w.stop(&dir);
 }

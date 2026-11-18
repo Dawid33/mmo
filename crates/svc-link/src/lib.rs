@@ -504,7 +504,8 @@ fn client_config(pin: &str) -> io::Result<quinn::ClientConfig> {
 pub struct LinkDialer;
 
 impl LinkDialer {
-    /// Dial `target` (an address or a `host:port` name, resolved again at every attempt), pinning the listener's certificate to `cert_sha256`, and keep the link up:
+    /// Dial `target` (an address or a `host:port` name, or several comma-separated; every address
+    /// resolved again at every attempt and tried in turn, starting after the one that last failed), pinning the listener's certificate to `cert_sha256`, and keep the link up:
     /// reconnect forever with backoff. `Down` is sent when a link drops or the first attempt of a
     /// down period fails; messages sent while down are dropped. The link ends when the returned
     /// sender is dropped, or when the receiver is dropped and the next event send fails (an idle
@@ -559,12 +560,12 @@ impl LinkDialer {
 
 /// Where a dial attempt goes, asked again before every attempt (a seam for the tests).
 trait Resolve {
-    async fn resolve(&self) -> io::Result<SocketAddr>;
+    async fn resolve_all(&self) -> io::Result<Vec<SocketAddr>>;
 }
 
 impl Resolve for LinkTarget {
-    async fn resolve(&self) -> io::Result<SocketAddr> {
-        LinkTarget::resolve(self).await
+    async fn resolve_all(&self) -> io::Result<Vec<SocketAddr>> {
+        LinkTarget::resolve_all(self).await
     }
 }
 
@@ -618,19 +619,37 @@ async fn dial_loop<In, Out>(
     let mut dialer: Option<(Endpoint, quinn::ClientConfig)> = None;
     let mut backoff = LINK_RETRY_MIN_MS;
     let mut announced_down = false;
+    // The address that last failed (or whose link last dropped): the next pass starts after it.
+    let mut last: Option<SocketAddr> = None;
     // Failed attempts since the last dial-failure line, and when that line went out.
     let mut unlogged_failures: u64 = 0;
     let mut last_dial_log: Option<std::time::Instant> = None;
     while !stop.load(Ordering::SeqCst) {
         let tried = async {
-            let addr = target.resolve().await.map_err(|e| format!("resolve {target}: {e}"))?;
+            let addrs = target.resolve_all().await.map_err(|e| format!("resolve {target}: {e}"))?;
+            let Some(&first) = addrs.first() else {
+                return Err(format!("resolve {target}: no address"));
+            };
             if dialer.is_none() {
-                let bind: SocketAddr = if addr.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0u16; 8], 0).into() };
+                let bind: SocketAddr = if first.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0u16; 8], 0).into() };
                 let parts = Endpoint::client(bind).and_then(|e| Ok((e, client_config(&pin)?)));
                 dialer = Some(parts.map_err(|e| format!("dialer setup failed: {e}"))?);
             }
             let (endpoint, config) = dialer.as_ref().expect("bound above");
-            attempt(endpoint, addr, config, &hello).await.map(|up| (addr, up))
+            // Every address in turn, starting after the one that last failed.
+            let start = last.and_then(|l| addrs.iter().position(|a| *a == l)).map_or(0, |i| i + 1);
+            let mut whys: Vec<String> = Vec::new();
+            for k in 0..addrs.len() {
+                let addr = addrs[(start + k) % addrs.len()];
+                match attempt(endpoint, addr, config, &hello).await {
+                    Ok(up) => return Ok((addr, up)),
+                    Err(why) => {
+                        last = Some(addr);
+                        whys.push(if addrs.len() == 1 { why } else { format!("{addr}: {why}") });
+                    }
+                }
+            }
+            Err(whys.join("; "))
         }
         .await;
         match tried {
@@ -666,6 +685,8 @@ async fn dial_loop<In, Out>(
                     break;
                 }
                 announced_down = true;
+                // A replica that dropped the link may be the one that died: try the others first.
+                last = Some(addr);
             }
             Err(why) => {
                 unlogged_failures += 1;
@@ -709,12 +730,59 @@ mod tests {
     }
 
     impl Resolve for FlakyResolver {
-        async fn resolve(&self) -> io::Result<SocketAddr> {
+        async fn resolve_all(&self) -> io::Result<Vec<SocketAddr>> {
             match self.calls.fetch_add(1, Ordering::SeqCst) {
                 0 => Err(io::Error::new(io::ErrorKind::NotFound, "no such host yet")),
-                _ => Ok(self.live),
+                _ => Ok(vec![self.live]),
             }
         }
+    }
+
+    /// A fixed list of addresses.
+    struct Fixed(Vec<SocketAddr>);
+
+    impl Resolve for Fixed {
+        async fn resolve_all(&self) -> io::Result<Vec<SocketAddr>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    impl std::fmt::Display for Fixed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("fixed:6480")
+        }
+    }
+
+    #[test]
+    fn the_dial_rotates_to_the_next_address_when_one_refuses() {
+        let token = "t".to_string();
+        let bind = |token: &str| {
+            LinkListener::bind::<u64, u64>(([127, 0, 0, 1], 0).into(), token.to_string(), String::new(), None).unwrap()
+        };
+        // The first address is a listener of ANOTHER identity: the pin refuses it at once.
+        let (refusing, _r_rx, _r_tx) = bind(&token);
+        let (live, _l_rx, _l_tx) = bind(&token);
+        let resolver = Fixed(vec![refusing.local_addr(), live.local_addr()]);
+        let hello = LinkHello::new(token, PeerRole::Coordinator, "");
+        let (slot, stop) = (Arc::<Mutex<Option<UnboundedSender<u64>>>>::default(), Arc::new(AtomicBool::new(false)));
+        let (event_tx, events) = crossbeam::channel::unbounded::<LinkEvent<u64>>();
+        let (pin, stop2) = (live.cert_sha256().to_string(), stop.clone());
+        let dialer = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(dial_loop(resolver, pin, hello, slot, stop2, event_tx));
+        });
+        let started = std::time::Instant::now();
+        let mut up = false;
+        while let Ok(event) = events.recv_timeout(Duration::from_secs(10)) {
+            if matches!(event, LinkEvent::Up(_)) {
+                up = true;
+                break;
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        assert!(up, "the link came up on the second address");
+        assert!(started.elapsed() < Duration::from_millis(LINK_RETRY_MIN_MS), "in the same pass, not after a backoff");
+        drop(dialer);
     }
 
     impl std::fmt::Display for FlakyResolver {

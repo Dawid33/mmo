@@ -667,6 +667,17 @@ const RIG_WORLD: &str = "hosts";
 /// Host `ordinal`'s link to the coordinator at `addr` (its pin in `cert_file`), its hello
 /// carrying the host's registration number `reg`.
 fn quic_world_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: HostId, boot: u64, reg: u64) -> server::roles::QuicWorldLink {
+    quic_world_link_to(svc_link::LinkTarget::from(addr), cert_file, ordinal, boot, reg)
+}
+
+/// [`quic_world_link`] to a target that may name several replicas (`a,b`).
+fn quic_world_link_to(
+    addr: svc_link::LinkTarget,
+    cert_file: PathBuf,
+    ordinal: HostId,
+    boot: u64,
+    reg: u64,
+) -> server::roles::QuicWorldLink {
     let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg }, RIG_WORLD);
     server::roles::QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_HOSTS_TEST_UNSET_PIN", &cert_file), hello)
 }
