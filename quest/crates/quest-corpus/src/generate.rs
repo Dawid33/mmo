@@ -206,6 +206,20 @@ pub fn program() -> impl Strategy<Value = String> {
     shape().prop_map(|s| render(&s))
 }
 
+/// [`program`] driven by `seed` instead of a test runner: the same seed gives the same source, so libFuzzer
+/// steers the generator through the 32 bytes (`quest/fuzz`'s `invariants` target).
+pub fn program_from_seed(seed: [u8; 32]) -> String {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+    let rng = TestRng::from_seed(RngAlgorithm::ChaCha, &seed);
+    let mut runner = TestRunner::new_with_rng(Config::default(), rng);
+    // `program()` draws from plain ranges and collections: a tree is always made.
+    match program().new_tree(&mut runner) {
+        Ok(tree) => tree.current(),
+        Err(reason) => unreachable!("the generator rejected a draw: {reason}"),
+    }
+}
+
 fn may_raise(body: &[Stmt]) -> bool {
     body.iter().any(|s| match s {
         Stmt::Raise { .. } => true,

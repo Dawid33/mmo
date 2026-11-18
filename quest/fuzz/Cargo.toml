@@ -18,6 +18,7 @@ quest-lang = { path = "../crates/quest-lang" }
 quest-vm = { path = "../crates/quest-vm" }
 quest-stub = { path = "../crates/quest-stub" }
 quest-corpus = { path = "../crates/quest-corpus" }
+state-hash = { path = "../../crates/state-hash", default-features = false }
 
 [profile.release]
 debug = 1
@@ -53,6 +54,20 @@ bench = false
 [[bin]]
 name = "stub_inputs"
 path = "fuzz_targets/stub_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "invariants"
+path = "fuzz_targets/invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "conversation"
+path = "fuzz_targets/conversation.rs"
 test = false
 doc = false
 bench = false
