@@ -859,8 +859,9 @@ impl MultiRig {
     /// One pass of the coordinator runtime's succession pump for drained land
     /// ([`Self::with_land_on_demand`]): a read of the `hosts` rows (every live host beating,
     /// every host that left clean as the boot that left), the super-regions hosts asked for
-    /// looked up in the rig's `super_regions` table, and a declaration the coordinator wants
-    /// executed in the rig store ([`Self::declare_in_store`]) and answered. The hosts a cut
+    /// looked up in the rig's `super_regions` table (`Input::LandOwners`), and a declaration or
+    /// an assignment (Elastic 3) the coordinator wants executed in the rig store
+    /// ([`Self::declare_in_store`], [`Self::assign_in_store`]) and answered. The hosts a cut
     /// needs are the live ones whose row is not clean.
     pub fn drive_land(&mut self) {
         if !self.land_on_demand {
@@ -884,15 +885,23 @@ impl MultiRig {
         let mut core = self.core();
         core.observe_leases(&rows, now, now);
         core.set_expected_hosts(expected);
-        let lookups = core.take_land_lookups();
+        let asked = core.take_land_lookups();
         drop(core);
-        for sr in lookups {
-            if let Some(owner) = self.stored_owner(sr) {
-                self.core().land_wanted(owner, now);
+        // The owners read, as the runtime's: the rows of the asked super-regions only (an absent
+        // one is free). A rig without a `super_regions` table reads nothing.
+        let mut assigning = false;
+        if !asked.is_empty() {
+            if let Some(store) = &self.claim_store {
+                let rows: Vec<(game::SuperRegion, i64, u64)> = asked
+                    .iter()
+                    .filter_map(|(sr, _)| store.get(sr).map(|&(owner, epoch)| (*sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), epoch)))
+                    .collect();
+                assigning = asked.iter().any(|(sr, _)| !matches!(store.get(sr), Some((Some(_), _))));
+                self.core().apply(game::coordinator::Input::LandOwners { asked, rows }, now);
             }
         }
         let wanted = self.core().declare_wanted(now);
-        if wanted.is_none() {
+        if wanted.is_none() && !assigning {
             return;
         }
         // Handed out: it leaves with the transition, executed and answered with it.
@@ -1871,11 +1880,6 @@ impl MultiRig {
             || self.successions.iter().any(|(s, _)| s.kind == game::SuccessionKind::Crash && (s.predecessor, s.predecessor_boot) == (h, boot))
     }
 
-    /// The rig store's `end_landless_host` (Elastic 2a): `Gone` unless `(host, boot)` is the
-    /// current boot's live dirty row, `OwnsLand` while it holds land, `Recipient` while an open
-    /// succession names it heir or survivor, else its row is dead — no succession, the
-    /// generation untouched. The lapse is the caller's to have seen (the rig vouches a killed
-    /// host in its reads, [`Self::drive_leases`]).
     /// `assign_land_in` against the rig's `super_regions` table ([`Self::with_claims`]): `Done`
     /// for an absent (epoch 1) or free (epoch + 1) row when the host's row is that live,
     /// dirty boot and not draining; otherwise the matching refusal, nothing written.
@@ -1898,6 +1902,11 @@ impl MultiRig {
         Assigned::Done { epoch }
     }
 
+    /// The rig store's `end_landless_host` (Elastic 2a): `Gone` unless `(host, boot)` is the
+    /// current boot's live dirty row, `OwnsLand` while it holds land, `Recipient` while an open
+    /// succession names it heir or survivor, else its row is dead — no succession, the
+    /// generation untouched. The lapse is the caller's to have seen (the rig vouches a killed
+    /// host in its reads, [`Self::drive_leases`]).
     pub fn end_landless_in_store(&mut self, end: game::coordinator::EndLandless) -> game::LandlessEnd {
         let (h, boot) = (end.host, end.boot);
         if self.boots[h.0 as usize] != boot || self.row_dead(h) || self.left.get(&h) == Some(&boot) {

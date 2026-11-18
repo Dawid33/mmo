@@ -32,8 +32,9 @@ use crate::history::persist::HistoryLoadError;
 /// is `Corrupt`. Formats 1 and 2 were the whole state in one blob (history, claims, memo); 3
 /// still held the fortress claims (site → player); 4 stamped with a process boot and kept the
 /// cut ids' high half out of the projection (Elastic 2b: a [`super::ReplicaId`], and
-/// `WorldCuts.epoch` durable).
-pub const COORDINATOR_STATE_VERSION: u8 = 5;
+/// `WorldCuts.epoch` durable); 5 kept the land lookups as a set of super-regions (Elastic 3:
+/// each with the hosts that asked).
+pub const COORDINATOR_STATE_VERSION: u8 = 6;
 
 /// One transition of the core ([`super::Coordinator::take_transition`]): the projection as
 /// bytes — `core`, and `history` when it changed — the messages it released, and the store

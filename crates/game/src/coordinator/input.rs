@@ -83,9 +83,12 @@ pub enum Input {
     /// never logged nor replayed.
     SuccessionsOpen { list: Vec<Succession>, issued_at_version: u64 },
     /// The ticker's owners read for the super-regions hosts asked for
-    /// ([`Coordinator::take_land_lookups`]): the hosts owning one. Ticker only; never logged nor
-    /// replayed (the hosts ask again).
-    LandOwners { owners: Vec<HostId> },
+    /// ([`Coordinator::take_land_lookups`]): `asked`, each with its askers, as handed out, and
+    /// the `super_regions` rows read of them — `(super-region, owner or NO_OWNER, epoch)`; an
+    /// asked super-region with no row is absent (free). Answered by
+    /// [`Coordinator::on_land_read`] (Elastic 3: an assignment, a named owner, or a departed
+    /// owner's land given away). Ticker only; never logged nor replayed (the hosts ask again).
+    LandOwners { asked: Vec<(crate::SuperRegion, Vec<HostId>)>, rows: Vec<(crate::SuperRegion, i64, u64)> },
     /// A world cut's decision as the store holds it, read back (a lookup: its answer was lost,
     /// or a host named a cut this core does not remember): for host `host`, or (`None`) the
     /// running cut's own decision. Logged and replayed — a recorded decision never changes.
@@ -202,11 +205,7 @@ impl Coordinator {
                 self.on_hosts_read(&rows, next_host_id, issued_mono, received_mono, world_tick)
             }
             Input::SuccessionsOpen { list, issued_at_version } => self.on_successions_open(list, issued_at_version, now),
-            Input::LandOwners { owners } => {
-                for owner in owners {
-                    self.on_land_owner(owner, now);
-                }
-            }
+            Input::LandOwners { asked, rows } => self.on_land_read(asked, &rows, now),
             Input::CutLookedUp { host, cut, committed } => self.on_cut_looked_up(host, cut, committed),
         }
         true

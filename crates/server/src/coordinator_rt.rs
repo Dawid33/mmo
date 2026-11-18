@@ -418,6 +418,8 @@ fn describe(msg: &CoordMsg) -> String {
         }
         // Its `Debug` hides the player token.
         CoordMsg::Login(order) => format!("Login({order:?})"),
+        CoordMsg::Assigned { rows } => format!("Assigned {rows:?}"),
+        CoordMsg::LandIs { sr, owner, epoch } => format!("LandIs {sr:?}: host {owner} at epoch {epoch}"),
     }
 }
 
@@ -461,6 +463,7 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         }
         // Its `Debug` hides the player token.
         HostMsg::Login(out) => format!("Login({out:?})"),
+        HostMsg::LandNeeded { sr } => format!("LandNeeded {sr:?}"),
     }
 }
 
@@ -1188,8 +1191,9 @@ struct SuccessionPump {
     /// [`Coordinator::take_generation_lookup`]).
     generation_rx: Option<Answer<u64>>,
     generation_retry_at: u64,
-    /// The owners read for the super-regions hosts asked for (`LandWanted`), with them.
-    land_rx: Option<(Vec<game::SuperRegion>, Answer<Vec<(game::SuperRegion, i64, u64)>>)>,
+    /// The owners read for the super-regions hosts asked for (`LandNeeded`, `LandWanted`), with
+    /// them and their askers.
+    land_rx: Option<(Vec<(game::SuperRegion, Vec<HostId>)>, Answer<Vec<(game::SuperRegion, i64, u64)>>)>,
     /// No end of a landless host is handed out before this (after a refused one).
     end_retry_at: u64,
 }
@@ -2020,12 +2024,13 @@ impl CoordinatorRuntime {
             }
             return Ok(());
         }
-        // Land of a host that left, asked for (`LandWanted`): the owners read (a plain read),
-        // each owner told to the core, which gives it away at its next declaration between cuts
-        // (no heir wait: a host that left never returns as itself). A failed read is
-        // dropped: the hosts ask again every `LAND_WANTED_EVERY_MS`.
+        // Land asked for (`LandNeeded`, `LandWanted`): the owners read (a plain read), the rows of
+        // the asked super-regions told to the core (Elastic 3: it assigns a free one, names a live
+        // owner, and gives a departed owner's land away at its next declaration between cuts —
+        // no heir wait: a host that left never returns as itself). A failed read is dropped: the
+        // hosts ask again every second.
         let mut failed = None;
-        if let Some((srs, rx)) = &p.land_rx {
+        if let Some((asked, rx)) = &mut p.land_rx {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => None,
                 Ok(answer) => Some(answer),
@@ -2034,10 +2039,9 @@ impl CoordinatorRuntime {
             if let Some(answer) = answer {
                 match answer {
                     Ok(rows) => {
-                        let owners: BTreeMap<game::SuperRegion, i64> = rows.into_iter().map(|(sr, o, _)| (sr, o)).collect();
-                        let wanted: BTreeSet<HostId> =
-                            srs.iter().filter_map(|sr| owners.get(sr)).filter_map(|o| u64::try_from(*o).ok().map(HostId)).collect();
-                        self.core.apply(Input::LandOwners { owners: wanted.into_iter().collect() }, now);
+                        let srs: BTreeSet<game::SuperRegion> = asked.iter().map(|(sr, _)| *sr).collect();
+                        let rows: Vec<(game::SuperRegion, i64, u64)> = rows.into_iter().filter(|(sr, _, _)| srs.contains(sr)).collect();
+                        self.core.apply(Input::LandOwners { asked: std::mem::take(asked), rows }, now);
                     }
                     Err(e) => failed = Some(e),
                 }
@@ -2045,9 +2049,9 @@ impl CoordinatorRuntime {
             }
         }
         if p.land_rx.is_none() {
-            let srs = self.core.take_land_lookups();
-            if !srs.is_empty() {
-                p.land_rx = Some((srs, self.store.owners_later()));
+            let asked = self.core.take_land_lookups();
+            if !asked.is_empty() {
+                p.land_rx = Some((asked, self.store.owners_later()));
             }
         }
         if let Some(e) = failed {

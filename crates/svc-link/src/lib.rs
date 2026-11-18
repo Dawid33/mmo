@@ -55,7 +55,9 @@ pub use target::LinkTarget;
 /// return variants, `Claim` is an adventure only, and `PlayerHandoff` carries no fortress.
 /// 9: Elastic 2b — coordinator replicas: the login service links to every replica, and one
 /// whose own hosts take no logins answers an order `HostToLogin::NoGate`.
-pub const LINK_PROTOCOL_VERSION: u32 = 9;
+/// 10: Elastic 3 — the coordinator assigns land: `HostMsg::LandNeeded`, `CoordMsg::Assigned`,
+/// `CoordMsg::LandIs`.
+pub const LINK_PROTOCOL_VERSION: u32 = 10;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

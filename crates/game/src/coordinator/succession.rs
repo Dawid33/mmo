@@ -89,7 +89,7 @@
 //! **Drain** (Task 11, decision 7): a host that leaves parks everything in its leave cut, its
 //! `hosts` row turns clean and its claims STAY. When a live host needs one of its regions it
 //! says so ([`HostMsg::LandWanted`]); the runtime looks the owner up
-//! ([`Coordinator::take_land_lookups`] → [`Coordinator::land_wanted`]) and, when no host
+//! ([`Coordinator::take_land_lookups`] → [`super::Input::LandOwners`]) and, when no host
 //! lapsed, [`Coordinator::declare_wanted`] hands out ONE `Leave` succession giving ALL that
 //! host's land to `heir_of` over the live attached hosts, with the same runs as a crash's —
 //! at once (Elastic 1: a host that left never returns as itself — its restarted process is a
@@ -142,6 +142,9 @@ struct Watched {
     /// When the latest read still showing it was ISSUED (the value was still there then at
     /// the earliest).
     last_issued_ms: u64,
+    /// When the first read showing this BOOT was received (a new boot restarts it; a beat does
+    /// not): how long this watch has known the host's process ([`LeaseWatch::known_for`]).
+    boot_received_ms: u64,
 }
 
 /// The coordinator's lapse watch over the `hosts` rows (fed every
@@ -168,6 +171,9 @@ pub struct LeaseWatch {
     /// Successful reads observed so far: a declaration the store refused waits for a newer
     /// one ([`Coordinator::declared`]).
     reads: u64,
+    /// When the latest successful read was received (the watch's clock): its "now" for
+    /// [`Self::known_for`] (the core never compares its store-clock `now` with these stamps).
+    received_ms: u64,
 }
 
 impl LeaseWatch {
@@ -177,21 +183,39 @@ impl LeaseWatch {
     pub fn observe(&mut self, rows: &[HostSeen], issued_ms: u64, received_ms: u64) {
         let mut next = BTreeMap::new();
         for row in rows {
-            let first_received_ms = match self.rows.get(&row.ordinal) {
+            let old = self.rows.get(&row.ordinal);
+            let first_received_ms = match old {
                 Some(w) if w.row.boot == row.boot && w.row.seen_ms == row.seen_ms => w.first_received_ms,
                 _ => received_ms,
             };
-            next.insert(row.ordinal, Watched { row: row.clone(), first_received_ms, last_issued_ms: issued_ms });
+            let boot_received_ms = match old {
+                Some(w) if w.row.boot == row.boot => w.boot_received_ms,
+                _ => received_ms,
+            };
+            next.insert(row.ordinal, Watched { row: row.clone(), first_received_ms, last_issued_ms: issued_ms, boot_received_ms });
         }
         self.rows = next;
         self.reads += 1;
+        self.received_ms = self.received_ms.max(received_ms);
+    }
+
+    /// How long (ms of the watch's clock, up to `now_ms`) this watch has known host `host`'s
+    /// current boot: from the first read showing it to `now_ms`. 0 for a row not read (a restarted
+    /// watch, a failed read, a new ticker know nobody yet).
+    pub fn known_for(&self, host: HostId, now_ms: u64) -> u64 {
+        self.rows.get(&host).map_or(0, |w| now_ms.saturating_sub(w.boot_received_ms))
+    }
+
+    /// When the latest successful read was received (the watch's clock).
+    pub fn latest_received_ms(&self) -> u64 {
+        self.received_ms
     }
 
     /// The watch of a replica that just became the ticker (Elastic 2b Task 6): nothing observed
     /// — every lease counts from zero, so a new ticker never hastens a declaration — under the
     /// same lease dial. The read count goes on (the refusals noted against it stay comparable).
     pub(super) fn restarted(&self) -> LeaseWatch {
-        LeaseWatch { rows: BTreeMap::new(), lease_ms: self.lease_ms, reads: self.reads }
+        LeaseWatch { rows: BTreeMap::new(), lease_ms: self.lease_ms, reads: self.reads, received_ms: self.received_ms }
     }
 
     /// Host `ordinal`'s row as the latest successful read showed it.
@@ -374,9 +398,10 @@ pub(super) struct SuccessionRuns {
     reread: bool,
     /// Dead rows nobody here declared that already asked for a re-read (asked once each).
     reread_for: BTreeSet<(HostId, u64)>,
-    /// Super-regions hosts asked for ([`crate::HostMsg::LandWanted`]) that the runtime is to
-    /// look up in the store ([`Coordinator::take_land_lookups`]).
-    land_lookups: BTreeSet<crate::SuperRegion>,
+    /// Super-regions hosts asked for ([`crate::HostMsg::LandWanted`],
+    /// [`crate::HostMsg::LandNeeded`]), each with the hosts that asked, that the ticker's runtime
+    /// is to look up in the store ([`Coordinator::take_land_lookups`]).
+    pub(super) land_lookups: BTreeMap<crate::SuperRegion, BTreeSet<HostId>>,
     /// Hosts that left cleanly whose land is wanted ([`Coordinator::land_wanted`]): given
     /// away at the next [`Coordinator::declare_wanted`] between cuts.
     land_wanted: BTreeSet<HostId>,
@@ -413,7 +438,7 @@ impl Default for SuccessionRuns {
             listed_early: Vec::new(),
             reread: false,
             reread_for: BTreeSet::new(),
-            land_lookups: BTreeSet::new(),
+            land_lookups: BTreeMap::new(),
             land_wanted: BTreeSet::new(),
             ending: None,
             ending_at_read: 0,
@@ -1391,41 +1416,41 @@ fn order(s: &Succession) -> CoordMsg {
 }
 
 impl super::Coordinator {
-    /// Host `host` needs a region of `sr`, whose owner left cleanly
-    /// ([`crate::HostMsg::LandWanted`]): looked up by the runtime
-    /// ([`Self::take_land_lookups`]). Ignored unless successions run (`Static` never gives
-    /// land away: its leaver gets it back when it returns, R3).
+    /// Host `host` needs a region of `sr` ([`crate::HostMsg::LandNeeded`]; or
+    /// [`crate::HostMsg::LandWanted`]: its owner left cleanly): queued with its asker, looked up
+    /// by the ticker's runtime ([`Self::take_land_lookups`]) and answered by
+    /// [`Self::on_land_read`] (`assign.rs`). Ignored unless successions run (`Static` never gives
+    /// land away: its leaver gets it back when it returns, R3; nor does it assign any).
     pub(super) fn land_asked(&mut self, host: HostId, sr: crate::SuperRegion) {
         if !self.successions.enabled {
             log::debug!("coordinator: host {host} wants super-region {sr:?}, but successions are off; ignored");
             return;
         }
-        self.successions.land_lookups.insert(sr);
+        self.successions.land_lookups.entry(sr).or_default().insert(host);
     }
 
     /// The super-regions hosts asked for since the last call (on any replica: queued in the
-    /// projection): the ticker's runtime reads their owners in the store and answers
-    /// [`super::Input::LandOwners`]. Nothing on a replica that is not the ticker (Elastic 2b Task
-    /// 6; a rebase before the next commit hands them out again — the hosts ask again anyway).
-    pub fn take_land_lookups(&mut self) -> Vec<crate::SuperRegion> {
+    /// projection), each with its askers by id: the ticker's runtime reads their owners in the
+    /// store and answers [`super::Input::LandOwners`]. Nothing on a replica that is not the
+    /// ticker (Elastic 2b Task 6; a rebase before the next commit hands them out again — the
+    /// hosts ask again anyway).
+    pub fn take_land_lookups(&mut self) -> Vec<(crate::SuperRegion, Vec<HostId>)> {
         if !self.ticking_now() {
             return Vec::new();
         }
-        let lookups: Vec<crate::SuperRegion> = std::mem::take(&mut self.successions.land_lookups).into_iter().collect();
+        let lookups: Vec<(crate::SuperRegion, Vec<HostId>)> = std::mem::take(&mut self.successions.land_lookups)
+            .into_iter()
+            .map(|(sr, askers)| (sr, askers.into_iter().collect()))
+            .collect();
         if !lookups.is_empty() {
             self.clean_checked = false;
         }
         lookups
     }
 
-    /// Test support: [`super::Input::LandOwners`] naming `owner`.
-    #[doc(hidden)]
-    pub fn land_wanted(&mut self, owner: HostId, now_ms: u64) {
-        self.apply(super::Input::LandOwners { owners: vec![owner] }, now_ms);
-    }
-
     /// Host `owner` holds a super-region a host asked for (the ticker's lookup,
-    /// [`super::Input::LandOwners`]): if it left cleanly, ALL its land goes to one heir at the
+    /// [`super::Input::LandOwners`], [`Self::on_land_read`]) and is not an attached live host:
+    /// if it left cleanly, ALL its land goes to one heir at the
     /// next [`Self::declare_wanted`] between cuts — at once: a host that left never returns as
     /// itself (the module docs).
     pub(super) fn on_land_owner(&mut self, owner: HostId, now_ms: u64) {

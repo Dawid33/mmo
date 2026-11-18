@@ -221,6 +221,13 @@ pub enum HostMsg {
     /// kick), or the end of a login session that left the world here. The coordinator forwards
     /// it to the login service unchanged and keeps nothing of it.
     Login(crate::LoginOut),
+    /// Something on this host needs a region of super-region `sr`, and the host knows no
+    /// reachable owner of it (Elastic 3): free, unknown, or owned by a host that left. The
+    /// coordinator's ticker reads the row: free land is assigned to the least-loaded host
+    /// ([`CoordMsg::Assigned`] to it, [`CoordMsg::LandIs`] to the askers), a live owner is named
+    /// ([`CoordMsg::LandIs`], or `Assigned` again to an asker that owns it), a departed owner's
+    /// land goes to an heir by a `Leave` succession. Ignored under `Static`.
+    LandNeeded { sr: SuperRegion },
 }
 
 /// Why a host's part of a world cut failed ([`HostMsg::CutFailed`]).
@@ -336,4 +343,12 @@ pub enum CoordMsg {
     /// spawn (here or on the host holding the player) or applies and relays a kick; the
     /// answers come back as [`HostMsg::Login`].
     Login(crate::LoginOrder),
+    /// These super-regions are this host's now, each at its epoch (Elastic 3: the coordinator
+    /// assigned free land to it, or the host asked for land the store already gives it). The
+    /// host fences them first, then takes them; a row its directory knows at that epoch or
+    /// newer is dropped. May come twice (a replay, a heal).
+    Assigned { rows: Vec<(SuperRegion, u64)> },
+    /// Super-region `sr` is host `owner`'s at `epoch` (Elastic 3: the answer to a
+    /// [`HostMsg::LandNeeded`] of land another host holds or was just assigned).
+    LandIs { sr: SuperRegion, owner: HostId, epoch: u64 },
 }

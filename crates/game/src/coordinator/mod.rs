@@ -32,6 +32,7 @@
 //! corrects them (its unlisted regions park, its unlisted players go offline), and a host that
 //! never comes back is ended by its succession.
 
+mod assign;
 mod clock;
 mod decisions;
 mod input;
@@ -42,6 +43,7 @@ mod state;
 mod succession;
 mod world_cut;
 
+pub use assign::*;
 pub use clock::*;
 pub use decisions::*;
 pub use input::*;
@@ -288,6 +290,17 @@ pub struct Coordinator {
     /// Test support ([`Self::record_inputs`]): the inputs that left the log by a commit or a
     /// release, in that order.
     recorded: Option<Vec<(u64, Input)>>,
+    /// The assignments this replica decided as the ticker (Elastic 3, `assign.rs`): `(host, the
+    /// store ms of the decision)`, counted toward the host's load for [`ASSIGN_PROVISIONAL_MS`]
+    /// (a beat sent just after shows neither the player nor the region yet). The process's own:
+    /// a new ticker starts from none.
+    provisional: Vec<(HostId, u64)>,
+    /// Per super-region an assignment was decided for and not answered yet, the hosts that asked
+    /// for it: told the owner ([`CoordMsg::LandIs`]) by the answer, dropped with it.
+    assign_askers: BTreeMap<crate::SuperRegion, Vec<HostId>>,
+    /// When the ticker last logged that no host could take free land (store ms): at most once
+    /// per [`ASSIGN_WARN_EVERY_MS`].
+    assign_warned_ms: Option<u64>,
 }
 
 /// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
@@ -393,6 +406,9 @@ projection! {
             reads_applied = 0,
             reads_taken = 0,
             reads_committed = 0,
+            provisional = Vec::new(),
+            assign_askers = BTreeMap::new(),
+            assign_warned_ms = None,
         }
         reset {
             out = Vec::new(),
@@ -486,6 +502,9 @@ impl Coordinator {
             stale_seen: false,
             refresh_covers: None,
             recorded: None,
+            provisional: Vec::new(),
+            assign_askers: BTreeMap::new(),
+            assign_warned_ms: None,
         };
         c.push_view(Target::Every);
         c
@@ -791,7 +810,7 @@ impl Coordinator {
             HostMsg::LeaveRequest => self.leave_request(host),
             HostMsg::SuccessionApplied { id } => self.succession_applied(host, id),
             HostMsg::SuccessionAdopted { id } => self.succession_adopted(host, id),
-            HostMsg::LandWanted { sr } => self.land_asked(host, sr),
+            HostMsg::LandWanted { sr } | HostMsg::LandNeeded { sr } => self.land_asked(host, sr),
             HostMsg::CutPeerCount { cut, peer, received_through, boot } => {
                 self.cut_peer_count(host, cut, peer, received_through, boot)
             }
@@ -1352,7 +1371,7 @@ impl Coordinator {
     /// Whether `answer` is the one a mark here awaits — what applying it ([`Input::Decision`])
     /// would act on; any other changes nothing. The runtime takes an answer's side effects
     /// (counters, closing a succeeded host's connection, retry pacing) only for these. A cut's
-    /// begin and a replica's end carry no mark: always.
+    /// begin, a replica's end and an assignment carry no mark: always.
     pub fn answer_awaited(&self, answer: &DecisionAnswer) -> bool {
         match answer {
             DecisionAnswer::Cut { stamp, cut, .. } => self.cut_mark_is(*cut, *stamp),
@@ -1360,7 +1379,9 @@ impl Coordinator {
             DecisionAnswer::Ended { stamp, end, .. } => self.successions_ending() == Some((end.host, end.boot, *stamp)),
             DecisionAnswer::RolledBack { stamp, .. } => self.successions_rolling() == Some(*stamp),
             DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } => true,
-            // Elastic 3 Task 3 gives assignments their mark.
+            // No mark (Elastic 3): the store's `WHERE owner = NO_OWNER` refuses a second
+            // decision for the same row (`Owned`), and applying an answer twice (a replay) only
+            // sends its messages again — which the host tolerates.
             DecisionAnswer::Assigned { .. } => true,
         }
     }
@@ -1388,10 +1409,7 @@ impl Coordinator {
             DecisionAnswer::Ended { stamp, end, outcome } => self.end_answered(stamp, end, outcome, now_ms),
             DecisionAnswer::RolledBack { stamp, outcome } => self.rollback_answered(stamp, outcome, now_ms),
             DecisionAnswer::ReplicaEnded { replica } => log::info!("coordinator: replica {replica}'s row is ended"),
-            // Elastic 3 Task 3 acts on it; nothing issues one before.
-            DecisionAnswer::Assigned { assign, outcome, .. } => {
-                log::debug!("coordinator: super-region {:?} assigned to host {}: {outcome:?}", assign.sr, assign.host)
-            }
+            DecisionAnswer::Assigned { assign, outcome, .. } => self.assign_answered(assign, outcome, now_ms),
         }
     }
 

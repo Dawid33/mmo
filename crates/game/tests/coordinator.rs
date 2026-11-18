@@ -354,7 +354,7 @@ fn state_round_trips() {
     };
     assert_eq!(started, site);
     assert_eq!(t.core[0], COORDINATOR_STATE_VERSION);
-    assert_eq!(COORDINATOR_STATE_VERSION, 5, "core v5: replica stamps, the cut ids' high half durable");
+    assert_eq!(COORDINATOR_STATE_VERSION, 6, "core v6: the land lookups name their askers");
     let mut c2 = reload(&t, &history, ReplicaId(1), 0);
     assert_eq!(c2.claims(), vec![(A, Claim::Adventure(site)), (B, Claim::Adventure(site))]);
     assert_eq!(c2.memo_ids().len(), 2);
@@ -364,7 +364,7 @@ fn state_round_trips() {
     let refuse = |bytes: &[u8]| Coordinator::load(bytes, &history, grid(), ReplicaId(1), 0).err();
     assert!(matches!(refuse(&[COORDINATOR_STATE_VERSION + 1]), Some(game::history::persist::HistoryLoadError::Corrupt(_))), "an unknown format is refused");
     assert!(matches!(refuse(&[]), Some(game::history::persist::HistoryLoadError::Corrupt(_))));
-    for old in [1, 2, 3, 4] {
+    for old in [1, 2, 3, 4, 5] {
         assert!(
             matches!(refuse(&[old, 0, 0]), Some(game::history::persist::HistoryLoadError::OldVersion { found }) if found == u32::from(old)),
             "format {old} is refused as old: re-forge"
@@ -2483,11 +2483,21 @@ fn read_departed(c: &mut Coordinator, n: u32, left: HostId, back: Option<u64>, n
     c.observe_leases(&rows, now, now);
 }
 
-/// Host 0 asks for `WANTED` at `now`; the runtime looks it up (`owner`'s) and says so.
+/// Host 0 asks for `WANTED` at `now` (`LandWanted`); the runtime looks it up (`owner`'s) and says so.
 fn land_asked(c: &mut Coordinator, owner: HostId, now: u64) {
-    c.handle(h(0), HostMsg::LandWanted { sr: WANTED }, now);
-    assert_eq!(c.take_land_lookups(), vec![WANTED], "the runtime looks the super-region up");
-    c.land_wanted(owner, now);
+    land_asked_by(c, HostMsg::LandWanted { sr: WANTED }, owner, now);
+}
+
+/// Host 0 sends `ask` for `WANTED` at `now`; the runtime looks it up (`owner`'s) and says so.
+fn land_asked_by(c: &mut Coordinator, ask: HostMsg, owner: HostId, now: u64) {
+    c.handle(h(0), ask, now);
+    assert_eq!(c.take_land_lookups(), vec![(WANTED, vec![h(0)])], "the runtime looks the super-region up");
+    owner_read(c, WANTED, owner, now);
+}
+
+/// The ticker's owners read for `sr` (asked by host 0), showing `owner`'s row.
+fn owner_read(c: &mut Coordinator, sr: game::SuperRegion, owner: HostId, now: u64) {
+    read_owners(c, vec![(sr, vec![h(0)])], vec![(sr, owner.0 as i64, 2)], now);
 }
 
 /// Host 1 left cleanly; host 0 needs its land. Elastic 1: a cleanly departed host never
@@ -2498,9 +2508,20 @@ fn land_asked(c: &mut Coordinator, owner: HostId, now: u64) {
 /// Nothing under `Rollback` (`Static`).
 #[test]
 fn land_of_a_host_that_left_is_given_at_once() {
+    land_of_a_host_that_left(HostMsg::LandWanted { sr: WANTED });
+}
+
+/// Elastic 3: the same with the new ask (`LandNeeded`) — land of a departed owner still opens
+/// a `Leave` succession, never an assignment.
+#[test]
+fn land_of_a_departed_owner_still_opens_a_leave_succession() {
+    land_of_a_host_that_left(HostMsg::LandNeeded { sr: WANTED });
+}
+
+fn land_of_a_host_that_left(ask: HostMsg) {
     let (mut c, t) = departed(3, h(1));
     read_departed(&mut c, 3, h(1), None, t);
-    land_asked(&mut c, h(1), t);
+    land_asked_by(&mut c, ask.clone(), h(1), t);
     let d = c.declare_wanted(t).expect("its land is given away at once");
     let live: std::collections::BTreeSet<HostId> = [0, 2].into_iter().map(h).collect();
     assert_eq!(d.dead, vec![(h(1), 101)], "the boot that left");
@@ -2511,15 +2532,15 @@ fn land_of_a_host_that_left_is_given_at_once() {
     c.declared(game::Declared::Done(list.clone()), t);
     assert_eq!(orders(&commit_routed(&mut c)), vec![(h(0), list[0].id), (h(2), list[0].id)], "the order goes to the survivors");
     read_departed(&mut c, 3, h(1), None, t + 1);
-    land_asked(&mut c, h(1), t + 1);
+    land_asked_by(&mut c, ask.clone(), h(1), t + 1);
     assert_eq!(c.declare_wanted(t + 1), None, "declared once");
     // Under `Rollback` (`Static`) a request is ignored.
     let (mut r, t) = departed(3, h(1));
     r.set_crash_policy(game::CrashPolicy::Rollback);
     read_departed(&mut r, 3, h(1), None, t);
-    r.handle(h(0), HostMsg::LandWanted { sr: WANTED }, t);
+    r.handle(h(0), ask, t);
     assert!(r.take_land_lookups().is_empty(), "Static looks nothing up");
-    r.land_wanted(h(1), t);
+    owner_read(&mut r, WANTED, h(1), t);
     assert_eq!(r.declare_wanted(t), None, "Static never declares");
 }
 
@@ -2565,7 +2586,7 @@ fn a_request_for_land_already_declared_is_pruned() {
     c.declared(game::Declared::Done(store_declares(&d, 2, 1, game::CutId(5))), t);
     assert!(c.lands_wanted().is_empty(), "the declared owner's request is done");
     // A late lookup answer for the same owner: not recorded again.
-    c.land_wanted(h(1), t + 1);
+    owner_read(&mut c, WANTED, h(1), t + 1);
     assert!(c.lands_wanted().is_empty(), "pruned");
     read_departed(&mut c, 2, h(1), None, t + 2);
     assert_eq!(c.declare_wanted(t + 2), None, "declared once");
@@ -3932,11 +3953,11 @@ fn a_world_life(gone: std::rc::Rc<std::cell::Cell<bool>>) -> Vec<(u64, LifeStep)
         assert!(c.take_successions_reread(), "a dead row nobody declared asks for a re-read");
         c.successions_open(Vec::new(), now);
     }));
-    // A host asks for land of a departed owner (`land_lookups`), the lookup's answer (`land_wanted`).
+    // A host asks for land of a departed owner (`land_lookups`), the lookup's answer (`LandOwners`).
     at(&mut life, 10, Box::new(|c, now| c.handle(h(1), HostMsg::LandWanted { sr: (3, 3) }, now)));
     at(&mut life, 10, Box::new(|c, now| {
-        assert_eq!(c.take_land_lookups(), vec![(3, 3)]);
-        c.land_wanted(h(9), now);
+        assert_eq!(c.take_land_lookups(), vec![((3, 3), vec![h(1)])]);
+        c.apply(Input::LandOwners { asked: vec![((3, 3), vec![h(1)])], rows: vec![((3, 3), 9, 2)] }, now);
     }));
     // A host asks about a cut nobody remembers (`lookups`), and the store's answer.
     at(&mut life, 10, Box::new(|c, now| c.handle(h(0), HostMsg::CutPrepared { cut: game::CutId(77) }, now)));
@@ -5109,7 +5130,7 @@ fn a_non_ticker_never_hands_out_timed_work() {
     b.apply(Input::Maintain, late);
     b.apply(hosts_read(3, &[h(2)], late), late);
     b.apply(Input::SuccessionsOpen { list: Vec::new(), issued_at_version: b.version() }, late);
-    b.apply(Input::LandOwners { owners: vec![h(5)] }, late);
+    b.apply(Input::LandOwners { asked: vec![((7, 0), vec![h(1)])], rows: vec![((7, 0), 5, 1)] }, late);
     assert_eq!(b.logged(), logged, "nothing of the ticker's work is logged on B");
     assert!(b.encode_projection() == before, "nor applied: {}", b.projection_debug());
     assert!(b.world_cut_running().is_none(), "no cut begins on B");
@@ -5252,4 +5273,297 @@ fn a_rebase_that_loses_the_ticker_drops_its_maintain() {
     assert!(b.calendar_day() < day, "its day turn is not replayed");
     let out = row.write(&mut b).expect("B writes on A's row");
     assert!(out.iter().all(|(_, m)| !matches!(m, CoordMsg::Calendar(_))), "B tells nobody the day: {out:?}");
+}
+
+// ---- Elastic 3 Task 3: the coordinator assigns free land -----------------------------------
+
+/// The super-region asked for in the assignment tests.
+const FREE: game::SuperRegion = (5, -2);
+
+/// The load a host's beat reports.
+fn load(players: u32, regions: u32, tick_permille: u32) -> game::HostLoad {
+    game::HostLoad { players, regions, tick_permille }
+}
+
+/// The ticker's `hosts` read at monotonic (and store) time `mono`: each host beating with its
+/// load and drain mark.
+fn read_hosts(c: &mut Coordinator, rows: &[(HostId, game::HostLoad, bool)], mono: u64) {
+    let rows: Vec<HostSeen> = rows
+        .iter()
+        .map(|&(o, load, draining)| {
+            let mut row = seen(o, mono + 1);
+            row.load = load;
+            row.draining = draining;
+            row
+        })
+        .collect();
+    let next_host_id = rows.iter().map(|r| r.ordinal.0 + 1).max().unwrap_or(0);
+    c.apply(Input::HostsRead { rows, next_host_id, issued_mono: mono, received_mono: mono, world_tick: 100 }, mono);
+}
+
+/// The ticker's owners read: the super-regions asked for (with their askers) and the rows
+/// read of them.
+fn read_owners(c: &mut Coordinator, asked: Vec<(game::SuperRegion, Vec<HostId>)>, rows: Vec<(game::SuperRegion, i64, u64)>, now: u64) {
+    c.apply(Input::LandOwners { asked, rows }, now);
+}
+
+/// Hosts `0..n` attached (`claim`), each read twice an [`ASSIGN_MIN_ATTACHED_MS`] apart with
+/// its load in `loads` (and the drain mark): every one known long enough. The time after.
+fn assigning(loads: &[(game::HostLoad, bool)]) -> (Coordinator, u64) {
+    let mut c = succeeding(loads.len() as u32);
+    let rows: Vec<(HostId, game::HostLoad, bool)> = loads.iter().enumerate().map(|(i, &(l, d))| (h(i as u64), l, d)).collect();
+    read_hosts(&mut c, &rows, 0);
+    read_hosts(&mut c, &rows, ASSIGN_MIN_ATTACHED_MS);
+    commit_routed(&mut c);
+    (c, ASSIGN_MIN_ATTACHED_MS)
+}
+
+/// The assignments of the pending transition (written).
+fn assignments(c: &mut Coordinator) -> Vec<AssignLand> {
+    written(c)
+        .map(|t| {
+            t.decisions
+                .into_iter()
+                .filter_map(|d| match d {
+                    StoreDecision::AssignLand(a) => Some(a),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Host `asker` needs `sr`; the ticker looks it up and reads no row (free): the assignments.
+fn need_free(c: &mut Coordinator, asker: HostId, sr: game::SuperRegion, now: u64) -> Vec<AssignLand> {
+    c.handle(asker, HostMsg::LandNeeded { sr }, now);
+    let asked = c.take_land_lookups();
+    assert_eq!(asked, vec![(sr, vec![asker])], "the runtime looks the super-region up");
+    read_owners(c, asked, Vec::new(), now);
+    assignments(c)
+}
+
+/// The store's answer to `a`, applied.
+fn assign_answer(c: &mut Coordinator, a: AssignLand, outcome: Result<Assigned, String>, now: u64) {
+    let stamp = CallStamp { replica: c.replica(), version: c.version() };
+    c.apply(Input::Decision(DecisionAnswer::Assigned { stamp, assign: a, outcome }), now);
+}
+
+/// The `Assigned` and `LandIs` messages of `out`.
+fn land_msgs(out: &[(Target, CoordMsg)]) -> Vec<(Target, CoordMsg)> {
+    out.iter().filter(|(_, m)| matches!(m, CoordMsg::Assigned { .. } | CoordMsg::LandIs { .. })).cloned().collect()
+}
+
+/// A need for free land: the ticker assigns it to the host that takes logins with the fewest
+/// players, then the fewest regions; once the store did it, the assignee is told its row and
+/// the asker the owner.
+#[test]
+fn free_land_is_assigned_to_the_least_loaded_host_that_takes_logins() {
+    let (mut c, t) = assigning(&[(load(9, 9, 0), false), (load(5, 0, 0), false), (load(1, 9, 0), false), (load(1, 2, 0), false)]);
+    let a = need_free(&mut c, h(0), FREE, t);
+    assert_eq!(a, vec![AssignLand { sr: FREE, host: h(3), boot: 103 }]);
+    assign_answer(&mut c, a[0], Ok(Assigned::Done { epoch: 1 }), t + 1);
+    assert_eq!(
+        land_msgs(&commit_routed(&mut c)),
+        vec![
+            (Target::Host(h(3)), CoordMsg::Assigned { rows: vec![(FREE, 1)] }),
+            (Target::Host(h(0)), CoordMsg::LandIs { sr: FREE, owner: h(3), epoch: 1 }),
+        ]
+    );
+}
+
+/// Eight free super-regions in one read over two idle hosts: the provisional load spreads them
+/// four and four.
+#[test]
+fn a_burst_spreads_by_provisional_load() {
+    let (mut c, t) = assigning(&[(load(0, 0, 0), false), (load(0, 0, 0), false)]);
+    let srs: Vec<game::SuperRegion> = (0..8).map(|i| (i, 0)).collect();
+    for &sr in &srs {
+        c.handle(h(0), HostMsg::LandNeeded { sr }, t);
+    }
+    let asked = c.take_land_lookups();
+    assert_eq!(asked.len(), 8);
+    read_owners(&mut c, asked, Vec::new(), t);
+    let a = assignments(&mut c);
+    assert_eq!(a.len(), 8);
+    for host in [h(0), h(1)] {
+        assert_eq!(a.iter().filter(|a| a.host == host).count(), 4, "host {host}: {a:?}");
+        assert_eq!(c.provisional_load(host, t), 4);
+    }
+}
+
+/// An assignment counts toward its host's load for [`ASSIGN_PROVISIONAL_MS`], no longer.
+#[test]
+fn provisional_load_expires() {
+    let (mut c, t) = assigning(&[(load(0, 0, 0), false)]);
+    assert_eq!(need_free(&mut c, h(0), FREE, t).len(), 1);
+    assert_eq!(c.provisional_load(h(0), t), 1);
+    assert_eq!(c.provisional_load(h(0), t + ASSIGN_PROVISIONAL_MS - 1), 1);
+    assert_eq!(c.provisional_load(h(0), t + ASSIGN_PROVISIONAL_MS), 0);
+}
+
+/// A host whose worst tick leaves less than [`ASSIGN_HEADROOM_MIN_PERMILLE`] is skipped while
+/// another qualifies, however few its players; it is chosen when it is the only candidate.
+#[test]
+fn a_low_headroom_host_is_skipped_while_another_qualifies() {
+    let (mut c, t) = assigning(&[(load(0, 0, 801), false), (load(3, 3, 800), false)]);
+    assert_eq!(need_free(&mut c, h(0), FREE, t)[0].host, h(1));
+    let (mut c, t) = assigning(&[(load(0, 0, 801), false), (load(3, 3, 800), true)]);
+    assert_eq!(need_free(&mut c, h(0), FREE, t)[0].host, h(0), "the only candidate");
+}
+
+/// A host this ticker has known for less than [`ASSIGN_MIN_ATTACHED_MS`] (the crash-loop
+/// guard) is skipped while an older one qualifies; it is chosen when alone.
+#[test]
+fn a_freshly_seen_host_is_skipped_while_an_older_one_qualifies() {
+    for alone in [false, true] {
+        let mut c = succeeding(2);
+        let busy = load(5, 5, 0);
+        read_hosts(&mut c, &[(h(0), busy, alone)], 0);
+        read_hosts(&mut c, &[(h(0), busy, alone), (h(1), load(0, 0, 0), false)], 1);
+        let t = ASSIGN_MIN_ATTACHED_MS;
+        read_hosts(&mut c, &[(h(0), busy, alone), (h(1), load(0, 0, 0), false)], t);
+        commit_routed(&mut c);
+        let want = if alone { h(1) } else { h(0) };
+        assert_eq!(need_free(&mut c, h(0), FREE, t)[0].host, want, "host 0 known 30 000 ms, host 1 29 999 ms (alone: {alone})");
+    }
+}
+
+/// A draining host and a leaving one take no new land, however idle.
+#[test]
+fn a_draining_or_leaving_host_is_assigned_nothing() {
+    let (mut c, t) = assigning(&[(load(9, 9, 0), false), (load(0, 0, 0), true), (load(0, 0, 0), false)]);
+    c.handle(h(2), HostMsg::LeaveRequest, t);
+    commit_routed(&mut c);
+    for i in 0..4 {
+        assert_eq!(need_free(&mut c, h(0), (i, 0), t)[0].host, h(0));
+    }
+}
+
+/// No host takes logins: nothing is assigned, and the next ask is looked up and decided again.
+#[test]
+fn no_host_taking_logins_assigns_nothing() {
+    let (mut c, t) = assigning(&[(load(0, 0, 0), true), (load(0, 0, 0), true)]);
+    assert!(need_free(&mut c, h(0), FREE, t).is_empty(), "nobody takes land");
+    assert!(need_free(&mut c, h(0), FREE, t + 1).is_empty(), "asked again: still nobody");
+    read_hosts(&mut c, &[(h(0), load(0, 0, 0), false), (h(1), load(0, 0, 0), true)], t + 2);
+    assert_eq!(need_free(&mut c, h(0), FREE, t + 3)[0].host, h(0), "asked again once a host takes logins");
+}
+
+/// Land of a live attached host: the asker is told its owner, nothing is decided.
+#[test]
+fn land_of_a_live_host_is_named_to_the_asker() {
+    let (mut c, t) = assigning(&[(load(0, 0, 0), false), (load(0, 0, 0), false)]);
+    c.handle(h(0), HostMsg::LandNeeded { sr: FREE }, t);
+    let asked = c.take_land_lookups();
+    read_owners(&mut c, asked, vec![(FREE, 1, 4)], t);
+    let t1 = written(&mut c);
+    assert!(t1.as_ref().is_none_or(|t| t.decisions.is_empty()), "nothing decided: {t1:?}");
+    let mut out = t1.map(|t| t.out).unwrap_or_default();
+    out.extend(c.take_out());
+    assert_eq!(land_msgs(&out), vec![(Target::Host(h(0)), CoordMsg::LandIs { sr: FREE, owner: h(1), epoch: 4 })]);
+}
+
+/// A host asking for land the store says is its own (its `Assigned` was lost) is told so.
+#[test]
+fn a_host_asking_for_land_the_store_says_is_its_own_is_told_assigned() {
+    let (mut c, t) = assigning(&[(load(0, 0, 0), false), (load(0, 0, 0), false)]);
+    c.handle(h(1), HostMsg::LandNeeded { sr: FREE }, t);
+    let asked = c.take_land_lookups();
+    read_owners(&mut c, asked, vec![(FREE, 1, 4)], t);
+    assert!(assignments(&mut c).is_empty());
+    assert_eq!(land_msgs(&commit_routed(&mut c)), vec![(Target::Host(h(1)), CoordMsg::Assigned { rows: vec![(FREE, 4)] })]);
+}
+
+/// A refused assignment (another host holds the row, the host's row is not live or drains, a
+/// store error) tells nobody anything and changes no projection; its provisional load is
+/// dropped, and the next ask decides again.
+#[test]
+fn a_refused_assignment_changes_nothing_and_the_next_ask_decides_again() {
+    let refusals: [Result<Assigned, String>; 4] =
+        [Ok(Assigned::Owned), Ok(Assigned::HostNotLive), Ok(Assigned::HostDraining), Err("lock timeout".into())];
+    for refusal in refusals {
+        let (mut c, t) = assigning(&[(load(0, 0, 0), false)]);
+        let a = need_free(&mut c, h(0), FREE, t);
+        assert_eq!(a.len(), 1);
+        let before = c.projection_debug();
+        assign_answer(&mut c, a[0], refusal.clone(), t + 1);
+        assert_eq!(c.projection_debug(), before, "{refusal:?} changes no projection");
+        assert!(land_msgs(&commit_routed(&mut c)).is_empty(), "{refusal:?} tells nobody");
+        assert_eq!(c.provisional_load(h(0), t + 1), 0, "{refusal:?}: the host took nothing");
+        assert_eq!(need_free(&mut c, h(0), FREE, t + 2), a, "{refusal:?}: decided again");
+    }
+}
+
+/// A replica that is not the ticker queues a host's need (durable: the ticker looks it up), and
+/// neither looks up nor decides anything.
+#[test]
+fn a_non_ticker_queues_the_ask_and_decides_nothing() {
+    let (mut row, mut a, mut b) = two_replicas();
+    for c in [&mut a, &mut b] {
+        c.set_crash_policy(game::CrashPolicy::Succession);
+    }
+    a.handle(h(0), claim_attach(h(0), 100, Vec::new(), Vec::new()), 0);
+    row.write(&mut a).expect("the attach commits");
+    row.rebase(&mut b);
+    assert!(!b.is_ticker());
+    b.handle(h(0), HostMsg::LandNeeded { sr: FREE }, 10);
+    assert!(b.take_land_lookups().is_empty(), "B looks no land up");
+    let logged = b.logged();
+    b.apply(Input::LandOwners { asked: vec![(FREE, vec![h(0)])], rows: Vec::new() }, 10);
+    assert_eq!(b.logged(), logged, "the owners read is not logged on B");
+    let t = b.take_transition();
+    assert!(t.as_ref().is_none_or(|t| t.decisions.is_empty()), "B decides nothing: {t:?}");
+    if t.is_some() {
+        b.transition_failed(t.unwrap());
+    }
+    row.write(&mut b).expect("B's queued ask commits");
+    row.rebase(&mut a);
+    assert_eq!(a.take_land_lookups(), vec![(FREE, vec![h(0)])], "the ticker looks it up");
+}
+
+/// An `Assigned` answer applied, then replayed by a rebase: the projection is the same, and the
+/// assignee is told again.
+#[test]
+fn an_assigned_answer_replayed_after_a_rebase_only_sends_again() {
+    let (mut c, t) = assigning(&[(load(0, 0, 0), false)]);
+    let a = need_free(&mut c, h(0), FREE, t);
+    let row = Row::of(&c);
+    assign_answer(&mut c, a[0], Ok(Assigned::Done { epoch: 1 }), t + 1);
+    let before = c.projection_debug();
+    let load_before = c.provisional_load(h(0), t + 1);
+    row.rebase(&mut c);
+    assert_eq!(c.projection_debug(), before, "the replay changes no projection");
+    assert_eq!(c.provisional_load(h(0), t + 1), load_before, "nor the provisional load");
+    assert_eq!(
+        land_msgs(&commit_routed(&mut c)),
+        vec![(Target::Host(h(0)), CoordMsg::Assigned { rows: vec![(FREE, 1)] })],
+        "the assignee is told again"
+    );
+}
+
+/// A `Static` coordinator assigns nothing: the ask is not queued, a read decides nothing.
+#[test]
+fn a_static_coordinator_assigns_nothing() {
+    let (mut c, t) = assigning(&[(load(0, 0, 0), false)]);
+    c.set_crash_policy(game::CrashPolicy::Rollback);
+    c.handle(h(0), HostMsg::LandNeeded { sr: FREE }, t);
+    assert!(c.take_land_lookups().is_empty(), "nothing queued");
+    read_owners(&mut c, vec![(FREE, vec![h(0)])], Vec::new(), t);
+    assert!(assignments(&mut c).is_empty(), "nothing assigned");
+}
+
+/// More free rows in one read than [`ASSIGN_PER_PASS_MAX`]: the rest wait for the next read.
+#[test]
+fn more_free_rows_than_the_pass_bound_wait_for_the_next_read() {
+    let (mut c, t) = assigning(&[(load(0, 0, 0), false), (load(0, 0, 0), false)]);
+    for i in 0..70 {
+        c.handle(h(0), HostMsg::LandNeeded { sr: (i, 1) }, t);
+    }
+    let asked = c.take_land_lookups();
+    assert_eq!(asked.len(), 70);
+    read_owners(&mut c, asked, Vec::new(), t);
+    assert_eq!(assignments(&mut c).len(), ASSIGN_PER_PASS_MAX);
+    let rest = c.take_land_lookups();
+    assert_eq!(rest.len(), 70 - ASSIGN_PER_PASS_MAX, "back in the lookups");
+    assert!(rest.iter().all(|(_, askers)| askers == &vec![h(0)]), "with their askers");
 }

@@ -594,6 +594,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             // coordinator sends one only to an attached host, and an order changes nothing here
             // until it is resolved.
             CoordMsg::Login(order) => self.login_orders.push(order),
+            // Elastic 3: the coordinator's answers to a need for land. No host asks yet (Task 4
+            // takes them); dropped.
+            CoordMsg::Assigned { .. } | CoordMsg::LandIs { .. } => {
+                log::debug!("coordinator land answer dropped (not taken yet): {msg:?}");
+            }
             CoordMsg::SpawnPeople { .. } | CoordMsg::Directive { .. } if !self.world_attached() => {
                 // Decided before the coordinator applied our latest `Attach`, which
                 // re-decided every listed region from its bodies: stale.
