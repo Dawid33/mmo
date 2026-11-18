@@ -359,8 +359,8 @@ macro_rules! engine_rows {
                 }
                 if let Some(boot) = live {
                     // A draining host keeps re-claiming its OWN rows (it runs them until it
-                    // leaves): the drain mark is not looked at here, only in `claim_free`.
-                    (tx, _) = check_live(pool, tx, owner, boot, lock_ms).await?;
+                    // leaves): the drain mark is not looked at here (an `AssignLand` refuses it).
+                    tx = check_live(pool, tx, owner, boot, lock_ms).await?;
                 }
                 tx.commit().await?;
                 Ok(Fence { owner, epochs, all_hosts: false })
@@ -378,21 +378,16 @@ macro_rules! engine_rows {
             /// short lock timeout would starve), and `FOR SHARE` serialises with a
             /// declaration's `FOR NO KEY UPDATE` of the row — a claim that locks first commits
             /// before the declaration moves the predecessor's rows (the newly won ones too); one
-            /// that locks after sees the row dead. The second value: the row is marked
-            /// draining (`drain_at_ms` set) — read under the same lock, so a drain mark (one
-            /// `UPDATE` of the row) lands either before it (seen) or after the claim commits.
-            async fn check_live(pool: &Pool, mut tx: Tx, owner: HostId, boot: u64, lock_ms: u64) -> Result<(Tx, bool), StoreError> {
+            /// that locks after sees the row dead.
+            async fn check_live(pool: &Pool, mut tx: Tx, owner: HostId, boot: u64, lock_ms: u64) -> Result<Tx, StoreError> {
                 let sql = format!(
-                    "SELECT drain_at_ms FROM hosts WHERE id = $1 AND boot = $2 AND state = {} AND clean = 0{}",
+                    "SELECT 1 FROM hosts WHERE id = $1 AND boot = $2 AND state = {} AND clean = 0{}",
                     crate::HOST_LIVE,
                     $share_lock
                 );
                 let row = sqlx::query(&sql).bind(i(owner.0)).bind(i(boot)).fetch_optional(&mut *tx).await;
                 match row {
-                    Ok(Some(r)) => {
-                        let draining = r.try_get::<Option<i64>, _>(0)?.is_some();
-                        Ok((tx, draining))
-                    }
+                    Ok(Some(_)) => Ok(tx),
                     Ok(None) => {
                         tx.rollback().await?;
                         log::warn!(
@@ -403,98 +398,6 @@ macro_rules! engine_rows {
                     }
                     Err(e) => Err(claim_error(pool, tx, e, lock_ms).await),
                 }
-            }
-
-            /// Claims for `owner` the super-regions of `srs` that are absent or free (owner
-            /// [`crate::NO_OWNER`]), in one transaction like [`claim_super_regions`] (same
-            /// `lock_timeout`, same side check, rows in key order): a new row gets epoch 1, a free
-            /// one epoch + 1; a row another owner holds is left alone — and never LOCKED: two
-            /// statements per super-region, an `INSERT … ON CONFLICT DO NOTHING` (an absent row)
-            /// then, if that inserted nothing, an `UPDATE … WHERE owner = -1` (a free one; a row
-            /// that does not match is not locked). An upsert's `ON CONFLICT DO UPDATE … WHERE`
-            /// would lock the conflicting row BEFORE its `WHERE` — a row another host holds
-            /// `FOR SHARE` in a staged cut part, so the claim would wait for that cut's decision
-            /// (which may wait for this host's own part). Fenced first-writer-wins: the update's
-            /// `WHERE owner = -1` is evaluated on the row's newest version (Postgres
-            /// re-checks it after waiting for another claimer's row lock, and a second insert
-            /// waits for the first's commit and then inserts nothing), so of two claimers
-            /// exactly one takes a row. The fence holds the rows won (possibly none). Refused
-            /// (`Fenced { sr: None }`, nothing claimed) unless `boot`'s `hosts` row is live
-            /// ([`check_live`]). A live row marked draining (`worldctl drain`) wins NOTHING but
-            /// is not refused: the transaction rolls back and the fence holds no rows — to the
-            /// caller exactly "nothing was free" (Elastic 1: a draining host takes no new land;
-            /// its own rows it still re-claims, [`claim_super_regions`]). SQLite callers hold
-            /// the writer lock; Postgres needs none (the row locks serialise it, and holding the
-            /// in-process lock while waiting for a row would hold up this host's own cut part).
-            pub(crate) async fn claim_free(
-                pool: &Pool,
-                owner: HostId,
-                boot: u64,
-                srs: Vec<SuperRegion>,
-                opened: u32,
-                lock_ms: u64,
-            ) -> Result<Fence, StoreError> {
-                let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
-                let tx = begin_claim(pool, lock_ms).await?;
-                let mut tx = check_side(pool, tx, opened, lock_ms).await?;
-                // A plain read of the drain mark first (no lock): a host already marked
-                // draining locks no free row for nothing. The locked re-check stays last.
-                let marked = sqlx::query("SELECT drain_at_ms FROM hosts WHERE id = $1 AND boot = $2")
-                    .bind(i(owner.0))
-                    .bind(i(boot))
-                    .fetch_optional(&mut *tx)
-                    .await;
-                match marked {
-                    Ok(Some(r)) if r.try_get::<Option<i64>, _>(0)?.is_some() => {
-                        tx.rollback().await?;
-                        log::debug!("[world-store] host {owner} is draining: its claim of free land wins nothing");
-                        return Ok(Fence { owner, epochs: BTreeMap::new(), all_hosts: false });
-                    }
-                    Ok(_) => {}
-                    Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
-                }
-                let insert = "INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $3, 1) \
-                              ON CONFLICT (sx, sz) DO NOTHING RETURNING epoch";
-                let take_free = format!(
-                    "UPDATE super_regions SET owner = $3, epoch = epoch + 1 WHERE sx = $1 AND sz = $2 AND owner = {} \
-                     RETURNING epoch",
-                    crate::NO_OWNER
-                );
-                let mut epochs = BTreeMap::new();
-                for (sx, sz) in srs {
-                    let mut won = None;
-                    for sql in [insert, take_free.as_str()] {
-                        let row = sqlx::query(sql)
-                            .bind(i64::from(sx))
-                            .bind(i64::from(sz))
-                            .bind(i(owner.0))
-                            .fetch_optional(&mut *tx)
-                            .await;
-                        match row {
-                            Ok(Some(row)) => {
-                                won = Some(row.try_get::<i64, _>(0)?);
-                                break;
-                            }
-                            Ok(None) => {}
-                            Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
-                        }
-                    }
-                    if let Some(epoch) = won {
-                        epochs.insert((sx, sz), u(epoch));
-                    }
-                }
-                let (tx, draining) = check_live(pool, tx, owner, boot, lock_ms).await?;
-                if draining {
-                    tx.rollback().await?;
-                    // Debug only: the server paces such claims and says so once.
-                    log::debug!(
-                        "[world-store] host {owner} is draining: it wins no new land ({} free super-region(s) left free)",
-                        epochs.len()
-                    );
-                    return Ok(Fence { owner, epochs: BTreeMap::new(), all_hosts: false });
-                }
-                tx.commit().await?;
-                Ok(Fence { owner, epochs, all_hosts: false })
             }
 
             /// Frees every super-region of `fence` (owner [`crate::NO_OWNER`], epoch + 1, so

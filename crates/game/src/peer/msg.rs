@@ -202,9 +202,9 @@ pub enum Volatile {
     /// The sender's region parked (its final halo already sent): no longer running, but
     /// not lost — unlike [`Volatile::RegionDown`] (a lost region: its mirrors end).
     RegionParked(RegionCoords),
-    /// The sender needs a region of this free super-region and this host is its preferred
-    /// claimer (R4, `PgClaim`): claim it. Sent at most once per
-    /// [`crate::CLAIM_WANTED_EVERY_MS`] per super-region while the need lasts.
+    /// The sender needs a region of this free super-region and takes this host for its
+    /// preferred claimer (R4, `PgClaim`). Never sent since Elastic 3 (the coordinator assigns
+    /// land, `HostMsg::LandNeeded`); ignored on receipt. Kept: wire enums are append-only.
     ClaimWanted(crate::SuperRegion),
 }
 

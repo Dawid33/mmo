@@ -206,8 +206,8 @@ pub enum HostMsg {
     /// left in a committed leave cut (its `hosts` row clean) and has not come back (R4
     /// drain). The coordinator looks the owner up and gives ALL its land to one heir by a
     /// `Leave` succession at once (a host that left never returns as itself: a restarted
-    /// process is a new host). Sent at most
-    /// once per [`crate::LAND_WANTED_EVERY_MS`] per super-region; ignored under `Static`.
+    /// process is a new host). No longer sent since Elastic 3 ([`HostMsg::LandNeeded`] covers
+    /// it); applied as a `LandNeeded`. Ignored under `Static`.
     LandWanted { sr: SuperRegion },
     /// World cut `cut` runs here in count mode with participant `peer` (R4 Task 12,
     /// `world_manager/world_cut.rs`): their link is down (or was not up at the `BeginCut`),
@@ -226,7 +226,8 @@ pub enum HostMsg {
     /// coordinator's ticker reads the row: free land is assigned to the least-loaded host
     /// ([`CoordMsg::Assigned`] to it, [`CoordMsg::LandIs`] to the askers), a live owner is named
     /// ([`CoordMsg::LandIs`], or `Assigned` again to an asker that owns it), a departed owner's
-    /// land goes to an heir by a `Leave` succession. Ignored under `Static`.
+    /// land goes to an heir by a `Leave` succession. Sent at most once per
+    /// [`crate::LAND_NEEDED_EVERY_MS`] per super-region; ignored under `Static`.
     LandNeeded { sr: SuperRegion },
 }
 

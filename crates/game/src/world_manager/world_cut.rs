@@ -142,7 +142,7 @@
 //! absent from their cuts) and release the session on that boot's hello. Aborted: what was
 //! held back goes out as usual. Under `claim` (R4 drain) a host that needs land of a host
 //! that left — a message held for it, a spawn placement — asks the coordinator for it
-//! (`peers.rs` `ask_for_land`, [`crate::HostMsg::LandWanted`]); its `Leave` succession hands
+//! (`land.rs` `ask_for_land`, [`crate::HostMsg::LandNeeded`]); its `Leave` succession hands
 //! the held messages to the heir instead (`succession.rs`). Under `Static` nothing changes.
 
 use super::*;
@@ -512,9 +512,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 );
                 self.left_peers.insert(ordinal, boot);
                 if let Some(directory) = self.ownership.0.directory_mut() {
-                    // Out of this host's claim preference at once (its row is clean: the next
-                    // read leaves it out too) — free land it was preferred for is asked of a
-                    // host that stays, not of nobody until the next directory read.
+                    // Not live here at once (its row is clean: the next read leaves it out too).
                     directory.note_dead(ordinal);
                     self.left_land.insert(ordinal, land);
                 }

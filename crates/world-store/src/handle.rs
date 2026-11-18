@@ -937,28 +937,6 @@ impl StoreHandle {
         self.ask(|r| Request::ClaimSuperRegions(owner, srs, Some(boot), r))
     }
 
-    /// Claims for `owner` only the super-regions of `srs` that no host holds: absent rows
-    /// (epoch 1) and free ones (owner [`NO_OWNER`], epoch + 1); a row another owner holds is
-    /// left alone, so of two claimers of one free row exactly one wins. One transaction,
-    /// like [`Self::claim_super_regions`]. The fence holds the rows won (possibly none).
-    /// Refused with `Fenced { sr: None }` (nothing claimed) unless host `owner`'s `hosts` row
-    /// is still the live boot `boot`: a host declared dead (R4) wins nothing. A row marked
-    /// draining ([`Self::drain_host`]) wins nothing either, but is not refused: the fence holds
-    /// no rows, as when nothing was free.
-    pub fn claim_free(&self, owner: HostId, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
-        self.ask(|r| Request::ClaimFree(owner, boot, srs, r))
-    }
-
-    /// [`Self::claim_free`], answered on the receiver.
-    pub fn claim_free_later(
-        &self,
-        owner: HostId,
-        boot: u64,
-        srs: Vec<SuperRegion>,
-    ) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
-        self.ask_later(|r| Request::ClaimFree(owner, boot, srs, r))
-    }
-
     /// Frees the super-regions `owner` holds under `fence` (owner [`NO_OWNER`], epoch + 1:
     /// `fence` is fenced from then on). One transaction, fenced: `Fenced` (nothing freed)
     /// unless every row of `fence` is still stored with its owner and epoch; only those rows
@@ -1181,7 +1159,7 @@ impl StoreHandle {
     /// like the heartbeat (it changes no ownership; the lock notes are in `operator.rs`).
     /// Refused ([`StoreError::NotDrainable`], nothing written) unless the row is dirty, live and
     /// beaten within the lease (a lapsed row's process is gone, not declared yet).
-    /// A draining host wins no new land ([`Self::claim_free`] returns no rows) and is not the
+    /// A draining host is assigned no new land (`AssignLand` answers `HostDraining`) and is not the
     /// coordinator's gate host; it learns the mark at its next beat ([`Beat::drain_in_ms`]).
     pub fn drain_host(&self, id: HostId, in_ms: u64) -> Result<(), StoreError> {
         self.ask(|r| Request::DrainHost(id, in_ms, r))

@@ -1,5 +1,6 @@
 //! The ownership directory (R4): the reads `owners` and `owned_by`, and the writes
-//! `claim_free` (only absent or free rows) and `release`.
+//! `claim_super_regions_live` (a boot's re-claim) and `release`. Free land is assigned by the
+//! coordinator (Elastic 3, `assign.rs`): its tests are there.
 
 use crate::common::hid;
 use game::{ChunkCoords, CutId, PortableRegion, RegionCoords, WorldCut};
@@ -43,8 +44,8 @@ fn owned_by_is_the_claimed_fence() {
 }
 
 /// Host `owner`'s live boot, registering hosts (boot `7000 + id`) until `owner` is issued if
-/// it has no live row: a `claim_free` is refused unless its claimer's `hosts` row is that
-/// live boot. `owner` must not have been issued yet (ids are never issued twice).
+/// it has no live row: a `claim_super_regions_live` is refused unless its claimer's `hosts` row
+/// is that live boot. `owner` must not have been issued yet (ids are never issued twice).
 pub(crate) fn live_boot(h: &StoreHandle, owner: game::HostId) -> u64 {
     if let Some(r) = h.hosts().unwrap().into_iter().find(|r| r.id == owner && r.state == world_store::HOST_LIVE) {
         return r.boot;
@@ -75,64 +76,16 @@ fn pg_db() -> Option<(common::PgTestDb, StoreUrl)> {
     Some((db, url))
 }
 
-#[test]
-fn claim_free_takes_absent_and_free_rows_only() {
-    each_backend("dir_claim_free", true, |url| {
-        let h = open(url);
-        let [x, y, z] = TEST_SUPER_REGIONS;
-        let a = h.claim_super_regions(hid(0), vec![x, y]).unwrap();
-        let b = h.claim_free(hid(1), live_boot(&h, hid(1)), vec![x, z]).unwrap();
-        assert_eq!(b.owner, hid(1));
-        assert_eq!(b.epochs, [(z, 1)].into_iter().collect(), "only the absent row is won");
-        let rows = h.owners().unwrap();
-        assert!(rows.contains(&(x, 0, a.epochs[&x])), "x is still A's at its epoch: {rows:?}");
-        assert!(rows.contains(&(z, 1, 1)), "{rows:?}");
-        // A's fence still commits; nothing of it was touched.
-        h.commit_cut(empty_cut(1), a).recv().unwrap().expect("A is not fenced");
-        // A free row is taken, its epoch bumped.
-        h.shutdown();
-        raw_exec(url, "UPDATE super_regions SET owner = -1 WHERE sx = 0 AND sz = -1");
-        let h = open(url);
-        let c = h.claim_free(hid(2), live_boot(&h, hid(2)), vec![x, y]).unwrap();
-        assert_eq!(c.epochs, [(y, 2)].into_iter().collect(), "only the free row is won");
-        assert_eq!(h.claim_free(hid(3), live_boot(&h, hid(3)), vec![]).unwrap().epochs, Default::default(), "nothing asked, nothing won");
-        h.shutdown();
-    });
-}
-
-/// Elastic 1 Task 7: a host marked draining wins no new land — its `claim_free` returns no
-/// rows (as "nothing was free": no error, the host is not fenced) and the land stays free;
-/// another host still takes it.
-#[test]
-fn a_draining_host_claims_nothing() {
-    each_backend("dir_drain_claims", false, |url| {
-        let h = open(url);
-        let [x, y, _] = TEST_SUPER_REGIONS;
-        // y is a free row (claimed, then released); x has no row at all.
-        let old = h.claim_super_regions(hid(0), vec![y]).unwrap();
-        h.release(hid(0), &old).unwrap();
-        let free_epoch = old.epochs[&y] + 1;
-        let boot = live_boot(&h, hid(1));
-        h.drain_host(hid(1), 60_000).unwrap();
-        let won = h.claim_free(hid(1), boot, vec![x, y]).expect("no error: as if nothing were free");
-        assert_eq!((won.owner, won.epochs), (hid(1), Default::default()), "nothing won");
-        assert_eq!(h.owners().unwrap(), vec![(y, NO_OWNER, free_epoch)], "x stays absent, y free at its epoch");
-        // A host that is not draining takes both.
-        let other = h.claim_free(hid(2), live_boot(&h, hid(2)), vec![x, y]).unwrap();
-        assert_eq!(other.epochs, [(x, 1), (y, free_epoch + 1)].into_iter().collect());
-        h.shutdown();
-    });
-}
-
 /// A draining host keeps the land it owns until it leaves: its re-claim of its own rows still
-/// succeeds (the drain guard is only on `claim_free`), and its fence still commits a cut.
+/// succeeds (the drain guard is only on an assignment, `AssignLand`), and its fence still
+/// commits a cut.
 #[test]
 fn a_draining_host_keeps_its_own_land() {
     each_backend("dir_drain_keeps", false, |url| {
         let h = open(url);
         let [x, _, _] = TEST_SUPER_REGIONS;
         let boot = live_boot(&h, hid(1));
-        let first = h.claim_free(hid(1), boot, vec![x]).unwrap();
+        let first = h.claim_super_regions_live(hid(1), boot, vec![x]).unwrap();
         assert_eq!(first.epochs, [(x, 1)].into_iter().collect());
         h.drain_host(hid(1), 60_000).unwrap();
         let mine = h.claim_super_regions_live(hid(1), boot, vec![x]).expect("its own rows, re-claimed");
@@ -141,41 +94,6 @@ fn a_draining_host_keeps_its_own_land() {
         assert_eq!(h.world_info().unwrap().world_tick, 100, "the cut committed");
         h.shutdown();
     });
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn two_claimers_of_one_free_row_one_wins() {
-    let Some((_db, url)) = pg_db() else { return };
-    let (a, b) = (open(&url), open(&url));
-    let sr = (7, 7);
-    // The first round races for an absent row, every later one for the same row freed again.
-    let mut last: Option<Fence> = None;
-    for round in 0..6u64 {
-        if let Some(held) = last.take() {
-            a.release(held.owner, &held).unwrap();
-        }
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let claim = |h: &StoreHandle, owner: game::HostId| {
-            let boot = live_boot(h, owner);
-            let (h, barrier) = (h.clone(), barrier.clone());
-            std::thread::spawn(move || {
-                barrier.wait();
-                h.claim_free(owner, boot, vec![sr]).unwrap()
-            })
-        };
-        let (ta, tb) = (claim(&a, hid(2 * round + 1)), claim(&b, hid(2 * round + 2)));
-        let (fa, fb) = (ta.join().unwrap(), tb.join().unwrap());
-        let mut won: Vec<Fence> = [fa, fb].into_iter().filter(|f| !f.epochs.is_empty()).collect();
-        assert_eq!(won.len(), 1, "round {round}: exactly one claimer wins: {won:?}");
-        let w = won.pop().unwrap();
-        let rows = a.owners().unwrap();
-        assert_eq!(rows, vec![(sr, w.owner.0 as i64, w.epochs[&sr])], "round {round}");
-        assert_eq!(w.epochs[&sr], 1 + 2 * u64::from(round), "round {round}: a claim and a release each bump the epoch");
-        last = Some(w);
-    }
-    a.shutdown();
-    b.shutdown();
 }
 
 #[test]
@@ -194,7 +112,7 @@ fn released_rows_are_free_and_the_old_fence_is_refused() {
         // A release is fenced too: the old fence holds nothing any more.
         let err = h.release(hid(0), &old).unwrap_err();
         assert!(matches!(err, StoreError::Fenced { sr: Some(_) }), "{err}");
-        let new = h.claim_free(hid(1), live_boot(&h, hid(1)), vec![x]).unwrap();
+        let new = h.claim_super_regions_live(hid(1), live_boot(&h, hid(1)), vec![x]).unwrap();
         assert_eq!(new.epochs, [(x, old.epochs[&x] + 2)].into_iter().collect());
         // A release names its owner: another owner's fence is refused, nothing freed.
         let err = h.release(hid(2), &new).unwrap_err();

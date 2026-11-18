@@ -1943,14 +1943,16 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
 // ---- R4 Task 5: claiming on demand --------------------------------------------------------
 
 
-/// Two hosts of a fresh world under `claim`: nothing is claimed until something needs a
-/// region. A client (an observer session on host 0) asks for one region in each of 8
-/// super-regions — asking again each round, as a client re-asks — until the store holds
-/// an owner for each: every owner is the one `static` gives (`rendezvous_owner` with every
-/// host live, R4 decision 11), and both hosts' directories say so.
+/// Two idle hosts of a fresh world under `claim` and a real coordinator (`Succession`): nothing
+/// is owned until something needs a region. A client (an observer session on host 0) asks for
+/// one region in each of 8 super-regions — asking again each round, as a client re-asks — until
+/// the store holds an owner for each. Host 0 asks the coordinator, which assigns each to the
+/// least-loaded host: with both idle, every assignment counts toward its host's load until a
+/// beat shows it, so the split is 4 / 4. Each row has exactly one owner, each host's fence
+/// holds exactly its rows (fenced before it took them), and both directories say so.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn fresh_world_under_claim_lays_out_like_static() {
+fn fresh_world_under_claim_is_assigned_by_load() {
     install_props();
     let Some(db) = PgDb::create("claimlayout") else { return };
     let dir = scratch("claimlayout");
@@ -1965,14 +1967,29 @@ fn fresh_world_under_claim_lays_out_like_static() {
     }
     let s = claims[0].store().super_region_regions();
     let mut pair = Pair { sims, started: Instant::now(), tick: Arc::new(std::sync::atomic::AtomicU64::new(0)) };
-    pair.until("every peer synced", |p| p.sims.iter().all(|s| s.manager.peers_synced()));
-    assert!(claims[0].store().owners().unwrap().is_empty(), "a fresh world: nothing claimed at boot");
+    let store = db.open();
+    let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
+    let tick = pair.tick.clone();
+    let cuts = server::coordinator_rt::WorldCuts { every: CUT_EVERY, tick: Box::new(move || tick.load(std::sync::atomic::Ordering::SeqCst)) };
+    let cert = dir.join("coordinator.cert-sha256");
+    let coordinator = listening_coordinator(store.clone(), start, &cert, cuts, server::claims::Fenced::default(), game::CrashPolicy::Succession);
+    for (i, sim) in pair.sims.iter_mut().enumerate() {
+        let c = &claims[i];
+        let link = quic_world_link(coordinator.addr, cert.clone(), sim.ordinal, sim.boot, sim.reg);
+        sim.manager.set_world_link(Box::new(SwitchLink(Arc::new(std::sync::Mutex::new((Some(link), 0))))), sim.boot, 0);
+        sim.manager.set_world_map(land_map());
+        sim.heartbeat = Some(server::lease::Heartbeat::new(c.store().clone(), sim.ordinal, sim.boot));
+        sim.fenced = c.fenced().clone();
+        let generation = server::claims::WorldGeneration::new(c.store().world_generation().unwrap());
+        sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(c.clone(), generation));
+    }
+    pair.until("every peer synced and both hosts attached", |p| p.sims.iter().all(|s| s.manager.peers_synced() && s.manager.world_attached()));
+    assert!(claims[0].store().owners().unwrap().is_empty(), "a fresh world: nothing owned at boot");
     let (visitor, player) = (5, PlayerId(77));
     let now = pair.now();
     assert!(pair.sims[0].manager.handle_server_event(ServerEvent::ObserverConnected { client: visitor, player }, now));
     let visits = super_region_corners(s, 8);
-    let store = claims[0].store().clone();
-    pair.until("every visited super-region claimed", |p| {
+    pair.until("every visited super-region assigned", |p| {
         let now = p.now();
         for (_, rc) in &visits {
             let ev = ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(*rc), visitor);
@@ -1982,20 +1999,26 @@ fn fresh_world_under_claim_lays_out_like_static() {
         visits.iter().all(|(sr, _)| owners.iter().any(|(o, owner, _)| o == sr && *owner != game::NO_OWNER))
     });
     let owners = store.owners().unwrap();
+    let mut per_host = [0usize; HOSTS as usize];
     for (sr, rc) in &visits {
-        let row = owners.iter().find(|(o, _, _)| o == sr).expect("a row");
-        let preferred = game::rendezvous_among(*sr, (0..u64::from(HOSTS)).map(HostId)).expect("an owner");
-        assert_eq!(row.1, (preferred.0 as i64), "{sr:?} is claimed as a fixed table of the live ids lays it out");
-        pair.until("both directories know it", |p| p.sims.iter().all(|sim| sim.manager.owner_host(*rc) == Some(preferred)));
+        let rows: Vec<_> = owners.iter().filter(|(o, _, _)| o == sr).collect();
+        assert_eq!(rows.len(), 1, "{sr:?}: one row");
+        let owner = HostId(u64::try_from(rows[0].1).expect("an owner"));
+        per_host[owner.0 as usize] += 1;
+        pair.until("both directories know it", |p| p.sims.iter().all(|sim| sim.manager.owner_host(*rc) == Some(owner)));
     }
-    // Each host's fence holds exactly what it claimed.
-    for (h, c) in claims.iter().enumerate() {
-        let mine: Vec<game::SuperRegion> =
-            owners.iter().filter(|(_, o, _)| *o == h as i64).map(|(sr, _, _)| *sr).collect();
-        assert_eq!(c.fence().epochs.keys().copied().collect::<Vec<_>>(), mine, "host {h}'s fence");
-    }
+    assert_eq!(per_host, [4, 4], "the least-loaded host takes each: split evenly");
+    // Each host's fence holds exactly what it was assigned.
+    pair.until("each fence holds its host's rows", |_| {
+        claims.iter().enumerate().all(|(h, c)| {
+            let mine: Vec<game::SuperRegion> = owners.iter().filter(|(_, o, _)| *o == h as i64).map(|(sr, _, _)| *sr).collect();
+            c.fence().epochs.keys().copied().collect::<Vec<_>>() == mine
+        })
+    });
     drop(pair);
+    assert_eq!(coordinator.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
     drop(links);
+    store.shutdown();
     for c in claims {
         c.store().clone().shutdown();
     }
@@ -2018,7 +2041,7 @@ fn a_host_restarted_cleanly_is_a_new_host_owning_nothing() {
     let old = first.ordinal;
     let store = first_claims.store().clone();
     let mine = vec![(0, 1), (2, 2)];
-    first_claims.add(store.claim_free(old, 3001, mine.clone()).unwrap());
+    first_claims.add(store.claim_super_regions_live(old, 3001, mine.clone()).unwrap());
     let before = store.owners().unwrap();
     drop(first);
     drop(first_links);

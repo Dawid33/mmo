@@ -38,27 +38,25 @@
 //!    the coordinator declares again after a fresh lease read (the re-claimed rows then move
 //!    to the heir, or the row is no longer lapsed).
 //!
-//! (Corrected, Elastic 1: the R4 notes listed a second cycle, "a zombie's `claim_free` vs a
-//! declaration of several predecessors", in which the zombie's upsert `ON CONFLICT` locked a
-//! row of another predecessor. `claim_free` no longer upserts: its `INSERT … ON CONFLICT DO
-//! NOTHING` takes no lock on an existing row, and its `UPDATE … WHERE owner = NO_OWNER` locks
-//! only a FREE row, which no declaration, end of a landless host or registration locks. That cycle cannot
-//! form any more.)
+//! (Corrected, Elastic 1: the R4 notes listed a second cycle, "a zombie's claim of free land vs
+//! a declaration of several predecessors". Elastic 3 removed the host's claim of free land
+//! (`claim_free`) altogether: free land is only ASSIGNED, by the coordinator inside its
+//! transition (below). The host-side statements on `super_regions` left are a boot's re-claim of
+//! its own rows (`claim_super_regions_live`, cycle 1 above) and the unguarded boot claim of
+//! `AllInOne` / `Static` and tools (`claim_super_regions` with no live check, no `hosts` row).)
 //!
 //! **The drain mark** (Elastic 1 Task 7; `rows.rs` `drain_host`, `worldctl drain`): ONE
 //! `UPDATE` of one dirty live `hosts` row's `drain_at_ms` (beaten within the lease: a lapsed
 //! row is refused, the guard in the same statement), UNFENCED like the heartbeat (it
 //! changes no ownership) — it holds that row and wants nothing after it, so it closes no cycle:
 //! like a heartbeat it only waits (at most its `lock_timeout`) for whoever holds the row — a
-//! declaration, an end of a landless host, a registration's vouch or total crash, a claim's `check_live`
-//! `FOR SHARE` — and nothing waits for it while it waits. `claim_free`'s guard reads the mark
-//! in `check_live`'s own statement (the same `FOR SHARE` of the claimer's row, its last; no new
-//! lock): a mark that commits first is seen (the claim wins nothing and rolls back), one that
-//! comes after waits for the claim's commit (the land won just before is kept and leaves with
-//! the host). Before its upserts `claim_free` also reads the mark PLAINLY (no lock, so it
-//! changes no lock order): a host already marked locks no free row for nothing; the locked
-//! re-check stays the last statement. A re-claim of a host's OWN rows
-//! (`claim_super_regions_live`) ignores the mark.
+//! declaration, an end of a landless host, a registration's vouch or total crash, a re-claim's
+//! `check_live` `FOR SHARE`, an assignment's `FOR SHARE` of its assignee's row — and nothing waits
+//! for it while it waits. An assignment reads the mark under its share lock (its first
+//! statement, below): a mark that commits first is seen (`HostDraining`, nothing written), one
+//! that comes after waits for the transition's commit (the land assigned just before is kept and
+//! leaves with the host). A re-claim of a host's OWN rows (`claim_super_regions_live`) ignores
+//! the mark.
 //!
 //! **The survivors** (Elastic 2a, the crash-loop rule): the declaration's survivors are the
 //! dirty live hosts that hold land — a `super_regions` row they own or an `in_flight` row of
@@ -94,11 +92,11 @@
 //! `world`, which every writer of `successions` takes first). Then `UPDATE hosts SET state =
 //! DEAD` of the row already locked. A heartbeat of that row waits for it (its 1 s lock timeout:
 //! "no beat this time"; after the commit it answers `live: false` — the host is replaced). A
-//! ZOMBIE's `claim_free` (the ended process still running) upserts only FREE rows and takes its
-//! `hosts` row `FOR SHARE` as its LAST statement (`check_live`): if the end holds the row, the
-//! claim waits there and, once the end commits, finds the row dead and is refused (it rolls back
-//! what it upserted); if the claim committed first, the end's `EXISTS` sees the land and answers
-//! `OwnsLand` (nothing written). A re-claim of the host's own rows (`claim_super_regions_live`)
+//! ZOMBIE (the ended process still running) wins no land: free land comes only by an assignment,
+//! decided under the `coordinator` row like the end itself — committed before the end's
+//! transition, the end's `EXISTS` sees the land and answers `OwnsLand` (nothing written); after
+//! it (or later in the same transition), the assignment's `FOR SHARE` read finds the row dead
+//! (`HostNotLive`). A re-claim of the host's own rows (`claim_super_regions_live`)
 //! re-claims nothing for a landless host. A drain mark and a vouch wait for the row as for a
 //! declaration. Nothing waits for a lock the end holds while that holder waits for it.
 //!
@@ -114,14 +112,27 @@
 //!
 //! Why no cycle:
 //! - Every coordinator decision runs under the `coordinator` row, so an assignment never runs
-//!   beside a declaration, an end of a landless host or another assignment.
+//!   CONCURRENTLY with a declaration, an end of a landless host or another assignment: those of
+//!   other transitions wait for the row. Inside ONE transition's transaction an assignment may
+//!   follow (or precede) a `Declare` or an `EndLandless` of host X, each decision in its own
+//!   savepoint, in order. X's `hosts` row is then held `FOR NO KEY UPDATE` by that same
+//!   transaction, and the assignment's `FOR SHARE` of it (or the declaration's lock after the
+//!   assignment's share) is a lock of the transaction on its own row — no wait, no conflict with
+//!   itself. It reads the row as the earlier decision left it: an assignment to X after X was
+//!   declared or ended finds it dead (`HostNotLive`); a declaration after an assignment to X moves
+//!   the assigned row with X's other land (it sees its own transaction's write). The declaration's
+//!   moved rows are owned, so an assignment never writes one (`Owned`).
 //! - Its walk is `coordinator` → `hosts` (one row, share) → `super_regions` (one row). The
 //!   declaration's is `coordinator` → `world` → `hosts` → `super_regions`; a registration's is
 //!   `world` → `hosts` → `successions` → `hosts` → `super_regions`. `hosts` before
 //!   `super_regions` in all three.
-//! - A host's re-claim of its own rows (`claim_super_regions_live`: `super_regions`, then its
-//!   `hosts` row) locks only rows it owns; an assignment writes only a free or absent row. They
-//!   share no `super_regions` row.
+//! - The host-side statements on `super_regions` (the host's claim of free land is gone,
+//!   Elastic 3) are a boot's re-claim of its own rows (`claim_super_regions_live`:
+//!   `super_regions`, then its `hosts` row `FOR SHARE`) and the unguarded boot claim of
+//!   `AllInOne` / `Static` (no `hosts` row, never beside a coordinator that assigns). The
+//!   re-claim locks only rows it owns (what its registration gave it); an assignment writes only
+//!   a free or absent row. They share no `super_regions` row, and their locks of the host's
+//!   `hosts` row are both `FOR SHARE`, which do not conflict.
 //! - Statements 2 and 3 never wait for a staged part. A row a part holds is owned in every
 //!   committed snapshot: `ON CONFLICT DO NOTHING` sees it, and the `UPDATE`'s `WHERE owner = -1`
 //!   does not match it, so no row lock is requested. A part that RELEASES the row is the same
@@ -305,8 +316,9 @@
 //! total crash while the old process still runs and may re-claim. `40P01` aborts one: an
 //! aborted re-claim is a fenced re-read (the row is
 //! dead once the registration commits); an aborted registration wrote nothing and its process
-//! exits and starts again. It extends no other cycle: `claim_free` locks no row a registration
-//! locks (free rows only), a boot claim (`claim_super_regions` with no live check) locks no
+//! exits and starts again. It extends no other cycle: an assignment takes its `hosts` row before
+//! its one free `super_regions` row (the registration's order) and a free row is no dirty row's
+//! land, which is all a registration locks there; a boot claim (`claim_super_regions` with no live check) locks no
 //! `hosts` row, and the declaration, the end of a landless host, rollback and decision all wait for `world`
 //! before anything a registration holds.
 

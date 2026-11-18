@@ -177,43 +177,6 @@ fn directory_ignores_an_older_epoch() {
     assert_eq!(d.get((0, 0), h(9)), Owner::Host(h(3)), "a newer read takes it");
 }
 
-/// With every host of `VOXEL_HOSTS` live, the preferred owner is the R3 rendezvous owner
-/// for every super-region (a fresh world under `claim` lays out like `static`).
-#[test]
-fn preferred_is_the_rendezvous_owner_while_every_host_lives() {
-    let mut d = Directory::default();
-    assert_eq!(d.preferred((0, 0)), None, "nobody is live");
-    for hosts in 2..=6u32 {
-        d.set_live((0..u64::from(hosts)).map(h).collect());
-        for sx in -16..16 {
-            for sz in -16..16 {
-                assert_eq!(d.preferred((sx, sz)), Some(rendezvous_owner((sx, sz), hosts)), "({sx}, {sz}) of {hosts}");
-            }
-        }
-    }
-}
-
-/// A dead host's share moves; nobody else's does.
-#[test]
-fn preferred_moves_only_the_dead_hosts_share() {
-    let mut d = Directory::default();
-    for hosts in 2..=6u32 {
-        for dead in (0..u64::from(hosts)).map(h) {
-            d.set_live((0..u64::from(hosts)).map(h).filter(|o| *o != dead).collect());
-            for sx in -16..16 {
-                for sz in -16..16 {
-                    let before = rendezvous_owner((sx, sz), hosts);
-                    let after = d.preferred((sx, sz)).expect("a live host");
-                    assert_ne!(after, dead, "({sx}, {sz}) went to the dead host");
-                    if before != dead {
-                        assert_eq!(after, before, "({sx}, {sz}) of {hosts} moved although host {before} lives");
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// The heir of a host is a pure function of who is live: the same set gives the same
 /// heir, never the predecessor itself, and `None` with nobody else live. Heirs spread
 /// over the survivors, and a survivor that dies too moves only its own heirships.

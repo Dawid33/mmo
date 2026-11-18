@@ -22,7 +22,7 @@
 //! 4. **Re-route.** The directory gives every `moved` row to the heir (the predecessor is
 //!    no longer live); the predecessor's running regions end here (`HaloSourceGone`, marked
 //!    stale for the store's re-seed); its observer tickets, endpoint, `left_peers` entry,
-//!    `early_marks`, `ClaimWanted` throttle, sync and cut-view marks go; a player handed to
+//!    `early_marks`, sync and cut-view marks go; a player handed to
 //!    it (`departed`, `handed`) points at the heir when a `Sent` entry of the report carries
 //!    it (the heir places it from the journal; on the heir itself it points nowhere) and is
 //!    forgotten otherwise (the store's record places it at its next login); a player it handed here and whose session has not come
@@ -323,7 +323,7 @@ macro_rules! host_fields {
             key_set: [peer_synced, pair_owns_seen, left_land_unread, unsaved_traffic, dead_seen],
             pair_set: [dead_boots, peer_in_source_view],
             value_map: [foreign_running, redirected, departed],
-            value_first: [handed, claim_wanted_sent],
+            value_first: [handed],
             key_second: [observer_tickets],
             value_second: [awaiting_session],
             value_sets: [kicks_pending],
@@ -342,8 +342,8 @@ macro_rules! host_fields {
             uncommitted_seq, cut_lead, next_cut_id, cut_order, silent_stopping, last_cut_caught,
             stored_regions, locations, in_flight_intents, intent_mailbox, pending_arrivals, arrivals_despawned,
             recently_despawned, despawn_warned, intent_replies_lost, parked_bodies, items_destroyed,
-            incarnation, incarnation_seen, next_incarnation, unowned_waiting, claims_wanted, claim_asks,
-            land_wanted, land_wanted_sent, land_scanned_ms, directory_wanted, journal_always,
+            incarnation, incarnation_seen, next_incarnation, unowned_waiting, land_needed, land_needed_sent,
+            assigned_rows, land_scanned_ms, directory_wanted, journal_always,
             peer_dropped_for_dead, peer_state_to_forgotten, cut_refused_for, unaccounted_dead, forgotten_hosts, foreign_halo_stale, higher_generation, endpoint,
             asked_elsewhere_answered_ms, observer_orders, nonces, observer_revocations,
             foreign_input_warned_ms, unseeded_warned, world_cut, world_cut_seen, wrapper_seen, marks_queued,
@@ -848,7 +848,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.left_peers.remove(&pred);
         self.left_land.remove(&pred);
         self.early_marks.remove(&pred);
-        self.claim_wanted_sent.retain(|_, (to, _, _)| *to != pred);
         let mut departed_moved = 0usize;
         let mut departed_forgotten = 0usize;
         let pointing: Vec<PlayerId> = self.departed.iter().filter(|(_, h)| **h == pred).map(|(p, _)| *p).collect();

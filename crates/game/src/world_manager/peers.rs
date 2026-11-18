@@ -132,9 +132,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.flush_world();
         // A peer may have finished its sync: spawn orders waiting for it go on.
         self.retry_held_spawns();
-        // Free super-regions needed here whose preferred claimer is another host.
-        self.ask_for_claims(now_ms);
-        // Land of a host that left cleanly, needed here (R4 drain).
+        // Land needed here with no reachable owner: asked of the coordinator (`land.rs`).
         self.ask_for_land(now_ms);
     }
 
@@ -1189,214 +1187,52 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.unowned_waiting.values().map(Vec::len).sum()
     }
 
-    // --- claiming on demand (R4, `PgClaim`) ------------------------------------------------
+    // --- land on demand (R4 `PgClaim`; asked of the coordinator since Elastic 3, `land.rs`) ---
 
-    /// Something here needs `rc`, whose super-region has no owner this host knows: it is
-    /// wanted for a claim ([`Self::take_claims_wanted`]); an `Unknown` one also asks for a
+    /// Something here needs `rc`, whose super-region has no owner this host knows: it is asked
+    /// of the coordinator (`land.rs`, [`Self::ask_for_land`]); an `Unknown` one also asks for a
     /// directory read. Nothing for an owned region (`AllInOne` / `Static` never get here).
     pub(super) fn note_unowned(&mut self, rc: RegionCoords) {
         let sr = crate::super_region_of(rc, self.ownership.1);
         if self.inheriting.contains_key(&sr) {
-            // This host's already (a succession not adopted yet): nothing to claim or read.
+            // This host's already (a succession not adopted yet): nothing to ask or read.
             return;
         }
         match self.ownership.0.owner_of(sr) {
             crate::Owner::Free => {
-                self.claims_wanted.insert(sr);
+                self.land_needed.insert(sr);
             }
             crate::Owner::Unknown => {
-                self.claims_wanted.insert(sr);
+                self.land_needed.insert(sr);
                 self.directory_wanted = true;
             }
             crate::Owner::Me | crate::Owner::Host(_) => {}
         }
     }
 
-    /// Every super-region with no owner something here needs, or a peer asked this host for.
-    fn unowned_needs(&self) -> BTreeSet<crate::SuperRegion> {
-        self.claims_wanted.iter().chain(&self.claim_asks).chain(self.unowned_waiting.keys()).copied().collect()
-    }
-
-    /// The free super-regions this host should claim now: something here needs a region of
-    /// one (a subscribe, a crossing, a spawn placement, a move, what waits for an owner) and
-    /// this host is its preferred live claimer ([`crate::Directory::preferred`]), or a peer
-    /// asked ([`Volatile::ClaimWanted`]). Only rows the directory says are `Free` — a claim
-    /// of a row another host holds would wait on that row's lock for nothing. The server
-    /// answers with [`Self::claimed`] (what it won); a need stays until an owner is known,
-    /// so an unanswered or lost claim is asked again. An `Unknown` one (or one with no live
-    /// claimer known) asks for a directory read instead.
-    ///
-    /// A host marked draining ([`crate::Directory::is_draining`]) claims nothing: it is never
-    /// its own preferred claimer, and a peer's ask is dropped (that peer prefers another host
-    /// once its directory shows the mark). With live hosts known but none preferred (every one
-    /// draining) nothing is claimed and no read is asked for: free land stays free, and what
-    /// needs it waits (the periodic read finds a host that joins).
-    pub fn take_claims_wanted(&mut self) -> Vec<crate::SuperRegion> {
-        let me = self.ordinal();
-        let draining = self.ownership.0.directory().is_some_and(|d| d.is_draining(me));
-        if draining {
-            self.claim_asks.clear();
-        }
-        let mut out = Vec::new();
-        for sr in self.unowned_needs() {
-            match self.ownership.0.owner_of(sr) {
-                crate::Owner::Me | crate::Owner::Host(_) => self.forget_claim_need(sr),
-                crate::Owner::Unknown => self.directory_wanted = true,
-                crate::Owner::Free => {
-                    let directory = self.ownership.0.directory();
-                    let preferred = directory.and_then(|d| d.preferred(sr));
-                    if preferred.is_none() && !directory.is_some_and(crate::Directory::knows_live) {
-                        self.directory_wanted = true;
-                    }
-                    if !draining && (preferred == Some(me) || self.claim_asks.contains(&sr)) {
-                        out.push(sr);
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// Who this host's directory prefers to claim `sr` when it is free
-    /// ([`crate::Directory::preferred`]); `None` with no directory or no such host.
-    pub fn preferred_claimer(&self, sr: crate::SuperRegion) -> Option<HostId> {
-        self.ownership.0.directory().and_then(|d| d.preferred(sr))
-    }
-
     /// The hosts marked draining, from the `hosts` rows of a directory read (the server calls
-    /// it right before [`Self::directory_read`]): none of them is preferred for free land
-    /// ([`crate::Directory::preferred`]), and this host, if among them, claims nothing
-    /// ([`Self::take_claims_wanted`]).
+    /// it right before [`Self::directory_read`]): the coordinator assigns none of them land; a
+    /// draining host still asks for land something here needs (`land.rs`).
     pub fn set_draining(&mut self, draining: BTreeSet<HostId>) {
         let Some(directory) = self.ownership.0.directory_mut() else { return };
         directory.set_draining(draining);
     }
 
-    /// `sr` has an owner now: nothing here wants it claimed any more.
-    fn forget_claim_need(&mut self, sr: crate::SuperRegion) {
-        self.claims_wanted.remove(&sr);
-        self.claim_asks.remove(&sr);
-        self.claim_wanted_sent.remove(&sr);
-    }
-
-    /// For each free super-region something here needs whose preferred live claimer is
-    /// another (reachable) host: that host is asked ([`Volatile::ClaimWanted`]) at most once
-    /// per [`CLAIM_WANTED_EVERY_MS`]. Called at the end of every [`Self::pump_peers`].
-    ///
-    /// Asked of one host for [`CLAIM_UNANSWERED_REREAD_MS`] with no owner known since, the
-    /// directory is read again ([`Self::take_directory_wanted`]; once per that span): the asked
-    /// host may be draining — it drops the asks (Elastic 1 Task 8) — and only a read shows this
-    /// host the mark, after which another host is preferred.
-    fn ask_for_claims(&mut self, now_ms: u64) {
-        let Some(directory) = self.ownership.0.directory() else { return };
-        let me = self.ordinal();
-        let mut asks = Vec::new();
-        let mut unanswered = Vec::new();
-        for &sr in self.claims_wanted.iter().chain(self.unowned_waiting.keys()) {
-            if self.ownership.0.owner_of(sr) != crate::Owner::Free {
-                continue;
-            }
-            let Some(preferred) = directory.preferred(sr).filter(|&p| p != me) else { continue };
-            let sent = self.claim_wanted_sent.get(&sr).filter(|&&(to, _, _)| to == preferred);
-            if sent.is_some_and(|&(_, _, since)| now_ms >= since + CLAIM_UNANSWERED_REREAD_MS) {
-                unanswered.push((sr, preferred));
-            }
-            if !sent.is_some_and(|&(_, at, _)| now_ms < at + CLAIM_WANTED_EVERY_MS) {
-                asks.push((sr, preferred));
-            }
-        }
-        for (sr, to) in unanswered {
-            log::debug!("[server] host {to} has not claimed {sr:?} in {CLAIM_UNANSWERED_REREAD_MS} ms of asks: reading the directory");
-            self.directory_wanted = true;
-            if let Some(sent) = self.claim_wanted_sent.get_mut(&sr) {
-                sent.2 = now_ms;
-            }
-        }
-        for (sr, to) in asks {
-            if !self.peer_reachable(to) {
-                continue;
-            }
-            if let Some(peer) = self.peers.get_mut(&to).filter(|p| !p.stale) {
-                log::debug!("[server] super-region {sr:?} is free and wanted here: host {to} asked to claim it");
-                peer.session.send_volatile(Volatile::ClaimWanted(sr));
-                let since = self.claim_wanted_sent.get(&sr).filter(|&&(t, _, _)| t == to).map_or(now_ms, |&(_, _, since)| since);
-                self.claim_wanted_sent.insert(sr, (to, now_ms, since));
-            }
-        }
-    }
-
-    /// Under `claim` (a directory): every super-region whose directory owner left cleanly and
-    /// has not come back (`left_peers`) that something here needs — a message held for that
-    /// host in its session (or waiting for one), or a spawn placement (`land_wanted`) — is
-    /// asked of the coordinator ([`HostMsg::LandWanted`]) at most once per
-    /// [`super::LAND_WANTED_EVERY_MS`]; it gives that host's land to an heir (R4 drain).
-    /// Called at the end of every [`Self::pump_peers`], it looks through what is held at most
-    /// once per that period (a need that flickers keeps its super-region's last ask: the
-    /// timestamps go only once older than the period). Never under `Static`: its leaver gets
-    /// what waits for it when it returns (R3).
-    fn ask_for_land(&mut self, now_ms: u64) {
-        if self.ownership.0.directory().is_none() || self.left_peers.is_empty() {
-            self.land_wanted.clear();
-            self.land_wanted_sent.clear();
-            return;
-        }
-        if self.land_scanned_ms.is_some_and(|at| now_ms < at + super::LAND_WANTED_EVERY_MS) {
-            return;
-        }
-        self.land_scanned_ms = Some(now_ms);
-        let s = self.ownership.1;
-        let mut needs: BTreeSet<crate::SuperRegion> = std::mem::take(&mut self.land_wanted);
-        for &o in self.left_peers.keys() {
-            let session = self.peers.get(&o).into_iter().flat_map(|p| p.session.unreceived());
-            let waiting = self.peer_waiting.get(&o).into_iter().flatten();
-            needs.extend(session.chain(waiting).filter_map(reliable_target).map(|rc| crate::super_region_of(rc, s)));
-        }
-        // A subscribe waiting for that land (`Session::asked_elsewhere`, R4 Task 16).
-        needs.extend(self.sessions.values().flat_map(|x| x.asked_elsewhere.iter()).map(|rc| crate::super_region_of(*rc, s)));
-        // Only land a departed host still holds.
-        needs.retain(|sr| matches!(self.owner_of_sr(*sr), crate::Owner::Host(h) if self.left_peers.contains_key(&h)));
-        // Kept a second period: a need still there at the next scan is not logged again.
-        self.land_wanted_sent.retain(|_, at| now_ms < *at + 2 * super::LAND_WANTED_EVERY_MS);
-        for &sr in &needs {
-            let recent = self.land_wanted_sent.get(&sr).is_some_and(|&at| now_ms < at + super::LAND_WANTED_EVERY_MS);
-            if recent {
-                continue;
-            }
-            if !self.land_wanted_sent.contains_key(&sr) {
-                log::info!("[server] super-region {sr:?} of a host that left is needed here: asking the coordinator for it");
-            }
-            self.land_wanted_sent.insert(sr, now_ms);
-            self.world_send(HostMsg::LandWanted { sr });
-            // Elastic 2a: a landless host is no recipient of the `Leave` succession that gives
-            // this land away — no order updates its directory — so each ask comes with a
-            // directory read (paced as the asks are): the heir is found there once declared.
-            self.directory_wanted = true;
-        }
-        // A placement's need stays while it is held (`retry_held_spawns` notes it again).
-        self.land_wanted = needs;
-    }
-
-    /// A spawn placement here needs `rc`, whose owner left cleanly (`placement.rs`): its
-    /// land is asked for ([`Self::ask_for_land`]).
-    pub(super) fn note_land_wanted(&mut self, rc: RegionCoords) {
-        self.land_wanted.insert(crate::super_region_of(rc, self.ownership.1));
-    }
-
-    /// The server's answer to [`Self::take_claims_wanted`]: this host won `rows`
-    /// (`(super-region, epoch)`, already in its fence). Its directory says so, every peer is
-    /// told ([`Reliable::Owns`]) and what waited for those super-regions is delivered here.
+    /// The server's answer to [`Self::take_assigned`]: `rows` (`(super-region, epoch)`) are
+    /// this host's, ALREADY in its fence. Its directory says so, every peer is told
+    /// ([`Reliable::Owns`]) and what waited for those super-regions is delivered here.
     pub fn claimed(&mut self, rows: Vec<(crate::SuperRegion, u64)>) {
         let me = self.ordinal();
         let Some(directory) = self.ownership.0.directory_mut() else {
-            log::error!("[server] {} super-region(s) claimed, but this host's ownership keeps no directory", rows.len());
+            log::error!("[server] {} super-region(s) assigned, but this host's ownership keeps no directory", rows.len());
             return;
         };
         for &(sr, epoch) in &rows {
             directory.set(sr, Some(me), epoch);
         }
-        log::info!("[server] claimed super-region(s) {rows:?} on demand");
+        log::info!("[server] super-region(s) {rows:?} are this host's now");
         for &(sr, _) in &rows {
-            self.forget_claim_need(sr);
+            self.forget_land_need(sr);
         }
         let peers: Vec<HostId> = self.peers.keys().copied().collect();
         for p in peers {
@@ -1721,23 +1557,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.send_to_region(to, RegionInput::Transfer(msg.into_event(), stamp));
                 }
             }
-            // A peer needs a region of `sr` and takes this host for its preferred claimer.
-            // A draining host claims no land: the asker prefers another host once its
-            // directory shows the mark (its next read).
-            Volatile::ClaimWanted(sr) if self.ownership.0.directory().is_some_and(|d| d.is_draining(self.ordinal())) => {
-                log::debug!("[server] host {from} asked this draining host to claim {sr:?}: not claimed");
+            // An older host's ask to claim free land (before Elastic 3): no host claims land
+            // any more — the coordinator assigns it. Never sent by this build; ignored.
+            Volatile::ClaimWanted(sr) => {
+                log::debug!("[server] host {from} asked this host to claim {sr:?}: ignored (the coordinator assigns land)");
             }
-            Volatile::ClaimWanted(sr) => match self.ownership.0.owner_of(sr) {
-                crate::Owner::Free => {
-                    self.claim_asks.insert(sr);
-                }
-                crate::Owner::Unknown => {
-                    self.claim_asks.insert(sr);
-                    self.directory_wanted = true;
-                }
-                // Owned: the asker learns it from that owner's `Owns` (or its next read).
-                crate::Owner::Me | crate::Owner::Host(_) => {}
-            },
             // An input the client sent to that host after its body left for this one.
             Volatile::Input { client, kind, stamp } => {
                 if kind.input_client() != Some(client) {
@@ -2043,7 +1867,7 @@ pub fn intents_in(r: &Reliable) -> Vec<crate::IntentMsg> {
 }
 
 /// The region a state message is bound for (a transfer's, a move's, an intent's or reply's).
-fn reliable_target(r: &Reliable) -> Option<RegionCoords> {
+pub(super) fn reliable_target(r: &Reliable) -> Option<RegionCoords> {
     match r.inner() {
         Reliable::Transfer { target, .. } | Reliable::PlayerMove { target, .. } => Some(*target),
         Reliable::Intent(m) => Some(peer_intent_target(m)),

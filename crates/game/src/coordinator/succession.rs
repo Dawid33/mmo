@@ -88,7 +88,7 @@
 //!
 //! **Drain** (Task 11, decision 7): a host that leaves parks everything in its leave cut, its
 //! `hosts` row turns clean and its claims STAY. When a live host needs one of its regions it
-//! says so ([`HostMsg::LandWanted`]); the runtime looks the owner up
+//! says so ([`HostMsg::LandNeeded`]); the runtime looks the owner up
 //! ([`Coordinator::take_land_lookups`] → [`super::Input::LandOwners`]) and, when no host
 //! lapsed, [`Coordinator::declare_wanted`] hands out ONE `Leave` succession giving ALL that
 //! host's land to `heir_of` over the live attached hosts, with the same runs as a crash's —
@@ -97,7 +97,7 @@
 //! the latest hosts read shows clean and live; a request is dropped if that row stops being
 //! clean and live, and the store refuses a declaration whose rows changed under it (`Gone` /
 //! `NotLapsed`: asked again after a fresh read). Nothing is decided by the leaver. The requests
-//! are in the projection (Elastic 2a); the hosts ask again every [`crate::LAND_WANTED_EVERY_MS`]
+//! are in the projection (Elastic 2a); the hosts ask again every [`crate::LAND_NEEDED_EVERY_MS`]
 //! anyway.
 
 use std::collections::{BTreeMap, BTreeSet};

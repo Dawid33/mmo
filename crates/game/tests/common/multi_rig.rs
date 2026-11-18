@@ -53,6 +53,9 @@ pub struct RigWorldLink {
     hold_orders: Arc<std::sync::atomic::AtomicBool>,
     /// What the order hold kept back, in order.
     stash: std::collections::VecDeque<game::CoordMsg>,
+    /// Test hook ([`MultiRig::drop_assigned`]): this many of the next [`game::CoordMsg::Assigned`]
+    /// read are lost (the message never came).
+    drop_assigned: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl game::WorldLink for RigWorldLink {
@@ -79,6 +82,13 @@ impl game::WorldLink for RigWorldLink {
         };
         if matches!(msg, Some(game::CoordMsg::HopIs { .. })) {
             self.hop_is.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if matches!(msg, Some(game::CoordMsg::Assigned { .. })) {
+            let left = self.drop_assigned.load(std::sync::atomic::Ordering::SeqCst);
+            if left > 0 {
+                self.drop_assigned.store(left - 1, std::sync::atomic::Ordering::SeqCst);
+                return self.recv();
+            }
         }
         msg
     }
@@ -291,6 +301,9 @@ pub struct MultiRig {
     pub world_hop_is: Vec<Arc<std::sync::atomic::AtomicUsize>>,
     /// Each host's [`RigWorldLink`] order-hold flag ([`Self::hold_orders`]).
     pub world_hold_orders: Vec<Arc<std::sync::atomic::AtomicBool>>,
+    /// Each host's [`RigWorldLink`] count of `Assigned` messages still to lose
+    /// ([`Self::drop_assigned`]), by host slot (kept across a host's restarts).
+    pub world_drop_assigned: Vec<Arc<std::sync::atomic::AtomicUsize>>,
     /// Made without a spawner schedule (every region ticks in lockstep).
     pub lockstep: bool,
     /// The rig's in-memory two-phase store (world cuts, [`Self::drive_world_cuts`]):
@@ -316,18 +329,26 @@ pub struct MultiRig {
     pub parked_hold: bool,
     /// The directory every host answers from ([`Self::with_directory`]); `None` = `Static`.
     pub directory: Option<Vec<(game::SuperRegion, Option<HostId>, u64)>>,
-    /// The rig's `super_regions` table while hosts claim on demand ([`Self::with_claims`]):
-    /// owner (`None` = a free row) and epoch per super-region.
+    /// The rig's `super_regions` table while land is assigned on demand
+    /// ([`Self::with_assignment`]): owner (`None` = a free row) and epoch per super-region.
     pub claim_store: Option<BTreeMap<game::SuperRegion, (Option<HostId>, u64)>>,
-    /// Claims asked of the store and not answered yet: `(rounds left, host, super-regions)`
-    /// (at most one per host, as a server keeps one `claim_free` in flight).
-    pub claims_pending: Vec<(u32, HostId, Vec<game::SuperRegion>)>,
+    /// Whether the rig coordinator assigns free land ([`Self::with_assignment`]): its crash
+    /// policy is `Succession` and every round ([`Self::drive_assignment`]) its land lookups are
+    /// read from the rig's `super_regions` table and its assignments executed there.
+    pub assigning: bool,
+    /// Each host's load as its `hosts` row reports it to the coordinator's reads (none: zero).
+    pub loads: BTreeMap<HostId, game::HostLoad>,
+    /// What each host's FENCE holds of the land assigned to it: the rows the rig took from its
+    /// `take_assigned` (or healed from a directory read) before telling it `claimed`, as the
+    /// server's directory keeper does. Cleared when the host dies.
+    pub assigned_fences: BTreeMap<HostId, BTreeMap<game::SuperRegion, u64>>,
+    /// While set, the store's answers to the assignments executed are lost (the deciding
+    /// replica dies after the commit): the coordinator sends no `Assigned` for them.
+    pub assign_answers_lost: bool,
     /// Hosts marked draining (`worldctl drain`): out of every directory read's live set, told
-    /// to every reader ([`game::WorldManager::set_draining`]), and their claims win nothing
-    /// (the store's guard).
+    /// to every reader ([`game::WorldManager::set_draining`]) and to the coordinator's reads,
+    /// and assigned nothing (the store's guard).
     pub draining: BTreeSet<HostId>,
-    /// Claims asked of the store, per host (counted when asked).
-    pub claims_asked: BTreeMap<HostId, u64>,
     /// Directory reads a host asked for (`take_directory_wanted`), per host.
     pub reads_asked: BTreeMap<HostId, u64>,
     /// Rounds played (the seed of each claim's answer delay).
@@ -487,6 +508,7 @@ impl MultiRig {
                 world_hold: Vec::new(),
                 world_hop_is: Vec::new(),
                 world_hold_orders: Vec::new(),
+                world_drop_assigned: Vec::new(),
                 lockstep: schedule.is_none(),
                 parts: BTreeMap::new(),
                 decided: BTreeMap::new(),
@@ -499,9 +521,11 @@ impl MultiRig {
                 parked_hold: false,
                 directory: None,
                 claim_store: None,
-                claims_pending: Vec::new(),
+                assigning: false,
+                loads: BTreeMap::new(),
+                assigned_fences: BTreeMap::new(),
+                assign_answers_lost: false,
                 draining: BTreeSet::new(),
-                claims_asked: BTreeMap::new(),
                 reads_asked: BTreeMap::new(),
                 rounds: 0,
                 boots: host_ids(hosts).map(rig_boot).collect(),
@@ -547,6 +571,12 @@ impl MultiRig {
         // A store stands behind it (Elastic 2a): every output leaves with its transition, and
         // the last transition is what a restarted coordinator loads.
         let core = game::coordinator::RigCluster::with_store(game::Coordinator::new_for(history, now, process));
+        while self.world_drop_assigned.len() < self.hosts.len() {
+            self.world_drop_assigned.push(Arc::default());
+        }
+        if self.assigning {
+            core.lock().unwrap_or_else(|e| e.into_inner()).set_crash_policy(game::CrashPolicy::Succession);
+        }
         // Every link before any is installed (an install pumps it): none misses the view.
         let links: Vec<game::InlineWorldLink> = host_ids(self.hosts.len() as u32)
             .map(|h| game::InlineWorldLink::shared(core.clone(), h).with_delay(mix(self.seed, 3000 + h.0), self.link_delay))
@@ -562,7 +592,7 @@ impl MultiRig {
             self.world_hold_orders.push(hold_orders.clone());
             let rig = &mut self.hosts[h];
             let now = rig.now_ms;
-            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is, hold_orders: hold_orders.clone(), stash: Default::default() }), world_boot(self.boots[h]), now);
+            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is, hold_orders: hold_orders.clone(), stash: Default::default(), drop_assigned: self.world_drop_assigned[h].clone() }), world_boot(self.boots[h]), now);
             rig.settle();
         }
         self.coordinator = Some(core);
@@ -847,61 +877,39 @@ impl MultiRig {
     }
 
     /// From now on the rig coordinator runs successions (`claim`) and gives a departed
-    /// host's land to an heir as soon as a host asks for it (`LandWanted`): every
-    /// [`Self::cut_round`] does what the coordinator runtime does ([`Self::drive_land`]).
+    /// host's land to an heir as soon as a host asks for it (`LandNeeded`): every
+    /// [`Self::cut_round`] does what the coordinator runtime does ([`Self::drive_land`]), and
+    /// every round looks up the land asked for ([`Self::drive_assignment`]).
     pub fn with_land_on_demand(&mut self) {
         let mut core = self.core();
         core.set_crash_policy(game::CrashPolicy::Succession);
         drop(core);
         self.land_on_demand = true;
+        self.assigning = true;
     }
 
     /// One pass of the coordinator runtime's succession pump for drained land
-    /// ([`Self::with_land_on_demand`]): a read of the `hosts` rows (every live host beating,
-    /// every host that left clean as the boot that left), the super-regions hosts asked for
-    /// looked up in the rig's `super_regions` table (`Input::LandOwners`), and a declaration or
-    /// an assignment (Elastic 3) the coordinator wants executed in the rig store
-    /// ([`Self::declare_in_store`], [`Self::assign_in_store`]) and answered. The hosts a cut
-    /// needs are the live ones whose row is not clean.
+    /// ([`Self::with_land_on_demand`]): a read of the `hosts` rows ([`Self::hosts_seen`]), the
+    /// land hosts asked for looked up ([`Self::drive_assignment`]'s lookups, Elastic 3), and a
+    /// `Leave` declaration the coordinator wants executed in the rig store
+    /// ([`Self::declare_in_store`]) and answered. The hosts a cut needs are the live ones whose
+    /// row is not clean.
     pub fn drive_land(&mut self) {
         if !self.land_on_demand {
             return;
         }
         let n = self.hosts.len() as u32;
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let declared_dead: BTreeSet<(HostId, u64)> =
-            self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
-        let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
-            .filter(|h| !self.dead.contains(h) || self.left.contains_key(h))
-            .map(|h| {
-                let boot = self.boots[h.0 as usize];
-                let clean = self.left.get(&h) == Some(&boot);
-                let state = if declared_dead.contains(&(h, boot)) && !clean { game::HOST_DEAD } else { game::HOST_LIVE };
-                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms: now + 1, draining: false, load: Default::default(), landed: self.landed(h) }
-            })
-            .collect();
+        let rows = self.hosts_seen(now);
         let expected: BTreeSet<HostId> =
             host_ids(n).filter(|h| !self.dead.contains(h) && self.left.get(h) != Some(&self.boots[(*h).0 as usize])).collect();
-        let mut core = self.core();
-        core.observe_leases(&rows, now, now);
-        core.set_expected_hosts(expected);
-        let asked = core.take_land_lookups();
-        drop(core);
-        // The owners read, as the runtime's: the rows of the asked super-regions only (an absent
-        // one is free). A rig without a `super_regions` table reads nothing.
-        let mut assigning = false;
-        if !asked.is_empty() {
-            if let Some(store) = &self.claim_store {
-                let rows: Vec<(game::SuperRegion, i64, u64)> = asked
-                    .iter()
-                    .filter_map(|(sr, _)| store.get(sr).map(|&(owner, epoch)| (*sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), epoch)))
-                    .collect();
-                assigning = asked.iter().any(|(sr, _)| !matches!(store.get(sr), Some((Some(_), _))));
-                self.core().apply(game::coordinator::Input::LandOwners { asked, rows }, now);
-            }
+        {
+            let mut core = self.core();
+            core.observe_leases(&rows, now, now);
+            core.set_expected_hosts(expected);
         }
-        let wanted = self.core().declare_wanted(now);
-        if wanted.is_none() && !assigning {
+        self.answer_land_lookups();
+        if self.core().declare_wanted(now).is_none() {
             return;
         }
         // Handed out: it leaves with the transition, executed and answered with it.
@@ -1402,18 +1410,58 @@ impl MultiRig {
         self.directory = Some(rows);
     }
 
-    /// From now on every host claims on demand against the rig's `super_regions` table, made
+    /// From now on free land is ASSIGNED on demand against the rig's `super_regions` table, made
     /// from the rows [`Self::with_directory`] gave (call it first): each host reads it whole
-    /// (every host live), and every round ([`Self::drive_claims`]) a host's
-    /// `take_claims_wanted` is answered as `claim_free` answers it — after 0..=`link_delay`
-    /// rounds (seeded) — with `claimed`, and a directory read when it won less than it asked
-    /// or asked for one (`take_directory_wanted`).
-    pub fn with_claims(&mut self) {
+    /// (every host live); the rig coordinator — now, or once [`Self::with_coordinator`] made it —
+    /// runs `Succession` and every round ([`Self::drive_assignment`]) reads the land its hosts
+    /// asked for from the table, executes its assignments there and answers them; a host's
+    /// `take_assigned` is fenced and answered with `claimed`, as the server's directory keeper
+    /// does. A test that needs free land assigned gives the rig a coordinator.
+    pub fn with_assignment(&mut self) {
         let rows = self.directory.clone().expect("with_directory first");
         self.claim_store = Some(rows.into_iter().map(|(sr, owner, epoch)| (sr, (owner, epoch))).collect());
+        self.assigning = true;
+        if self.coordinator.is_some() {
+            self.core().set_crash_policy(game::CrashPolicy::Succession);
+        }
         for h in host_ids(self.hosts.len() as u32) {
             self.read_directory(h);
         }
+    }
+
+    /// The next `n` [`game::CoordMsg::Assigned`] host `h` reads are lost (0: none any more).
+    pub fn drop_assigned(&mut self, h: HostId, n: usize) {
+        self.world_drop_assigned[h.0 as usize].store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many more `Assigned` host `h` will lose ([`Self::drop_assigned`]).
+    pub fn assigned_drops_left(&self, h: HostId) -> usize {
+        self.world_drop_assigned[h.0 as usize].load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Every live host's world link goes down (`false`: every coordinator replica is gone, as
+    /// far as a host can tell) or comes back up (`true`; each host attaches again).
+    pub fn world_links_up(&mut self, up: bool) {
+        for h in host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h)) {
+            if let Some(link) = self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()) {
+                link.set_up(up);
+            }
+        }
+    }
+
+    /// The rows of land assigned to host `h` that its fence holds ([`Self::assigned_fences`]).
+    pub fn assigned_fence(&self, h: HostId) -> BTreeMap<game::SuperRegion, u64> {
+        self.assigned_fences.get(&h).cloned().unwrap_or_default()
+    }
+
+    /// Host `h` takes `rows` as its own: its fence first ([`Self::assigned_fences`]), then its
+    /// manager's `claimed` — the server's order.
+    pub fn fence_then_claim(&mut self, h: HostId, rows: Vec<(game::SuperRegion, u64)>) {
+        if rows.is_empty() {
+            return;
+        }
+        self.assigned_fences.entry(h).or_default().extend(rows.iter().copied());
+        self.hosts[h.0 as usize].manager.claimed(rows);
     }
 
     /// Host `h` reads the rig's `super_regions` table whole, with the `hosts` rows as the
@@ -1421,7 +1469,7 @@ impl MultiRig {
     /// and not marked draining (`claims::live_hosts`), and the clean rows (hosts that left in
     /// a committed cut) handed to the manager after the read (`note_clean_rows`).
     pub fn read_directory(&mut self, h: HostId) {
-        let store = self.claim_store.as_ref().expect("with_claims");
+        let store = self.claim_store.as_ref().expect("with_assignment");
         let rows: Vec<(game::SuperRegion, i64, u64)> =
             store.iter().map(|(sr, (owner, epoch))| (*sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), *epoch)).collect();
         let clean = |o: &HostId| self.left.get(o) == Some(&self.boots[o.0 as usize]);
@@ -1443,6 +1491,17 @@ impl MultiRig {
         let present: BTreeSet<HostId> = host_ids(self.hosts.len() as u32).filter(shown).collect();
         let left: Vec<(HostId, u64)> = left.into_iter().filter(|(o, _)| shown(o)).collect();
         let next_host_id = self.hosts.len() as u64;
+        // A lost `Assigned`, healed as the server's directory keeper heals it: a row this host
+        // owns that its fence lacks, newer than its directory knows, is fenced and taken FIRST.
+        let fence = self.assigned_fence(h);
+        let lost: Vec<(game::SuperRegion, u64)> = rows
+            .iter()
+            .filter(|(sr, owner, epoch)| {
+                *owner == h.0 as i64 && !fence.contains_key(sr) && *epoch > self.hosts[h.0 as usize].manager.known_epoch(*sr).unwrap_or(0)
+            })
+            .map(|(sr, _, epoch)| (*sr, *epoch))
+            .collect();
+        self.fence_then_claim(h, lost);
         let m = &mut self.hosts[h.0 as usize].manager;
         m.set_draining(self.draining.clone());
         m.directory_read(rows, live);
@@ -1452,65 +1511,108 @@ impl MultiRig {
         m.note_clean_rows(left);
     }
 
-    /// One round of every host's claim loop (as the server's): directory reads asked for,
-    /// claims asked for (one in flight per host), claims due answered.
-    pub fn drive_claims(&mut self) {
+    /// One round of what serves land on demand ([`Self::with_assignment`]): every host's
+    /// directory read it asked for; the coordinator's land lookups (when it has any) answered
+    /// from the rig's `super_regions` table after a `hosts` read — every live host beating, its
+    /// load and drain mark — and what that decided committed, executed in the table and
+    /// answered (lost while [`Self::assign_answers_lost`]); then every host's assigned rows
+    /// fenced and taken (`take_assigned` → `claimed`).
+    pub fn drive_assignment(&mut self) {
         if self.claim_store.is_none() {
             return;
         }
         self.rounds += 1;
         for h in host_ids(self.hosts.len() as u32) {
+            if self.dead.contains(&h) {
+                continue;
+            }
             if self.hosts[h.0 as usize].manager.take_directory_wanted() {
                 *self.reads_asked.entry(h).or_default() += 1;
                 self.read_directory(h);
             }
-            if self.claims_pending.iter().any(|(_, p, _)| *p == h) {
+        }
+        if self.assigning && self.coordinator.is_some() {
+            self.answer_land_lookups();
+        }
+        for h in host_ids(self.hosts.len() as u32) {
+            if self.dead.contains(&h) {
                 continue;
             }
-            let wanted = self.hosts[h.0 as usize].manager.take_claims_wanted();
-            if !wanted.is_empty() {
-                *self.claims_asked.entry(h).or_default() += 1;
-                let delay = (mix(self.seed, self.rounds * 64 + h.0) % u64::from(self.link_delay + 1)) as u32;
-                self.claims_pending.push((delay, h, wanted));
-            }
-        }
-        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.claims_pending).into_iter().partition(|(d, _, _)| *d == 0);
-        self.claims_pending = later.into_iter().map(|(d, h, srs)| (d - 1, h, srs)).collect();
-        for (_, h, srs) in due {
-            let store = self.claim_store.as_mut().expect("with_claims");
-            let mut won = Vec::new();
-            // A draining host's claim wins nothing (the store's guard).
-            for sr in srs.iter().filter(|_| !self.draining.contains(&h)) {
-                match store.get(sr).copied() {
-                    None => {
-                        store.insert(*sr, (Some(h), 1));
-                        won.push((*sr, 1));
-                    }
-                    Some((None, epoch)) => {
-                        store.insert(*sr, (Some(h), epoch + 1));
-                        won.push((*sr, epoch + 1));
-                    }
-                    Some((Some(_), _)) => {}
-                }
-            }
-            let short = won.len() < srs.len();
-            if !won.is_empty() {
-                self.hosts[h.0 as usize].manager.claimed(won);
-            }
-            if short {
-                self.read_directory(h);
-            }
+            let rows = self.hosts[h.0 as usize].manager.take_assigned();
+            self.fence_then_claim(h, rows);
         }
         for rig in &mut self.hosts {
             rig.settle();
         }
     }
 
+    /// The `hosts` rows as the coordinator's ticker reads them: every host running (or that
+    /// left, as the boot that left) beating at `now`, its row dead once a crash succession
+    /// declared that boot, clean once it left, with its drain mark and load.
+    fn hosts_seen(&self, now: u64) -> Vec<game::coordinator::HostSeen> {
+        let declared_dead: BTreeSet<(HostId, u64)> =
+            self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
+        host_ids(self.hosts.len() as u32)
+            .filter(|h| !self.dead.contains(h) || self.left.contains_key(h))
+            .map(|h| {
+                let boot = self.boots[h.0 as usize];
+                let clean = self.left.get(&h) == Some(&boot);
+                let state = if declared_dead.contains(&(h, boot)) && !clean { game::HOST_DEAD } else { game::HOST_LIVE };
+                game::coordinator::HostSeen {
+                    ordinal: h,
+                    boot,
+                    clean,
+                    state,
+                    seen_ms: now + 1,
+                    draining: self.draining.contains(&h),
+                    load: self.loads.get(&h).copied().unwrap_or_default(),
+                    landed: self.landed(h),
+                }
+            })
+            .collect()
+    }
+
+    /// The ticker's land lookups ([`game::Coordinator::take_land_lookups`]), when it has any:
+    /// a `hosts` read first ([`Self::hosts_seen`]: who may be assigned), then the owners read of
+    /// the asked rows from the rig's `super_regions` table (`Input::LandOwners`), and what it
+    /// decided committed, executed and answered. A rig without a table reads nothing.
+    fn answer_land_lookups(&mut self) {
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let rows = self.hosts_seen(now);
+        let asked = {
+            let mut core = self.core();
+            if !core.is_ticker() {
+                return;
+            }
+            let asked = core.take_land_lookups();
+            if asked.is_empty() {
+                return;
+            }
+            core.observe_leases(&rows, now, now);
+            asked
+        };
+        let Some(store) = &self.claim_store else { return };
+        let owned: Vec<(game::SuperRegion, i64, u64)> = asked
+            .iter()
+            .filter_map(|(sr, _)| store.get(sr).map(|&(owner, epoch)| (*sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), epoch)))
+            .collect();
+        self.core().apply(game::coordinator::Input::LandOwners { asked, rows: owned }, now);
+        self.core().commit();
+        let answer = !self.assign_answers_lost;
+        for a in self.execute_committed(answer) {
+            if let game::coordinator::DecisionAnswer::Declared { outcome: Ok(game::Declared::Done(list)), .. } = a {
+                self.land_declared.extend(list);
+            }
+        }
+        // The answers' messages leave with the next transition (write-before-send).
+        self.core().commit();
+    }
+
     /// Host `h` holds no super-region any more: each of its rows in the rig's `super_regions`
     /// table is free (epoch + 1), and every live host's directory is read again — the state
     /// of a host that never claimed anything (claim on demand: an idle host).
     pub fn free_land_of(&mut self, h: HostId) {
-        let store = self.claim_store.as_mut().expect("with_claims");
+        let store = self.claim_store.as_mut().expect("with_assignment");
         for (owner, epoch) in store.values_mut() {
             if *owner == Some(h) {
                 *owner = None;
@@ -1524,7 +1626,7 @@ impl MultiRig {
         }
     }
 
-    /// The owner of `sr` in the rig's `super_regions` table ([`Self::with_claims`]).
+    /// The owner of `sr` in the rig's `super_regions` table ([`Self::with_assignment`]).
     pub fn stored_owner(&self, sr: game::SuperRegion) -> Option<HostId> {
         self.claim_store.as_ref().and_then(|s| s.get(&sr)).and_then(|(owner, _)| *owner)
     }
@@ -1564,6 +1666,8 @@ impl MultiRig {
     /// ([`Self::forgiven`]): its regions come back from the store with the heir (Task 9).
     pub fn kill(&mut self, h: HostId) {
         assert!(!self.dead.contains(&h), "host {h} is dead already");
+        // Its fence dies with its process.
+        self.assigned_fences.remove(&h);
         let n = self.hosts.len() as u32;
         let mut gone: BTreeSet<EntityId> = BTreeSet::new();
         for (id, last) in &self.tracked {
@@ -1638,6 +1742,9 @@ impl MultiRig {
         // No keeper: its "home" is never kept (a slot so every table stays indexed by id).
         self.homes.push(self.homes[0]);
         self.boots.push(boot);
+        while self.world_drop_assigned.len() < self.hosts.len() {
+            self.world_drop_assigned.push(Arc::default());
+        }
         if self.coordinator.is_some() {
             self.world_sent.push(Arc::default());
             self.world_hold.push(Arc::default());
@@ -1724,7 +1831,7 @@ impl MultiRig {
             self.world_hold[h.0 as usize] = hold.clone();
             self.world_hop_is[h.0 as usize] = hop_is.clone();
             let rig = &mut self.hosts[h.0 as usize];
-            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is, hold_orders: hold_orders.clone(), stash: Default::default() }), world_boot(boot), now);
+            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is, hold_orders: hold_orders.clone(), stash: Default::default(), drop_assigned: self.world_drop_assigned[h.0 as usize].clone() }), world_boot(boot), now);
             rig.settle();
         }
     }
@@ -1837,7 +1944,7 @@ impl MultiRig {
             .filter(|h| !self.row_dead(*h) && self.left.get(h) != Some(&self.boots[h.0 as usize]) && !predecessors.contains(h))
             .filter(|h| self.landed(*h) || d.heirs.contains(h))
             .collect();
-        let store = self.claim_store.as_mut().expect("with_claims: the rig's super_regions table");
+        let store = self.claim_store.as_mut().expect("with_assignment: the rig's super_regions table");
         let mut out = Vec::new();
         for (&(predecessor, predecessor_boot), &heir) in d.dead.iter().zip(&d.heirs) {
             let mut moved = Vec::new();
@@ -1880,7 +1987,7 @@ impl MultiRig {
             || self.successions.iter().any(|(s, _)| s.kind == game::SuccessionKind::Crash && (s.predecessor, s.predecessor_boot) == (h, boot))
     }
 
-    /// `assign_land_in` against the rig's `super_regions` table ([`Self::with_claims`]): `Done`
+    /// `assign_land_in` against the rig's `super_regions` table ([`Self::with_assignment`]): `Done`
     /// for an absent (epoch 1) or free (epoch + 1) row when the host's row is that live,
     /// dirty boot and not draining; otherwise the matching refusal, nothing written.
     pub fn assign_in_store(&mut self, a: game::coordinator::AssignLand) -> game::coordinator::Assigned {
@@ -1892,7 +1999,7 @@ impl MultiRig {
         if self.draining.contains(&h) {
             return Assigned::HostDraining;
         }
-        let store = self.claim_store.as_mut().expect("with_claims: the rig's super_regions table");
+        let store = self.claim_store.as_mut().expect("with_assignment: the rig's super_regions table");
         let epoch = match store.get(&a.sr).copied() {
             None => 1,
             Some((None, epoch)) => epoch + 1,
@@ -2383,7 +2490,7 @@ impl MultiRig {
         for rig in &mut self.hosts {
             rig.settle();
         }
-        self.drive_claims();
+        self.drive_assignment();
         self.drive_adoptions();
         self.assert_conserved_world();
     }

@@ -325,13 +325,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             Placement::Host(owner) if self.leave_blocks(owner) && self.ownership.0.directory().is_some() => {
                 // R4 drain: the owner left cleanly (or is leaving in a cut not decided here
-                // yet). Its land is asked for (`LandWanted`, once it left); the order waits
+                // yet). Its land is asked for (`LandNeeded`, once it left); the order waits
                 // like one for an unknown owner — placed once the heir holds the land (the
                 // heir holds every order until it adopted), else refused at
                 // `SPAWN_SYNC_WAIT_MS` (the login service answers 503, the client retries).
-                // Asked at the next scan of `ask_for_land`: up to `LAND_WANTED_EVERY_MS` later.
+                // Asked at the next pass of `ask_for_land` (`land.rs`).
                 let region = self.spawn_region(req.record_region);
-                self.note_land_wanted(region);
+                self.note_land_needed(region);
                 self.hold_spawn(req, since_ms, "its region's host left the world; its land is asked for")
             }
             Placement::Host(owner) => {

@@ -307,28 +307,6 @@ fn a_host_frozen_in_a_fenced_transaction_does_not_block_its_declaration_for_ever
     w.shutdown();
 }
 
-/// Final review A-M1: `claim_free` never locks a row it cannot win. A row another host holds
-/// — here `FOR SHARE` in that host's staged cut part — is left alone at once (an upsert's
-/// `ON CONFLICT DO UPDATE … WHERE` locked it before its `WHERE`, and the claim waited for that
-/// cut's decision while holding this store's writer lock, which its own part needs).
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn claim_free_does_not_wait_for_a_row_another_host_holds() {
-    let Some(w) = World::new(2) else { return };
-    const WAIT_MS: u64 = 500;
-    w.hosts[0].set_claim_lock_timeout_ms(WAIT_MS);
-    w.hosts[1].prepare_cut(part(1, hid(1), vec![]), w.fences[1].clone(), 0).recv().unwrap().unwrap();
-    let theirs: Vec<world_store::SuperRegion> = w.fences[1].epochs.keys().copied().collect();
-    let started = Instant::now();
-    let won = w.hosts[0].claim_free(hid(0), boot_of(hid(0)), theirs).expect("a claim that wins nothing is no error");
-    let waited = started.elapsed();
-    assert!(won.epochs.is_empty(), "host 1 holds them: {won:?}");
-    assert!(waited < Duration::from_millis(WAIT_MS / 2), "the claim waited {waited:?} behind a row it could not win");
-    assert_eq!(w.h.owned_by(hid(1)).unwrap(), w.fences[1], "host 1's rows are untouched");
-    assert!(!w.h.abort_cut(CutId(1), 100).unwrap());
-    w.shutdown();
-}
-
 /// Final review A-I4: the store cannot refuse a settle whose heir part did not adopt the
 /// predecessor's in-flight rows (the pairing is the coordinator's), but it DETECTS it: the
 /// rows that outlive the settle under the predecessor's ordinal are reported (an error line
@@ -559,33 +537,17 @@ fn sqlite_declares_nothing() {
 
 // ---- Fix round 1: a declared-dead host wins nothing; several predecessors; refusals ----------
 
-/// Host 1 is declared dead while its process still runs: its `claim_free` of a free row is
-/// refused as fenced and the row stays free.
-#[test]
-fn a_dead_hosts_claim_of_a_free_row_is_refused() {
-    let Some(w) = World::new(2) else { return };
-    w.vouch(hid(1));
-    w.declared(hid(1), hid(0));
-    let free = (9, 9);
-    let err = w.hosts[1].claim_free(hid(1), boot_of(hid(1)), vec![free]).unwrap_err();
-    assert_eq!(err, StoreError::Fenced { sr: None });
-    assert!(w.h.owners().unwrap().iter().all(|(sr, _, _)| *sr != free), "the row was not created");
-    // The heir claims it as usual.
-    let won = w.hosts[0].claim_free(hid(0), boot_of(hid(0)), vec![free]).unwrap();
-    assert_eq!(won.epochs.keys().copied().collect::<Vec<_>>(), vec![free]);
-    w.shutdown();
-}
-
-/// A free row host 1 won just before its declaration moves to the heir with the rest.
+/// A free row assigned to host 1 just before its declaration moves to the heir with the rest.
 #[test]
 fn a_claim_committed_just_before_the_declaration_moves_with_the_rest() {
     let Some(w) = World::new(2) else { return };
     let late = (9, 9);
-    let won = w.hosts[1].claim_free(hid(1), boot_of(hid(1)), vec![late]).unwrap();
+    let assigned = w.h.assign_land(game::coordinator::AssignLand { sr: late, host: hid(1), boot: boot_of(hid(1)) }).unwrap();
+    let game::coordinator::Assigned::Done { epoch } = assigned else { panic!("{assigned:?}") };
     w.vouch(hid(1));
     let s = w.declared(hid(1), hid(0));
     assert_eq!(s.moved.len(), 3, "its two boot rows and the late one: {:?}", s.moved);
-    assert!(s.moved.contains(&(late, won.epochs[&late] + 1)));
+    assert!(s.moved.contains(&(late, epoch + 1)));
     assert!(w.h.owned_by(hid(1)).unwrap().epochs.is_empty(), "the dead ordinal owns nothing");
     w.shutdown();
 }
@@ -680,10 +642,11 @@ fn malformed_declarations_are_unsupported() {
 
 // ---- R4 Task 11: a cleanly-left boot claims nothing ------------------------------------------
 
-/// Host 1 leaves clean (its leave cut committed): from then on a claim by THAT boot — of a
-/// free row, or a re-claim of its own — is refused as fenced and writes nothing, before and
-/// after its `Leave` succession is declared (the declaration does not mark the row dead).
-/// Another process of host 1 is a new host with a new id: it claims normally.
+/// Host 1 leaves clean (its leave cut committed): from then on a re-claim of its own rows by
+/// THAT boot is refused as fenced and writes nothing, before and after its `Leave` succession is
+/// declared (the declaration does not mark the row dead). Another process of host 1 is a new
+/// host with a new id: it is assigned land normally. (An assignment to the clean boot itself is
+/// `assign.rs`'s `HostNotLive`.)
 #[test]
 fn a_cleanly_left_boot_claims_nothing() {
     let Some(w) = World::new(2) else { return };
@@ -695,9 +658,7 @@ fn a_cleanly_left_boot_claims_nothing() {
     assert_eq!(w.state_of(hid(1)), (HOST_LIVE, true), "left clean");
     let free = (9, 9);
     let refused = |w: &World| {
-        assert_eq!(w.hosts[1].claim_free(hid(1), boot_of(hid(1)), vec![free]).unwrap_err(), StoreError::Fenced { sr: None });
         assert_eq!(w.hosts[1].claim_super_regions_live(hid(1), boot_of(hid(1)), own.clone()).unwrap_err(), StoreError::Fenced { sr: None });
-        assert!(w.h.owners().unwrap().iter().all(|(sr, _, _)| *sr != free), "the free row was not created");
     };
     refused(&w);
     let before = w.h.owned_by(hid(1)).unwrap();
@@ -712,7 +673,7 @@ fn a_cleanly_left_boot_claims_nothing() {
     assert_eq!(s.moved.len(), 2);
     // The heir's cut settles the `Leave` succession (it adopts the in-flight rows host 1's leave
     // cut left). Elastic 1: another process of host 1 is a NEW host — it registers at once under
-    // a new id, owns nothing and claims normally; host 1's row (clean, landless, named by no open
+    // a new id, owns nothing and is assigned land normally; host 1's row (clean, landless, named by no open
     // succession) is pruned at that registration.
     assert_eq!(w.hosts[0].cut_decided(CutId(1)).unwrap(), Some(true));
     let heir = w.h.owned_by(hid(0)).unwrap();
@@ -722,8 +683,8 @@ fn a_cleanly_left_boot_claims_nothing() {
     let next = w.hosts[1].register_host(crate::hosts::new_host("host-1", 9001), CrashPolicy::Succession).unwrap();
     assert_eq!((next.id, next.bumped), (hid(2), false));
     assert_eq!(w.h.hosts().unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![hid(0), hid(2)]);
-    let won = w.hosts[1].claim_free(next.id, 9001, vec![free]).unwrap();
-    assert_eq!(won.epochs.keys().copied().collect::<Vec<_>>(), vec![free]);
+    let won = w.h.assign_land(game::coordinator::AssignLand { sr: free, host: next.id, boot: 9001 }).unwrap();
+    assert_eq!(won, game::coordinator::Assigned::Done { epoch: 1 });
     w.shutdown();
 }
 
@@ -831,9 +792,9 @@ fn a_landless_lapsed_host_is_ended_without_a_generation_change() {
     assert_eq!((0..2).map(|o| w.h.owned_by(hid(o)).unwrap()).collect::<Vec<_>>(), land_before, "nothing moved");
     assert!(!w.hosts[2].heartbeat(hid(2), boot2, Default::default()).unwrap().live, "its next beat finds it replaced");
     assert_eq!(w.h.end_landless_host(hid(2), boot2), Ok(LandlessEnd::Gone), "dead already");
-    // A claim of a free row by the ended boot (a zombie) is refused.
-    let err = w.hosts[2].claim_free(hid(2), boot2, vec![(40, 40)]);
-    assert!(err.is_err() || err.as_ref().is_ok_and(|f| f.epochs.is_empty()), "{err:?}");
+    // An assignment of a free row to the ended boot (a zombie) is refused.
+    let refused = w.h.assign_land(game::coordinator::AssignLand { sr: (40, 40), host: hid(2), boot: boot2 }).unwrap();
+    assert_eq!(refused, game::coordinator::Assigned::HostNotLive);
     assert!(w.h.owned_by(hid(2)).unwrap().epochs.is_empty(), "the zombie won nothing");
     // The next registration prunes the dead landless row.
     let next = w.hosts[2].register_host(crate::hosts::new_host("host-2", 777), CrashPolicy::Succession).unwrap();

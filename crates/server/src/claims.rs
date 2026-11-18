@@ -1,7 +1,7 @@
 //! The server's owner-epoch claims: at start a process claims the
 //! super-regions it owns ([`HostClaims::claim`]) and keeps that
-//! [`Fence`]; a host may later grow it ([`HostClaims::add`], rows won with
-//! `claim_free`) or swap it for what it holds now ([`HostClaims::replace`]). The
+//! [`Fence`]; a host may later grow it ([`HostClaims::add`], rows the coordinator assigned
+//! it) or swap it for what it holds now ([`HostClaims::replace`]). The
 //! world store checks the current fence on every region load and cut commit; once another process claims one of those super-regions the
 //! store answers [`StoreError::Fenced`], and the process is fenced for good
 //! ([`Fenced`]): it stops ticking, refuses its clients and exits with
@@ -9,7 +9,7 @@
 //!
 //! Under `claim` (R4) a host holds nothing at boot ([`HostClaims::none`]), registers, then
 //! re-claims its own rows ([`HostClaims::reclaim_own`]); the main loop's
-//! [`DirectoryKeeper`] claims free super-regions on demand and reads the directory; an heir's
+//! [`DirectoryKeeper`] fences the land the coordinator assigns it and reads the directory; an heir's
 //! [`AdoptionReader`] reads what it inherits (R4, a succession).
 
 use game::HostId;
@@ -290,7 +290,7 @@ impl HostClaims {
         self.fence.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Grows the fence by `more` (rows this host won since, e.g. with `claim_free`): its
+    /// Grows the fence by `more` (rows this host won since, e.g. assigned by the coordinator): its
     /// epochs are merged in, a super-region in both taking `more`'s. The next load or
     /// commit is checked against them too (fenced anywhere = fenced).
     pub fn add(&self, more: Fence) {
@@ -397,11 +397,11 @@ impl HostClaims {
     }
 }
 
-// --- the directory and claiming on demand (R4, `claim`) -----------------------------------
+// --- the directory and assigned land (R4 `claim`; assigned by the coordinator, Elastic 3) ---
 
-/// The hosts a claim preference counts by `rows` at the database clock `now_ms`: live, not
+/// The hosts a directory read counts live by `rows` at the database clock `now_ms`: live, not
 /// left clean, beaten within [`game::HOST_LEASE_MS`] (what a booting host counts as alive),
-/// and NOT marked draining (`worldctl drain`: a draining host wins no land, Elastic 1).
+/// and NOT marked draining (`worldctl drain`: a draining host is assigned no land, Elastic 1).
 pub fn live_hosts(rows: &[HostRow], now_ms: u64) -> BTreeSet<HostId> {
     rows.iter()
         .filter(|r| r.state == game::HOST_LIVE && !r.clean && now_ms.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS)
@@ -431,13 +431,10 @@ pub fn read_directory(
     Ok((rows, live, draining_hosts(&hosts)))
 }
 
-/// After a failed claim, no new one for this long.
-pub const CLAIM_RETRY_MS: u64 = 1_000;
-/// After a claim that won NOTHING of what it asked (another host was faster, or this host is
-/// draining and the store gave it nothing), no new claim for this long: whatever the reason
-/// for an empty answer, claiming never spins against the store.
-pub const CLAIM_NOTHING_WON_RETRY_MS: u64 = 1_000;
-/// At most one warning per this long about failed claims or directory reads.
+/// After a failed directory read, the next one is not started before this many ms (a read
+/// the manager wants is not put off to the next backstop period).
+pub const DIRECTORY_READ_RETRY_MS: u64 = 1_000;
+/// At most one warning per this long about failed directory reads.
 pub const DIRECTORY_WARN_MS: u64 = 10_000;
 
 /// A directory read in flight: its three plain reads, each answered on its own receiver.
@@ -482,36 +479,25 @@ impl DirectoryRead {
     }
 }
 
-/// A `claim` host's directory and claims, driven from its main loop (never blocks): the
-/// manager says what it wants ([`game::WorldManager::take_claims_wanted`], always rows its
-/// directory says are free), this claims it on the store thread (`claim_free_later`, one
-/// claim in flight), grows the fence ([`HostClaims::add`]) and answers the manager
-/// ([`game::WorldManager::claimed`]). A claim that won less than it asked (another host was
-/// faster; one that won NOTHING also paces the next claim by [`CLAIM_NOTHING_WON_RETRY_MS`] —
-/// a draining host's claim wins nothing, so its rows stay free), or that failed (a lock
-/// timeout among them: retried after [`CLAIM_RETRY_MS`],
-/// never fatal), triggers a directory read — except a claim refused as `Fenced` (this boot
-/// was declared dead or replaced, R4): that sets the [`Fenced`] flag and claims nothing more; so does the manager's
-/// [`game::WorldManager::take_directory_wanted`], and every [`world_store::TERRAIN_POLL_SECS`]
-/// as a backstop ([`game::WorldManager::directory_read`]).
+/// A `claim` host's directory and assigned land, driven from its main loop (never blocks).
+/// The land the coordinator assigned this host ([`game::WorldManager::take_assigned`]) goes
+/// into the fence ([`HostClaims::add`]) BEFORE the manager learns it
+/// ([`game::WorldManager::claimed`]): a load or a cut in it is checked against the fence from
+/// the moment the manager treats it as its own. The directory is read whole on the store thread
+/// when the manager wants it ([`game::WorldManager::take_directory_wanted`]) and every
+/// [`world_store::TERRAIN_POLL_SECS`] as a backstop ([`game::WorldManager::directory_read`]).
+///
+/// **A lost `Assigned` is healed by a read** (Elastic 3, the plan's departure 7): a read row
+/// this host owns that its fence lacks, at an epoch above the one the manager knows, is an
+/// assignment whose message never came. It is fenced and handed to the manager as assigned
+/// FIRST, before the read itself — else the read would make the manager treat it as its own
+/// (`Owner::Me`) and load regions the fence refuses (a fenced exit). A row at or below the
+/// epoch the manager knows is not: a read issued before this host gave the row up must not put
+/// it back.
 pub struct DirectoryKeeper {
     claims: HostClaims,
-    /// This process's boot: every claim is refused unless its `hosts` row is still that live boot.
-    boot: u64,
-    claiming: Option<(usize, Receiver<Result<Fence, StoreError>>)>,
-    no_claim_before: Option<Instant>,
-    /// The directory read in flight, with its number.
-    reading: Option<(u64, DirectoryRead)>,
-    /// Directory reads started so far (the next one's number is this + 1).
-    reads_started: u64,
-    /// After a claim that won less than it asked, or failed: no claim at all until a read
-    /// numbered ABOVE this one is applied (one started after that answer — an older read may
-    /// not show the rows lost). Otherwise the lost rows, still `Free` in the directory, would
-    /// be claimed again against another host's rows (finding 1: a claim must never lock
-    /// rows it cannot win).
-    claims_wait_for_read: Option<u64>,
-    /// An empty claim answer was logged (once until a claim wins something again).
-    nothing_won_told: bool,
+    /// The directory read in flight.
+    reading: Option<DirectoryRead>,
     read_wanted: bool,
     next_read: Instant,
     warned: Option<Instant>,
@@ -522,8 +508,12 @@ pub struct DirectoryKeeper {
 
 /// What the [`DirectoryKeeper`] asks of the manager (a trait so a test can play it).
 pub trait ClaimingManager {
-    fn take_claims_wanted(&mut self) -> Vec<SuperRegion>;
+    /// The rows the coordinator assigned since the last call ([`WorldManager::take_assigned`]).
+    fn take_assigned(&mut self) -> Vec<(SuperRegion, u64)>;
+    /// `rows` are this host's, already in its fence ([`WorldManager::claimed`]).
     fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>);
+    /// The epoch the manager's directory knows for `sr` ([`WorldManager::known_epoch`]).
+    fn known_epoch(&self, sr: SuperRegion) -> Option<u64>;
     fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<HostId>);
     fn set_draining(&mut self, draining: BTreeSet<HostId>);
     fn take_directory_wanted(&mut self) -> bool;
@@ -553,11 +543,14 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
     fn note_dead_rows(&mut self, dead: Vec<HostId>) {
         WorldManager::note_dead_rows(self, dead)
     }
-    fn take_claims_wanted(&mut self) -> Vec<SuperRegion> {
-        WorldManager::take_claims_wanted(self)
+    fn take_assigned(&mut self) -> Vec<(SuperRegion, u64)> {
+        WorldManager::take_assigned(self)
     }
     fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>) {
         WorldManager::claimed(self, rows)
+    }
+    fn known_epoch(&self, sr: SuperRegion) -> Option<u64> {
+        WorldManager::known_epoch(self, sr)
     }
     fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, live: BTreeSet<HostId>) {
         WorldManager::directory_read(self, rows, live)
@@ -572,23 +565,12 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
 
 impl DirectoryKeeper {
     /// The keeper of `claims` (its owner is this host); its first backstop read comes one
-    /// period from now (a boot reads the directory itself, [`read_directory`]).
-    pub fn new(claims: HostClaims, boot: u64) -> DirectoryKeeper {
+    /// period from now (a boot reads the directory itself, [`read_directory`]). `_boot`, this
+    /// process's boot, is no longer used: the keeper makes no per-boot store call since free
+    /// land is assigned by the coordinator (Elastic 3), not claimed here.
+    pub fn new(claims: HostClaims, _boot: u64) -> DirectoryKeeper {
         let next_read = Instant::now() + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
-        DirectoryKeeper {
-            claims,
-            boot,
-            claiming: None,
-            no_claim_before: None,
-            reading: None,
-            reads_started: 0,
-            claims_wait_for_read: None,
-            nothing_won_told: false,
-            read_wanted: false,
-            next_read,
-            warned: None,
-            hosts_read: None,
-        }
+        DirectoryKeeper { claims, reading: None, read_wanted: false, next_read, warned: None, hosts_read: None }
     }
 
     /// The `hosts` rows the latest directory read brought (each read once): what the peer links
@@ -605,73 +587,37 @@ impl DirectoryKeeper {
         }
     }
 
-    /// A claim lost rows or failed: a fresh read is wanted, and nothing is claimed again
-    /// until one started from now on is applied.
-    fn wait_for_a_fresh_read(&mut self) {
-        self.read_wanted = true;
-        self.claims_wait_for_read = Some(self.reads_started);
+    /// `rows` (already this host's in the store) into the fence, then to the manager.
+    fn fence_then_tell(&self, rows: Vec<(SuperRegion, u64)>, manager: &mut impl ClaimingManager) {
+        let owner = self.claims.fence().owner;
+        self.claims.add(Fence { owner, epochs: rows.iter().copied().collect(), all_hosts: false });
+        manager.claimed(rows);
     }
 
-    /// One pass: answers that came are handed to the manager, then the next read and claim
-    /// are started if due. At most one claim is in flight, and none while a lost claim waits
-    /// for its read.
+    /// One pass, in this order: a directory read that answered is handed to the manager (the
+    /// heal of a lost assignment first, see the type's docs); a read is started when wanted or
+    /// due; the rows the coordinator assigned are fenced, then handed to the manager. Nothing
+    /// is taken once the host is fenced (it is stopping).
     pub fn pump(&mut self, manager: &mut impl ClaimingManager) {
-        let owner = self.claims.fence().owner;
-        if let Some((asked, rx)) = &self.claiming {
-            let asked = *asked;
-            let answer = match rx.try_recv() {
-                Err(TryRecvError::Empty) => None,
-                Ok(answer) => Some(answer),
-                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
-            };
-            if let Some(answer) = answer {
-                self.claiming = None;
-                match answer {
-                    Ok(won) => {
-                        let rows: Vec<(SuperRegion, u64)> = won.epochs.iter().map(|(sr, e)| (*sr, *e)).collect();
-                        if rows.len() < asked {
-                            self.wait_for_a_fresh_read();
-                        }
-                        if rows.is_empty() && asked > 0 {
-                            // Paced: an empty answer whose rows the next read still shows
-                            // free would otherwise be claimed again at once.
-                            if !self.nothing_won_told {
-                                self.nothing_won_told = true;
-                                log::info!(
-                                    "[server] a claim of {asked} free super-region(s) won nothing (taken first, or this host \
-                                     is draining); claims paced to one per {CLAIM_NOTHING_WON_RETRY_MS} ms"
-                                );
-                            }
-                            self.no_claim_before = Some(Instant::now() + Duration::from_millis(CLAIM_NOTHING_WON_RETRY_MS));
-                        } else {
-                            self.nothing_won_told = false;
-                        }
-                        if !rows.is_empty() {
-                            // The fence first: a load or cut in a won super-region is checked
-                            // against it from the moment the manager knows it owns it.
-                            self.claims.add(won);
-                            manager.claimed(rows);
-                        }
-                    }
-                    Err(e) if self.claims.note_refusal(&e) => {
-                        // Declared dead or replaced: the main loop sees the flag and exits fenced.
-                        log::error!("[server] claiming super-regions was refused ({e}); this host is fenced");
-                        return;
-                    }
-                    Err(e) => {
-                        self.warn(&format!("claiming super-regions failed ({e}); asked again in {CLAIM_RETRY_MS} ms"));
-                        self.no_claim_before = Some(Instant::now() + Duration::from_millis(CLAIM_RETRY_MS));
-                        self.wait_for_a_fresh_read();
-                    }
-                }
-            }
-        }
-        if let Some((n, read)) = self.reading.as_mut() {
-            let n = *n;
+        if let Some(read) = self.reading.as_mut() {
             if let Some(answer) = read.poll() {
                 self.reading = None;
                 match answer {
                     Ok((rows, live, hosts, next_host_id)) => {
+                        // A lost `Assigned`: fenced and told BEFORE the read reaches the manager.
+                        let fence = self.claims.fence();
+                        let me = i64::try_from(fence.owner.0).unwrap_or(i64::MAX);
+                        let lost: Vec<(SuperRegion, u64)> = rows
+                            .iter()
+                            .filter(|(sr, owner, epoch)| {
+                                *owner == me && !fence.epochs.contains_key(sr) && *epoch > manager.known_epoch(*sr).unwrap_or(0)
+                            })
+                            .map(|(sr, _, epoch)| (*sr, *epoch))
+                            .collect();
+                        if !lost.is_empty() && !self.claims.fenced().is_set() {
+                            log::info!("[server] the directory shows super-region(s) {lost:?} assigned to this host: fenced and taken");
+                            self.fence_then_tell(lost, manager);
+                        }
                         manager.set_draining(draining_hosts(&hosts));
                         manager.directory_read(rows, live);
                         // Every dead row is noted (`note_dead_rows`); then those no open
@@ -692,16 +638,10 @@ impl DirectoryKeeper {
                         // clean rows failed) is noted now — the manager skips the known ones.
                         manager.note_clean_rows(hosts.iter().filter(|r| r.clean).map(|r| (r.id, r.boot)).collect());
                         self.hosts_read = Some(hosts);
-                        if self.claims_wait_for_read.is_some_and(|after| n > after) {
-                            self.claims_wait_for_read = None;
-                        }
                     }
                     Err(e) => {
-                        self.warn(&format!("reading the ownership directory failed ({e}); read again in {CLAIM_RETRY_MS} ms"));
-                        // A gated claim waits for a read that succeeds: try again soon.
-                        if self.claims_wait_for_read.is_some() {
-                            self.next_read = Instant::now() + Duration::from_millis(CLAIM_RETRY_MS);
-                        }
+                        self.warn(&format!("reading the ownership directory failed ({e}); read again in {DIRECTORY_READ_RETRY_MS} ms"));
+                        self.next_read = Instant::now() + Duration::from_millis(DIRECTORY_READ_RETRY_MS);
                     }
                 }
             }
@@ -713,19 +653,15 @@ impl DirectoryKeeper {
         if self.reading.is_none() && (self.read_wanted || now >= self.next_read) {
             self.read_wanted = false;
             self.next_read = now + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
-            self.reads_started += 1;
-            self.reading = Some((self.reads_started, DirectoryRead::start(self.claims.store())));
+            self.reading = Some(DirectoryRead::start(self.claims.store()));
         }
-        let may_claim = !self.claims.fenced().is_set()
-            && self.claiming.is_none()
-            && self.claims_wait_for_read.is_none()
-            && self.no_claim_before.is_none_or(|at| now >= at);
-        if may_claim {
-            let wanted = manager.take_claims_wanted();
-            if !wanted.is_empty() {
-                log::debug!("[server] claiming free super-region(s) {wanted:?} as host {owner}");
-                self.claiming = Some((wanted.len(), self.claims.store().claim_free_later(owner, self.boot, wanted)));
-            }
+        if self.claims.fenced().is_set() {
+            return;
+        }
+        let assigned = manager.take_assigned();
+        if !assigned.is_empty() {
+            log::debug!("[server] super-region(s) {assigned:?} assigned to this host: fenced, then taken");
+            self.fence_then_tell(assigned, manager);
         }
     }
 }
@@ -1005,7 +941,8 @@ mod tests {
         let (x, y) = ((0, 0), (0, -1));
         let me = register(&store, 10);
         let claims = HostClaims::claim_srs(store.clone(), me, vec![x]).unwrap();
-        claims.add(store.claim_free(me, 10, vec![y]).unwrap());
+        // As the keeper adds a row the coordinator assigned (the set-up: an upsert of it).
+        claims.add(store.claim_super_regions(me, vec![y]).unwrap());
         assert_eq!(claims.fence().epochs.keys().copied().collect::<Vec<_>>(), vec![y, x]);
         claims.commit_cut(empty_cut(1)).recv().unwrap().expect("both rows are held");
         // Another process takes the added row: the next commit is fenced on it, and that
@@ -1060,138 +997,105 @@ mod tests {
     }
 
 
-    /// A manager whose directory says `sr` is free until a read is applied, and that wants
-    /// it claimed while it is: the order of the keeper's claims and applied reads.
-    struct Wanting {
-        sr: SuperRegion,
-        read: bool,
-        events: Vec<&'static str>,
+    /// A fake manager sharing the keeper's [`HostClaims`]: what it was told, in order, each with
+    /// whether the fence held the row at that moment.
+    struct Told {
+        claims: HostClaims,
+        assigned: Vec<(SuperRegion, u64)>,
+        known: Option<u64>,
+        wants_read: bool,
+        events: Vec<String>,
     }
 
-    impl ClaimingManager for Wanting {
-        fn take_claims_wanted(&mut self) -> Vec<SuperRegion> {
-            if self.read {
-                return Vec::new();
-            }
-            self.events.push("claim");
-            vec![self.sr]
+    impl Told {
+        fn new(claims: HostClaims) -> Told {
+            Told { claims, assigned: Vec::new(), known: None, wants_read: false, events: Vec::new() }
+        }
+    }
+
+    impl ClaimingManager for Told {
+        fn take_assigned(&mut self) -> Vec<(SuperRegion, u64)> {
+            std::mem::take(&mut self.assigned)
         }
         fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>) {
-            panic!("won {rows:?}: the row is another host's");
+            let fence = self.claims.fence();
+            for (sr, epoch) in &rows {
+                assert_eq!(fence.epochs.get(sr), Some(epoch), "the fence holds {sr:?} at {epoch} before the manager learns it");
+            }
+            self.events.push(format!("claimed {rows:?}"));
+        }
+        fn known_epoch(&self, _sr: SuperRegion) -> Option<u64> {
+            self.known
         }
         fn directory_read(&mut self, rows: Vec<(SuperRegion, i64, u64)>, _live: BTreeSet<HostId>) {
-            assert!(rows.iter().any(|(sr, owner, _)| *sr == self.sr && *owner == 1), "the read shows host 1's row: {rows:?}");
-            self.events.push("read");
-            self.read = true;
+            let fence = self.claims.fence();
+            let fenced: Vec<(SuperRegion, u64)> = rows.iter().filter_map(|(sr, _, _)| fence.epochs.get(sr).map(|e| (*sr, *e))).collect();
+            self.events.push(format!("read, fence {fenced:?}"));
         }
         fn set_draining(&mut self, _draining: BTreeSet<HostId>) {}
         fn take_directory_wanted(&mut self) -> bool {
-            false
+            std::mem::take(&mut self.wants_read)
         }
     }
 
-    /// A claim that loses its row (another host holds it; this host's directory said free)
-    /// claims nothing more until a directory read started after that answer is applied: the
-    /// lost row is never sent to `claim_free` a second time.
-    #[test]
-    fn a_lost_claim_waits_for_a_fresh_read_before_claiming_again() {
-        let store = memory_store();
-        let sr = (0, 3);
-        // Host 1 (registered first) holds the row; this host is host 2.
-        assert_eq!(register(&store, 9), h(1));
-        let me = register(&store, 10);
-        store.claim_super_regions(h(1), vec![sr]).unwrap();
-        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), me), 10);
-        let mut m = Wanting { sr, read: false, events: Vec::new() };
+    /// Pumps `keeper` until `m` saw a read (at most a few seconds).
+    fn until_read(keeper: &mut DirectoryKeeper, m: &mut Told) {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !m.read {
+        while !m.events.iter().any(|e| e.starts_with("read")) {
             assert!(Instant::now() < deadline, "no read applied: {:?}", m.events);
-            keeper.pump(&mut m);
+            keeper.pump(m);
             std::thread::sleep(Duration::from_millis(1));
         }
-        for _ in 0..20 {
-            keeper.pump(&mut m);
-        }
-        assert_eq!(m.events, ["claim", "read"], "one claim, then the read; no claim of the lost row in between");
-        assert!(keeper.claims.fence().epochs.is_empty(), "nothing won");
-        store.shutdown();
     }
 
-    /// A claim refused because this boot's `hosts` row is no longer live (declared dead, or
-    /// replaced) fences the host: the flag is set and nothing more is claimed.
+    /// Elastic 3, Review Focus 2: an `Assigned` that never came. The directory read shows a row
+    /// this host owns at epoch 4 that its fence lacks and its manager does not know: the keeper
+    /// fences it and hands it to the manager as assigned BEFORE the read reaches the manager.
     #[test]
-    fn a_claim_by_a_replaced_boot_fences_the_host() {
+    fn a_lost_assigned_is_healed_by_the_directory_read() {
         let store = memory_store();
         let me = register(&store, 10);
-        // Every lease lapses at once: the next registration is a total crash, which marks
-        // this host's row dead (and prunes it) — the boot is replaced.
-        store.set_host_lease_ms(0);
-        std::thread::sleep(Duration::from_millis(5));
-        register(&store, 11);
-        store.set_host_lease_ms(game::HOST_LEASE_MS);
+        let sr = (0, 3);
+        for _ in 0..4 {
+            store.claim_super_regions(me, vec![sr]).unwrap();
+        }
+        assert_eq!(store.owners().unwrap(), vec![(sr, me.0 as i64, 4)]);
         let claims = HostClaims::none(store.clone(), me);
         let mut keeper = DirectoryKeeper::new(claims.clone(), 10);
-        let mut m = Free { sr: (0, 3), asked: 0 };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !claims.fenced().is_set() {
-            assert!(Instant::now() < deadline, "the refused claim never fenced the host");
-            keeper.pump(&mut m);
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        for _ in 0..20 {
-            keeper.pump(&mut m);
-        }
-        assert_eq!(m.asked, 1, "nothing claimed after the refusal");
-        assert!(store.owners().unwrap().is_empty(), "nothing won");
+        let mut m = Told::new(claims.clone());
+        m.wants_read = true;
+        until_read(&mut keeper, &mut m);
+        assert_eq!(m.events, [format!("claimed {:?}", vec![(sr, 4u64)]), format!("read, fence {:?}", vec![(sr, 4u64)])]);
+        assert_eq!(claims.fence().epochs.get(&sr), Some(&4));
+        // A row the manager knows at that epoch already (it gave the row up since: a stale
+        // read) is not put back.
+        let other = HostClaims::none(store.clone(), me);
+        let mut keeper = DirectoryKeeper::new(other.clone(), 10);
+        let mut m = Told::new(other.clone());
+        m.known = Some(4);
+        m.wants_read = true;
+        until_read(&mut keeper, &mut m);
+        assert_eq!(m.events, [format!("read, fence {:?}", Vec::<(SuperRegion, u64)>::new())], "nothing healed");
+        assert!(other.fence().epochs.is_empty());
         store.shutdown();
     }
 
-    /// Elastic 1 Task 7: a claim answered with NOTHING won while the rows stay free (here:
-    /// this host is draining, so the store gives it nothing) is not asked again before
-    /// [`CLAIM_NOTHING_WON_RETRY_MS`] — never a hot loop against the store, whatever the
-    /// manager keeps wanting.
+    /// Elastic 3: the rows the coordinator assigned are in the fence before the manager's
+    /// `claimed` (the fake checks the fence when it is told).
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn a_claim_that_won_nothing_is_paced() {
+    fn assigned_rows_grow_the_fence_before_the_manager_learns_them() {
         let store = memory_store();
         let me = register(&store, 10);
-        store.drain_host(me, 60_000).unwrap();
-        let mut keeper = DirectoryKeeper::new(HostClaims::none(store.clone(), me), 10);
-        let mut m = Free { sr: (0, 3), asked: 0 };
-        let start = Instant::now();
-        let pump_until = |keeper: &mut DirectoryKeeper, m: &mut Free, ms: u64| {
-            while start.elapsed() < Duration::from_millis(ms) {
-                keeper.pump(m);
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        };
-        pump_until(&mut keeper, &mut m, CLAIM_NOTHING_WON_RETRY_MS / 2);
-        assert_eq!(m.asked, 1, "one claim, then paced");
-        pump_until(&mut keeper, &mut m, CLAIM_NOTHING_WON_RETRY_MS * 5 / 2);
-        assert!((2..=3).contains(&m.asked), "one claim per {CLAIM_NOTHING_WON_RETRY_MS} ms: {}", m.asked);
-        assert!(store.owners().unwrap().is_empty(), "nothing won");
+        let claims = HostClaims::none(store.clone(), me);
+        let mut keeper = DirectoryKeeper::new(claims.clone(), 10);
+        let mut m = Told::new(claims.clone());
+        m.assigned = vec![((0, 3), 2), ((1, 3), 1)];
+        keeper.pump(&mut m);
+        assert_eq!(m.events, [format!("claimed {:?}", vec![((0, 3), 2u64), ((1, 3), 1u64)])]);
+        assert_eq!(claims.fence().epochs.iter().map(|(sr, e)| (*sr, *e)).collect::<Vec<_>>(), [((0, 3), 2), ((1, 3), 1)]);
+        keeper.pump(&mut m);
+        assert_eq!(m.events.len(), 1, "taken once");
         store.shutdown();
-    }
-
-    /// A manager that always wants one free super-region.
-    struct Free {
-        sr: SuperRegion,
-        asked: u32,
-    }
-
-    impl ClaimingManager for Free {
-        fn take_claims_wanted(&mut self) -> Vec<SuperRegion> {
-            self.asked += 1;
-            vec![self.sr]
-        }
-        fn claimed(&mut self, rows: Vec<(SuperRegion, u64)>) {
-            panic!("won {rows:?} as a replaced boot");
-        }
-        fn directory_read(&mut self, _rows: Vec<(SuperRegion, i64, u64)>, _live: BTreeSet<HostId>) {}
-        fn set_draining(&mut self, _draining: BTreeSet<HostId>) {}
-        fn take_directory_wanted(&mut self) -> bool {
-            false
-        }
     }
 
     #[test]

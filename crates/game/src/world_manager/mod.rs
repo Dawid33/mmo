@@ -25,12 +25,14 @@ use crate::save_cut::{
 };
 
 mod drain;
+mod land;
 mod peers;
 mod placement;
 mod succession;
 mod world_cut;
 mod world_link;
 pub use drain::{drain_remaining_secs, DRAIN_RETELL_TOLERANCE_TICKS};
+pub use land::LAND_NEEDED_EVERY_MS;
 pub use peers::intents_in;
 pub use succession::{SuccessionReportIn, SUCCESSION_WAIT_LOG_MS};
 pub use placement::{
@@ -91,19 +93,6 @@ const FOREIGN_INPUT_WARN_MS: u64 = 1_000;
 /// forever, nor hand the target an unbounded backlog in one burst when it
 /// starts.
 pub const PENDING_ARRIVALS_PER_REGION_MAX: usize = 2 * crate::slime::SLIME_CAP_PER_REGION;
-/// Most often a host asks another for a claim of one super-region
-/// ([`crate::Volatile::ClaimWanted`], R4 `PgClaim`): once per this many ms while the need
-/// lasts (it is volatile — a lost one is asked again).
-pub const CLAIM_WANTED_EVERY_MS: u64 = 1_000;
-/// A `ClaimWanted` asked of the same host this long without the super-region getting an owner
-/// makes the asker read the directory (Elastic 1 Task 8): a draining host drops the asks of a
-/// peer that has not read its mark yet, and nothing else would prompt that peer to read before
-/// its periodic backstop (`TERRAIN_POLL_SECS`). At most once per this long per super-region.
-pub const CLAIM_UNANSWERED_REREAD_MS: u64 = 3 * CLAIM_WANTED_EVERY_MS;
-/// Most often a host asks the coordinator for the land of a host that left cleanly
-/// ([`crate::HostMsg::LandWanted`], R4 drain): once per this many ms per super-region while
-/// something here needs it (it is not queued while the link is down — asked again).
-pub const LAND_WANTED_EVERY_MS: u64 = 1_000;
 /// How many of the latest despawned arrivals' ids the manager remembers
 /// ([`WorldManager::recently_despawned_arrivals`], test support: the
 /// conservation check reads them as an allowed exit).
@@ -1226,40 +1215,30 @@ pub struct WorldManager<S: RegionSpawner> {
     /// here, in order, until it has an owner ("wait, never guess"). A cut writes each as
     /// this host's in-flight row ([`Self::cut_peer_rows`]), as for an absent peer.
     ///
-    /// Not capped: every super-region listed here is wanted for a claim
-    /// ([`Self::take_claims_wanted`], `ClaimWanted` to its preferred host every
-    /// [`CLAIM_WANTED_EVERY_MS`]), so an entry lasts one claim round trip — unless no live
-    /// host that could claim it is reachable, which is exactly the bound of what waits in a
-    /// session for an unreachable peer (`peer_waiting`, a session's queue: uncapped too, for
-    /// as long as the outage) — or unless the claimer is reachable but its claims keep
-    /// failing (store errors, lock timeouts: retried every `CLAIM_RETRY_MS` on the server),
-    /// which lasts as long as the store's outage and grows by the departures into that
+    /// Not capped: every super-region listed here is asked of the coordinator (`land.rs`,
+    /// [`crate::HostMsg::LandNeeded`] every [`LAND_NEEDED_EVERY_MS`]), so an entry lasts one
+    /// assignment round trip — unless no coordinator replica is up or no host takes land,
+    /// which is exactly the bound of what waits in a session for an unreachable peer
+    /// (`peer_waiting`, a session's queue: uncapped too, for as long as the outage) — or unless
+    /// the assignment keeps failing (store errors, lock timeouts: the host asks again), which
+    /// lasts as long as the store's outage and grows by the departures into that
     /// super-region meanwhile (slimes are bounded per region; their refill is not). Not
     /// capped like `pending_arrivals` because an overflow here has no running target to put
     /// drops down in, and a person in it may not be despawned. Counted on the `[server]` line
     /// (`unowned_waiting=`).
     unowned_waiting: BTreeMap<crate::SuperRegion, Vec<peers::UnownedWait>>,
-    /// Super-regions with no owner this host knows that something here needs (a subscribe,
-    /// a player clamped at their seam, a spawn placement, a move, a session's region): what
-    /// [`Self::take_claims_wanted`] answers from (with `unowned_waiting`'s keys), forgotten
-    /// once an owner is known (`peers.rs`).
-    claims_wanted: BTreeSet<crate::SuperRegion>,
-    /// Free super-regions a peer asked this host to claim ([`crate::Volatile::ClaimWanted`]).
-    claim_asks: BTreeSet<crate::SuperRegion>,
-    /// The last `ClaimWanted` sent per super-region: to which host, at which `clock_ms`, and
-    /// since when (`clock_ms`) that host has been asked without an answer — reset when another
-    /// host is asked, and at each directory read the silence prompts
-    /// ([`CLAIM_UNANSWERED_REREAD_MS`]).
-    claim_wanted_sent: BTreeMap<crate::SuperRegion, (HostId, u64, u64)>,
-    /// Super-regions of a host that left cleanly (`left_peers`) that a spawn placement here
-    /// needs (`placement.rs`): asked for with what waits in a held session
-    /// ([`crate::HostMsg::LandWanted`], `peers.rs`), forgotten once their owner is no
-    /// departed host.
-    land_wanted: BTreeSet<crate::SuperRegion>,
-    /// The last `LandWanted` sent per super-region, at which `clock_ms`
-    /// ([`LAND_WANTED_EVERY_MS`]).
-    land_wanted_sent: BTreeMap<crate::SuperRegion, u64>,
-    /// `clock_ms` of the last scan for land of departed hosts ([`LAND_WANTED_EVERY_MS`]: what
+    /// Super-regions with no reachable owner this host knows that something here needs (a
+    /// subscribe, a player clamped at their seam, a spawn placement, a move, a session's
+    /// region): asked of the coordinator (`land.rs`, with `unowned_waiting`'s keys and what is
+    /// held for departed hosts), forgotten once an owner is known.
+    land_needed: BTreeSet<crate::SuperRegion>,
+    /// The last [`crate::HostMsg::LandNeeded`] sent per super-region, at which `clock_ms`
+    /// ([`LAND_NEEDED_EVERY_MS`]).
+    land_needed_sent: BTreeMap<crate::SuperRegion, u64>,
+    /// Rows the coordinator assigned to this host ([`crate::CoordMsg::Assigned`]) not taken by
+    /// the server yet ([`Self::take_assigned`]: the fence first, then [`Self::claimed`]).
+    assigned_rows: Vec<(crate::SuperRegion, u64)>,
+    /// `clock_ms` of the last scan for land of departed hosts ([`LAND_NEEDED_EVERY_MS`]: what
     /// is held for them is looked through at most once per period, not every pump).
     land_scanned_ms: Option<u64>,
     /// An `Unknown` owner was hit: the server reads the directory whole
@@ -1587,11 +1566,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             incarnation_seen: BTreeMap::new(),
             next_incarnation: 0,
             unowned_waiting: BTreeMap::new(),
-            claims_wanted: BTreeSet::new(),
-            claim_asks: BTreeSet::new(),
-            claim_wanted_sent: BTreeMap::new(),
-            land_wanted: BTreeSet::new(),
-            land_wanted_sent: BTreeMap::new(),
+            land_needed: BTreeSet::new(),
+            land_needed_sent: BTreeMap::new(),
+            assigned_rows: Vec::new(),
             land_scanned_ms: None,
             directory_wanted: false,
             peers: BTreeMap::new(),

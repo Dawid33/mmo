@@ -368,9 +368,8 @@ pub struct Directory {
     /// Read whole at least once.
     read: bool,
     live: BTreeSet<HostId>,
-    /// Hosts marked draining (`worldctl drain`, from the `hosts` rows of the latest read): in
-    /// no claim preference, this host's own included — a draining host wins no land, so free
-    /// land is preferred to the live hosts that are not draining ([`Self::preferred`]).
+    /// Hosts marked draining (`worldctl drain`, from the `hosts` rows of the latest read): the
+    /// coordinator assigns none of them land (Elastic 3).
     draining: BTreeSet<HostId>,
 }
 
@@ -453,19 +452,9 @@ impl Directory {
 
     /// Whether any host is known live. The server's reads leave draining hosts (and clean rows)
     /// out of `live` but always put this host in, draining or not; so with every other live
-    /// host draining `live` holds this host alone. With live hosts and no [`Self::preferred`]
-    /// claimer, every live host is draining — free land stays free, and a directory read would
-    /// change nothing until a host joins (the periodic read finds it).
+    /// host draining `live` holds this host alone.
     pub fn knows_live(&self) -> bool {
         !self.live.is_empty()
-    }
-
-    /// The live host that should claim `sr` when it is free: [`rendezvous_among`] the live
-    /// hosts that are not draining (a fixed live set lays out like a `Static` table of it; a
-    /// dead or draining host's share moves, nobody else's). `None` while no such host is known
-    /// (none live, or every live one draining).
-    pub fn preferred(&self, sr: SuperRegion) -> Option<HostId> {
-        rendezvous_among(sr, self.live.iter().copied().filter(|h| !self.draining.contains(h)))
     }
 }
 

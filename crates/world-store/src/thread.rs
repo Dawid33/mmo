@@ -106,8 +106,6 @@ pub(crate) enum Request {
     ResolvePlayer(String, Reply<(PlayerId, Option<PlayerRecord>)>),
     /// Claim the list; with a boot, only while that boot's `hosts` row is live.
     ClaimSuperRegions(HostId, Vec<SuperRegion>, Option<u64>, Reply<Fence>),
-    /// Claim only the absent or free super-regions of the list, as the live boot given.
-    ClaimFree(HostId, u64, Vec<SuperRegion>, Reply<Fence>),
     /// Free the fence's super-regions.
     Release(Fence, Reply<()>),
     /// Elastic 2b Task 3: the coordinator row's first write (first writer wins).
@@ -589,20 +587,6 @@ async fn serve(
                     r.send(on_pool!(&pool, claim_super_regions(owner, srs, s, live, lock_ms)))
                 })
             }
-            // Postgres: no writer lock (as the heartbeat) — a claim may wait up to its lock
-            // timeout for another claimer's row, and this host's own cut part must not queue
-            // behind it in-process (it could be the very part that other claimer's cut waits
-            // for: a cycle Postgres cannot see). The row locks serialise it.
-            Request::ClaimFree(owner, boot, srs, r) => {
-                let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
-                tokio::spawn(async move {
-                    let _w = match &pool {
-                        Pool::Sqlite(_) => Some(writer.lock().await),
-                        Pool::Pg(_) => None,
-                    };
-                    r.send(on_pool!(&pool, claim_free(owner, boot, srs, s, lock_ms)))
-                })
-            }
             Request::Release(fence, r) => {
                 let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
@@ -1001,7 +985,6 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::CommitCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::PutTiled(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimSuperRegions(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::ClaimFree(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::Release(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::BootstrapCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RaiseCoordinatorEpoch(r) => r.send(Err(StoreError::ReadOnly)),

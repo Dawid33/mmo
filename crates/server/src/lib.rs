@@ -764,7 +764,7 @@ pub fn run() -> claims::ServerExit {
         "[server] ownership: {}, {super_region_regions} regions per super-region side",
         if ownership_word.trim().is_empty() { "allinone" } else { ownership_word.trim() }
     );
-    // `claim` (R4): super-regions are claimed on demand by the preferred live host, the
+    // `claim` (R4): super-regions are assigned on demand by the coordinator (Elastic 3), the
     // directory read from the store — a host role only, and any number of hosts: peer links,
     // world cuts, the login relay and observer sessions. A `static` host is alone (the store
     // refuses a second one beside a live row).
@@ -1162,7 +1162,7 @@ pub fn run() -> claims::ServerExit {
     );
     manager.set_ownership(ownership, super_region_regions);
     // `claim`: the directory read whole before anything is placed or restored (until then
-    // every owner is `Unknown`), and the loop's claim keeper.
+    // every owner is `Unknown`), and the loop's directory keeper (it fences assigned land).
     let mut directory_keeper = None;
     if let Some(claims) = claims.as_ref().filter(|_| claim_on_demand) {
         let (rows, live, draining) = claims::read_directory(claims.store(), host_id)

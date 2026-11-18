@@ -5766,7 +5766,7 @@ fn player_is_clamped_at_a_seam_whose_owner_is_unknown() {
     sweep("player_is_clamped_at_a_seam_whose_owner_is_unknown", 2, 1, SEEDS / 4, clamped_at_an_unknown_seam);
 }
 
-// --- R4 Task 5: claiming on demand, `Owns`, `ClaimWanted` ------------------------------
+// --- R4 Task 5 / Elastic 3: land assigned on demand, `Owns` --------------------------------
 
 /// The test player, standing in `a`, is pushed over its seam with `b` every round until its
 /// body stands in `b` (it is clamped back while `b` has no owner its host knows); `false`
@@ -5795,60 +5795,113 @@ fn nothing_unowned(rig: &MultiRig) -> bool {
     rig.hosts.iter().all(|r| r.manager.unowned_waiting_ids().is_empty())
 }
 
-/// A player walks from `a` toward `b`, whose super-region is free: its host asks for the
-/// super-region to be claimed — by the preferred live host (`rendezvous_owner` with every
-/// host live), which claims it — every directory ends naming that host, and the player
-/// crosses into `b` there, once.
-fn claimed_when_a_player_walks_to_it(rig: &mut MultiRig) {
+/// The host the coordinator assigns free `sr` to while it assigned nothing else lately: among
+/// the live hosts that are not draining, the fewest players, then the fewest regions (the rig's
+/// [`MultiRig::loads`]), then the rendezvous weight (`pick_assignee`).
+fn least_loaded(rig: &MultiRig, sr: game::SuperRegion) -> HostId {
+    let candidates: Vec<HostId> =
+        host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h) && !rig.draining.contains(h)).collect();
+    let key = |h: &HostId| {
+        let l = rig.loads.get(h).copied().unwrap_or_default();
+        (l.players, l.regions)
+    };
+    let least = candidates.iter().map(key).min().expect("a candidate");
+    game::rendezvous_among(sr, candidates.iter().copied().filter(|h| key(h) == least)).expect("a candidate")
+}
+
+/// A load that makes a host the busiest of the rig's.
+const BUSY: game::HostLoad = game::HostLoad { players: 5, regions: 5, tick_permille: 0 };
+
+/// The `LandNeeded` asks for `sr` host `h` sent its coordinator so far.
+fn land_needed_sent(rig: &MultiRig, h: HostId, sr: game::SuperRegion) -> usize {
+    rig.sent_to_coordinator(h).iter().filter(|m| matches!(m, game::HostMsg::LandNeeded { sr: s } if *s == sr)).count()
+}
+
+/// The hosts whose fence holds the assigned row `sr`.
+fn fenced_by(rig: &MultiRig, sr: game::SuperRegion) -> Vec<HostId> {
+    host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h) && rig.assigned_fence(*h).contains_key(&sr)).collect()
+}
+
+/// A rig whose free land is assigned by a coordinator: the directory `rows`, the rig's
+/// `super_regions` table behind it, the coordinator over a quiet history.
+fn assigning_world(rig: &mut MultiRig, rows: Vec<(game::SuperRegion, Option<HostId>, u64)>) {
+    rig.with_directory(rows);
+    rig.with_assignment();
+    rig.with_coordinator(quiet_history());
+}
+
+/// A player walks from `a` toward `b`, whose super-region is free: its host asks the
+/// coordinator, which assigns it to the least-loaded host (here not the rendezvous choice: that
+/// one is the busiest); every directory ends naming that host, and the player crosses into `b`
+/// there, once.
+fn assigned_when_a_player_walks_to_it(rig: &mut MultiRig) {
     let hosts = rig.hosts.len() as u32;
     let (a, b) = host_seam(hosts, 1);
     let sr = sr_of(rig, b);
-    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
-    rig.with_claims();
+    assigning_world(rig, rendezvous_rows(rig, &[sr], &[]));
+    let busiest = crate::common::rendezvous_owner(sr, hosts);
+    rig.loads.insert(busiest, BUSY);
+    let owner = least_loaded(rig, sr);
+    assert_ne!(owner, busiest, "the least-loaded host is not the rendezvous choice");
     let ha = rig.owner(a);
-    let preferred = crate::common::rendezvous_owner(sr, hosts);
     assert_eq!(rig.hosts[ha.0 as usize].manager.owner_of(b), game::Owner::Free);
     rig.run(a);
     rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     until_body(rig);
     assert!(push_player_into(rig, a, b, WALK_ROUNDS), "the player never crossed into {b:?}: {:?}", rig.player_body(P_CLIENT));
-    assert_eq!(rig.stored_owner(sr), Some(preferred), "the preferred host claimed it");
+    assert_eq!(rig.stored_owner(sr), Some(owner), "assigned to the least-loaded host");
+    assert_eq!(fenced_by(rig, sr), [owner], "in that host's fence, nobody else's");
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(preferred))),
-        "every directory names host {preferred}: {:?}",
+        until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(owner))),
+        "every directory names host {owner}: {:?}",
         owners_seen(rig, b)
     );
-    assert_eq!(rig.player_owners(P_CLIENT), [(preferred, b)], "the player is in {b:?} once, on host {preferred}");
+    assert_eq!(rig.player_owners(P_CLIENT), [(owner, b)], "the player is in {b:?} once, on host {owner}");
     assert!(nothing_unowned(rig), "nothing waits for an owner");
 }
 
 /// A client whose only connection is its home walks from `a` into `b`, whose super-region
 /// is free, having asked its home for `b` while nobody owned it (the subscribe waits).
-/// Another host claims `b` and the body is handed there: the home must have named that
+/// Another host is assigned `b` and the body is handed there: the home must have named that
 /// host for `b` (`RegionElsewhere`) by then — the client has no other way to find the host
 /// its player is on now, and would be parked there for want of a session.
 fn told_where_its_body_went(rig: &mut MultiRig) {
     let hosts = rig.hosts.len() as u32;
     let (a, b) = host_seam(hosts, 1);
     let sr = sr_of(rig, b);
-    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
-    rig.with_claims();
+    assigning_world(rig, rendezvous_rows(rig, &[sr], &[]));
     let ha = rig.owner(a);
-    let preferred = crate::common::rendezvous_owner(sr, hosts);
-    if preferred == ha {
-        // Its own host claims it: a thread seam, nobody to name.
-        return;
-    }
+    // The home is the busiest: the land goes to another host.
+    rig.loads.insert(ha, BUSY);
+    let owner = least_loaded(rig, sr);
+    assert_ne!(owner, ha);
     rig.run(a);
     rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
     until_body(rig);
     rig.record_packets();
     rig.hosts[ha.0 as usize].event(subscribe_packet(b));
-    assert!(push_player_into(rig, a, b, WALK_ROUNDS), "the player never crossed into {b:?}: {:?}", rig.player_body(P_CLIENT));
+    // Pushed over the seam until its body is handed to the owner of `b` — in `b` there, or
+    // parked there for want of a session (the rig's client follows no `RegionElsewhere`).
+    let mut handed = false;
+    for _ in 0..WALK_ROUNDS {
+        match rig.player_body(P_CLIENT) {
+            Some((h, rc, _)) if rc == b && h == owner => handed = true,
+            Some((_, rc, id)) if rc == a => {
+                rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0));
+            }
+            None if rig.parked_on(P_PLAYER) == [owner] => handed = true,
+            _ => {}
+        }
+        if handed {
+            break;
+        }
+        rig.round();
+    }
+    assert!(handed, "the body was never handed to host {owner}: {:?}, parked {:?}", rig.player_body(P_CLIENT), rig.parked_on(P_PLAYER));
     let named: Vec<HostId> = elsewhere_for(rig, ha, b).into_iter().map(|(o, _)| o).collect();
     assert!(
-        named.contains(&preferred),
-        "host {ha} handed the body to host {preferred} and never named it for {b:?} (named: {named:?}; seed {}, link delay {})",
+        named.contains(&owner),
+        "host {ha} handed the body to host {owner} and never named it for {b:?} (named: {named:?}; seed {}, link delay {})",
         rig.seed,
         rig.link_delay
     );
@@ -5864,37 +5917,44 @@ fn a_client_whose_body_is_handed_into_just_claimed_land_is_told_the_host() {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_free_super_region_is_claimed_by_its_preferred_host_when_a_player_walks_to_it() {
+fn a_free_super_region_is_assigned_when_a_player_walks_to_it() {
     for hosts in [2, 3] {
-        sweep(
-            "a_free_super_region_is_claimed_by_its_preferred_host_when_a_player_walks_to_it",
-            hosts,
-            1,
-            SEEDS / 4,
-            claimed_when_a_player_walks_to_it,
-        );
+        sweep("a_free_super_region_is_assigned_when_a_player_walks_to_it", hosts, 1, SEEDS / 4, assigned_when_a_player_walks_to_it);
     }
 }
 
-/// A slime walks from `a` into free `b`, whose preferred host is not `a`'s: `a`'s host
-/// never claims it — it asks the preferred host (`ClaimWanted`), which claims it — and
-/// the slime, waiting meanwhile, ends in `b` on that host, once.
-fn claim_wanted_reaches_preferred(rig: &mut MultiRig) {
+/// A slime walks from `a` into free `b`: `a`'s host asks the coordinator within one ask period
+/// of the slime starting to wait ([`game::LAND_NEEDED_EVERY_MS`]), asks at most once per period
+/// after, the land is assigned (to the least-loaded host), and the slime, waiting meanwhile, ends
+/// in `b` on that host, once.
+fn need_reaches_the_coordinator(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let sr = sr_of(rig, b);
-    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
-    rig.with_claims();
+    assigning_world(rig, rendezvous_rows(rig, &[sr], &[]));
     let ha = rig.owner(a);
-    let preferred = crate::common::rendezvous_owner(sr, 2);
-    assert_ne!(ha, preferred, "the needing host is not the preferred one");
+    let owner = least_loaded(rig, sr);
     rig.run(a);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
     assert!(
-        until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(preferred))),
-        "every directory names host {preferred}: {:?}",
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
+        "the slime never waited for an owner"
+    );
+    let since = rig.hosts[ha.0 as usize].now_ms;
+    let period_rounds = (game::LAND_NEEDED_EVERY_MS / game::TICK_RATE) as usize;
+    assert!(
+        land_needed_sent(rig, ha, sr) >= 1 || until(rig, period_rounds, |rig| land_needed_sent(rig, ha, sr) >= 1),
+        "host {ha} never asked for {sr:?} within {} ms",
+        game::LAND_NEEDED_EVERY_MS
+    );
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.stored_owner(sr) == Some(owner)), "{sr:?} was never assigned to host {owner}");
+    let took = rig.hosts[ha.0 as usize].now_ms - since;
+    let asks = land_needed_sent(rig, ha, sr);
+    assert!(asks as u64 <= took / game::LAND_NEEDED_EVERY_MS + 1, "{asks} asks in {took} ms (seed {})", rig.seed);
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(owner))),
+        "every directory names host {owner}: {:?}",
         owners_seen(rig, b)
     );
-    assert_eq!(rig.stored_owner(sr), Some(preferred), "claimed by the preferred host, not by host {ha}");
     rig.run(b);
     until_settled_in(rig, id, b);
     assert!(nothing_unowned(rig), "nothing waits for an owner");
@@ -5902,87 +5962,35 @@ fn claim_wanted_reaches_preferred(rig: &mut MultiRig) {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn claim_wanted_reaches_the_preferred_host() {
-    sweep("claim_wanted_reaches_the_preferred_host", 2, 1, SEEDS / 2, claim_wanted_reaches_preferred);
+fn a_need_for_free_land_reaches_the_coordinator_within_its_bound() {
+    sweep("a_need_for_free_land_reaches_the_coordinator_within_its_bound", 2, 1, SEEDS / 2, need_reaches_the_coordinator);
 }
 
-// --- Elastic 1 Task 7: a draining host wins no land ----------------------------------------
+// --- Elastic 1 Task 7 / Elastic 3: a draining host is assigned no land -----------------------
 
-/// Two hosts; `b`'s free super-region is preferred (among both) to host `drainer`, which is
-/// marked draining. The other host's id.
-fn drain_the_preferred(sr: game::SuperRegion) -> (HostId, HostId) {
-    let drainer = crate::common::rendezvous_owner(sr, 2);
-    let other = host_ids(2).find(|h| *h != drainer).expect("two hosts");
-    (drainer, other)
-}
-
-/// Host A (draining) is the rendezvous choice for `b`'s free super-region among {A, B}: both
-/// directories prefer B instead, A never asks the store, B claims it, and a player walking
-/// into `b` lands there on B, once.
-fn draining_share_goes_to_another(rig: &mut MultiRig) {
+/// The needing host (`a`'s) is draining — and is the rendezvous choice or not, it does not
+/// matter: it still asks for the free land its slime walks into, the coordinator assigns it to
+/// the other host (never to the drainer, whose fence never holds it), and the slime ends in `b`
+/// there, once.
+fn draining_need_met_by_another(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let sr = sr_of(rig, b);
     rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
-    let (drainer, other) = drain_the_preferred(sr);
-    rig.draining.insert(drainer);
-    rig.with_claims();
-    for h in host_ids(2) {
-        assert_eq!(rig.hosts[h.0 as usize].manager.preferred_claimer(sr), Some(other), "host {h} prefers host {other}");
-    }
     let ha = rig.owner(a);
+    let other = HostId(1 - ha.0);
+    rig.draining.insert(ha);
+    rig.with_assignment();
+    rig.with_coordinator(quiet_history());
     rig.run(a);
-    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
-    until_body(rig);
-    assert!(push_player_into(rig, a, b, WALK_ROUNDS), "the player never crossed into {b:?}: {:?}", rig.player_body(P_CLIENT));
-    assert_eq!(rig.stored_owner(sr), Some(other), "the host that is not draining claimed it");
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    assert!(until(rig, 2 * CROSS_ROUNDS, |rig| fenced_by(rig, sr) == [other]), "{sr:?} was never assigned to host {other}");
+    assert_eq!(rig.stored_owner(sr), Some(other), "only the host that is not draining holds it");
+    assert!(land_needed_sent(rig, ha, sr) >= 1, "the draining host asked for the land its slime needs");
     assert!(
         until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(other))),
         "every directory names host {other}: {:?}",
         owners_seen(rig, b)
     );
-    assert_eq!(rig.player_owners(P_CLIENT), [(other, b)], "the player is in {b:?} once, on host {other}");
-    assert_eq!(rig.claims_asked.get(&drainer).copied().unwrap_or(0), 0, "the draining host asked the store for nothing");
-    assert!(nothing_unowned(rig), "nothing waits for an owner");
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn a_draining_hosts_share_of_free_land_is_claimed_by_another() {
-    sweep("a_draining_hosts_share_of_free_land_is_claimed_by_another", 2, 1, SEEDS / 4, draining_share_goes_to_another);
-}
-
-/// The needing host's directory is one read behind: it still prefers the draining host and
-/// asks it (`ClaimWanted`). The draining host claims nothing; the land stays free and the
-/// slime waits. At the needing host's next read it prefers itself, claims, and the slime
-/// ends in `b` there, once.
-fn a_stale_ask_of_a_draining_host(rig: &mut MultiRig) {
-    let (a, b) = host_seam(2, 1);
-    let sr = sr_of(rig, b);
-    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
-    rig.with_claims();
-    let ha = rig.owner(a);
-    let (drainer, other) = drain_the_preferred(sr);
-    assert_eq!(other, ha, "the needing host is not the preferred one");
-    // Only the draining host has read its mark so far.
-    rig.draining.insert(drainer);
-    rig.read_directory(drainer);
-    assert_eq!(rig.hosts[ha.0 as usize].manager.preferred_claimer(sr), Some(drainer), "a stale directory");
-    rig.run(a);
-    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
-    assert!(
-        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
-        "the slime never waited for an owner"
-    );
-    // Fewer rounds than an unanswered ask takes to make the asker read the directory on its
-    // own (`CLAIM_UNANSWERED_REREAD_MS`: `an_ask_a_draining_host_drops_…`).
-    for _ in 0..WAIT_ROUNDS {
-        rig.round();
-    }
-    assert_eq!(rig.claims_asked.get(&drainer).copied().unwrap_or(0), 0, "asked, the draining host claimed nothing");
-    assert_eq!(rig.stored_owner(sr), None, "the land stays free");
-    assert_eq!(rig.hosts[ha.0 as usize].manager.unowned_waiting_ids(), [(sr, id)], "the slime still waits");
-    rig.read_directory(ha);
-    assert!(until(rig, CROSS_ROUNDS, |rig| rig.stored_owner(sr) == Some(ha)), "host {ha} never claimed it");
     rig.run(b);
     until_settled_in(rig, id, b);
     assert!(nothing_unowned(rig), "nothing waits for an owner");
@@ -5990,18 +5998,19 @@ fn a_stale_ask_of_a_draining_host(rig: &mut MultiRig) {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_draining_host_asked_to_claim_claims_nothing() {
-    sweep("a_draining_host_asked_to_claim_claims_nothing", 2, 1, SEEDS / 4, a_stale_ask_of_a_draining_host);
+fn a_draining_host_is_assigned_nothing_and_its_need_is_met_by_another() {
+    sweep("a_draining_host_is_assigned_nothing_and_its_need_is_met_by_another", 2, 1, SEEDS / 4, draining_need_met_by_another);
 }
 
-/// Every host draining: nobody is preferred, nobody claims, nothing panics or spins (no
-/// directory read asked round after round); the slime waits for an owner all along.
+/// Every host draining: nobody is assigned anything, nothing panics or spins (the asks stay
+/// paced, no directory read asked round after round); the slime waits for an owner all along.
 fn every_host_draining(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let sr = sr_of(rig, b);
     rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
     rig.draining.extend(host_ids(2));
-    rig.with_claims();
+    rig.with_assignment();
+    rig.with_coordinator(quiet_history());
     let ha = rig.owner(a);
     rig.run(a);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
@@ -6009,13 +6018,15 @@ fn every_host_draining(rig: &mut MultiRig) {
         until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
         "the slime never waited for an owner"
     );
+    let since = rig.hosts[ha.0 as usize].now_ms;
     for _ in 0..CROSS_ROUNDS {
         rig.round();
     }
-    for h in host_ids(2) {
-        assert_eq!(rig.hosts[h.0 as usize].manager.preferred_claimer(sr), None, "host {h}: nobody to prefer");
-    }
-    assert!(rig.claims_asked.is_empty(), "nobody asked the store: {:?}", rig.claims_asked);
+    let took = rig.hosts[ha.0 as usize].now_ms - since;
+    let asks = land_needed_sent(rig, ha, sr);
+    assert!(asks >= 1, "the need was asked for");
+    assert!(asks as u64 <= took / game::LAND_NEEDED_EVERY_MS + 2, "{asks} asks in {took} ms: paced");
+    assert!(host_ids(2).all(|h| rig.assigned_fence(h).is_empty()), "nobody was assigned anything");
     assert!(rig.reads_asked.values().all(|n| *n <= 2), "no read loop: {:?}", rig.reads_asked);
     assert_eq!(rig.stored_owner(sr), None, "the land stays free");
     assert_eq!(rig.hosts[ha.0 as usize].manager.unowned_waiting_ids(), [(sr, id)], "the need is still pending");
@@ -6023,13 +6034,255 @@ fn every_host_draining(rig: &mut MultiRig) {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn every_host_draining_claims_nothing_and_waits() {
-    sweep("every_host_draining_claims_nothing_and_waits", 2, 1, SEEDS / 4, every_host_draining);
+fn every_host_draining_is_assigned_nothing_and_what_waits_waits() {
+    sweep("every_host_draining_is_assigned_nothing_and_what_waits_waits", 2, 1, SEEDS / 4, every_host_draining);
 }
 
-/// A slime waits on `a`'s host for free `b`; then the other host claims `b`'s super-region
-/// (its server's `claimed`, no claim loop): its `Owns` tells `a`'s host, which sends the
-/// slime on — it ends in `b` once, and a committed world cut afterwards holds it once.
+// --- Elastic 3 Task 4: assignment races, lost answers, dead assignees, no replica -------------
+
+/// A free region with a neighbour of each of the two hosts (rendezvous layout, `s` = 1), and
+/// those neighbours: `(free, of host 0, of host 1)`.
+fn free_between_two_hosts(rig: &MultiRig) -> (RegionCoords, RegionCoords, RegionCoords) {
+    let owner = |rc: RegionCoords| crate::common::rendezvous_owner(game::super_region_of(rc, 1), 2);
+    for z in 2..20 {
+        for x in 2..20 {
+            let f = RegionCoords::new(x, z);
+            if rig.homes.contains(&f) {
+                continue;
+            }
+            let near = [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| RegionCoords::new(x + dx, z + dz));
+            let of = |h: u64| near.iter().copied().find(|n| owner(*n) == HostId(h) && !rig.homes.contains(n));
+            if let (Some(n0), Some(n1)) = (of(0), of(1)) {
+                return (f, n0, n1);
+            }
+        }
+    }
+    panic!("no free region between the two hosts");
+}
+
+/// Both hosts need one free super-region in the same round (a slime of each walks into it):
+/// exactly one assignment — one owner in the store, one fence holding the row — and both
+/// slimes land in the world once.
+fn one_assignment_for_two_askers(rig: &mut MultiRig) {
+    let (f, n0, n1) = free_between_two_hosts(rig);
+    let sr = sr_of(rig, f);
+    assigning_world(rig, rendezvous_rows(rig, &[sr], &[]));
+    rig.run(n0);
+    rig.run(n1);
+    let ids = [rig.spawn_slime(n0, past_seam(n0, f, REGION_SIZE / 2.0)), rig.spawn_slime(n1, past_seam(n1, f, REGION_SIZE / 2.0))];
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| host_ids(2).all(|h| land_needed_sent(rig, h, sr) >= 1)),
+        "both hosts asked for {sr:?}"
+    );
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.stored_owner(sr).is_some()), "{sr:?} was never assigned");
+    let owner = rig.stored_owner(sr).expect("assigned");
+    let epoch = rig.claim_store.as_ref().expect("a table")[&sr].1;
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, f).iter().all(|o| *o == Some(owner))),
+        "every directory names host {owner}: {:?}",
+        owners_seen(rig, f)
+    );
+    rig.run(f);
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| ids.iter().all(|id| rig.owners_of(*id).len() == 1) && nothing_unowned(rig)),
+        "both slimes landed: {:?}",
+        ids.map(|id| rig.owners_of(id))
+    );
+    assert_eq!(fenced_by(rig, sr), [owner], "one fence holds the row");
+    assert_eq!(rig.claim_store.as_ref().expect("a table")[&sr], (Some(owner), epoch), "assigned once");
+    for id in ids {
+        assert_eq!(live_count(rig, id), 1, "{id:?} is in the world once");
+    }
+    rig.assert_conserved_world();
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn two_hosts_asking_for_one_super_region_get_exactly_one_assignment() {
+    sweep("two_hosts_asking_for_one_super_region_get_exactly_one_assignment", 2, 1, SEEDS / 2, one_assignment_for_two_askers);
+}
+
+/// Review Focus 2: the store commits an assignment to host X (the least loaded), X never reads
+/// its `Assigned`, and X dies before it learns of the land — a slime of the other host S waits
+/// for that land meanwhile (on S, or on X once S was told the owner). X is a LANDED host: it
+/// is never ended as landless; it is succeeded (a `Crash` succession), the heir owns the row,
+/// and the slime is in the world once.
+fn assignee_dies_unaware(rig: &mut MultiRig) {
+    let chain = host_chain(2);
+    let (rs, rd) = (chain[0], chain[1]);
+    let rf = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .map(|(dx, dz)| RegionCoords::new(rs.x + dx, rs.z + dz))
+        .into_iter()
+        .find(|c| *c != rd && !rig.homes.contains(c) && sr_of(rig, *c) != sr_of(rig, rs) && sr_of(rig, *c) != sr_of(rig, rd))
+        .expect("a free neighbour of the survivor's region");
+    let sr = sr_of(rig, rf);
+    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
+    rig.with_assignment();
+    for rc in &chain {
+        rig.run(*rc);
+    }
+    world_cuts(rig);
+    rig.with_adoption();
+    rig.parked_hold = true;
+    let (s, x) = (rig.owner(rs), rig.owner(rd));
+    rig.loads.insert(s, BUSY);
+    until_committed(rig, 1);
+    rig.drop_assigned(x, usize::MAX);
+    let id = rig.spawn_slime(rs, past_seam(rs, rf, REGION_SIZE / 2.0));
+    for _ in 0..2 * CROSS_ROUNDS {
+        if rig.stored_owner(sr).is_some() {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert_eq!(rig.stored_owner(sr), Some(x), "the store assigned {sr:?} to host {x}");
+    assert!(fenced_by(rig, sr).is_empty(), "no fence holds it: host {x} never learned");
+    assert_ne!(rig.hosts[x.0 as usize].manager.owner_of(rf), game::Owner::Me, "host {x} never treats it as its own");
+    rig.kill(x);
+    rig.drop_assigned(x, 0);
+    assert_eq!(rig.drive_leases(), None, "a landed assignee is never ended as landless");
+    assert!(rig.ended.is_empty(), "nothing ended");
+    let succession = rig.run_succession(x).remove(0);
+    assert_eq!((succession.kind, succession.heir), (game::SuccessionKind::Crash, s), "{succession:?}");
+    assert!(succession.moved.iter().any(|(m, _)| *m == sr), "the assigned row moves with the rest: {:?}", succession.moved);
+    assert_eq!(rig.stored_owner(sr), Some(s), "the heir owns the row");
+    assert_settled_whole(rig, &succession, &[id]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_assignee_that_dies_before_learning_its_land_is_succeeded_not_ended() {
+    sweep("an_assignee_that_dies_before_learning_its_land_is_succeeded_not_ended", 2, 1, HEIR_SWEEP_SEEDS, assignee_dies_unaware);
+}
+
+/// Two coordinator replicas. The deciding replica's assignment commits and it dies before it
+/// applied the store's answer (nobody is told). The hosts relink to the other replica; the
+/// needing host asks again; that replica's read shows the owner and tells it (`Assigned` to an
+/// asker that is the owner, `LandIs` to another): one owner, one fence row, one assignment, and
+/// the slime that waited lands once.
+fn replica_dies_mid_assignment(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let sr = sr_of(rig, b);
+    assigning_world(rig, rendezvous_rows(rig, &[sr], &[]));
+    rig.with_replicas(2);
+    rig.run(a);
+    rig.assign_answers_lost = true;
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    assert!(until(rig, 2 * CROSS_ROUNDS, |rig| rig.stored_owner(sr).is_some()), "{sr:?} was never assigned");
+    let owner = rig.stored_owner(sr).expect("assigned");
+    let row = rig.claim_store.as_ref().expect("a table")[&sr];
+    // The deciding replica dies; the other ends it and becomes the ticker.
+    rig.kill_replica(0, 1);
+    rig.end_replica(1, 0);
+    rig.assign_answers_lost = false;
+    assert!(
+        until(rig, 3 * CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(owner))),
+        "every host learned host {owner} owns {sr:?}: {:?}",
+        owners_seen(rig, b)
+    );
+    assert_eq!(fenced_by(rig, sr), [owner], "one fence holds the row");
+    assert_eq!(rig.claim_store.as_ref().expect("a table")[&sr], row, "assigned exactly once");
+    rig.run(b);
+    until_settled_in(rig, id, b);
+    assert_eq!(live_count(rig, id), 1);
+    assert!(nothing_unowned(rig), "nothing waits for an owner");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_replica_dying_mid_assignment_assigns_exactly_once() {
+    sweep("a_replica_dying_mid_assignment_assigns_exactly_once", 2, 1, SEEDS / 4, replica_dies_mid_assignment);
+}
+
+/// Host X (the least loaded) is assigned the land a slime of the other host walks into, and its
+/// `Assigned` is lost (no host dies). The other host is told the owner and sends the slime to X,
+/// which thinks the land free: X holds it, asks itself, and the coordinator's read shows X the
+/// owner — `Assigned` again. X fences the row once and the slime lands once on X.
+fn lost_assigned_learned_at_the_next_need(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let sr = sr_of(rig, b);
+    assigning_world(rig, rendezvous_rows(rig, &[sr], &[]));
+    let ha = rig.owner(a);
+    let x = HostId(1 - ha.0);
+    rig.loads.insert(ha, BUSY);
+    rig.drop_assigned(x, 1);
+    rig.run(a);
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    assert!(until(rig, 2 * CROSS_ROUNDS, |rig| rig.stored_owner(sr) == Some(x)), "{sr:?} was never assigned to host {x}");
+    let row = rig.claim_store.as_ref().expect("a table")[&sr];
+    assert!(until(rig, 3 * CROSS_ROUNDS, |rig| fenced_by(rig, sr) == [x]), "host {x} never learned its land");
+    assert_eq!(rig.assigned_drops_left(x), 0, "its first `Assigned` was lost");
+    assert!(land_needed_sent(rig, x, sr) >= 1, "host {x} asked for the land itself");
+    assert_eq!(rig.claim_store.as_ref().expect("a table")[&sr], row, "assigned once");
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(x))),
+        "every directory names host {x}: {:?}",
+        owners_seen(rig, b)
+    );
+    rig.run(b);
+    until_settled_in(rig, id, b);
+    assert_eq!(live_count(rig, id), 1);
+    assert!(nothing_unowned(rig), "nothing waits for an owner");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_lost_assigned_is_learned_at_the_assignees_next_need() {
+    sweep("a_lost_assigned_is_learned_at_the_assignees_next_need", 2, 1, SEEDS / 4, lost_assigned_learned_at_the_next_need);
+}
+
+/// Every coordinator replica is gone (each host's world link down): owned land runs on — the
+/// test player crosses between the two hosts' super-regions and back — while a slime walking
+/// into free land waits, unassigned. A replica comes back (a new process on the row): the need
+/// is met and the slime lands once.
+fn no_replica_assigns_nothing(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    let rf = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .map(|(dx, dz)| RegionCoords::new(a.x + dx, a.z + dz))
+        .into_iter()
+        .find(|c| *c != b && !rig.homes.contains(c) && sr_of(rig, *c) != sr_of(rig, a) && sr_of(rig, *c) != sr_of(rig, b))
+        .expect("a free neighbour of a");
+    let sr = sr_of(rig, rf);
+    assigning_world(rig, rendezvous_rows(rig, &[sr], &[]));
+    rig.run(a);
+    rig.run(b);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    rig.world_links_up(false);
+    let id = rig.spawn_slime(a, past_seam(a, rf, REGION_SIZE / 2.0));
+    assert!(push_player_into(rig, a, b, WALK_ROUNDS), "the player crosses into {b:?} with no replica up");
+    assert!(push_player_into(rig, b, a, WALK_ROUNDS), "and back into {a:?}");
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.stored_owner(sr), None, "nothing is assigned with no replica up");
+    assert_eq!(rig.hosts[ha.0 as usize].manager.unowned_waiting_ids(), [(sr, id)], "the slime waits for an owner");
+    assert!(host_ids(2).all(|h| rig.assigned_fence(h).is_empty()));
+    rig.restart_coordinator_from_store();
+    assert!(until(rig, 2 * CROSS_ROUNDS, |rig| rig.stored_owner(sr).is_some()), "the need is met once a replica is back");
+    let owner = rig.stored_owner(sr).expect("assigned");
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, rf).iter().all(|o| *o == Some(owner))),
+        "every directory names host {owner}: {:?}",
+        owners_seen(rig, rf)
+    );
+    rig.run(rf);
+    until_settled_in(rig, id, rf);
+    assert_eq!(fenced_by(rig, sr), [owner]);
+    assert!(nothing_unowned(rig), "nothing waits for an owner");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn with_every_replica_down_nothing_is_assigned_and_owned_land_runs_on() {
+    sweep("with_every_replica_down_nothing_is_assigned_and_owned_land_runs_on", 2, 1, SEEDS / 4, no_replica_assigns_nothing);
+}
+
+/// A slime waits on `a`'s host for free `b`; then the other host is assigned `b`'s super-region
+/// (its server's fence and `claimed`, as an `Assigned` is taken — no coordinator asked): its
+/// `Owns` tells `a`'s host, which sends the slime on — it ends in `b` once, and a committed
+/// world cut afterwards holds it once.
 fn owns_delivers_what_waited(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let sr = sr_of(rig, b);
@@ -6042,7 +6295,7 @@ fn owns_delivers_what_waited(rig: &mut MultiRig) {
         until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids() == [(sr, id)]),
         "the slime never waited for an owner"
     );
-    rig.hosts[hb.0 as usize].manager.claimed(vec![(sr, 2)]);
+    rig.fence_then_claim(hb, vec![(sr, 2)]);
     assert!(
         until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.owner_of(b) == game::Owner::Host(hb)),
         "host {ha} never learned host {hb}'s claim"
@@ -6365,7 +6618,7 @@ fn succession_world(rig: &mut MultiRig) -> Vec<RegionCoords> {
     let chain = host_chain(rig.hosts.len() as u32);
     let rows = rendezvous_rows(rig, &[], &[]);
     rig.with_directory(rows);
-    rig.with_claims();
+    rig.with_assignment();
     for rc in &chain {
         rig.run(*rc);
     }
@@ -7622,7 +7875,7 @@ fn row_delivered_out(rig: &mut MultiRig) -> bool {
     until_committed(rig, 1);
     let row = rig.stored_places(id) == [(dead, b, "row")];
     // Claims from now on: the preferred host claims `b`, and the slime goes out to it.
-    rig.with_claims();
+    rig.with_assignment();
     assert!(
         until(rig, CROSS_ROUNDS, |rig| rig.hosts[p.0 as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == id)),
         "the slime never reached host {p}"
@@ -7839,7 +8092,7 @@ fn person_into_inherited(rig: &mut MultiRig, waiting: bool) -> bool {
     let (rs, rd) = (chain[0], chain[1]);
     let (history, _, people) = history_with_site(rs, 2);
     rig.with_directory(rendezvous_rows(rig, &[], &[]));
-    rig.with_claims();
+    rig.with_assignment();
     for rc in &chain {
         rig.run(*rc);
     }
@@ -8557,11 +8810,11 @@ fn drained_world(rig: &mut MultiRig, then: impl FnOnce(&mut MultiRig, &[RegionCo
     chain
 }
 
-/// The `LandWanted`s host `h` sent its coordinator so far, by super-region.
+/// The `LandNeeded`s host `h` sent its coordinator so far, by super-region.
 fn land_asks(rig: &MultiRig, h: HostId) -> std::collections::BTreeMap<game::SuperRegion, usize> {
     let mut out = std::collections::BTreeMap::new();
     for m in rig.sent_to_coordinator(h) {
-        if let game::HostMsg::LandWanted { sr } = m {
+        if let game::HostMsg::LandNeeded { sr } = m {
             *out.entry(sr).or_insert(0) += 1;
         }
     }
@@ -8583,7 +8836,7 @@ fn until_land_declared(rig: &mut MultiRig) -> game::Succession {
 /// Host L leaves in a committed cut (a slime of it parked with it) and exits. Afterwards a
 /// survivor's slime crosses toward L's region and a deposit is put down there: both wait in
 /// the survivor's session, held for L's next boot. The survivor asks for the land
-/// (`LandWanted`, at most once per `LAND_WANTED_EVERY_MS` per super-region); the coordinator
+/// (`LandNeeded`, at most once per `LAND_NEEDED_EVERY_MS` per super-region); the coordinator
 /// gives ALL of L's land to the heir at once as a `Leave` succession;
 /// the reports carry `Sent` entries only. The heir delivers what was held once — the slime
 /// lands once, the items are held exactly once every round and lie in L's region at the end
@@ -8617,7 +8870,7 @@ fn held_for_a_leaver(rig: &mut MultiRig) {
     assert!(asks.get(&sr).is_some_and(|n| *n >= 1), "host {s} asked for {sr:?}: {asks:?}");
     for (sr, n) in &asks {
         assert!(
-            *n as u64 <= asked_ms / game::LAND_WANTED_EVERY_MS + 1,
+            *n as u64 <= asked_ms / game::LAND_NEEDED_EVERY_MS + 1,
             "{sr:?} asked {n} times in {asked_ms} ms (seed {})",
             rig.seed
         );
@@ -8665,7 +8918,7 @@ fn transfer_held_for_a_leaver_is_delivered_once_to_its_heir() {
 /// The test player plays on host L, which leaves in a committed cut (the player parked and
 /// saved in its part) and exits. The login service orders the player's spawn at a survivor
 /// (its entry host): its record's region is L's, so the order waits and the survivor asks
-/// for the land (`LandWanted`); the coordinator gives it away at once (no heir wait). The
+/// for the land (`LandNeeded`); the coordinator gives it away at once (no heir wait). The
 /// order is placed once the land is the heir's and adopted — on the heir (relayed, or on the
 /// entry host itself) — or, if the ask, the declaration and the adoption took longer than
 /// `SPAWN_SYNC_WAIT_MS`, refused (the login service answers 503) and placed at the client's
@@ -9698,7 +9951,7 @@ fn founders_world(rig: &mut MultiRig) -> Vec<RegionCoords> {
     let chain = if n == 1 { vec![rig.homes[0]] } else { host_chain(n) };
     let rows = rendezvous_rows(rig, &[], &[]);
     rig.with_directory(rows);
-    rig.with_claims();
+    rig.with_assignment();
     for rc in &chain {
         rig.run(*rc);
     }
@@ -9726,9 +9979,6 @@ fn join_during_a_leave(rig: &mut MultiRig) -> bool {
     rig.connect_home(leaver, P_CLIENT, P_PLAYER, centre_of(rl));
     until_body(rig);
     until_committed(rig, 1);
-    // A free super-region whose claim the leaver is preferred for (B-M3: once its leave is
-    // committed it leaves every directory's preference at once).
-    let preferred_free = (100..400).map(|x| (x, x)).find(|sr| rig.hosts[leaver.0 as usize].manager.preferred_claimer(*sr) == Some(leaver));
     rig.hosts[leaver.0 as usize].manager.request_leave();
     let mut cut = None;
     for _ in 0..WORLD_CUT_ROUNDS {
@@ -9748,11 +9998,6 @@ fn join_during_a_leave(rig: &mut MultiRig) -> bool {
         until(rig, CROSS_ROUNDS, |rig| others.iter().all(|o| rig.hosts[o.0 as usize].manager.peer_left(leaver))),
         "every founder heard the leave cut's decision"
     );
-    if let Some(sr) = preferred_free {
-        for o in &others {
-            assert_ne!(rig.hosts[o.0 as usize].manager.preferred_claimer(sr), Some(leaver), "host {o} no longer prefers the leaver for {sr:?}");
-        }
-    }
     // Linked once the cut is decided (Task 4's `linked_or_outside`, the later link checked).
     assert!(
         until(rig, CROSS_ROUNDS, |r| others.iter().all(|o| r.hosts[o.0 as usize].manager.peer_is_reachable(n) && r.hosts[n.0 as usize].manager.peer_is_reachable(*o))),
@@ -9764,9 +10009,6 @@ fn join_during_a_leave(rig: &mut MultiRig) -> bool {
     // N's periodic hosts read: L's row is clean.
     rig.read_directory(n);
     assert!(rig.hosts[n.0 as usize].manager.peer_left(leaver), "the newcomer learnt from the clean row that host {leaver} left");
-    if let Some(sr) = preferred_free {
-        assert_ne!(rig.hosts[n.0 as usize].manager.preferred_claimer(sr), Some(leaver), "nor does the newcomer prefer it");
-    }
     assert!(
         until(rig, CROSS_ROUNDS, |rig| rig.hosts[n.0 as usize].manager.peers_synced()),
         "the newcomer awaits no sync of the host that left (seed {}, link delay {})",
@@ -10016,7 +10258,7 @@ fn third_host_joins_at_a_fixed_tick(rig: &mut MultiRig) {
     let chain = host_chain(rig.hosts.len() as u32);
     let rows = rendezvous_rows(rig, &[], &[]);
     rig.with_directory(rows);
-    rig.with_claims();
+    rig.with_assignment();
     for rc in &chain {
         rig.run(*rc);
     }
@@ -10767,55 +11009,18 @@ fn a_drain_deadline_during_a_world_cut_waits_for_it_and_loses_nothing() {
     sweep("a_drain_deadline_during_a_world_cut_waits_for_it_and_loses_nothing", 2, 1, HEIR_SWEEP_SEEDS, drain_due_during_a_cut);
 }
 
-/// Ruling 7 (Task 7's review): the needing host's directory is a read behind the drain mark —
-/// it keeps asking the draining host to claim (`ClaimWanted`), which drops the ask. Nobody
-/// reads the directory for it: an ask unanswered for [`game::CLAIM_UNANSWERED_REREAD_MS`]
-/// makes the asker read it, it then prefers itself and claims. The land is claimed within
-/// that bound (plus a claim's round trip) of the mark, and the slime ends in `b` once.
-fn an_unanswered_ask_rereads(rig: &mut MultiRig) {
-    let (a, b) = host_seam(2, 1);
-    let sr = sr_of(rig, b);
-    rig.with_directory(rendezvous_rows(rig, &[sr], &[]));
-    rig.with_claims();
-    let ha = rig.owner(a);
-    let (drainer, other) = drain_the_preferred(sr);
-    assert_eq!(other, ha, "the needing host is not the preferred one");
-    rig.draining.insert(drainer);
-    rig.read_directory(drainer);
-    assert_eq!(rig.hosts[ha.0 as usize].manager.preferred_claimer(sr), Some(drainer), "a stale directory");
-    rig.run(a);
-    let marked = rig.hosts[ha.0 as usize].now_ms;
-    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
-    let bound = game::CLAIM_UNANSWERED_REREAD_MS + game::CLAIM_WANTED_EVERY_MS;
-    let rounds = (bound / game::TICK_RATE) as usize + CROSS_ROUNDS;
-    assert!(until(rig, rounds, |rig| rig.stored_owner(sr) == Some(ha)), "host {ha} never claimed {sr:?}");
-    let took = rig.hosts[ha.0 as usize].now_ms - marked;
-    assert!(took <= bound + 20 * game::TICK_RATE, "claimed {took} ms after the mark (bound {bound} ms, seed {})", rig.seed);
-    assert!(rig.reads_asked.get(&ha).is_some_and(|n| *n >= 1), "the asker read the directory on its own");
-    assert_eq!(rig.claims_asked.get(&drainer).copied().unwrap_or(0), 0, "the draining host claimed nothing");
-    rig.run(b);
-    until_settled_in(rig, id, b);
-    assert!(nothing_unowned(rig), "nothing waits for an owner");
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn an_ask_a_draining_host_drops_makes_the_asker_reread_within_its_bound() {
-    sweep("an_ask_a_draining_host_drops_makes_the_asker_reread_within_its_bound", 2, 1, SEEDS / 4, an_unanswered_ask_rereads);
-}
-
 // --- Elastic 2a: recipients own land; a landless death is ended ----------------------------
 
 /// Rounds a flapping host runs before it dies, and the budget for its end.
 const FLAP_ROUNDS: usize = 20;
 
-/// Host `x` wins super-region `sr` (free in the rig's `super_regions` table) as a `claim_free`
-/// would answer it: the table names it, its manager is told.
+/// Host `x` is assigned super-region `sr` (free in the rig's `super_regions` table) as an
+/// `AssignLand` would answer it: the table names it, its fence takes it, its manager is told.
 fn win_land(rig: &mut MultiRig, x: HostId, sr: game::SuperRegion) {
-    let store = rig.claim_store.as_mut().expect("with_claims");
+    let store = rig.claim_store.as_mut().expect("with_assignment");
     let epoch = store.get(&sr).map_or(1, |(_, e)| e + 1);
     store.insert(sr, (Some(x), epoch));
-    rig.hosts[x.0 as usize].manager.claimed(vec![(sr, epoch)]);
+    rig.fence_then_claim(x, vec![(sr, epoch)]);
     assert!(rig.landed(x));
 }
 
@@ -11227,7 +11432,7 @@ fn landed_adjacent_after_the_declaration(rig: &mut MultiRig) {
         .expect("a free neighbour of the dead host's region");
     let rows = rendezvous_rows(rig, &[sr_of(rig, rf)], &[]);
     rig.with_directory(rows);
-    rig.with_claims();
+    rig.with_assignment();
     rig.run(rs);
     rig.run(rd);
     world_cuts(rig);
@@ -11261,7 +11466,7 @@ fn landed_adjacent_after_the_declaration(rig: &mut MultiRig) {
     let mut stopped = None;
     for _ in 0..WORLD_CUT_ROUNDS {
         rig.cut_round();
-        rig.drive_claims();
+        rig.drive_assignment();
         if let Some(d) = rig.hosts[x.0 as usize].manager.take_unaccounted_dead() {
             stopped = Some(d);
             break;
@@ -11307,7 +11512,7 @@ fn pruned_landless_peer_with_unsaved_traffic(rig: &mut MultiRig) {
         .expect("a free neighbour of the holder's region");
     let rows = rendezvous_rows(rig, &[sr_of(rig, rf)], &[]);
     rig.with_directory(rows);
-    rig.with_claims();
+    rig.with_assignment();
     rig.run(rs);
     rig.run(rd);
     world_cuts(rig);
@@ -11332,7 +11537,7 @@ fn pruned_landless_peer_with_unsaved_traffic(rig: &mut MultiRig) {
     assert!(traded, "the slime {id:?} crossed from X to the holder (seed {})", rig.seed);
     // X's land freed (the table: no row of it), X dies landless, is ended and its row pruned —
     // all before the holder's next directory read.
-    for (owner, epoch) in rig.claim_store.as_mut().expect("with_claims").values_mut() {
+    for (owner, epoch) in rig.claim_store.as_mut().expect("with_assignment").values_mut() {
         if *owner == Some(x) {
             *owner = None;
             *epoch += 1;
@@ -11352,7 +11557,7 @@ fn pruned_landless_peer_with_unsaved_traffic(rig: &mut MultiRig) {
     let mut stopped = None;
     for _ in 0..WORLD_CUT_ROUNDS {
         rig.cut_round();
-        rig.drive_claims();
+        rig.drive_assignment();
         if let Some(d) = rig.hosts[holder.0 as usize].manager.take_unaccounted_dead() {
             stopped = Some(d);
             break;
