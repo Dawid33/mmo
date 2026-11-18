@@ -555,6 +555,70 @@ fn runner() -> Runner {
     Runner::new(log_program(), 1 << 20, cfg()).expect("loads")
 }
 
+/// `main`: `world.get("k")`, awaited (its error, if any, kept), then `log("done")`.
+fn await_program() -> Arc<Program> {
+    let mut pb = ProgramBuilder::new(stub_api().version);
+    let str_ty = pb.ty(TypeDesc::Str);
+    let unit = pb.ty(TypeDesc::Unit);
+    let int = pb.ty(TypeDesc::Int);
+    pb.ty(TypeDesc::Enum {
+        name: quest_vm::types::ERROR_ENUM_NAME.into(),
+        variants: ["Lost", "Timeout", "NamespaceGone"]
+            .iter()
+            .map(|v| (v.to_string(), vec![]))
+            .collect(),
+    });
+    let prom = pb.ty(TypeDesc::Promise(int));
+    let get = pb.host_site(F_WORLD_GET, HostFnKind::Promise, vec![str_ty], prom);
+    let log = pb.host_site(F_LOG, HostFnKind::Command, vec![str_ty], unit);
+    let (key, done) = (pb.string("k"), pb.string("done"));
+    let mut f = pb.func("main", 0);
+    let (k, p, val, err) = (f.local(0), f.local(1), f.local(2), f.local(3));
+    f.mark_ref(k);
+    f.mark_ref(err);
+    f.emit_t(Op::LoadStr, k, key);
+    f.emit(Op::CallHost, get, k, p);
+    f.emit(Op::Await, val, p, int);
+    f.emit_t(Op::LoadStr, k, done);
+    f.emit(Op::CallHost, log, k, k);
+    f.emit(Op::Ret, 0u16, 0u16, 0u16);
+    let main = f.fn_ref();
+    f.end();
+    pb.main(main);
+    Arc::new(pb.finish().expect("program"))
+}
+
+/// Regression (MVP review, quest-stub): the runner forgot a never-answered request at its deadline even
+/// on a tick without fuel, where `Vm::tick` runs no timeout pass: the run looked settled while the VM
+/// still owed the `Timeout`.
+#[test]
+fn zero_fuel_tick_times_out_once() {
+    let mut r = Runner::new(
+        await_program(),
+        1 << 20,
+        StubConfig {
+            failures: vec![FailureRule {
+                op: Some("world.get".into()),
+                nth: 1,
+                kind: FailureKind::Timeout,
+            }],
+            ..cfg()
+        },
+    )
+    .expect("loads");
+    assert!(r.vm.start_main());
+    r.step(10_000);
+    assert!(!r.quiescent(), "main waits for its answer");
+    while r.now <= quest_vm::consts::PROMISE_TIMEOUT_TICKS + 1 {
+        r.step(0);
+    }
+    assert!(!r.quiescent(), "no tick has timed the request out yet");
+    assert!(r.host.output.is_empty());
+    r.step(10_000);
+    assert_eq!(r.host.output, ["log: done"]);
+    assert!(r.quiescent());
+}
+
 #[test]
 fn runner_runs_main() {
     let mut r = runner();

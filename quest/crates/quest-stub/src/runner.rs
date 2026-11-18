@@ -74,7 +74,8 @@ impl Runner {
     }
 
     /// One tick: deliver what scripts emitted during the previous one, answer the requests due now (in
-    /// promise-id order), run the VM, advance the clock.
+    /// promise-id order), run the VM, forget the never-answered requests the VM timed out (only with
+    /// fuel, as the VM), advance the clock.
     pub fn step(&mut self, fuel: u64) -> TickReport {
         for event in std::mem::take(&mut self.host.emitted) {
             let name = match &event {
@@ -96,7 +97,11 @@ impl Runner {
         }
         self.host.tick = self.now;
         let report = self.vm.tick(self.now, fuel, &mut self.host);
-        self.host.expire(self.now);
+        // `Vm::tick` times promises out only on a tick with fuel: the host forgets a never-answered
+        // request on such a tick too, so the two agree on when it ended.
+        if fuel > 0 {
+            self.host.expire(self.now);
+        }
         self.now += 1;
         report
     }
