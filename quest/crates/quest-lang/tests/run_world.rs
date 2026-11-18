@@ -1053,3 +1053,32 @@ fn conversation_reads_the_dialogue_mirror_not_uncommitted_state() {
         ]
     );
 }
+
+const SLOW_SETUP: &str = r#"quest D:
+    role keeper: Person
+    let flag = 0
+    @on(Setup)
+    fn setup(e):
+        let i = 0
+        while i < 300:
+            i = i + 1
+        flag = 1
+    dialogue hi(p: Player, npc: Person) for keeper:
+        npc: f"flag is {flag}" @d.hi
+    stage S:
+        @on(Entered)
+        fn s(e):
+            pass
+"#;
+
+#[test]
+fn talk_during_a_multi_tick_setup_reads_the_placed_mirror() {
+    let (p, lines) = compiled(SLOW_SETUP);
+    let people = parse_people(SMITH_PEOPLE).expect("people");
+    let roles = roles(SMITH_PEOPLE, &[("keeper", "Person(3)")]);
+    let mut w = World::new(p, people, roles, StubConfig::default(), 200).expect("placed");
+    w.set_lines(lines);
+    // `setup` runs over several ticks from tick 0: the talk at 1 reads the mirror taken at placement.
+    let out = run(&mut w, "1 talk 1 3\n2 done 1\n");
+    assert_eq!(out, ["[1] Hal: flag is 0", "[1] end Hal: Finished"]);
+}

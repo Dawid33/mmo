@@ -114,7 +114,6 @@ pub struct World {
     lines: BTreeMap<String, String>,
     show_ids: bool,
     fuel: u64,
-    roles: Vec<(String, WireValue)>,
     outcome: Outcome,
     /// The tick `Setup` is delivered at.
     setup_at: Option<u64>,
@@ -215,13 +214,12 @@ impl World {
                 now: 0,
                 faults: Vec::new(),
                 api_events: stub_api().events,
-                roles: roles.clone(),
+                roles,
                 mirrors: BTreeMap::new(),
             },
             lines: BTreeMap::new(),
             show_ids: false,
             fuel,
-            roles,
             outcome: Outcome::Running,
             setup_at: Some(0),
             namespace: Namespace::default(),
@@ -249,7 +247,7 @@ impl World {
                 MEM_BYTES_DEFAULT,
                 cfg.clone(),
                 id,
-                w.roles.clone(),
+                w.core.roles.clone(),
             )
             .map_err(load_error)?;
             w.core.insts.push(Inst { runner, name });
@@ -257,6 +255,9 @@ impl World {
         for inst in &mut w.core.insts {
             inst.runner.host.in_world = true;
         }
+        // The placed state is what a talk before the first commit reads (a `Setup` running over several
+        // ticks takes no mirror until it ends).
+        w.core.take_mirrors();
         Ok(w)
     }
 
@@ -280,7 +281,7 @@ impl World {
         }
         for (k, r) in q.roles.iter().enumerate() {
             let (Some(f), Some((_, value))) =
-                (r.cond, self.roles.iter().find(|(n, _)| *n == r.name))
+                (r.cond, self.core.roles.iter().find(|(n, _)| *n == r.name))
             else {
                 continue;
             };
@@ -293,7 +294,7 @@ impl World {
             // The earlier roles (an optional one as `Some(v)` / `None` where its type asks), then this one.
             let mut args = Vec::new();
             for (j, earlier) in q.roles[..k].iter().enumerate() {
-                let given = self.roles.iter().find(|(n, _)| *n == earlier.name);
+                let given = self.core.roles.iter().find(|(n, _)| *n == earlier.name);
                 let plain = given.map(|(_, v)| v.clone());
                 let wrapped = match &plain {
                     Some(v) => WireValue::Variant {
