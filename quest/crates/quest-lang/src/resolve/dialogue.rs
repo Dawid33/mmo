@@ -474,21 +474,27 @@ impl<'a> Resolver<'a> {
 
     fn line_id(&mut self, id: &ast::LineId, file: &str) -> String {
         let key = id.path.join(".");
-        if let Some((first_file, first)) = self.line_ids.get(&key) {
+        self.claim_line_id(&key, file, id.span);
+        key
+    }
+
+    /// Records a line id, written or provisional (`duplicate-line-id` when it was used before: an explicit
+    /// `@d.0` beside the provisional `d.0` collides too).
+    fn claim_line_id(&mut self, key: &str, file: &str, at: ast::Span) {
+        if let Some((first_file, first)) = self.line_ids.get(key) {
             let mut d = error(
                 "duplicate-line-id",
                 format!("line id `@{key}` is used twice"),
                 file,
-                id.span,
+                at,
             );
             d.notes
                 .push(format!("first used at {first_file}:{}", first.line));
             self.diags.push(d);
         } else {
             self.line_ids
-                .insert(key.clone(), (file.to_string(), id.span));
+                .insert(key.to_string(), (file.to_string(), at));
         }
-        key
     }
 
     /// A line's text (a string or f-string literal, `bad-line-text`) and its id (`missing-line-id`, a
@@ -509,6 +515,7 @@ impl<'a> Resolver<'a> {
             },
             None => {
                 let path = format!("{}.{n}", s.line_prefix);
+                self.claim_line_id(&path, s.file, at);
                 self.diags.push(Diagnostic {
                     severity: Severity::Warning,
                     ..error(

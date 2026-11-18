@@ -160,8 +160,12 @@ fn lines_table_has_text_and_holes() {
 fn graph_independent_of_module_order() {
     let a = "mod b\n\nscene zed(x: Person):\n    x: \"z\" @a.z\n    -> later\n\nscene later(x: Person):\n    x: \"l\" @a.l\n\nevent Pong:\n    n: int\n";
     let b = "event Ping:\n    n: int\n\ndialogue alpha(p: Player, npc: Person):\n    emit Ping(n=1)\n    npc: \"a\" @b.a\n";
+    // The same declarations in another order (`alpha` keeps its lines: its `emit` argument is a fn, and a
+    // fn's source lines are in the program's line table).
+    let a2 = "event Pong:\n    n: int\n\nscene later(x: Person):\n    x: \"l\" @a.l\n\nscene zed(x: Person):\n    x: \"z\" @a.z\n    -> later\n\nmod b\n";
+    let b2 = "\n\n\ndialogue alpha(p: Player, npc: Person):\n    emit Ping(n=1)\n    npc: \"a\" @b.a\n\nevent Ping:\n    n: int\n";
     let one = compiled(&[("main.qs", a), ("b.qs", b)]);
-    let two = compiled(&[("b.qs", b), ("main.qs", a)]);
+    let two = compiled(&[("main.qs", a2), ("b.qs", b2)]);
     assert_eq!(one.program.to_bytes(), two.program.to_bytes());
     assert_eq!(one.lines, two.lines);
     let names: Vec<&str> = one
@@ -207,6 +211,15 @@ fn script_emit_in_handler_enqueues() {
 
 @on(Ping)
 fn pong(e):
+    print(f"ping {e.n}")
+    emit Pong(n=e.n + 1)
+    print("pinged")
+
+event Pong:
+    n: int
+
+@on(Pong)
+fn last(e):
     print(f"pong {e.n}")
 
 fn main():
@@ -215,8 +228,92 @@ fn main():
 "#;
     let c = compiled(&[("main.qs", main)]);
     let events: Vec<&str> = c.program.events.iter().map(|e| e.name.as_str()).collect();
-    assert_eq!(events, ["Ping"]);
+    assert_eq!(events, ["Ping", "Pong"]);
     let out = run(&[("main.qs", main)]);
     assert!(out.reports.is_empty(), "{:?}", out.reports);
-    assert_eq!(out.lines, ["sent", "pong 7"]);
+    // A handler's `emit` is handled after the handler's own segment, as a host's delivery would be.
+    assert_eq!(out.lines, ["sent", "ping 7", "pinged", "pong 8"]);
+}
+
+#[test]
+fn scene_line_ticks_count_holes_by_source() {
+    // "Hi " (3) + `{b.id}` (6, its braces included) + "!" (1) = 10 characters: 30 + 10 ticks.
+    let main = "scene chat(a: Person, b: Person):\n    a: f\"Hi {b.id}!\" @chat.hole\n";
+    let c = compiled(&[("main.qs", main)]);
+    let d = dialogue(&c, "chat");
+    let body = block(&c, d.nodes[0].body);
+    assert!(
+        matches!(&body[0], StepDef::Line { line, .. } if line.ticks == 40 && line.subst.len() == 1),
+        "{body:?}"
+    );
+}
+
+/// The `once` site of each option of the dialogue's first choice.
+fn option_sites(c: &Compiled) -> Vec<(String, Option<u32>)> {
+    let d = dialogue(c, "d");
+    let body = block(c, d.nodes[0].body);
+    let StepDef::Choice { options, .. } = &body[0] else {
+        panic!("{body:?}");
+    };
+    options
+        .iter()
+        .map(|o| (o.text.id.clone(), o.once))
+        .collect()
+}
+
+#[test]
+fn once_site_survives_an_earlier_insertion() {
+    let before = r#"dialogue d(p: Player, npc: Person):
+    choice:
+        once "Ask about the dog." @d.ask
+        "Goodbye." @d.bye
+"#;
+    let after = r#"dialogue d(p: Player, npc: Person):
+    choice:
+        once "Ask about the weather." @d.weather
+        once "Ask about the dog." @d.ask
+        "Goodbye." @d.bye
+"#;
+    let old = option_sites(&compiled(&[("main.qs", before)]));
+    let new = option_sites(&compiled(&[("main.qs", after)]));
+    let ask =
+        |v: &[(String, Option<u32>)]| v.iter().find(|(id, _)| id == "d.ask").and_then(|o| o.1);
+    assert!(ask(&old).is_some());
+    assert_eq!(ask(&old), ask(&new));
+    assert_ne!(new[0].1, new[1].1);
+}
+
+#[test]
+fn once_steps_sharing_an_anchor_collide() {
+    // Both `once:` steps are anchored at their first line, `d.x`.
+    let main = r#"dialogue d(p: Player, npc: Person):
+    once:
+        once:
+            npc: "x" @d.x
+"#;
+    let codes: Vec<String> =
+        match quest_lang::compile(&tree(&[("main.qs", main)]), &quest_stub::stub_api()) {
+            Ok(_) => panic!("compiled"),
+            Err(diags) => diags.into_iter().map(|d| d.code.to_string()).collect(),
+        };
+    assert_eq!(codes, ["site-collision"]);
+}
+
+#[test]
+fn provisional_line_id_collides_with_a_written_one() {
+    // An explicit id cannot end in a number (`@d.0` does not parse), but two provisional ids can meet:
+    // module `farm`'s `talk` and quest `farm`'s `talk` are both `farm.talk.0`.
+    let main = "mod farm\n\nquest farm:\n    dialogue talk(npc: Person):\n        npc: \"b\"\n";
+    let farm = "dialogue talk(npc: Person):\n    npc: \"a\"\n";
+    let errors: Vec<(String, String, u32)> =
+        common::diagnostics(&[("main.qs", main), ("farm.qs", farm)])
+            .into_iter()
+            .filter(|d| d.severity == quest_lang::Severity::Error)
+            .map(|d| (d.code.to_string(), d.file, d.line))
+            .collect();
+    // (The quest beside the module of its name is `duplicate-def` as well.)
+    assert!(
+        errors.contains(&("duplicate-line-id".to_string(), "farm.qs".to_string(), 2)),
+        "{errors:?}"
+    );
 }

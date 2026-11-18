@@ -6,8 +6,17 @@
 //!   order changes the program. A dialogue's steps are laid out in source order, depth first: a block's steps
 //!   are contiguous, each nested block is reserved where its step is met and filled right after it (a loop,
 //!   not recursion: steps nest as deep as the source).
-//! - **Record sites** (`once`, `once` options, line groups) are numbered per dialogue in that same order:
-//!   each node's condition, then its steps, a step's own sites before its nested blocks'.
+//! - **Record sites** (`once` / `once per` records, `once` options, line groups' pick counts) are persistent
+//!   NPC state kept across an edit, keyed by (instance, dialogue, site), so a site never depends on source
+//!   position: it is the FNV-1a 32 hash of a stable **anchor** string, made from line ids —
+//!   `option:<its text's id>`, `group:<its first member's id>`, `line:<id>` / `member:<id>` (a line's own
+//!   `when once`), `node:<node name>|<its first line id>` (nodes of a group share a name), `once:<the first
+//!   line id in its body>` and `when:<…>` likewise (a `when once …:` step). A `once:` or `when:` step whose
+//!   body holds no line is anchored `<node name>#once<n>` / `<node name>#when<n>`, `n` its ordinal among the
+//!   node's line-less steps of that kind (so only those shift on an edit). Two anchors of one dialogue on one
+//!   site — the same anchor twice (`once: once: …` around the same first line) or a hash collision — are the
+//!   error `site-collision`, never a silent merge. The first line id is the first in source order: a line, a
+//!   group's first member, a choice's first option text.
 //! - **Speakers.** A line without one is said by `npc` in a conversation and by the lead (the first of the
 //!   cast) in a scene or bark; an option's and a topic's text by `p`.
 //! - **Lines table.** Each line's source text, keyed by its id, with its f-string holes written `{0}`,
@@ -17,6 +26,8 @@
 //! - Only top-level dialogues and scenes are lowered here; a quest's are Task 44's.
 
 use super::Gen;
+use crate::ast::Span;
+use crate::diag::Diagnostic;
 use crate::hir::{
     self, DefId, DefKind, DialogueKind, EmitArg, EventRef, LinePart, LineRef, Step, StepKind,
 };
@@ -108,7 +119,9 @@ impl<'a> Gen<'a> {
             index: &index,
             graph: DialogueGraph::default(),
             lines: Lines::new(),
-            site: 0,
+            sites: BTreeMap::new(),
+            node: String::new(),
+            lineless: BTreeMap::new(),
             kind: DialogueKind::Conversation,
             file: String::new(),
         };
@@ -132,10 +145,39 @@ struct Lower<'l, 'a> {
     index: &'l BTreeMap<DefId, u16>,
     graph: DialogueGraph,
     lines: Lines,
-    /// The next record site of the dialogue being lowered.
-    site: u32,
+    /// The record sites of the dialogue being lowered, with their anchors.
+    sites: BTreeMap<u32, String>,
+    /// The node being lowered, and its line-less `once:` / `when:` steps so far.
+    node: String,
+    lineless: BTreeMap<&'static str, u32>,
     kind: DialogueKind,
     file: String,
+}
+
+/// FNV-1a, 32 bits: a record site from its anchor (fixed, unlike std's `Hash`).
+fn fnv1a32(s: &str) -> u32 {
+    s.bytes().fold(0x811c_9dc5u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
+}
+
+/// The first line id among `steps`, in source order (a line, a group's first member, a choice's first
+/// option text), nested steps included.
+fn first_line(steps: &[Step]) -> Option<&str> {
+    let mut stack: Vec<&Step> = steps.iter().rev().collect();
+    while let Some(s) = stack.pop() {
+        let found = match &s.kind {
+            StepKind::Line(l) => Some(&l.text),
+            StepKind::Group(members) => members.first().map(|m| &m.line.text),
+            StepKind::Choice { options, .. } => options.iter().find_map(|o| o.text.as_ref()),
+            _ => None,
+        };
+        if let Some(t) = found {
+            return Some(&t.id.path);
+        }
+        stack.extend(s.inner().into_iter().rev());
+    }
+    None
 }
 
 fn sat_u8(n: u32) -> u8 {
@@ -156,14 +198,51 @@ impl<'a> Lower<'_, 'a> {
         self.g.fns.get(&d).map_or(u16::MAX, |r| r.0)
     }
 
-    fn next_site(&mut self) -> u32 {
-        let s = self.site;
-        self.site = self.site.saturating_add(1);
-        s
+    /// The record site of `anchor` (`site-collision` at `at` when another record of the dialogue has it).
+    fn site(&mut self, anchor: String, at: Span) -> u32 {
+        let site = fnv1a32(&anchor);
+        match self.sites.get(&site) {
+            Some(other) => {
+                let message = if *other == anchor {
+                    format!(
+                        "two records of this dialogue share the anchor `{anchor}`: give one of them a line of its own"
+                    )
+                } else {
+                    format!(
+                        "the records anchored `{anchor}` and `{other}` hash to the same site: change a line id"
+                    )
+                };
+                self.g.diags.push(Diagnostic::error(
+                    "site-collision",
+                    message,
+                    &self.file,
+                    at.line,
+                    at.col,
+                    at.len,
+                ));
+            }
+            None => {
+                self.sites.insert(site, anchor);
+            }
+        }
+        site
+    }
+
+    /// The anchor of a `once:` or `when:` step (`kind`) holding `steps`.
+    fn block_anchor(&mut self, kind: &'static str, steps: &[Step]) -> String {
+        match first_line(steps) {
+            Some(id) => format!("{kind}:{id}"),
+            None => {
+                let n = self.lineless.entry(kind).or_insert(0);
+                let anchor = format!("{}#{kind}{n}", self.node);
+                *n = n.saturating_add(1);
+                anchor
+            }
+        }
     }
 
     fn dialogue(&mut self, name: &str, dl: &'a hir::Dialogue) -> DialogueDef {
-        self.site = 0;
+        self.sites.clear();
         self.kind = dl.kind;
         let topic = dl.topic.as_ref().map(|t| TopicDef {
             text: self.line_def(&t.text, Speaker::Cast(0), None),
@@ -179,7 +258,10 @@ impl<'a> Lower<'_, 'a> {
         }
         let mut nodes = Vec::with_capacity(dl.nodes.len());
         for n in &dl.nodes {
-            let cond = self.cond(n.cond.as_ref());
+            self.node = n.name.clone();
+            self.lineless.clear();
+            let anchor = format!("node:{}|{}", n.name, first_line(&n.steps).unwrap_or(""));
+            let cond = self.cond(n.cond.as_ref(), anchor, n.span);
             let body = self.body(&n.steps, &first);
             nodes.push(NodeDef {
                 name: n.name.clone(),
@@ -250,18 +332,19 @@ impl<'a> Lower<'_, 'a> {
         block
     }
 
-    fn once(&mut self, o: &hir::Once) -> OnceDef {
+    fn once(&mut self, o: &hir::Once, anchor: String, at: Span) -> OnceDef {
         OnceDef {
-            site: self.next_site(),
+            site: self.site(anchor, at),
             per: o.per.map(|p| self.f(p)),
         }
     }
 
-    fn cond(&mut self, c: Option<&hir::Cond>) -> CondDef {
+    /// A condition; its `once` record is anchored `anchor` (taken only when there is one).
+    fn cond(&mut self, c: Option<&hir::Cond>, anchor: String, at: Span) -> CondDef {
         match c {
             None => CondDef::NONE,
             Some(c) => CondDef {
-                once: c.once.as_ref().map(|o| self.once(o)),
+                once: c.once.as_ref().map(|o| self.once(o, anchor, at)),
                 guard: c.guard.map(|g| self.f(g)),
             },
         }
@@ -328,7 +411,8 @@ impl<'a> Lower<'_, 'a> {
         match &s.kind {
             StepKind::Line(l) => {
                 let line = self.line(l);
-                let cond = self.cond(l.cond.as_ref());
+                let anchor = format!("line:{}", l.text.id.path);
+                let cond = self.cond(l.cond.as_ref(), anchor, s.span);
                 StepDef::Line { line, cond }
             }
             StepKind::Choice { timeout, options } => {
@@ -339,8 +423,9 @@ impl<'a> Lower<'_, 'a> {
                         fallback = Some(self.reserve(&o.steps, todo));
                         continue;
                     };
+                    let anchor = format!("option:{}", text.id.path);
                     let text = self.line_def(text, Speaker::Cast(0), None);
-                    let once = o.once.then(|| self.next_site());
+                    let once = o.once.then(|| self.site(anchor, o.span));
                     out.push(OptionDef {
                         text,
                         guard: o.guard.map(|g| self.f(g)),
@@ -356,12 +441,17 @@ impl<'a> Lower<'_, 'a> {
                 }
             }
             StepKind::Group(members) => {
-                let site = self.next_site();
+                let anchor = match members.first() {
+                    Some(m) => format!("group:{}", m.line.text.id.path),
+                    None => format!("{}#group", self.node),
+                };
+                let site = self.site(anchor, s.span);
                 let members = members
                     .iter()
                     .map(|m| {
                         let line = self.line(&m.line);
-                        let cond = self.cond(m.line.cond.as_ref());
+                        let anchor = format!("member:{}", m.line.text.id.path);
+                        let cond = self.cond(m.line.cond.as_ref(), anchor, m.span);
                         MemberDef {
                             line,
                             cond,
@@ -373,14 +463,19 @@ impl<'a> Lower<'_, 'a> {
                 StepDef::Group { site, members }
             }
             StepKind::When(c, steps) => {
-                let cond = self.cond(Some(c));
+                let anchor = match c.once {
+                    Some(_) => self.block_anchor("when", steps),
+                    None => String::new(),
+                };
+                let cond = self.cond(Some(c), anchor, s.span);
                 StepDef::When {
                     cond,
                     body: self.reserve(steps, todo),
                 }
             }
             StepKind::Once(o, steps) => {
-                let once = self.once(o);
+                let anchor = self.block_anchor("once", steps);
+                let once = self.once(o, anchor, s.span);
                 StepDef::Once {
                     once,
                     body: self.reserve(steps, todo),
