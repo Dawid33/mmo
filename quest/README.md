@@ -172,8 +172,29 @@ stub and where the example's prose and the run differ. `d_commutative` is also r
 
 **Testing rule (owner, 2026-11-16).** The plan's tests are the initial implementation's. From now on a test is
 written only as a regression for a bug that was actually found; never pre-emptively or "for coverage". Broad
-assurance comes from fuzzing, planned later. Phase 10 (dialogue and quests) was initial implementation too and
+assurance comes from fuzzing (below). Phase 10 (dialogue and quests) was initial implementation too and
 carried its own tests; since its close-out (Task 49) the rule applies again.
+
+## Fuzzing
+
+`fuzz/` is a cargo-fuzz crate (libFuzzer) with its own workspace and lockfile, excluded from this workspace, so
+neither `quest-check` nor `quest-test` builds it. `just quest-fuzz <target> [secs=60] [jobs=1]` runs one target
+(cargo-fuzz is installed pinned under `target/tools/` on first use; a 10 s per-input timeout, 2 GiB RSS):
+
+| Target | Input | Holds |
+|---|---|---|
+| `compile` | bytes as lossy UTF-8, the file `main.qs` | `compile` returns: no panic, no stack overflow |
+| `program_bytes` | bytes as a program | `Program::from_bytes` is `Ok`/`Err`; one that fits the stub's API runs `main` 200 ticks of fuel 2000 |
+| `vm_load` | a byte picking a run case (`RUN[b % len]`), then a saved state | `Vm::load` is `Err`, or the VM runs 200 ticks |
+| `wire_decode` | bytes as a wire value | `WireValue::decode` is `Ok`/`Err`; a value re-encodes to bytes that decode to it |
+| `stub_inputs` | bytes as lossy UTF-8 | `parse_people` and `parse_script` return |
+
+The corpora (`fuzz/corpus/<target>/`, git-ignored) are seeded by `fuzz/seeds.sh` when a target has none: the
+corpus's sources, people and script files, and through `quest-corpus`'s `examples/dump_seeds.rs` each run case's
+program bytes, a state saved halfway through its run and wire values. Re-run `fuzz/seeds.sh` after a bytecode or
+save-format change (old seeds then only reach the version check). A crash is written to
+`fuzz/artifacts/<target>/`; replay it with `quest/target/tools/cargo-fuzz-<ver>/bin/cargo-fuzz fuzz run <target>
+<file>` from `quest/`, and keep it as a regression test.
 
 ## Known limits
 

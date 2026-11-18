@@ -1,0 +1,58 @@
+# The quest language's fuzz targets (cargo-fuzz, libFuzzer): `just quest-fuzz <target> [secs] [jobs]`.
+# Its OWN workspace and lockfile, excluded from quest/Cargo.toml, so libFuzzer and the sanitizer flags never
+# reach `just quest-test` / `quest-check`. Glue only: the crates under test keep `forbid(unsafe_code)`.
+[package]
+name = "quest-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+quest-lang = { path = "../crates/quest-lang" }
+quest-vm = { path = "../crates/quest-vm" }
+quest-stub = { path = "../crates/quest-stub" }
+quest-corpus = { path = "../crates/quest-corpus" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "compile"
+path = "fuzz_targets/compile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "program_bytes"
+path = "fuzz_targets/program_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vm_load"
+path = "fuzz_targets/vm_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stub_inputs"
+path = "fuzz_targets/stub_inputs.rs"
+test = false
+doc = false
+bench = false

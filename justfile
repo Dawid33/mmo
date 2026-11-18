@@ -2952,3 +2952,18 @@ quest-wasm:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml -p quest-corpus --test determinism --target wasm32-unknown-unknown 2>&1 | tee "$log"
     grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$log" || { echo "quest-wasm: the wasm32 half ran no test" >&2; exit 1; }
+
+# quest-fuzz <target> [secs] [jobs] — run one fuzz target of quest/fuzz/ (compile, program_bytes, vm_load,
+# wire_decode, stub_inputs) for `secs` seconds on `jobs` libFuzzer processes. cargo-fuzz is installed pinned
+# under quest/target/tools on first use; the corpus is seeded from quest/corpus by quest/fuzz/seeds.sh when
+# the target has none. Crashes land in quest/fuzz/artifacts/<target>/ (git-ignored).
+quest-fuzz target secs="60" fuzz_jobs="1":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=0.13.2
+    root="$PWD/quest/target/tools/cargo-fuzz-$ver"
+    [ -x "$root/bin/cargo-fuzz" ] || {{cap}} cargo install --locked cargo-fuzz --version "$ver" --root "$root"
+    [ -d "quest/fuzz/corpus/{{target}}" ] || {{cap}} quest/fuzz/seeds.sh
+    cd quest
+    {{cap}} "$root/bin/cargo-fuzz" fuzz run "{{target}}" --jobs "{{fuzz_jobs}}" -- \
+        -max_total_time="{{secs}}" -timeout=10 -rss_limit_mb=2048

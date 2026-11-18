@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/quest-vm", "crates/quest-stub", "crates/quest-lang", "crates/quest-cli", "crates/quest-corpus"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
