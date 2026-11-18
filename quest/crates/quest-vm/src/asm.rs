@@ -19,7 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand as Kind, Wide};
 use crate::host::HostFnKind;
 use crate::program::{
-    FnInfo, GlobalInfo, HandlerInfo, HostSite, LineEntry, Program, ProgramError, Shape,
+    EventInfo, FnInfo, GlobalInfo, HandlerInfo, HostSite, LineEntry, Program, ProgramError,
+    QuestInfo, Shape,
 };
 use crate::types::{TypeDesc, TypeId, TypeTable};
 
@@ -141,6 +142,8 @@ pub struct ProgramBuilder {
     fns: Vec<FnInfo>,
     globals: Vec<GlobalInfo>,
     handlers: Vec<HandlerInfo>,
+    events: Vec<EventInfo>,
+    quest: Option<QuestInfo>,
     main_fn: Option<u16>,
     host_sites: Vec<HostSite>,
     lines: Vec<LineEntry>,
@@ -169,6 +172,8 @@ impl ProgramBuilder {
             fns: Vec::new(),
             globals: Vec::new(),
             handlers: Vec::new(),
+            events: Vec::new(),
+            quest: None,
             main_fn: None,
             host_sites: Vec::new(),
             lines: Vec::new(),
@@ -365,12 +370,45 @@ impl ProgramBuilder {
         i
     }
 
+    /// A handler of the home (or of a program without a quest), in no stage.
     pub fn handler(&mut self, event: &str, event_ty: TypeId, f: FnRef) {
+        self.owned_handler(event, event_ty, f, 0, None);
+    }
+
+    /// A handler of instance `owner` (0 the home, `1 + i` part `i`) declared in `stage`.
+    pub fn owned_handler(
+        &mut self,
+        event: &str,
+        event_ty: TypeId,
+        f: FnRef,
+        owner: u16,
+        stage: Option<u16>,
+    ) {
         self.handlers.push(HandlerInfo {
             event: event.to_string(),
             event_ty,
             fn_id: f.0,
+            owner,
+            stage,
         });
+    }
+
+    /// A script event: its index, the operand of `Enqueue` and `After`.
+    pub fn script_event(&mut self, name: &str, ty: TypeId) -> u16 {
+        let Some(i) = id16(self.events.len()) else {
+            self.fail("more than 65536 script events");
+            return 0;
+        };
+        self.events.push(EventInfo {
+            name: name.to_string(),
+            ty,
+        });
+        i
+    }
+
+    /// The program's quest (its globals and fns are this builder's indices).
+    pub fn set_quest(&mut self, q: QuestInfo) {
+        self.quest = Some(q);
     }
 
     pub fn main(&mut self, f: FnRef) {
@@ -417,6 +455,8 @@ impl ProgramBuilder {
             // ranges an op reads or writes beyond the words it names: the owning frame covers them
             let (first, extra) = match (p.op, p.rest) {
                 (Op::Await | Op::AwaitAll, _) => (p.a, 2),
+                // the ticks, then the event value
+                (Op::After, Wideness::Two(b, _)) => (b, 2),
                 (Op::CallBuiltin, Wideness::Two(b, _)) => {
                     let n = match p.a {
                         Opnd::Imm(id) => Builtin::from_u16(id).map(Builtin::arity),
@@ -544,6 +584,8 @@ impl ProgramBuilder {
             fns: self.fns,
             globals: self.globals,
             handlers: self.handlers,
+            events: self.events,
+            quest: self.quest,
             main_fn: self.main_fn,
             host_sites: self.host_sites,
             lines: self.lines,

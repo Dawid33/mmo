@@ -18,6 +18,8 @@ pub enum FaultKind {
     TooManyCommands,
     TooManyPromises,
     TooManyParked,
+    /// `after` with `TIMERS_MAX` timers live.
+    TooManyTimers,
     PromiseAlreadyAwaited,
     HostFault,
     /// Memory that does not parse: sets the instance `Failed`, no abort is attempted.
@@ -54,6 +56,7 @@ impl FaultKind {
             FaultKind::TooManyCommands => "too many commands",
             FaultKind::TooManyPromises => "too many promises",
             FaultKind::TooManyParked => "too many parked handlers",
+            FaultKind::TooManyTimers => "too many timers",
             FaultKind::PromiseAlreadyAwaited => "promise already awaited",
             FaultKind::HostFault => "host fault",
             FaultKind::Corrupt => "corrupt memory",

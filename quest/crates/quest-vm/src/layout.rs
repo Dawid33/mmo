@@ -1,12 +1,12 @@
 //! Memory layout and header (design D2).
 //!
 //! Regions in order: header | static | heap | shadow | dirty | inbox | queue | promises |
-//! parked | commands | error trace. All offsets are `u32` bytes; arithmetic is done in `u64`
+//! parked | timers | commands | error trace. All offsets are `u32` bytes; arithmetic is done in `u64`
 //! and narrowed only after a bound check, so nothing can overflow a 32-bit `usize`.
 
 use crate::consts::{
     CMD_BYTES, ERR_TRACE_MAX, HEADER_WORDS, HEAP_MIN_BYTES, INBOX_BYTES, PARKED_MAX, PROMISE_MAX,
-    QUEUE_LEN,
+    QUEUE_LEN, TIMERS_MAX,
 };
 use crate::mem::Mem;
 
@@ -18,6 +18,8 @@ pub const QUEUE_REC_WORDS: u32 = 4;
 pub const PROMISE_REC_WORDS: u32 = 6;
 /// Words of one parked-handler record (`promise` owns its contents).
 pub const PARKED_REC_WORDS: u32 = 4;
+/// Words of one timer record (`timers` owns its contents).
+pub const TIMER_REC_WORDS: u32 = 4;
 /// Words of one error-trace entry.
 pub const TRACE_REC_WORDS: u32 = 1;
 
@@ -82,6 +84,13 @@ pub const H_RESUME_PARKED: u32 = 40;
 /// block of the inbox heap holding one bit per global; 0 = none. Freed once the init cursor is past the
 /// last global.
 pub const H_INIT_SKIP: u32 = 41;
+pub const H_TIMERS_BASE: u32 = 42;
+/// The last timer serial issued (`timers`).
+pub const H_TIMER_SERIAL: u32 = 43;
+/// The instance this memory belongs to (`VmConfig::instance`): 0 the home, `1 + i` part `i`.
+pub const H_OWNER: u32 = 44;
+/// The quest's start (`QuestInfo::start_fn`, `sched`): `QSTART_*`.
+pub const H_QUEST_START: u32 = 45;
 
 /// `H_STATUS`: nothing is running.
 pub const STATUS_IDLE: u64 = 0;
@@ -94,7 +103,7 @@ pub const LINK_SENTINEL: u64 = u64::MAX;
 
 /// Every header field; a new `H_*` const must be added here, which checks it fits (words past
 /// the last field up to `HEADER_WORDS` stay zero and reserved).
-const H_ALL: [u32; 42] = [
+const H_ALL: [u32; 46] = [
     H_MAGIC,
     H_BYTECODE_VERSION,
     H_HOST_API_VERSION,
@@ -137,6 +146,10 @@ const H_ALL: [u32; 42] = [
     H_EV_ARRIVAL,
     H_RESUME_PARKED,
     H_INIT_SKIP,
+    H_TIMERS_BASE,
+    H_TIMER_SERIAL,
+    H_OWNER,
+    H_QUEST_START,
 ];
 
 const _: () = {
@@ -151,12 +164,21 @@ const _: () = {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoadError {
-    MemTooSmall { need: u32 },
+    MemTooSmall {
+        need: u32,
+    },
     BadMagic,
-    VersionMismatch { found: u32 },
-    HostApiMismatch { found: u32 },
+    VersionMismatch {
+        found: u32,
+    },
+    HostApiMismatch {
+        found: u32,
+    },
     ProgramMismatch,
     Invalid(String),
+    /// A role of the quest that `VmConfig::roles` does not give, gives twice, or gives a value that does
+    /// not fit; or a role the program does not have. Names the role.
+    Role(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +195,7 @@ pub struct Layout {
     pub queue_base: u32,
     pub promises_base: u32,
     pub parked_base: u32,
+    pub timers_base: u32,
     pub cmds_base: u32,
     pub cmds_end: u32,
     pub trace_base: u32,
@@ -188,10 +211,12 @@ impl Layout {
         let queue = u64::from(QUEUE_LEN as u32) * u64::from(QUEUE_REC_WORDS);
         let promises = u64::from(PROMISE_MAX as u32) * u64::from(PROMISE_REC_WORDS);
         let parked = u64::from(PARKED_MAX as u32) * u64::from(PARKED_REC_WORDS);
+        let timers = u64::from(TIMERS_MAX as u32) * u64::from(TIMER_REC_WORDS);
         let trace = u64::from(ERR_TRACE_MAX as u32) * u64::from(TRACE_REC_WORDS);
         let inbox = words_of(INBOX_BYTES);
         let cmds = words_of(CMD_BYTES);
-        let fixed = u64::from(HEADER_WORDS) + inbox + queue + promises + parked + cmds + trace;
+        let fixed =
+            u64::from(HEADER_WORDS) + inbox + queue + promises + parked + timers + cmds + trace;
 
         // Smallest R with floor(R * 64 / 129) >= static_words + heap minimum.
         let t = u64::from(static_words) + words_of(HEAP_MIN_BYTES);
@@ -221,6 +246,7 @@ impl Layout {
         let queue_base = next(queue);
         let promises_base = next(promises);
         let parked_base = next(parked);
+        let timers_base = next(timers);
         let cmds_base = next(cmds);
         let trace_base = next(trace);
         Ok(Layout {
@@ -236,6 +262,7 @@ impl Layout {
             queue_base,
             promises_base,
             parked_base,
+            timers_base,
             cmds_base,
             cmds_end: trace_base,
             trace_base,
@@ -245,7 +272,7 @@ impl Layout {
     /// Writes the magic, `mem_bytes`, `static_words` and every region base (logged writes).
     /// A memory shorter than the header is left untouched.
     pub fn write_header(&self, mem: &mut Mem) {
-        let fields: [(u32, u64); 18] = [
+        let fields: [(u32, u64); 19] = [
             (H_MAGIC, MAGIC),
             (H_MEM_BYTES, u64::from(self.mem_bytes)),
             (H_STATIC_WORDS, u64::from(self.static_words)),
@@ -258,6 +285,7 @@ impl Layout {
             (H_QUEUE_BASE, u64::from(self.queue_base)),
             (H_PROMISES_BASE, u64::from(self.promises_base)),
             (H_PARKED_BASE, u64::from(self.parked_base)),
+            (H_TIMERS_BASE, u64::from(self.timers_base)),
             (H_CMDS_BASE, u64::from(self.cmds_base)),
             (H_CMDS_END, u64::from(self.cmds_end)),
             (H_TRACE_BASE, u64::from(self.trace_base)),
@@ -301,6 +329,7 @@ impl Layout {
             (H_QUEUE_BASE, planned.queue_base),
             (H_PROMISES_BASE, planned.promises_base),
             (H_PARKED_BASE, planned.parked_base),
+            (H_TIMERS_BASE, planned.timers_base),
             (H_CMDS_BASE, planned.cmds_base),
             (H_CMDS_END, planned.cmds_end),
             (H_TRACE_BASE, planned.trace_base),

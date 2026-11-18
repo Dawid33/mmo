@@ -13,18 +13,23 @@
 //!    already made stay: writes are final (§8.2). The fresh instance continues the old promise serial, so
 //!    with the same epoch no id is issued twice.
 //! 3. Every initialised global, and every queued event, is read out as a [`WireValue`].
-//! 4. For each global of the new program, in order: an old global of the same qualified name whose
-//!    value loads structurally into the new type is CARRIED; else an orphan of that name that loads is
-//!    ADOPTED; either way its initialiser does not run (`H_INIT_SKIP`). Otherwise its initialiser runs
-//!    at the next ticks (INITIALISED). An old global that was not carried becomes an orphan.
+//! 4. For each global of the new program, in order: a role's global takes the role's value from `cfg`
+//!    as in [`Vm::new`] (an old value of that name is dropped: a role never re-binds) and is not
+//!    reported. Otherwise an old global of the same qualified name whose value loads structurally into
+//!    the new type is CARRIED; else an orphan of that name that loads is ADOPTED; either way its
+//!    initialiser does not run (`H_INIT_SKIP`). Otherwise its initialiser runs at the next ticks
+//!    (INITIALISED). An old global that was not carried becomes an orphan.
 //! 5. The queued events are delivered again in their order; one with no handler in the new program, or
 //!    whose shape no longer fits, is dropped. An event whose handlers had already started when the edit
 //!    landed is not delivered again — re-running handlers that already ran is worse than losing the rest
 //!    — and counts as dropped.
+//! 6. The timers (those of committed segments: the open one was undone) are set again with their ids,
+//!    due ticks and scopes; one whose script event is gone, or whose value no longer fits it, is dropped.
 //!
-//! The fresh instance has the old epoch, promise serial and latest `now`; everything else — `main`'s
-//! state, the arrival counter, the fuel debt — starts as in [`Vm::new`]. A failed instance migrates
-//! too: its initialised globals carry over and the new instance is not failed.
+//! The fresh instance has the old epoch, promise and timer serials and latest `now`, and a quest start
+//! that already began does not run again; everything else — `main`'s state, the arrival counter, the
+//! fuel debt — starts as in [`Vm::new`]. A failed instance migrates too: its initialised globals carry
+//! over and the new instance is not failed.
 //!
 //! # Orphans
 //! Kept outside the flat memory (the script cannot address them) in a list sorted by (name, type text),
@@ -33,7 +38,8 @@
 //!
 //! # Reset
 //! [`Vm::reset`] replaces the instance with a fresh one of the same program at the next epoch: the
-//! memory is byte for byte that of [`Vm::new`] with `epoch + 1`, no orphans, an empty undo log.
+//! memory is byte for byte that of [`Vm::new`] with `epoch + 1` (the same instance and roles), no
+//! orphans, no timers, an empty undo log.
 //!
 //! Both clear the undo log: rollback does not cross an edit or a Reset (decision 14).
 
@@ -43,11 +49,11 @@ use crate::consts::QUEUE_LEN;
 use crate::fault::FaultKind;
 use crate::interp::Fault;
 use crate::layout::{
-    H_EPOCH, H_EV_HANDLER, H_INIT_CURSOR, H_INIT_SKIP, H_NOW, H_PROMISE_SERIAL, H_QUEUE_COUNT,
-    H_QUEUE_HEAD, H_RESUME_PARKED, LoadError,
+    H_EPOCH, H_EV_HANDLER, H_INIT_CURSOR, H_NOW, H_PROMISE_SERIAL, H_QUEST_START, H_QUEUE_COUNT,
+    H_QUEUE_HEAD, H_RESUME_PARKED, H_TASK, H_TIMER_SERIAL, LoadError,
 };
 use crate::program::{GlobalInfo, Program};
-use crate::sched::word_off;
+use crate::sched::{QSTART_DONE, QSTART_WANTED, TASK_START, word_off};
 use crate::types::{TypeDesc, TypeId, TypeTable};
 use crate::vm::{Delivery, Vm, VmConfig};
 use crate::wire::{WireValue, from_wire, to_wire};
@@ -78,6 +84,8 @@ pub struct MigrationReport {
     pub events_dropped: u32,
     /// Parked tasks cancelled (and a resumed one cut off mid-segment).
     pub handlers_cancelled: u32,
+    /// Timers not set again: their script event is gone or their value no longer fits it.
+    pub timers_dropped: u32,
 }
 
 /// Printing deeper than this shows `…` (as the compiler's type printer).
@@ -177,6 +185,8 @@ impl Vm {
             epoch,
             host_api_version: self.program.host_api_version,
             events: self.events.clone(),
+            instance: self.instance,
+            roles: self.roles.clone(),
         };
         // The program and the memory size built this instance, so they build a fresh one.
         if let Ok(vm) = Vm::new(Arc::clone(&self.program), cfg) {
@@ -195,7 +205,8 @@ impl Vm {
     ) -> Result<(Vm, MigrationReport), MigrateError> {
         let epoch = u32::try_from(self.header(H_EPOCH).map_err(invalid)?)
             .map_err(|_| MigrateError::Corrupt("epoch out of range".into()))?;
-        let mut next = Vm::new(new, VmConfig { epoch, ..cfg }).map_err(MigrateError::Refused)?;
+        let mut next = Vm::fresh(new, VmConfig { epoch, ..cfg }).map_err(MigrateError::Refused)?;
+        let mut skip = next.install_roles().map_err(MigrateError::Refused)?;
         let mut report = MigrationReport::default();
 
         // The old instance is read through a copy, whose open segment is undone (an abort restores
@@ -205,12 +216,18 @@ impl Vm {
             self.program_hash,
             self.store.clone(),
             Vec::new(),
+            self.instance,
+            Vec::new(),
         );
         let this = &mut old_vm;
 
         // 1, 2: the open segment is undone; the parked tasks go with the old memory.
-        let resumed_mid_segment = this.task_in_progress().map_err(invalid)?
-            && this.header(H_RESUME_PARKED).map_err(invalid)? != 0;
+        let in_progress = this.task_in_progress().map_err(invalid)?;
+        let resumed_mid_segment =
+            in_progress && this.header(H_RESUME_PARKED).map_err(invalid)? != 0;
+        // A start cut off mid-segment runs again; one that ended (or parked) does not.
+        let started = this.header(H_QUEST_START).map_err(invalid)? == QSTART_DONE
+            && !(in_progress && this.header(H_TASK).map_err(invalid)? == TASK_START);
         this.store.segment_abort();
         report.handlers_cancelled =
             this.parked_count().map_err(invalid)? + u32::from(resumed_mid_segment);
@@ -223,8 +240,12 @@ impl Vm {
         // 4: the new globals.
         let p = Arc::clone(&next.program);
         let mut orphans = self.orphans.clone();
-        let mut skip = vec![0u64; p.globals.len().div_ceil(64)];
         for (i, g) in p.globals.iter().enumerate() {
+            if skip[i / 64] >> (i % 64) & 1 != 0 {
+                // a role's, installed from `cfg`
+                old.retain(|o| o.name != g.name);
+                continue;
+            }
             let carried = match old.iter().position(|o| o.name == g.name) {
                 Some(k) if next.load_global(g, &old[k].value) => {
                     old.remove(k);
@@ -256,14 +277,8 @@ impl Vm {
             add_orphan(&mut orphans, o);
         }
         next.orphans = orphans;
-        if skip.iter().any(|&w| w != 0) {
-            let bytes: Vec<u8> = skip.iter().flat_map(|w| w.to_le_bytes()).collect();
-            let set = next
-                .inbox_store(&bytes)
-                .map_err(invalid)?
-                .ok_or(MigrateError::InboxFull)?;
-            next.set_header(H_INIT_SKIP, set).map_err(invalid)?;
-            next.skip_carried_inits().map_err(invalid)?;
+        if !next.set_init_skip(&skip).map_err(invalid)? {
+            return Err(MigrateError::InboxFull);
         }
 
         // 5: the queued events, in order.
@@ -273,9 +288,20 @@ impl Vm {
             }
         }
 
-        for field in [H_PROMISE_SERIAL, H_NOW] {
+        // 6: the timers.
+        for t in this.carried_timers().map_err(invalid)? {
+            if !next.restore_timer(&t).map_err(invalid)? {
+                report.timers_dropped += 1;
+            }
+        }
+
+        for field in [H_PROMISE_SERIAL, H_TIMER_SERIAL, H_NOW] {
             let v = this.header(field).map_err(invalid)?;
             next.set_header(field, v).map_err(invalid)?;
+        }
+        if started && next.header(H_QUEST_START).map_err(invalid)? == QSTART_WANTED {
+            next.set_header(H_QUEST_START, QSTART_DONE)
+                .map_err(invalid)?;
         }
         next.store.mem.clear_log();
         Ok((next, report))

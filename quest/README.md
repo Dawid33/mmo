@@ -119,18 +119,19 @@ an await undoes only the changes since it; commands and requests of an aborted s
 ## What a block's state is
 
 The top-level `let`s. They run once, in module-dependency then declaration order, before `main` (an `await`
-in an initialiser is refused). Everything else (locals, parked handlers, the queue, pending promises) is VM
+in an initialiser is refused). Everything else (locals, parked handlers, the queue, pending promises, timers) is VM
 state that is saved and restored with them. **Edits** (`quest run --load` with a changed script): a variable
 whose name and type still fit keeps its value; a new one runs its initialiser; a removed or retyped one
 becomes an **orphan** kept aside (a later edit that brings the name back with a fitting type takes it again);
 queued events go to the new handlers (those with none are dropped), parked handlers are cancelled and their
-writes stay, an event whose handlers already started is not re-delivered. **Reset** (`--reset`)
-re-initialises everything: variables, queue, parked handlers, promises, orphans.
+writes stay, an event whose handlers already started is not re-delivered, timers stay set (one whose event is
+gone or no longer fits is dropped). **Reset** (`--reset`)
+re-initialises everything: variables, queue, parked handlers, promises, timers, orphans.
 
 ## Tunables
 
 All in `crates/quest-vm/src/consts.rs`; some are part of the saved format. Instance memory 262144 bytes;
-fuel 2000 per tick (CLI); queue 4; promise records 16; parked handlers 4; promise timeout 200 ticks;
+fuel 2000 per tick (CLI); queue 4; promise records 16; parked handlers 4; timers 16; promise timeout 200 ticks;
 command buffer 8192 bytes; inbox 8192 bytes; error trace 16 entries; reference path 32 steps; struct or
 variant fields 32; one structural walk (compare, hash, format) at most 65536 words (`ValueTooLarge`);
 source nesting 256.
@@ -211,8 +212,8 @@ orphan: gold: int = Int(7)
 ```
 
 — `carried`, `adopted`, `initialised` and `orphaned` list names (a line only when its list is not empty),
-then one `orphan:` line per value kept aside (older orphans too), then `events dropped: N` and
-`handlers cancelled: N` when not 0. A file that cannot be loaded exits 2. A migration can be refused (a
+then one `orphan:` line per value kept aside (older orphans too), then `events dropped: N`,
+`handlers cancelled: N` and `timers dropped: N` when not 0. A file that cannot be loaded exits 2. A migration can be refused (a
 value too large to read out, say): the run prints the reason and exits 2 without writing a state file, so
 the old state stays valid for the old script.
 

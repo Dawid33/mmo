@@ -29,7 +29,8 @@ use state_hash::StateHash;
 use crate::bytecode::BYTECODE_VERSION;
 use crate::hash::Fnv64;
 use crate::layout::{
-    H_BYTECODE_VERSION, H_HOST_API_VERSION, H_PROGRAM_HASH, H_STATIC_WORDS, Layout, LoadError,
+    H_BYTECODE_VERSION, H_HOST_API_VERSION, H_OWNER, H_PROGRAM_HASH, H_STATIC_WORDS, Layout,
+    LoadError,
 };
 use crate::mem::Mem;
 use crate::migrate::Orphan;
@@ -133,9 +134,10 @@ impl Vm {
     }
 
     /// The instance saved in `bytes`, resumed exactly where it was, with an empty undo log. `program`
-    /// must be the one it was saved with (`ProgramMismatch`) and `cfg.host_api_version` the program's;
-    /// `cfg.events` configures it as in [`Vm::new`]. `cfg.mem_bytes` and `cfg.epoch` are not used: the
-    /// memory carries both.
+    /// must be the one it was saved with (`ProgramMismatch`), `cfg.host_api_version` the program's and
+    /// `cfg.instance` the instance it was saved as (`Invalid`); `cfg.events` and `cfg.roles` configure it as
+    /// in [`Vm::new`] (the roles are not installed again: the memory holds them; [`Vm::reset`] uses them).
+    /// `cfg.mem_bytes` and `cfg.epoch` are not used: the memory carries both.
     pub fn load(program: Arc<Program>, cfg: VmConfig, bytes: &[u8]) -> Result<Vm, LoadError> {
         let mut r = Reader { rest: bytes };
         if r.take(SAVE_MAGIC.len()).ok() != Some(&SAVE_MAGIC[..]) {
@@ -191,6 +193,7 @@ impl Vm {
             (H_BYTECODE_VERSION, u64::from(BYTECODE_VERSION)),
             (H_HOST_API_VERSION, u64::from(program.host_api_version)),
             (H_PROGRAM_HASH, program_hash),
+            (H_OWNER, u64::from(cfg.instance)),
         ];
         for (w, want) in expected {
             if header(w) != Some(want) {
@@ -200,7 +203,14 @@ impl Vm {
             }
         }
         let store = Store { mem, layout };
-        let mut vm = Vm::adopt(program, program_hash, store, cfg.events);
+        let mut vm = Vm::adopt(
+            program,
+            program_hash,
+            store,
+            cfg.events,
+            cfg.instance,
+            cfg.roles,
+        );
         vm.orphans = orphans;
         Ok(vm)
     }
@@ -233,6 +243,8 @@ mod tests {
             epoch: 1,
             host_api_version: 1,
             events: vec![],
+            instance: 0,
+            roles: vec![],
         };
         let a = Vm::new(program(1), cfg.clone()).expect("a");
         let mut b = Vm::new(program(2), cfg).expect("b");

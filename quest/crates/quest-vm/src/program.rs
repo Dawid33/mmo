@@ -4,9 +4,11 @@
 //! `QSPROG01`, `bytecode_version: u32`, `host_api_version: u32`, `static_words: u16`, `main_fn` (a `u8`
 //! flag, then a `u16` that is 0 when the flag is 0), then each table as a `u32` count followed by its
 //! elements, in the order of the struct's fields: `code` (8 bytes per instruction, see [`Instr::encode`]),
-//! `consts`, `strings` (`u32` length + UTF-8), `shapes`, `types`, `fns`, `globals`, `handlers`,
-//! `host_sites`, `lines`, `files`. Nothing may follow. The encoding is canonical: bytes that parse are
-//! exactly `to_bytes` of the program they parse to.
+//! `consts`, `strings` (`u32` length + UTF-8), `shapes`, `types`, `fns`, `globals`, `handlers` (each
+//! with its owner and an optional stage), `events`, then `quest` (a `u8` flag, then the [`QuestInfo`] when
+//! it is 1), `host_sites`, `lines`, `files`. Nothing may follow. Every flag and optional is a `u8` 0 or 1
+//! (an optional's value follows a 1 only). The encoding is canonical: bytes that parse are exactly
+//! `to_bytes` of the program they parse to.
 //!
 //! `from_bytes` never allocates from an untrusted count (every element takes at least one byte, so a
 //! count larger than the input runs out of bytes first) and ends with [`Program::validate`]; a program
@@ -88,6 +90,80 @@ pub struct HandlerInfo {
     pub event: String,
     pub event_ty: TypeId,
     pub fn_id: u16,
+    /// The instance whose handler it is: 0 the home (or a program without a quest), `1 + i` part `i`.
+    /// An instance registers only its own (`VmConfig::instance`).
+    pub owner: u16,
+    /// The quest stage (an index into `QuestInfo::stages`) whose handler it is: a timer its task sets is
+    /// stage-scoped (`CancelStageTimers`). `None` in the quest body or a program without a quest.
+    pub stage: Option<u16>,
+}
+
+/// A script event (a quest's `event`): `Enqueue` and `After` name one by index; `deliver` takes its name
+/// like a host event's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventInfo {
+    pub name: String,
+    pub ty: TypeId,
+}
+
+/// The program's quest (spec §5.12). Every `global` is an index into `Program::globals`, every fn an index
+/// into `Program::fns`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestInfo {
+    pub name: String,
+    pub roles: Vec<RoleInfo>,
+    /// The stage names, in source order; the first is the initial one.
+    pub stages: Vec<String>,
+    pub stage_global: u16,
+    pub participants_global: u16,
+    /// The role (an index into `roles`) whose region is the home's.
+    pub home_role: u16,
+    pub repeat: Option<RepeatInfo>,
+    pub parts: Vec<PartInfo>,
+    /// The `requires` conditions: pure fns of no parameters.
+    pub requires: Vec<u16>,
+    /// Enters the first stage: run once, after the initialisers and before `main`, in the home only.
+    pub start_fn: u16,
+    /// The globals dialogues read (strictly increasing).
+    pub read_set: Vec<u16>,
+}
+
+/// A role: [`crate::vm::Vm::new`] writes its value (`VmConfig::roles`) into `global` before the
+/// initialisers run; the global's own initialiser never runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoleInfo {
+    pub name: String,
+    pub global: u16,
+    /// The role's type `T`; the global's is `T`, or `Option[T]` for an optional role.
+    pub ty: TypeId,
+    pub optional: bool,
+    /// The `where` condition: a pure fn taking the earlier roles, then this one.
+    pub cond: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RepeatInfo {
+    pub cooldown: u64,
+    pub exclusive: bool,
+    pub once_per_player: bool,
+}
+
+/// A part of the quest: its own instance (`HandlerInfo::owner` `1 + i`), anchored to a role.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartInfo {
+    pub name: String,
+    pub anchor: Anchor,
+    /// An index into `QuestInfo::roles`.
+    pub role: u16,
+    /// The globals the part reads through its mirror (strictly increasing).
+    pub read_set: Vec<u16>,
+}
+
+/// `part name on role` (the role's entity) or `part name at role` (the region where it was bound).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Anchor {
+    On,
+    At,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,6 +204,8 @@ pub struct Program {
     pub fns: Vec<FnInfo>,
     pub globals: Vec<GlobalInfo>,
     pub handlers: Vec<HandlerInfo>,
+    pub events: Vec<EventInfo>,
+    pub quest: Option<QuestInfo>,
     pub main_fn: Option<u16>,
     pub host_sites: Vec<HostSite>,
     pub lines: Vec<LineEntry>,
@@ -168,6 +246,22 @@ impl Writer {
     fn str(&mut self, s: &str) {
         self.count(s.len());
         self.0.extend_from_slice(s.as_bytes());
+    }
+    fn flag(&mut self, b: bool) {
+        self.u8(u8::from(b));
+    }
+    /// A `u8` 1 and the value, or a `u8` 0.
+    fn opt_u16(&mut self, v: Option<u16>) {
+        self.flag(v.is_some());
+        if let Some(v) = v {
+            self.u16(v);
+        }
+    }
+    fn u16s(&mut self, v: &[u16]) {
+        self.count(v.len());
+        for x in v {
+            self.u16(*x);
+        }
     }
 }
 
@@ -236,6 +330,118 @@ impl<'a> Reader<'a> {
     fn named_ids(&mut self) -> Parse<Vec<(String, TypeId)>> {
         self.vec(|r| Ok((r.str()?, r.u16()?)))
     }
+    /// A `u8` 0 or 1.
+    fn flag(&mut self) -> Parse<bool> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => invalid("a flag is not canonical"),
+        }
+    }
+    fn opt_u16(&mut self) -> Parse<Option<u16>> {
+        Ok(if self.flag()? {
+            Some(self.u16()?)
+        } else {
+            None
+        })
+    }
+    fn u16s(&mut self) -> Parse<Vec<u16>> {
+        self.vec(|r| r.u16())
+    }
+}
+
+fn write_quest(w: &mut Writer, q: &QuestInfo) {
+    w.str(&q.name);
+    w.count(q.roles.len());
+    for r in &q.roles {
+        w.str(&r.name);
+        w.u16(r.global);
+        w.u16(r.ty);
+        w.flag(r.optional);
+        w.opt_u16(r.cond);
+    }
+    w.count(q.stages.len());
+    for s in &q.stages {
+        w.str(s);
+    }
+    w.u16(q.stage_global);
+    w.u16(q.participants_global);
+    w.u16(q.home_role);
+    w.flag(q.repeat.is_some());
+    if let Some(r) = &q.repeat {
+        w.u64(r.cooldown);
+        w.flag(r.exclusive);
+        w.flag(r.once_per_player);
+    }
+    w.count(q.parts.len());
+    for p in &q.parts {
+        w.str(&p.name);
+        w.u8(match p.anchor {
+            Anchor::On => 0,
+            Anchor::At => 1,
+        });
+        w.u16(p.role);
+        w.u16s(&p.read_set);
+    }
+    w.u16s(&q.requires);
+    w.u16(q.start_fn);
+    w.u16s(&q.read_set);
+}
+
+fn read_quest(r: &mut Reader) -> Parse<QuestInfo> {
+    let name = r.str()?;
+    let roles = r.vec_ids(|r| {
+        Ok(RoleInfo {
+            name: r.str()?,
+            global: r.u16()?,
+            ty: r.u16()?,
+            optional: r.flag()?,
+            cond: r.opt_u16()?,
+        })
+    })?;
+    let stages = r.vec_ids(|r| r.str())?;
+    let stage_global = r.u16()?;
+    let participants_global = r.u16()?;
+    let home_role = r.u16()?;
+    let repeat = if r.flag()? {
+        Some(RepeatInfo {
+            cooldown: r.u64()?,
+            exclusive: r.flag()?,
+            once_per_player: r.flag()?,
+        })
+    } else {
+        None
+    };
+    let parts = r.vec_ids(|r| {
+        Ok(PartInfo {
+            name: r.str()?,
+            anchor: match r.u8()? {
+                0 => Anchor::On,
+                1 => Anchor::At,
+                a => return invalid(format!("unknown part anchor {a}")),
+            },
+            role: r.u16()?,
+            read_set: r.u16s()?,
+        })
+    })?;
+    Ok(QuestInfo {
+        name,
+        roles,
+        stages,
+        stage_global,
+        participants_global,
+        home_role,
+        repeat,
+        parts,
+        requires: r.u16s()?,
+        start_fn: r.u16()?,
+        read_set: r.u16s()?,
+    })
+}
+
+/// Strictly increasing and every id below `n`.
+fn is_id_set(set: &[u16], n: usize) -> bool {
+    set.windows(2).all(|w| w[0] < w[1]) && set.iter().all(|&g| usize::from(g) < n)
 }
 
 fn write_named_ids(w: &mut Writer, fields: &[(String, TypeId)]) {
@@ -377,6 +583,17 @@ impl Program {
             w.str(&h.event);
             w.u16(h.event_ty);
             w.u16(h.fn_id);
+            w.u16(h.owner);
+            w.opt_u16(h.stage);
+        }
+        w.count(self.events.len());
+        for e in &self.events {
+            w.str(&e.name);
+            w.u16(e.ty);
+        }
+        w.flag(self.quest.is_some());
+        if let Some(q) = &self.quest {
+            write_quest(&mut w, q);
         }
         w.count(self.host_sites.len());
         for s in &self.host_sites {
@@ -458,8 +675,21 @@ impl Program {
                 event: r.str()?,
                 event_ty: r.u16()?,
                 fn_id: r.u16()?,
+                owner: r.u16()?,
+                stage: r.opt_u16()?,
             })
         })?;
+        let events = r.vec_ids(|r| {
+            Ok(EventInfo {
+                name: r.str()?,
+                ty: r.u16()?,
+            })
+        })?;
+        let quest = if r.flag()? {
+            Some(read_quest(&mut r)?)
+        } else {
+            None
+        };
         let host_sites = r.vec_ids(|r| {
             let host_fn = r.u16()?;
             let kind = match r.u8()? {
@@ -499,6 +729,8 @@ impl Program {
             fns,
             globals,
             handlers,
+            events,
+            quest,
             main_fn,
             host_sites,
             lines,
@@ -560,6 +792,7 @@ impl Program {
             self.host_sites.len(),
             self.globals.len(),
             self.handlers.len(),
+            self.events.len(),
         ];
         if id_tables.iter().any(|&n| n > ID_TABLE_MAX as usize) {
             return invalid("a table is longer than its ids can address");
@@ -646,9 +879,28 @@ impl Program {
         if slots.windows(2).any(|w| w[0] == w[1]) {
             return invalid("two globals share a slot");
         }
+        self.validate_events_and_quest()?;
         for h in &self.handlers {
             if usize::from(h.event_ty) >= ntypes || usize::from(h.fn_id) >= nfns {
                 return invalid(format!("handler {} is out of range", h.event));
+            }
+            let (parts, stages) = self
+                .quest
+                .as_ref()
+                .map_or((0, 0), |q| (q.parts.len(), q.stages.len()));
+            if usize::from(h.owner) > parts || h.stage.is_some_and(|s| usize::from(s) >= stages) {
+                return invalid(format!(
+                    "handler {}: its owner or stage is out of range",
+                    h.event
+                ));
+            }
+            if let Some(e) = self.events.iter().find(|e| e.name == h.event)
+                && e.ty != h.event_ty
+            {
+                return invalid(format!(
+                    "handler {}: its event type is not the script event's",
+                    h.event
+                ));
             }
             // Dispatch writes the event into parameter 0 (frame word 3).
             let f = &self.fns[usize::from(h.fn_id)];
@@ -725,6 +977,97 @@ impl Program {
         Ok(())
     }
 
+    /// The script events (types in range, names unique) and the quest: every global, role, stage, part and
+    /// fn it names in range; fns of the arity their use needs; role globals of the role's type.
+    fn validate_events_and_quest(&self) -> Result<(), ProgramError> {
+        let (ntypes, nglobals) = (self.types.0.len(), self.globals.len());
+        let mut names: Vec<&str> = Vec::with_capacity(self.events.len());
+        for e in &self.events {
+            if usize::from(e.ty) >= ntypes {
+                return invalid(format!("script event {} names a type out of range", e.name));
+            }
+            names.push(&e.name);
+        }
+        names.sort_unstable();
+        if names.windows(2).any(|w| w[0] == w[1]) {
+            return invalid("two script events share a name");
+        }
+        let Some(q) = &self.quest else {
+            return Ok(());
+        };
+        let fn_of = |f: u16, params: usize, what: &str| match self.fns.get(usize::from(f)) {
+            Some(i) if usize::from(i.params) == params => Ok(()),
+            _ => invalid(format!(
+                "quest {}: {what} is not a fn of {params} parameters",
+                q.name
+            )),
+        };
+        let mut role_names: Vec<&str> = Vec::new();
+        let mut role_globals: Vec<u16> = Vec::new();
+        for (i, r) in q.roles.iter().enumerate() {
+            let Some(g) = self.globals.get(usize::from(r.global)) else {
+                return invalid(format!("role {}: its global is out of range", r.name));
+            };
+            if usize::from(r.ty) >= ntypes || !self.role_global_fits(r, g.ty) {
+                return invalid(format!(
+                    "role {}: its global's type is not the role's",
+                    r.name
+                ));
+            }
+            if let Some(c) = r.cond {
+                fn_of(c, i + 1, "a role's condition")?;
+            }
+            role_names.push(&r.name);
+            role_globals.push(r.global);
+        }
+        role_names.sort_unstable();
+        role_globals.sort_unstable();
+        if role_names.windows(2).any(|w| w[0] == w[1])
+            || role_globals.windows(2).any(|w| w[0] == w[1])
+        {
+            return invalid("two roles share a name or a global");
+        }
+        if usize::from(q.stage_global) >= nglobals || usize::from(q.participants_global) >= nglobals
+        {
+            return invalid(format!("quest {}: a global is out of range", q.name));
+        }
+        if usize::from(q.home_role) >= q.roles.len().max(1) {
+            return invalid(format!("quest {}: the home role is out of range", q.name));
+        }
+        if !is_id_set(&q.read_set, nglobals) {
+            return invalid(format!("quest {}: the read set is malformed", q.name));
+        }
+        for p in &q.parts {
+            if usize::from(p.role) >= q.roles.len() || !is_id_set(&p.read_set, nglobals) {
+                return invalid(format!(
+                    "part {}: its role or read set is malformed",
+                    p.name
+                ));
+            }
+        }
+        for &f in &q.requires {
+            fn_of(f, 0, "a requirement")?;
+        }
+        fn_of(q.start_fn, 0, "the start")
+    }
+
+    /// Whether a role's global holds its type: `T`, or for an optional role `Option[T]` (the enum
+    /// `Option` of `None` and `Some` with one field of type `T`).
+    fn role_global_fits(&self, r: &RoleInfo, global_ty: TypeId) -> bool {
+        if !r.optional {
+            return global_ty == r.ty;
+        }
+        match self.types.0.get(usize::from(global_ty)) {
+            Some(TypeDesc::Enum { name, variants }) if name == "Option" => matches!(
+                variants.as_slice(),
+                [(none, n), (some, s)]
+                    if none == "None" && n.is_empty() && some == "Some"
+                        && matches!(s.as_slice(), [(_, t)] if *t == r.ty)
+            ),
+            _ => false,
+        }
+    }
+
     fn check_instr(&self, ins: &Instr, f: &FnInfo) -> Result<(), String> {
         let lay = ins.op.layout();
         let static_words = u32::from(self.static_words);
@@ -737,6 +1080,7 @@ impl Program {
                 Operand::Type => usize::from(v) < self.types.0.len(),
                 Operand::Builtin => Builtin::from_u16(v).is_some(),
                 Operand::HostSite => usize::from(v) < self.host_sites.len(),
+                Operand::Event => usize::from(v) < self.events.len(),
             };
             if !ok {
                 return Err(format!(
@@ -762,6 +1106,10 @@ impl Program {
             // the error word follows the value word
             Op::Await | Op::AwaitAll if u32::from(ins.a) + 1 >= static_words => {
                 Err("Await's error slot is outside the static region".into())
+            }
+            // the event value follows the ticks
+            Op::After if u32::from(ins.b) + 1 >= static_words => {
+                Err("After's value slot is outside the static region".into())
             }
             Op::CallBuiltin => match Builtin::from_u16(ins.a).map(Builtin::arity) {
                 Some(n) if u32::from(ins.b) + u32::from(n) > static_words => {

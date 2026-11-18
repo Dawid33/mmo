@@ -7,7 +7,9 @@
 //! * `H_TASK` / `H_TASK_ARG`: the task in progress (`TASK_*`) and its identity (the global index of an
 //!   `Init` task, the handler index of a `Handler` task); `TASK_NONE` between tasks. The interpreter's
 //!   own registers (`H_PC`, `H_CURRENT_FN`, `H_STATUS`) say where the task is.
-//! * `H_INIT_CURSOR`: the next global to initialise; `H_MAIN`: whether `main` was asked for / started.
+//! * `H_INIT_CURSOR`: the next global to initialise; `H_QUEST_START`: whether the quest's start
+//!   (`QuestInfo::start_fn`) is still to run — in the home only (`H_OWNER` 0); `H_MAIN`: whether `main`
+//!   was asked for / started.
 //!   `H_INIT_SKIP`: after a migration, the globals whose initialisers do not run (their values were
 //!   carried over, `migrate`); the cursor steps over them.
 //! * The queue region: a ring of `QUEUE_LEN` records (`H_QUEUE_HEAD`, `H_QUEUE_COUNT`) of
@@ -19,16 +21,25 @@
 //! * The command buffer (`cmds` region, `H_CMD_LEN` bytes used): one record per command, print or promise
 //!   request, a header word (`kind: u8 | host fn: u16 << 16 | byte length: u32 << 32`) and the bytes
 //!   packed into words (a command's arguments as the wire bytes of one `List`, a print's UTF-8 text, a
-//!   request's id as 8 little-endian bytes followed by its arguments as a command's). Bytes past
-//!   `H_CMD_LEN` are stale and never read.
+//!   request's id as 8 little-endian bytes followed by its arguments as a command's, an `Enqueue`'s event
+//!   value as its wire bytes with the script event's index in the host-fn field). Bytes past `H_CMD_LEN`
+//!   are stale and never read.
+//! * The timers (`timers`).
 //! * The promise and parked tables (`promise`).
 //! * `H_NOW`: the latest `now` a tick was given.
 //!
+//! # Instances and events
+//! Every instance of a program with parts runs the same program; `VmConfig::instance` (`H_OWNER`) says
+//! which: only handlers whose `owner` is that instance register. [`Vm::deliver`] takes the host's events
+//! and the program's script events alike. `Enqueue` buffers its event like a command; the commit delivers
+//! it to the instance's own queue, with the overflow rules of a host delivery (a drop is reported as
+//! `EventDropped`; an event no handler of this instance takes goes silently: another instance's).
+//!
 //! # Tasks and segments
 //! A task runs one function from its entry until its `Ret` on the sentinel link: the pending
-//! initialisers in `program.globals` order, then `main` if it was asked for, then the handlers of the
-//! queued events and of the ready continuations by arrival (each handler of an event its own task, in
-//! table order; a continuation resumes a parked task, `promise`). Every task opens a segment when it
+//! initialisers in `program.globals` order, then the quest's start (the home only), then `main` if it
+//! was asked for, then the handlers of the queued events and of the ready continuations by arrival (each
+//! handler of an event its own task, in table order; a continuation resumes a parked task, `promise`). Every task opens a segment when it
 //! starts or resumes. A segment ends at the task's end or at an `await`, which parks the task. At the end
 //! the function's error word (frame word 2) is checked: non-zero is an escaping error. Otherwise the
 //! task's result is stored (an initialiser's return value is moved into its global; a handler's event
@@ -37,7 +48,8 @@
 //! the task are cleared, and only then are the commands, prints and requests handed to the host in
 //! order (the host never sees an effect the memory has not committed). A fault or an escaping error
 //! aborts the segment (the script regions return to the segment's start), clears the buffer, frees the
-//! promise records the segment issued (`promise`) and reports `Report::HandlerAborted`
+//! promise records the segment issued (`promise`), undoes its timers (`timers`) and reports
+//! `Report::HandlerAborted`
 //! (`Report::InitFailed` for an initialiser, which also fails the instance); error data too large to
 //! convert for the report turns the cause into that fault. Only a `Corrupt` fault (memory that does not
 //! parse) fails the instance without an abort.
@@ -62,9 +74,9 @@ use crate::host::{
 use crate::interp::{Exec, Fault, Meter};
 use crate::layout::{
     H_ARRIVAL, H_CMD_LEN, H_CURRENT_FN, H_EV_ARRIVAL, H_EV_HANDLER, H_EV_PAYLOAD, H_FUEL_DEBT,
-    H_INIT_CURSOR, H_INIT_SKIP, H_INSTANCE, H_MAIN, H_NOW, H_PC, H_QUEUE_COUNT, H_QUEUE_HEAD,
-    H_RESUME_PARKED, H_STATUS, H_TASK, H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN, LINK_SENTINEL,
-    QUEUE_REC_WORDS, STATUS_IDLE, STATUS_RUNNING,
+    H_INIT_CURSOR, H_INIT_SKIP, H_INSTANCE, H_MAIN, H_NOW, H_PC, H_QUEST_START, H_QUEUE_COUNT,
+    H_QUEUE_HEAD, H_RESUME_PARKED, H_STATUS, H_TASK, H_TASK_ARG, H_TRACE_DROPPED, H_TRACE_LEN,
+    LINK_SENTINEL, QUEUE_REC_WORDS, STATUS_IDLE, STATUS_RUNNING,
 };
 use crate::object::{capacity, hdr, obj, ptr_of, read_slot, write_slot};
 use crate::program::HostSite;
@@ -107,6 +119,12 @@ const TASK_NONE: u64 = 0;
 const TASK_INIT: u64 = 1;
 pub(crate) const TASK_MAIN: u64 = 2;
 pub(crate) const TASK_HANDLER: u64 = 3;
+/// The quest's start (`QuestInfo::start_fn`).
+pub(crate) const TASK_START: u64 = 4;
+// `H_QUEST_START`.
+pub(crate) const QSTART_NONE: u64 = 0;
+pub(crate) const QSTART_WANTED: u64 = 1;
+pub(crate) const QSTART_DONE: u64 = 2;
 // `H_MAIN`.
 const MAIN_NONE: u64 = 0;
 const MAIN_WANTED: u64 = 1;
@@ -118,6 +136,7 @@ const INSTANCE_FAILED: u64 = 1;
 const CMD_COMMAND: u64 = 0;
 const CMD_PRINT: u64 = 1;
 pub(crate) const CMD_REQUEST: u64 = 2;
+const CMD_ENQUEUE: u64 = 3;
 
 const WORD: u64 = 8;
 /// Frame words: the return link, the return value, the error value, the first parameter.
@@ -130,6 +149,8 @@ enum Buffered {
     Command(u16, Vec<WireValue>),
     Print(String),
     Request(u64, u16, Vec<WireValue>),
+    /// A script event (its index) and its value.
+    Enqueue(u16, WireValue),
 }
 
 /// The task in progress, from the header.
@@ -194,6 +215,7 @@ impl Vm {
         let init_pending = self.header(H_INIT_CURSOR)? < self.program.globals.len() as u64;
         Ok(self.task_in_progress()?
             || init_pending
+            || self.header(H_QUEST_START)? == QSTART_WANTED
             || self.header(H_MAIN)? == MAIN_WANTED
             || self.header(H_EV_HANDLER)? != 0
             || self.header(H_QUEUE_COUNT)? != 0
@@ -242,10 +264,10 @@ impl Vm {
     fn try_deliver(&mut self, event: &str, payload: &WireValue) -> Exec<Delivery> {
         let p = Arc::clone(&self.program);
         let drop = |r| Ok(Delivery::Dropped(r));
-        if !self.events.iter().any(|e| e == event) {
+        if !self.events.iter().any(|e| e == event) && !p.events.iter().any(|e| e.name == event) {
             return drop(DropReason::UnknownEvent);
         }
-        let Some(first) = p.handlers.iter().position(|h| h.event == event) else {
+        let Some(first) = self.first_handler(event) else {
             return drop(DropReason::NoHandler);
         };
         if !wire::fits(&p.types, p.handlers[first].event_ty, payload) {
@@ -254,12 +276,7 @@ impl Vm {
         if self.failed() {
             return drop(DropReason::InstanceFailed);
         }
-        let (head, count) = (self.header(H_QUEUE_HEAD)?, self.header(H_QUEUE_COUNT)?);
-        let qlen = QUEUE_LEN as u64;
-        if head >= qlen || count > qlen {
-            return corrupt("queue head or count out of range");
-        }
-        if count == qlen {
+        if self.queue_full()? {
             return drop(DropReason::QueueFull);
         }
         let mut bytes = Vec::new();
@@ -267,18 +284,49 @@ impl Vm {
         let Some(ptr) = self.inbox_store(&bytes)? else {
             return drop(DropReason::InboxFull);
         };
-        let arrival = self.header(H_ARRIVAL)?;
-        let at = self.queue_rec((head + count) % qlen)?;
-        self.store.wr(at, arrival)?;
-        self.store.wr(word_off(at, 1)?, first as u64)?;
-        self.store.wr(word_off(at, 2)?, ptr)?;
-        self.set_header(H_ARRIVAL, arrival.wrapping_add(1))?;
-        self.set_header(H_QUEUE_COUNT, count + 1)?;
+        if !self.queue_push(first, ptr)? {
+            return corrupt("the queue filled while delivering");
+        }
         Ok(if self.task_in_progress()? {
             Delivery::Queued
         } else {
             Delivery::Accepted
         })
+    }
+
+    /// The first handler of `event` this instance registers (its `owner` is this instance).
+    pub(crate) fn first_handler(&self, event: &str) -> Option<usize> {
+        self.program
+            .handlers
+            .iter()
+            .position(|h| h.event == event && h.owner == self.instance)
+    }
+
+    fn queue_full(&self) -> Exec<bool> {
+        let (head, count) = (self.header(H_QUEUE_HEAD)?, self.header(H_QUEUE_COUNT)?);
+        let qlen = QUEUE_LEN as u64;
+        if head >= qlen || count > qlen {
+            return corrupt("queue head or count out of range");
+        }
+        Ok(count == qlen)
+    }
+
+    /// Queues an event whose first handler is `first` and whose payload is the inbox block `ptr` (the
+    /// record owns it from now on), with the next arrival number. `false` when the queue is full (nothing
+    /// changed).
+    pub(crate) fn queue_push(&mut self, first: usize, ptr: u64) -> Exec<bool> {
+        if self.queue_full()? {
+            return Ok(false);
+        }
+        let (head, count) = (self.header(H_QUEUE_HEAD)?, self.header(H_QUEUE_COUNT)?);
+        let arrival = self.header(H_ARRIVAL)?;
+        let at = self.queue_rec((head + count) % QUEUE_LEN as u64)?;
+        self.store.wr(at, arrival)?;
+        self.store.wr(word_off(at, 1)?, first as u64)?;
+        self.store.wr(word_off(at, 2)?, ptr)?;
+        self.set_header(H_ARRIVAL, arrival.wrapping_add(1))?;
+        self.set_header(H_QUEUE_COUNT, count + 1)?;
+        Ok(true)
     }
 
     pub(crate) fn queue_rec(&self, i: u64) -> Exec<u32> {
@@ -372,6 +420,7 @@ impl Vm {
         let now = now.max(last);
         self.set_header(H_NOW, now)?;
         self.expire_promises(now)?;
+        self.fire_timers(now)?;
         let Some(fresh) = self.meter_after_debt(fuel)? else {
             return Ok(());
         };
@@ -420,6 +469,14 @@ impl Vm {
         }
         if cursor != p.globals.len() as u64 {
             return corrupt("init cursor out of range");
+        }
+        if self.header(H_QUEST_START)? == QSTART_WANTED {
+            let Some(q) = &p.quest else {
+                return corrupt("a quest start in a program without a quest");
+            };
+            self.set_header(H_QUEST_START, QSTART_DONE)?;
+            self.begin_task(TASK_START, 0, q.start_fn)?;
+            return Ok(true);
         }
         if self.header(H_MAIN)? == MAIN_WANTED {
             let Some(f) = p.main_fn else {
@@ -489,6 +546,28 @@ impl Vm {
         Ok(stepped)
     }
 
+    /// Makes `skip` (one bit per global, `init_skipped`) the set of initialisers that do not run, in place
+    /// of any earlier set, and moves the init cursor past the leading ones. `false` when the inbox has no
+    /// room for it (nothing changed then).
+    pub(crate) fn set_init_skip(&mut self, skip: &[u64]) -> Exec<bool> {
+        let set = if skip.iter().any(|&w| w != 0) {
+            let bytes: Vec<u8> = skip.iter().flat_map(|w| w.to_le_bytes()).collect();
+            match self.inbox_store(&bytes)? {
+                Some(set) => set,
+                None => return Ok(false),
+            }
+        } else {
+            0
+        };
+        let old = self.header(H_INIT_SKIP)?;
+        if old != 0 {
+            self.inbox.free(&mut self.store, ptr_of(old)?)?;
+        }
+        self.set_header(H_INIT_SKIP, set)?;
+        self.skip_carried_inits()?;
+        Ok(true)
+    }
+
     /// The arrival number of the oldest queued event.
     fn queue_head_arrival(&self) -> Exec<Option<u64>> {
         let (head, count) = (self.header(H_QUEUE_HEAD)?, self.header(H_QUEUE_COUNT)?);
@@ -545,7 +624,7 @@ impl Vm {
             .iter()
             .enumerate()
             .skip(idx + 1)
-            .find(|(_, o)| o.event == h.event);
+            .find(|(_, o)| o.event == h.event && o.owner == self.instance);
         match next {
             Some((j, _)) => self.set_header(H_EV_HANDLER, j as u64 + 1)?,
             None => {
@@ -624,6 +703,7 @@ impl Vm {
             TASK_INIT => p.globals.get(i).map(|g| g.init_fn),
             TASK_MAIN => p.main_fn,
             TASK_HANDLER => p.handlers.get(i).map(|h| h.fn_id),
+            TASK_START => p.quest.as_ref().map(|q| q.start_fn),
             _ => None,
         };
         match fn_id {
@@ -680,6 +760,7 @@ impl Vm {
         let buffered = self.read_cmds()?;
         let now = self.header(H_NOW)?;
         self.commit_promises(now)?;
+        self.commit_timers()?;
         self.store.segment_commit();
         self.clear_task()?;
         for b in buffered {
@@ -687,9 +768,43 @@ impl Vm {
                 Buffered::Command(f, args) => host.command(f, &args),
                 Buffered::Print(text) => host.print(&text),
                 Buffered::Request(id, f, args) => host.request(PromiseId(id), f, &args),
+                Buffered::Enqueue(e, value) => self.deliver_own(e, &value, host)?,
             }
         }
         Ok(())
+    }
+
+    /// A committed `Enqueue`: the event goes to this instance's queue as a host's delivery would (module
+    /// docs).
+    fn deliver_own(&mut self, e: u16, value: &WireValue, host: &mut dyn Host) -> Exec<()> {
+        let Some(ev) = self.program.events.get(usize::from(e)) else {
+            return corrupt("an Enqueue of an unknown script event");
+        };
+        let event = ev.name.clone();
+        match self.sched_deliver(&event, value) {
+            Delivery::Accepted | Delivery::Queued => {}
+            Delivery::Dropped(DropReason::NoHandler) => {}
+            // Not failed while a segment commits: the memory did not parse.
+            Delivery::Dropped(DropReason::InstanceFailed) => {
+                return corrupt("the queue does not parse");
+            }
+            Delivery::Dropped(reason) => host.report(Report::EventDropped { event, reason }),
+        }
+        Ok(())
+    }
+
+    /// `Enqueue a, b`: the value in slot `b` (borrowed), of script event `a`, joins the segment's buffered
+    /// effects; the commit delivers it.
+    pub(crate) fn exec_enqueue(&mut self, e: u16, slot: u16, m: &mut Meter) -> Exec<()> {
+        let p = Arc::clone(&self.program);
+        let Some(ev) = p.events.get(usize::from(e)) else {
+            return corrupt("an Enqueue of an unknown script event");
+        };
+        let (w, words) = to_wire(&self.store, self.heap, &p.types, ev.ty, self.rd(slot)?)?;
+        m.words(words);
+        let mut bytes = Vec::new();
+        w.encode(&mut bytes);
+        self.buffer(CMD_ENQUEUE, e, &bytes, m)
     }
 
     /// The task failed with `cause`: the segment is undone, the buffer cleared and the failure reported;
@@ -709,6 +824,7 @@ impl Vm {
         let report = self.report_for(t, cause);
         self.store.segment_abort();
         self.abort_promises()?;
+        self.abort_timers()?;
         if t.kind == TASK_INIT {
             self.set_header(H_INSTANCE, INSTANCE_FAILED)?;
         }
@@ -996,6 +1112,10 @@ impl Vm {
                         None => return corrupt("a request's arguments do not decode"),
                     }
                 }
+                CMD_ENQUEUE => match WireValue::decode(&bytes) {
+                    Ok(v) => Buffered::Enqueue(f, v),
+                    Err(_) => return corrupt("an enqueued event does not decode"),
+                },
                 _ => return corrupt("unknown command record"),
             });
             at += 1 + words;

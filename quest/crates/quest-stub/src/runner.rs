@@ -41,6 +41,8 @@ impl Runner {
                 epoch: 1,
                 host_api_version: api.version,
                 events: api.events.into_iter().map(|e| e.name).collect(),
+                instance: 0,
+                roles: vec![],
             },
         )?;
         Ok(Runner {

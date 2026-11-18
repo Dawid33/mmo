@@ -89,6 +89,9 @@ fn load_state(bytes: &[u8], program: Arc<Program>, cfg: VmConfig) -> Result<Vm, 
     if report.handlers_cancelled > 0 {
         eprintln!("handlers cancelled: {}", report.handlers_cancelled);
     }
+    if report.timers_dropped > 0 {
+        eprintln!("timers dropped: {}", report.timers_dropped);
+    }
     Ok(vm)
 }
 
@@ -311,6 +314,8 @@ fn run(dir: &str, opts: RunOpts) -> ExitCode {
             epoch: 1,
             host_api_version: api.version,
             events: api.events.into_iter().map(|e| e.name).collect(),
+            instance: 0,
+            roles: vec![],
         };
         match load_state(&bytes, Arc::clone(&program), vm_cfg) {
             Ok(vm) => runner.vm = vm,

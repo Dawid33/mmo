@@ -26,6 +26,7 @@ pub mod save;
 mod sched;
 pub mod store;
 pub mod string;
+mod timers;
 pub mod types;
 pub mod vm;
 pub mod wire;

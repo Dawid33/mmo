@@ -29,8 +29,9 @@ use crate::bytecode::{Instr, Op};
 use crate::consts::ERR_TRACE_MAX;
 use crate::fault::FaultKind;
 use crate::fuel::{
-    FUEL_ALLOC, FUEL_AWAIT, FUEL_BUILTIN, FUEL_CALL, FUEL_HEAP, FUEL_HOST_CHECK, FUEL_HOST_COMMAND,
-    FUEL_HOST_QUERY, FUEL_HOST_REQUEST, FUEL_KEY, FUEL_REAP, FUEL_SIMPLE,
+    FUEL_AFTER, FUEL_ALLOC, FUEL_AWAIT, FUEL_BUILTIN, FUEL_CALL, FUEL_CANCEL, FUEL_ENQUEUE,
+    FUEL_HEAP, FUEL_HOST_CHECK, FUEL_HOST_COMMAND, FUEL_HOST_QUERY, FUEL_HOST_REQUEST, FUEL_KEY,
+    FUEL_REAP, FUEL_SIMPLE,
 };
 use crate::host::{Host, HostFnKind, SrcLoc};
 use crate::layout::{
@@ -170,6 +171,9 @@ pub(crate) fn base_fuel(p: &Program, ins: Instr) -> u64 {
             _ => FUEL_HOST_QUERY,
         },
         Await | AwaitAll => FUEL_AWAIT,
+        Enqueue => FUEL_ENQUEUE,
+        After => FUEL_AFTER,
+        CancelTimer | CancelStageTimers => FUEL_CANCEL,
     }
 }
 
@@ -555,6 +559,10 @@ impl Vm {
 
             Op::Await | Op::AwaitAll => return self.exec_await(fn_id, pc, ins, m),
             Op::PromiseDetach => self.exec_detach(a)?,
+            Op::Enqueue => self.exec_enqueue(a, b, m)?,
+            Op::After => self.exec_after(a, b, c, m)?,
+            Op::CancelTimer => self.exec_cancel_timer(a)?,
+            Op::CancelStageTimers => self.exec_cancel_stage_timers()?,
         }
         Ok(Flow::Next)
     }

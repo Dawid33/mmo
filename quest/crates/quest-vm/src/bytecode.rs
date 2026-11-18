@@ -21,13 +21,17 @@
 //! | `AwaitAll` | results (error in `a + 1`) | slot of the list of promises | the result's type (`list[T]`) |
 //! | `PromiseDetach` | promise slot | - | - |
 //! | `CallHost` | host site | first argument slot | result slot (a query's answer; a command leaves it); a fallible site's error in `c + 1` |
+//! | `Enqueue` | script event (`Program::events`) | slot of the event value (borrowed) | - |
+//! | `After` | destination (the timer id) | slot of the ticks (int); the event value (borrowed) in `b + 1` | script event |
+//! | `CancelTimer` | slot of the timer id | - | - |
+//! | `CancelStageTimers` | - | - | - |
 //! | `ListLen`, `GetTag`, `NegI`, `Not`, ... two-operand ops | destination | source | - |
 //!
 //! Builtins are numbered in the order of design D5's list, then the ones added after it, each appended
 //! so no earlier number moves: `ModF` (41, float `%`) and `StrCmp` (42, string ordering).
 
 /// Version of the instruction set, builtin ids, fuel table and memory layout.
-pub const BYTECODE_VERSION: u32 = 2;
+pub const BYTECODE_VERSION: u32 = 3;
 
 macro_rules! numbered {
     ($(#[$m:meta])* $name:ident, $repr:ty, $from:ident, [$($v:ident),* $(,)?]) => {
@@ -118,6 +122,10 @@ numbered!(
         Await,
         AwaitAll,
         PromiseDetach,
+        Enqueue,
+        After,
+        CancelTimer,
+        CancelStageTimers,
     ]
 );
 
@@ -254,6 +262,8 @@ pub enum Operand {
     Type,
     Builtin,
     HostSite,
+    /// A script event (`Program::events`).
+    Event,
 }
 
 /// What `b | c << 16` names when an op takes a 32-bit operand.
@@ -278,7 +288,7 @@ impl Op {
     /// The operand kinds of this op. With a `wide` other than `None`, `b` and `c` are `Unused`.
     pub fn layout(self) -> OpLayout {
         use Op::*;
-        use Operand::{Builtin as Bi, FnId, HostSite, Imm, Shape, Slot, Type, Unused as U};
+        use Operand::{Builtin as Bi, Event, FnId, HostSite, Imm, Shape, Slot, Type, Unused as U};
         let l = |a, b, c| OpLayout {
             a,
             b,
@@ -292,13 +302,13 @@ impl Op {
             wide,
         };
         match self {
-            Nop | Ret => l(U, U, U),
+            Nop | Ret | CancelStageTimers => l(U, U, U),
             LoadSmall => l(Slot, Imm, U),
             LoadConst => w(Slot, Wide::Const),
             LoadStr => w(Slot, Wide::Str),
             Copy | Dup | Move | NegI | NegF | IntToFloat | FloatToInt | Not | GetTag | ListLen
             | RefLoad | RefTake | RefStore => l(Slot, Slot, U),
-            Drop | MakeUnique | PromiseDetach => l(Slot, U, U),
+            Drop | MakeUnique | PromiseDetach | CancelTimer => l(Slot, U, U),
             AddI | SubI | MulI | DivI | RemI | EqI | NeI | LtI | LeI | AddF | SubF | MulF
             | DivF | EqF | NeF | LtF | LeF | Eq | GetIndex | TakeIndex | SetIndex | GetKey
             | TakeKey | SetKey | RefIndex | RefKey => l(Slot, Slot, Slot),
@@ -314,6 +324,8 @@ impl Op {
             CallBuiltin => l(Bi, Slot, Slot),
             CallHost => l(HostSite, Slot, Slot),
             Await | AwaitAll => l(Slot, Slot, Type),
+            Enqueue => l(Event, Slot, U),
+            After => l(Slot, Slot, Event),
         }
     }
 }

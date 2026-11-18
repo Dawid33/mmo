@@ -30,3 +30,9 @@ pub const FUEL_RESUME: u64 = 20;
 pub const FUEL_DISPATCH: u64 = 10;
 /// One reap step.
 pub const FUEL_REAP: u64 = 2;
+/// `Enqueue` (+ payload size).
+pub const FUEL_ENQUEUE: u64 = 10;
+/// `After` (+ payload size).
+pub const FUEL_AFTER: u64 = 10;
+/// `CancelTimer`, `CancelStageTimers` (a scan of the timer table).
+pub const FUEL_CANCEL: u64 = 5;

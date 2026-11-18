@@ -24,6 +24,9 @@ pub const PROMISE_MAX: usize = 16;
 /// Parked handlers.
 pub const PARKED_MAX: usize = 4;
 
+/// Live timers (`after`) of one instance; one more faults `TooManyTimers`.
+pub const TIMERS_MAX: usize = 16;
+
 /// Error return trace entries (later ones are counted, not kept).
 pub const ERR_TRACE_MAX: usize = 16;
 
@@ -65,6 +68,7 @@ mod tests {
         assert_eq!(QUEUE_LEN, 4);
         assert_eq!(PROMISE_MAX, 16);
         assert_eq!(PARKED_MAX, 4);
+        assert_eq!(TIMERS_MAX, 16);
         assert_eq!(ERR_TRACE_MAX, 16);
         assert_eq!(PROMISE_TIMEOUT_TICKS, 200);
         assert_eq!(FUEL_PER_TICK_DEFAULT, 2_000);

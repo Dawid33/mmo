@@ -264,6 +264,8 @@ fn record(main: &str, host: &mut Recorder, fuel: u64, ticks: u64) -> quest_vm::V
             epoch: 1,
             host_api_version: api.version,
             events: api.events.into_iter().map(|e| e.name).collect(),
+            instance: 0,
+            roles: vec![],
         },
     )
     .expect("the program loads");

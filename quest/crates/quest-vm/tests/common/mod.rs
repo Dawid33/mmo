@@ -100,6 +100,8 @@ pub fn cfg() -> VmConfig {
         epoch: 1,
         host_api_version: API,
         events: EVENTS.iter().map(|e| e.to_string()).collect(),
+        instance: 0,
+        roles: vec![],
     }
 }
 

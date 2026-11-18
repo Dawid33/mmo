@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use common::*;
 use quest_vm::asm::{FnBuilder, ProgramBuilder, SlotRef};
-use quest_vm::consts::WORK_WORDS_MAX;
+use quest_vm::consts::{TIMERS_MAX, WORK_WORDS_MAX};
 use quest_vm::host::{AbortCause, DropReason, HostFnKind, Report};
-use quest_vm::program::Program;
+use quest_vm::layout::LoadError;
+use quest_vm::program::{Anchor, PartInfo, Program, QuestInfo, RoleInfo};
 use quest_vm::types::{TypeDesc, TypeId};
 use quest_vm::vm::{Delivery, Status, Vm, VmConfig};
 use quest_vm::wire::WireValue;
@@ -878,4 +879,829 @@ fn oversized_error_data_aborts_the_handler() {
     assert_eq!(vm.deliver("Ping", &ping(5)), Delivery::Accepted);
     run_idle(&mut vm, &mut host, 1_000);
     assert_eq!(logged(&host), [(5, 0)]);
+}
+
+// ---- script events, timers, roles, instance owners --------------------------------------------------
+
+/// [`Tys`], the script event `Ring { n: int }` (event 0), its shape and the log site `log(n, tag)` (host
+/// fn 7).
+struct QTys {
+    t: Tys,
+    ring: TypeId,
+    ring_event: u16,
+    shape: u16,
+    log: u16,
+}
+
+fn qtys(pb: &mut ProgramBuilder) -> QTys {
+    let t = tys(pb);
+    let ring = pb.ty(TypeDesc::Struct {
+        name: "Ring".into(),
+        fields: vec![("n".into(), t.int)],
+    });
+    let ring_event = pb.script_event("Ring", ring);
+    let shape = pb.shape(1, 0);
+    let log = pb.host_site(7, HostFnKind::Command, vec![t.int, t.int], t.unit);
+    QTys {
+        t,
+        ring,
+        ring_event,
+        shape,
+        log,
+    }
+}
+
+fn ring(n: i64) -> WireValue {
+    WireValue::Struct {
+        name: "Ring".into(),
+        fields: vec![("n".into(), WireValue::Int(n))],
+    }
+}
+
+/// A handler of `event` (type `ty`) owned by `owner` in `stage`: logs `(e.n, tag)`.
+#[allow(clippy::too_many_arguments)]
+fn logger(
+    pb: &mut ProgramBuilder,
+    q: &QTys,
+    name: &str,
+    event: &str,
+    ty: TypeId,
+    owner: u16,
+    stage: Option<u16>,
+    tag: i16,
+) {
+    let h = pb.declare(name, 1);
+    let mut f = pb.body(h);
+    let ev = f.param(0);
+    f.mark_ref(ev);
+    let (n, k) = (f.local(0), f.local(1));
+    f.emit(Op::GetField, n, ev, 0u16);
+    f.emit(Op::LoadSmall, k, tag as u16, 0u16);
+    f.emit(Op::CallHost, q.log, n, n);
+    ret(&mut f);
+    f.end();
+    pb.owned_handler(event, ty, h, owner, stage);
+}
+
+/// `out = Ring { n: n + add }` (locals `scratch`, `scratch + 1` are used).
+fn make_ring(f: &mut FnBuilder, q: &QTys, n: SlotRef, add: i16, out: SlotRef, scratch: u16) {
+    let (k, sum) = (f.local(scratch), f.local(scratch + 1));
+    f.emit(Op::LoadSmall, k, add as u16, 0u16);
+    f.emit(Op::AddI, sum, n, k);
+    f.emit(Op::NewObj, out, q.shape, 0u16);
+    f.emit(Op::SetField, out, 0u16, sum);
+}
+
+/// A global `name: int` initialised to 0 by `zero`.
+fn int_global(pb: &mut ProgramBuilder, q: &QTys, name: &str, zero: quest_vm::asm::FnRef) -> u16 {
+    let g = pb.global(name, q.t.int);
+    pb.set_global_init(g, zero);
+    g.0
+}
+
+/// A fn returning 0: an initialiser.
+fn zero_fn(pb: &mut ProgramBuilder) -> quest_vm::asm::FnRef {
+    let z = pb.declare("zero", 0);
+    let mut f = pb.body(z);
+    let r = f.ret();
+    f.emit(Op::LoadSmall, r, 0u16, 0u16);
+    ret(&mut f);
+    f.end();
+    z
+}
+
+/// A fn of no parameters that does nothing.
+fn noop_fn(pb: &mut ProgramBuilder, name: &str) -> quest_vm::asm::FnRef {
+    let s = pb.declare(name, 0);
+    let mut f = pb.body(s);
+    ret(&mut f);
+    f.end();
+    s
+}
+
+/// A quest named `Q` with the stages `A`, `B`, globals `Q::stage` / `Q::participants`, the given roles and
+/// `parts` parts anchored on role 0, started by `start`.
+fn quest_info(
+    pb: &mut ProgramBuilder,
+    q: &QTys,
+    zero: quest_vm::asm::FnRef,
+    roles: Vec<RoleInfo>,
+    parts: usize,
+    start: quest_vm::asm::FnRef,
+) -> QuestInfo {
+    let stage = int_global(pb, q, "Q::stage", zero);
+    let participants = int_global(pb, q, "Q::participants", zero);
+    QuestInfo {
+        name: "Q".into(),
+        roles,
+        stages: vec!["A".into(), "B".into()],
+        stage_global: stage,
+        participants_global: participants,
+        home_role: 0,
+        repeat: None,
+        parts: (0..parts)
+            .map(|i| PartInfo {
+                name: format!("part{i}"),
+                anchor: Anchor::On,
+                role: 0,
+                read_set: vec![stage],
+            })
+            .collect(),
+        requires: vec![],
+        start_fn: start.0,
+        read_set: vec![],
+    }
+}
+
+/// The timer program. Global `last` holds the latest timer id.
+/// - `Ping { n }` (a handler of stage `A`): `last = after(n, Ring(n))` — a stage-scoped timer;
+/// - `Pong { n }` (any stage): `last = after(n, Ring(n + 100))`, then faults `DivByZero` when `n == 0`;
+/// - `Big`: `cancel(last)`; `Quiet`: cancels the stage's timers;
+/// - `Ring { n }`: logs `(n, 1)`.
+fn timers_program() -> Arc<Program> {
+    let mut pb = ProgramBuilder::new(API);
+    let q = qtys(&mut pb);
+    let zero = zero_fn(&mut pb);
+    let start = noop_fn(&mut pb, "$start::Q");
+    let info = quest_info(&mut pb, &q, zero, vec![], 0, start);
+    let last = SlotRef::Global(quest_vm::asm::GlobalRef(int_global(
+        &mut pb, &q, "last", zero,
+    )));
+    for (name, event, add, stage) in [("set_a", "Ping", 0, Some(0)), ("set", "Pong", 100, None)] {
+        let h = pb.declare(name, 1);
+        let mut f = pb.body(h);
+        let ev = f.param(0);
+        f.mark_ref(ev);
+        let (n, ticks, val, id) = (f.local(0), f.local(1), f.local(2), f.local(3));
+        f.mark_ref(val);
+        f.emit(Op::GetField, n, ev, 0u16);
+        f.emit(Op::Copy, ticks, n, 0u16);
+        make_ring(&mut f, &q, n, add, val, 4);
+        f.emit(Op::After, id, ticks, q.ring_event);
+        f.emit(Op::Copy, last, id, 0u16);
+        f.emit(Op::Drop, val, 0u16, 0u16);
+        if add == 100 {
+            let (z, cond, out) = (f.local(6), f.local(7), f.local(8));
+            f.emit(Op::LoadSmall, z, 0u16, 0u16);
+            f.emit(Op::EqI, cond, n, z);
+            let skip = f.label();
+            f.jump(Op::JmpIfNot, cond, skip);
+            f.emit(Op::DivI, out, z, z);
+            f.bind(skip);
+        }
+        ret(&mut f);
+        f.end();
+        pb.owned_handler(event, q.t.ping, h, 0, stage);
+    }
+    let cancel = pb.declare("cancel", 1);
+    {
+        let mut f = pb.body(cancel);
+        f.mark_ref(f.param(0));
+        f.emit(Op::CancelTimer, last, 0u16, 0u16);
+        ret(&mut f);
+        f.end();
+    }
+    pb.handler("Big", q.t.ping, cancel);
+    let leave = pb.declare("leave_stage", 1);
+    {
+        let mut f = pb.body(leave);
+        f.mark_ref(f.param(0));
+        f.emit(Op::CancelStageTimers, 0u16, 0u16, 0u16);
+        ret(&mut f);
+        f.end();
+    }
+    pb.handler("Quiet", q.t.ping, leave);
+    logger(&mut pb, &q, "rang", "Ring", q.ring, 0, None, 1);
+    pb.set_quest(info);
+    Arc::new(pb.finish().expect("timers program"))
+}
+
+/// One tick at `now` with unlimited fuel.
+fn at(vm: &mut Vm, host: &mut RecordingHost, now: u64) {
+    vm.tick(now, u64::MAX, host);
+}
+
+fn fault_kinds(host: &RecordingHost) -> Vec<FaultKind> {
+    host.reports
+        .iter()
+        .filter_map(|r| match r {
+            Report::HandlerAborted {
+                cause: AbortCause::Fault { kind, .. },
+                ..
+            } => Some(*kind),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The id of the `serial`-th timer of epoch 1.
+fn timer_id(serial: u64) -> u64 {
+    1 << 32 | serial
+}
+
+#[test]
+fn script_event_is_delivered() {
+    let mut pb = ProgramBuilder::new(API);
+    let q = qtys(&mut pb);
+    logger(&mut pb, &q, "rang", "Ring", q.ring, 0, None, 1);
+    // Ping { n }: emit Ring(n + 10)
+    let h = pb.declare("ping", 1);
+    {
+        let mut f = pb.body(h);
+        let ev = f.param(0);
+        f.mark_ref(ev);
+        let (n, val) = (f.local(0), f.local(1));
+        f.mark_ref(val);
+        f.emit(Op::GetField, n, ev, 0u16);
+        make_ring(&mut f, &q, n, 10, val, 2);
+        f.emit(Op::Enqueue, q.ring_event, val, 0u16);
+        f.emit(Op::Drop, val, 0u16, 0u16);
+        ret(&mut f);
+        f.end();
+    }
+    pb.handler("Ping", q.t.ping, h);
+    let p = Arc::new(pb.finish().expect("program"));
+    assert!(!EVENTS.contains(&"Ring"));
+
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    // a host may deliver a script event
+    assert_eq!(vm.deliver("Ring", &ring(7)), Delivery::Accepted);
+    assert_eq!(
+        vm.deliver("Nope", &ring(7)),
+        Delivery::Dropped(DropReason::UnknownEvent)
+    );
+    assert_eq!(
+        vm.deliver("Ring", &WireValue::Int(7)),
+        Delivery::Dropped(DropReason::WrongShape)
+    );
+    at(&mut vm, &mut host, 1);
+    assert_eq!(logged(&host), [(7, 1)]);
+    // and a handler may queue one for its own instance: it runs in the same tick, after the commit
+    assert_eq!(vm.deliver("Ping", &ping(1)), Delivery::Accepted);
+    at(&mut vm, &mut host, 2);
+    assert_eq!(logged(&host), [(7, 1), (11, 1)]);
+    assert!(host.reports.is_empty(), "{:?}", host.reports);
+    assert!(vm.is_idle());
+}
+
+#[test]
+fn enqueue_overflows_like_host_events() {
+    let mut pb = ProgramBuilder::new(API);
+    let q = qtys(&mut pb);
+    logger(&mut pb, &q, "rang", "Ring", q.ring, 0, None, 1);
+    // Pong { n }: emit Ring(n + i) for i in 0..5, then fault when n == 0
+    let h = pb.declare("pong", 1);
+    {
+        let mut f = pb.body(h);
+        let ev = f.param(0);
+        f.mark_ref(ev);
+        let (n, val) = (f.local(0), f.local(1));
+        f.mark_ref(val);
+        f.emit(Op::GetField, n, ev, 0u16);
+        for i in 0..5 {
+            make_ring(&mut f, &q, n, i, val, 2);
+            f.emit(Op::Enqueue, q.ring_event, val, 0u16);
+            f.emit(Op::Drop, val, 0u16, 0u16);
+        }
+        let (z, cond, out) = (f.local(4), f.local(5), f.local(6));
+        f.emit(Op::LoadSmall, z, 0u16, 0u16);
+        f.emit(Op::EqI, cond, n, z);
+        let skip = f.label();
+        f.jump(Op::JmpIfNot, cond, skip);
+        f.emit(Op::DivI, out, z, z);
+        f.bind(skip);
+        ret(&mut f);
+        f.end();
+    }
+    pb.handler("Pong", q.t.ping, h);
+    let p = Arc::new(pb.finish().expect("program"));
+
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    vm.deliver("Pong", &ping(20));
+    at(&mut vm, &mut host, 1);
+    // the queue holds four: the fifth is dropped, as a host event would be
+    assert_eq!(logged(&host), [(20, 1), (21, 1), (22, 1), (23, 1)]);
+    assert_eq!(
+        host.reports,
+        [Report::EventDropped {
+            event: "Ring".into(),
+            reason: DropReason::QueueFull,
+        }]
+    );
+    // an aborted segment queues nothing
+    let mut host = RecordingHost::default();
+    vm.deliver("Pong", &ping(0));
+    at(&mut vm, &mut host, 2);
+    assert!(logged(&host).is_empty());
+    assert_eq!(fault_kinds(&host), [FaultKind::DivByZero]);
+    assert!(vm.is_idle());
+}
+
+/// A program with one part: `Ping` is handled by a home handler (tag 0) and a part handler (tag 1); the
+/// script event `Ring` only by the part (tag 2).
+fn owners_program() -> Arc<Program> {
+    let mut pb = ProgramBuilder::new(API);
+    let q = qtys(&mut pb);
+    let zero = zero_fn(&mut pb);
+    let start = noop_fn(&mut pb, "$start::Q");
+    let dog = pb.global("Q::role.dog", q.t.int);
+    pb.set_global_init(dog, zero);
+    let role = RoleInfo {
+        name: "dog".into(),
+        global: dog.0,
+        ty: q.t.int,
+        optional: false,
+        cond: None,
+    };
+    let info = quest_info(&mut pb, &q, zero, vec![role], 1, start);
+    logger(&mut pb, &q, "home_ping", "Ping", q.t.ping, 0, None, 0);
+    logger(&mut pb, &q, "part_ping", "Ping", q.t.ping, 1, None, 1);
+    logger(&mut pb, &q, "part_ring", "Ring", q.ring, 1, None, 2);
+    pb.set_quest(info);
+    Arc::new(pb.finish().expect("owners program"))
+}
+
+fn dog_cfg(instance: u16) -> VmConfig {
+    VmConfig {
+        instance,
+        roles: vec![("dog".into(), WireValue::Int(1))],
+        ..cfg()
+    }
+}
+
+#[test]
+fn only_owner_handlers_run() {
+    let p = owners_program();
+    let mut home = Vm::new(p.clone(), dog_cfg(0)).expect("home");
+    let mut part = Vm::new(p.clone(), dog_cfg(1)).expect("part");
+    let (mut hh, mut ph) = (RecordingHost::default(), RecordingHost::default());
+    for (vm, host) in [(&mut home, &mut hh), (&mut part, &mut ph)] {
+        assert_eq!(vm.deliver("Ping", &ping(5)), Delivery::Accepted);
+        at(vm, host, 1);
+    }
+    assert_eq!(logged(&hh), [(5, 0)]);
+    assert_eq!(logged(&ph), [(5, 1)]);
+    // the part's own event has no handler at home
+    assert_eq!(
+        home.deliver("Ring", &ring(6)),
+        Delivery::Dropped(DropReason::NoHandler)
+    );
+    assert_eq!(part.deliver("Ring", &ring(6)), Delivery::Accepted);
+    at(&mut part, &mut ph, 2);
+    assert_eq!(logged(&ph), [(5, 1), (6, 2)]);
+    // there is no second part
+    assert!(matches!(
+        Vm::new(p.clone(), dog_cfg(2)),
+        Err(LoadError::Invalid(_))
+    ));
+    // a save loads only as the instance it was
+    assert!(Vm::load(p.clone(), dog_cfg(1), &part.save()).is_ok());
+    assert!(matches!(
+        Vm::load(p, dog_cfg(0), &part.save()),
+        Err(LoadError::Invalid(_))
+    ));
+}
+
+#[test]
+fn quest_start_runs_after_the_initialisers_in_the_home_only() {
+    let mut pb = ProgramBuilder::new(API);
+    let q = qtys(&mut pb);
+    let zero = zero_fn(&mut pb);
+    let say = |pb: &mut ProgramBuilder, name: &str, tag: i16| {
+        let s = pb.declare(name, 0);
+        let mut f = pb.body(s);
+        let (n, k) = (f.local(0), f.local(1));
+        f.emit(Op::LoadSmall, n, 0u16, 0u16);
+        f.emit(Op::LoadSmall, k, tag as u16, 0u16);
+        f.emit(Op::CallHost, q.log, n, n);
+        ret(&mut f);
+        f.end();
+        s
+    };
+    let start = say(&mut pb, "$start::Q", 9);
+    let main = say(&mut pb, "main", 8);
+    let init = say(&mut pb, "init", 7);
+    let dog = pb.global("Q::role.dog", q.t.int);
+    pb.set_global_init(dog, zero);
+    let g = pb.global("g", q.t.unit);
+    pb.set_global_init(g, init);
+    let role = RoleInfo {
+        name: "dog".into(),
+        global: dog.0,
+        ty: q.t.int,
+        optional: false,
+        cond: None,
+    };
+    let info = quest_info(&mut pb, &q, zero, vec![role], 1, start);
+    pb.main(main);
+    pb.set_quest(info);
+    let p = Arc::new(pb.finish().expect("program"));
+
+    let mut home = Vm::new(p.clone(), dog_cfg(0)).expect("home");
+    let mut part = Vm::new(p.clone(), dog_cfg(1)).expect("part");
+    let (mut hh, mut ph) = (RecordingHost::default(), RecordingHost::default());
+    for (vm, host) in [(&mut home, &mut hh), (&mut part, &mut ph)] {
+        assert!(vm.start_main());
+        at(vm, host, 1);
+        assert!(vm.is_idle());
+    }
+    assert_eq!(logged(&hh), [(0, 7), (0, 9), (0, 8)]);
+    assert_eq!(logged(&ph), [(0, 7), (0, 8)]);
+    // an edit does not start the quest again
+    let (mut next, _) = home.migrate(p.clone(), dog_cfg(0)).expect("migrates");
+    let mut nh = RecordingHost::default();
+    at(&mut next, &mut nh, 2);
+    assert!(logged(&nh).is_empty());
+    // a reset does
+    home.reset();
+    let mut rh = RecordingHost::default();
+    at(&mut home, &mut rh, 3);
+    assert_eq!(logged(&rh), [(0, 7), (0, 9)]);
+}
+
+#[test]
+fn timer_fires_at_due_tick() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    vm.deliver("Pong", &ping(3));
+    at(&mut vm, &mut host, 2);
+    assert_eq!(vm.timers(), [(5, timer_id(1), "Ring".to_string())]);
+    for now in 3..=4 {
+        at(&mut vm, &mut host, now);
+        assert!(logged(&host).is_empty(), "fired early, at {now}");
+    }
+    at(&mut vm, &mut host, 5);
+    assert_eq!(logged(&host), [(103, 1)]);
+    assert!(vm.timers().is_empty());
+    assert!(host.reports.is_empty(), "{:?}", host.reports);
+    assert!(vm.is_idle());
+    // a late tick fires what is due by then
+    vm.deliver("Pong", &ping(2));
+    at(&mut vm, &mut host, 6);
+    at(&mut vm, &mut host, 20);
+    assert_eq!(logged(&host), [(103, 1), (102, 1)]);
+}
+
+#[test]
+fn timers_fire_in_due_then_id_order() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    // due 6 (id 1), due 6 (id 2), due 5 (id 3)
+    for (now, n) in [(2, 4), (3, 3), (4, 1)] {
+        vm.deliver("Pong", &ping(n));
+        at(&mut vm, &mut host, now);
+    }
+    assert_eq!(
+        vm.timers(),
+        [
+            (5, timer_id(3), "Ring".to_string()),
+            (6, timer_id(1), "Ring".to_string()),
+            (6, timer_id(2), "Ring".to_string()),
+        ]
+    );
+    at(&mut vm, &mut host, 5);
+    assert_eq!(logged(&host), [(101, 1)]);
+    at(&mut vm, &mut host, 6);
+    assert_eq!(logged(&host), [(101, 1), (104, 1), (103, 1)]);
+}
+
+#[test]
+fn stage_timer_cancelled() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    // a stage handler's timer (Ring 3) and a quest-body handler's (Ring 103)
+    vm.deliver("Ping", &ping(3));
+    vm.deliver("Pong", &ping(3));
+    at(&mut vm, &mut host, 2);
+    assert_eq!(vm.timers().len(), 2);
+    vm.deliver("Quiet", &ping(0));
+    at(&mut vm, &mut host, 3);
+    assert_eq!(vm.timers(), [(5, timer_id(2), "Ring".to_string())]);
+    for now in 4..=8 {
+        at(&mut vm, &mut host, now);
+    }
+    assert_eq!(logged(&host), [(103, 1)]);
+}
+
+#[test]
+fn cancel_timer_cancels_only_its_timer() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    vm.deliver("Pong", &ping(3)); // id 1, due 5
+    at(&mut vm, &mut host, 2);
+    vm.deliver("Pong", &ping(4)); // id 2, due 7: `last`
+    at(&mut vm, &mut host, 3);
+    vm.deliver("Big", &ping(0));
+    at(&mut vm, &mut host, 4);
+    assert_eq!(vm.timers(), [(5, timer_id(1), "Ring".to_string())]);
+    // cancelling a timer that is gone does nothing
+    vm.deliver("Big", &ping(0));
+    for now in 5..=9 {
+        at(&mut vm, &mut host, now);
+    }
+    assert_eq!(logged(&host), [(103, 1)]);
+    assert!(host.reports.is_empty(), "{:?}", host.reports);
+}
+
+#[test]
+fn timer_undone_with_its_segment() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    // Pong 0 sets a timer, then faults: the timer goes with the segment
+    vm.deliver("Pong", &ping(0));
+    at(&mut vm, &mut host, 2);
+    assert_eq!(fault_kinds(&host), [FaultKind::DivByZero]);
+    assert!(vm.timers().is_empty());
+    for now in 3..=5 {
+        at(&mut vm, &mut host, now);
+    }
+    assert!(logged(&host).is_empty());
+    assert!(vm.is_idle());
+    // and the sim's rollback undoes a committed one
+    let before = vm.hash64();
+    let cp = vm.checkpoint();
+    vm.deliver("Pong", &ping(3));
+    at(&mut vm, &mut host, 6);
+    assert_eq!(vm.timers().len(), 1);
+    vm.rollback_to(cp).expect("rollback");
+    assert!(vm.timers().is_empty());
+    assert_eq!(vm.hash64(), before);
+}
+
+#[test]
+fn too_many_timers_faults() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    for now in 0..TIMERS_MAX as u64 {
+        vm.deliver("Pong", &ping(50));
+        at(&mut vm, &mut host, 2 + now);
+    }
+    assert!(host.reports.is_empty(), "{:?}", host.reports);
+    assert_eq!(vm.timers().len(), TIMERS_MAX);
+    vm.deliver("Pong", &ping(50));
+    at(&mut vm, &mut host, 40);
+    assert_eq!(fault_kinds(&host), [FaultKind::TooManyTimers]);
+    assert_eq!(vm.timers().len(), TIMERS_MAX);
+}
+
+#[test]
+fn timer_survives_save_load_and_is_hashed() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    let mut other = common::vm(&p);
+    at(&mut other, &mut RecordingHost::default(), 1);
+    vm.deliver("Pong", &ping(3));
+    at(&mut vm, &mut host, 2);
+    other.deliver("Pong", &ping(4));
+    at(&mut other, &mut RecordingHost::default(), 2);
+    // the timers are all that differs (their due ticks and payloads): the hashes differ
+    assert_ne!(vm.hash64(), other.hash64());
+
+    let mut loaded = Vm::load(p.clone(), cfg(), &vm.save()).expect("loads");
+    assert_eq!(loaded.hash64(), vm.hash64());
+    assert_eq!(loaded.timers(), vm.timers());
+    let mut lh = RecordingHost::default();
+    let mut vh = RecordingHost::default();
+    for now in 3..=6 {
+        at(&mut vm, &mut vh, now);
+        at(&mut loaded, &mut lh, now);
+        assert_eq!(loaded.hash64(), vm.hash64());
+    }
+    assert_eq!(logged(&lh), [(103, 1)]);
+    assert_eq!(lh.transcript(), vh.transcript());
+}
+
+#[test]
+fn timers_carried_by_an_edit() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    vm.deliver("Ping", &ping(3)); // scoped, id 1, due 5
+    at(&mut vm, &mut host, 2);
+    vm.deliver("Pong", &ping(4)); // id 2, due 7
+    at(&mut vm, &mut host, 3);
+    // the same program: both timers, ids, due ticks and scopes carried; the serial goes on
+    let (mut next, report) = vm.migrate(p.clone(), cfg()).expect("migrates");
+    assert_eq!(report.timers_dropped, 0);
+    assert_eq!(next.timers(), vm.timers());
+    next.deliver("Quiet", &ping(0));
+    at(&mut next, &mut host, 4);
+    assert_eq!(next.timers(), [(7, timer_id(2), "Ring".to_string())]);
+    next.deliver("Pong", &ping(1));
+    at(&mut next, &mut host, 5);
+    assert_eq!(next.timers()[0], (6, timer_id(3), "Ring".to_string()));
+    for now in 6..=8 {
+        at(&mut next, &mut host, now);
+    }
+    assert_eq!(logged(&host), [(101, 1), (104, 1)]);
+
+    // a program without the script event drops them
+    let mut pb = ProgramBuilder::new(API);
+    let t = tys(&mut pb);
+    let h = ping_logger(&mut pb, &t, "on_ping", 0, 0);
+    pb.handler("Ping", t.ping, h);
+    let other = Arc::new(pb.finish().expect("program"));
+    let (next, report) = vm.migrate(other, cfg()).expect("migrates");
+    assert_eq!(report.timers_dropped, 2);
+    assert!(next.timers().is_empty());
+}
+
+#[test]
+fn reset_clears_timers() {
+    let p = timers_program();
+    let mut vm = vm(&p);
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    vm.deliver("Pong", &ping(3));
+    vm.deliver("Ping", &ping(3));
+    at(&mut vm, &mut host, 2);
+    assert_eq!(vm.timers().len(), 2);
+    vm.reset();
+    assert!(vm.timers().is_empty());
+    for now in 3..=8 {
+        at(&mut vm, &mut host, now);
+    }
+    assert!(logged(&host).is_empty());
+}
+
+/// Roles `farmer: int` and `optional miller: str`; the first global `seen = farmer + 1` shows the roles
+/// are in place before any initialiser runs; the roles' own initialisers fault if they ever run.
+fn roles_program() -> Arc<Program> {
+    let mut pb = ProgramBuilder::new(API);
+    let q = qtys(&mut pb);
+    let zero = zero_fn(&mut pb);
+    let start = noop_fn(&mut pb, "$start::Q");
+    let opt_str = pb.ty(TypeDesc::Enum {
+        name: "Option".into(),
+        variants: vec![
+            ("None".into(), vec![]),
+            ("Some".into(), vec![("value".into(), q.t.str)]),
+        ],
+    });
+    let bomb = pb.declare("$role_placeholder", 0);
+    {
+        let mut f = pb.body(bomb);
+        let (z, out) = (f.local(0), f.local(1));
+        f.emit(Op::LoadSmall, z, 0u16, 0u16);
+        f.emit(Op::DivI, out, z, z);
+        ret(&mut f);
+        f.end();
+    }
+    let seen_init = pb.declare("init_seen", 0);
+    let seen = pb.global("seen", q.t.int);
+    pb.set_global_init(seen, seen_init);
+    let farmer = pb.global("Q::role.farmer", q.t.int);
+    let miller = pb.global("Q::role.miller", opt_str);
+    pb.set_global_init(farmer, bomb);
+    pb.set_global_init(miller, bomb);
+    {
+        let mut f = pb.body(seen_init);
+        let (one, r) = (f.local(0), f.ret());
+        f.emit(Op::LoadSmall, one, 1u16, 0u16);
+        f.emit(Op::AddI, r, SlotRef::Global(farmer), one);
+        ret(&mut f);
+        f.end();
+    }
+    let roles = vec![
+        RoleInfo {
+            name: "farmer".into(),
+            global: farmer.0,
+            ty: q.t.int,
+            optional: false,
+            cond: None,
+        },
+        RoleInfo {
+            name: "miller".into(),
+            global: miller.0,
+            ty: q.t.str,
+            optional: true,
+            cond: None,
+        },
+    ];
+    let info = quest_info(&mut pb, &q, zero, roles, 0, start);
+    pb.set_quest(info);
+    Arc::new(pb.finish().expect("roles program"))
+}
+
+fn with_roles(roles: &[(&str, WireValue)]) -> VmConfig {
+    VmConfig {
+        roles: roles
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.clone()))
+            .collect(),
+        ..cfg()
+    }
+}
+
+#[test]
+fn role_values_installed() {
+    let p = roles_program();
+    let slot = |name: &str| {
+        let g = p.globals.iter().find(|g| g.name == name).expect(name);
+        (g.slot, g.ty)
+    };
+    let value = |vm: &Vm, name: &str| {
+        let (s, t) = slot(name);
+        vm.debug_value(s, t).expect("readable")
+    };
+    let none = WireValue::Variant {
+        name: "None".into(),
+        fields: vec![],
+    };
+    let mut vm = Vm::new(p.clone(), with_roles(&[("farmer", WireValue::Int(4))])).expect("loads");
+    let mut host = RecordingHost::default();
+    at(&mut vm, &mut host, 1);
+    assert!(host.reports.is_empty(), "{:?}", host.reports);
+    assert!(vm.is_idle());
+    assert_eq!(value(&vm, "Q::role.farmer"), WireValue::Int(4));
+    assert_eq!(value(&vm, "Q::role.miller"), none);
+    assert_eq!(value(&vm, "seen"), WireValue::Int(5));
+
+    let given = with_roles(&[
+        ("miller", WireValue::Str("Mo".into())),
+        ("farmer", WireValue::Int(9)),
+    ]);
+    let mut vm = Vm::new(p.clone(), given).expect("loads");
+    at(&mut vm, &mut host, 1);
+    assert!(host.reports.is_empty(), "{:?}", host.reports);
+    assert_eq!(value(&vm, "seen"), WireValue::Int(10));
+    let some = WireValue::Variant {
+        name: "Some".into(),
+        fields: vec![("value".into(), WireValue::Str("Mo".into()))],
+    };
+    assert_eq!(value(&vm, "Q::role.miller"), some);
+    // a reset installs them again; a save keeps them
+    vm.reset();
+    at(&mut vm, &mut host, 2);
+    assert!(host.reports.is_empty(), "{:?}", host.reports);
+    assert_eq!(value(&vm, "Q::role.miller"), some);
+    assert_eq!(value(&vm, "seen"), WireValue::Int(10));
+    let loaded = Vm::load(p.clone(), cfg(), &vm.save()).expect("loads");
+    assert_eq!(value(&loaded, "Q::role.farmer"), WireValue::Int(9));
+}
+
+#[test]
+fn missing_role_refused() {
+    let p = roles_program();
+    let refused = |roles: &[(&str, WireValue)]| Vm::new(p.clone(), with_roles(roles)).err();
+    assert_eq!(refused(&[]), Some(LoadError::Role("farmer".into())));
+    assert_eq!(
+        refused(&[("miller", WireValue::Str("Mo".into()))]),
+        Some(LoadError::Role("farmer".into()))
+    );
+    // a role the quest does not have, or one given twice
+    assert_eq!(
+        refused(&[("farmer", WireValue::Int(1)), ("baker", WireValue::Int(1))]),
+        Some(LoadError::Role("baker".into()))
+    );
+    assert_eq!(
+        refused(&[("farmer", WireValue::Int(1)), ("farmer", WireValue::Int(2))]),
+        Some(LoadError::Role("farmer".into()))
+    );
+    // a program without a quest takes no roles
+    let plain = sum_loop(1, false);
+    assert_eq!(
+        Vm::new(plain, with_roles(&[("farmer", WireValue::Int(1))])).err(),
+        Some(LoadError::Role("farmer".into()))
+    );
+}
+
+#[test]
+fn misfit_role_refused() {
+    let p = roles_program();
+    let refused = |roles: &[(&str, WireValue)]| Vm::new(p.clone(), with_roles(roles)).err();
+    assert_eq!(
+        refused(&[("farmer", WireValue::Str("x".into()))]),
+        Some(LoadError::Role("farmer".into()))
+    );
+    assert_eq!(
+        refused(&[("farmer", WireValue::Int(1)), ("miller", WireValue::Int(3))]),
+        Some(LoadError::Role("miller".into()))
+    );
+    // an optional role is given as its value, not as an `Option`
+    let some = WireValue::Variant {
+        name: "Some".into(),
+        fields: vec![("value".into(), WireValue::Str("Mo".into()))],
+    };
+    assert_eq!(
+        refused(&[("farmer", WireValue::Int(1)), ("miller", some)]),
+        Some(LoadError::Role("miller".into()))
+    );
 }

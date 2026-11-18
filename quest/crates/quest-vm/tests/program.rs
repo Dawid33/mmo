@@ -4,7 +4,9 @@ use quest_vm::asm::ProgramBuilder;
 use quest_vm::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op};
 use quest_vm::fuel::*;
 use quest_vm::host::HostFnKind;
-use quest_vm::program::{FnInfo, GlobalInfo, Program, ProgramError};
+use quest_vm::program::{
+    Anchor, FnInfo, GlobalInfo, PartInfo, Program, ProgramError, QuestInfo, RepeatInfo, RoleInfo,
+};
 use quest_vm::types::TypeDesc;
 
 fn instr(op: Op, a: u16, b: u16, c: u16) -> Instr {
@@ -91,13 +93,17 @@ fn op_and_builtin_numbers_pinned() {
         (Await, 61),
         (AwaitAll, 62),
         (PromiseDetach, 63),
+        (Enqueue, 64),
+        (After, 65),
+        (CancelTimer, 66),
+        (CancelStageTimers, 67),
     ];
     assert_eq!(ops.len(), Op::ALL.len());
     for &(op, n) in ops {
         assert_eq!(op as u8, n, "{op:?}");
         assert_eq!(Op::from_u8(n), Some(op));
     }
-    assert_eq!(Op::from_u8(64), None);
+    assert_eq!(Op::from_u8(68), None);
     assert_eq!(Op::from_u8(255), None);
 
     use Builtin::*;
@@ -220,6 +226,9 @@ fn fuel_table_pinned() {
     assert_eq!(FUEL_RESUME, 20u64);
     assert_eq!(FUEL_DISPATCH, 10u64);
     assert_eq!(FUEL_REAP, 2u64);
+    assert_eq!(FUEL_ENQUEUE, 10u64);
+    assert_eq!(FUEL_AFTER, 10u64);
+    assert_eq!(FUEL_CANCEL, 5u64);
 }
 
 /// A valid program: `main` (fn 0) calls `callee` (fn 1); one `Nop` in each function is room for `poke`.
@@ -458,6 +467,8 @@ fn validate_is_fast_on_many_globals_and_frames() {
         fns: vec![],
         globals: vec![],
         handlers: vec![],
+        events: vec![],
+        quest: None,
         main_fn: None,
         host_sites: vec![],
         lines: vec![],
@@ -577,6 +588,90 @@ fn full() -> Program {
     pb.handler("PlayerClicked", en, handler);
     pb.main(init);
     let _ = (dict, g);
+
+    // A quest: script events, roles, stages, a part, owned and stage-scoped handlers, the timer ops.
+    let opt_str = pb.ty(TypeDesc::Enum {
+        name: "Option".into(),
+        variants: vec![
+            ("None".into(), vec![]),
+            ("Some".into(), vec![("value".into(), st)]),
+        ],
+    });
+    let found = pb.script_event("DogFound", rec);
+    let stage = pb.global("Q::stage", int);
+    let parts = pb.global("Q::participants", int);
+    let farmer = pb.global("Q::role.farmer", int);
+    let miller = pb.global("Q::role.miller", opt_str);
+    for g in [stage, parts, farmer, miller] {
+        pb.set_global_init(g, init);
+    }
+    let req = pb.declare("$requires::Q", 0);
+    let cond = pb.declare("$where::Q::miller", 2);
+    let start = pb.declare("$start::Q", 0);
+    for f in [req, start] {
+        let mut b = pb.body(f);
+        b.emit(Op::Ret, 0, 0, 0);
+        b.end();
+    }
+    let mut b = pb.body(cond);
+    b.mark_ref(b.param(1));
+    b.emit(Op::Ret, 0, 0, 0);
+    b.end();
+    let on_found = pb.declare("Q::found", 1);
+    let mut b = pb.body(on_found);
+    let ev = b.param(0);
+    b.mark_ref(ev);
+    b.emit(Op::Enqueue, found, ev, 0);
+    b.emit(Op::Copy, b.local(1), ev, 0);
+    b.emit(Op::After, b.local(0), b.local(1), found);
+    b.emit(Op::CancelTimer, b.local(0), 0, 0);
+    b.emit(Op::CancelStageTimers, 0, 0, 0);
+    b.emit(Op::Ret, 0, 0, 0);
+    b.end();
+    pb.owned_handler("DogFound", rec, on_found, 0, Some(1));
+    let spotted = pb.declare("Q::watch::spotted", 1);
+    let mut b = pb.body(spotted);
+    b.mark_ref(b.param(0));
+    b.emit(Op::Ret, 0, 0, 0);
+    b.end();
+    pb.owned_handler("PlayerClicked", en, spotted, 1, None);
+    pb.set_quest(QuestInfo {
+        name: "Q".into(),
+        roles: vec![
+            RoleInfo {
+                name: "farmer".into(),
+                global: farmer.0,
+                ty: int,
+                optional: false,
+                cond: None,
+            },
+            RoleInfo {
+                name: "miller".into(),
+                global: miller.0,
+                ty: st,
+                optional: true,
+                cond: Some(cond.0),
+            },
+        ],
+        stages: vec!["Open".into(), "Search".into()],
+        stage_global: stage.0,
+        participants_global: parts.0,
+        home_role: 0,
+        repeat: Some(RepeatInfo {
+            cooldown: 9_000,
+            exclusive: true,
+            once_per_player: false,
+        }),
+        parts: vec![PartInfo {
+            name: "watch".into(),
+            anchor: Anchor::On,
+            role: 0,
+            read_set: vec![stage.0, parts.0],
+        }],
+        requires: vec![req.0],
+        start_fn: start.0,
+        read_set: vec![stage.0],
+    });
     pb.finish().expect("full program is valid")
 }
 
@@ -595,6 +690,115 @@ fn roundtrip_bytes_identical() {
     assert_eq!(q, p);
     assert_eq!(q.to_bytes(), bytes);
     assert_eq!(q.content_hash(), p.content_hash());
+}
+
+#[test]
+fn program_v3_roundtrip() {
+    let p = full();
+    assert_eq!(p.bytecode_version, 3);
+    let q = p.quest.as_ref().expect("a quest");
+    assert_eq!(p.events.len(), 1);
+    assert_eq!(q.roles.len(), 2);
+    assert_eq!(q.parts.len(), 1);
+    assert!(p.handlers.iter().any(|h| h.owner == 1));
+    assert!(p.handlers.iter().any(|h| h.stage == Some(1)));
+    for op in [
+        Op::Enqueue,
+        Op::After,
+        Op::CancelTimer,
+        Op::CancelStageTimers,
+    ] {
+        assert!(p.code.iter().any(|i| i.op == op), "{op:?}");
+    }
+    let bytes = p.to_bytes();
+    let back = Program::from_bytes(&bytes).unwrap();
+    assert_eq!(back, p);
+    assert_eq!(back.to_bytes(), bytes);
+    // a plain program has neither
+    let b = base();
+    assert!(b.events.is_empty() && b.quest.is_none());
+    assert_eq!(Program::from_bytes(&b.to_bytes()).unwrap(), b);
+}
+
+/// Each corruption of the quest tables is refused by `validate` and by `from_bytes` of its bytes, never a
+/// panic.
+#[test]
+fn hostile_quest_info_is_err() {
+    let refused = |p: &Program| {
+        assert!(matches!(p.validate(), Err(ProgramError::Invalid(_))));
+        assert!(Program::from_bytes(&p.to_bytes()).is_err());
+    };
+    let ok = full();
+    let ng = ok.globals.len() as u16;
+    let nf = ok.fns.len() as u16;
+    type Edit = Box<dyn Fn(&mut Program)>;
+    let edits: Vec<Edit> = vec![
+        // a role global out of range
+        Box::new(move |p| p.quest.as_mut().unwrap().roles[0].global = ng),
+        Box::new(|p| p.quest.as_mut().unwrap().roles[0].global = u16::MAX),
+        // a role whose global's type is not the role's (an optional role's is `Option[T]`)
+        Box::new(|p| p.quest.as_mut().unwrap().roles[1].optional = false),
+        Box::new(|p| p.quest.as_mut().unwrap().roles[0].optional = true),
+        // two roles of one name, or one global
+        Box::new(|p| p.quest.as_mut().unwrap().roles[1].name = "farmer".into()),
+        // a part role out of range
+        Box::new(|p| p.quest.as_mut().unwrap().parts[0].role = 2),
+        // a handler's stage out of range, its owner past the parts, a stage outside a quest
+        Box::new(|p| p.handlers[1].stage = Some(2)),
+        Box::new(|p| p.handlers[1].owner = 2),
+        Box::new(|p| {
+            p.quest = None;
+            p.handlers.retain(|h| h.owner == 0);
+        }),
+        // read sets and well-known globals out of range or unsorted
+        Box::new(move |p| p.quest.as_mut().unwrap().read_set = vec![ng]),
+        Box::new(|p| p.quest.as_mut().unwrap().parts[0].read_set.reverse()),
+        Box::new(move |p| p.quest.as_mut().unwrap().stage_global = ng),
+        Box::new(move |p| p.quest.as_mut().unwrap().participants_global = ng),
+        Box::new(|p| p.quest.as_mut().unwrap().home_role = 2),
+        // fns out of range or of the wrong arity
+        Box::new(move |p| p.quest.as_mut().unwrap().start_fn = nf),
+        Box::new(move |p| p.quest.as_mut().unwrap().requires = vec![nf]),
+        Box::new(|p| {
+            let c = p.quest.as_ref().unwrap().roles[1].cond.unwrap();
+            p.quest.as_mut().unwrap().start_fn = c;
+        }),
+        Box::new(|p| {
+            let s = p.quest.as_ref().unwrap().start_fn;
+            p.quest.as_mut().unwrap().roles[1].cond = Some(s);
+        }),
+        // an event type out of range, two events of one name, a handler disagreeing with its event's type
+        Box::new(|p| p.events[0].ty = u16::MAX),
+        Box::new(|p| {
+            let e = p.events[0].clone();
+            p.events.push(e);
+        }),
+        Box::new(|p| p.handlers[1].event_ty = 0),
+    ];
+    for (i, edit) in edits.iter().enumerate() {
+        let mut p = ok.clone();
+        edit(&mut p);
+        assert_ne!(p, ok, "edit {i} changed nothing");
+        refused(&p);
+    }
+    // instructions naming an event that does not exist
+    let mut p = ok.clone();
+    p.events.clear();
+    p.handlers[1].event = "Gone".into();
+    refused(&p);
+    // a non-canonical flag byte: the miller's `optional` (1) becomes 2
+    let bytes = ok.to_bytes();
+    // the role's name (a `u32` length, then the bytes; the global's name is longer), then global: u16,
+    // ty: u16, optional: u8
+    let at = bytes
+        .windows(10)
+        .position(|w| w == b"\x06\x00\x00\x00miller")
+        .expect("the role's name")
+        + 10;
+    let mut b = bytes.clone();
+    assert_eq!(b[at + 4], 1);
+    b[at + 4] = 2;
+    assert!(Program::from_bytes(&b).is_err());
 }
 
 #[test]

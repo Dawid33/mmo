@@ -7,9 +7,10 @@
 //! One exception: the orphans an edit kept aside (`migrate`) are a Rust field, which [`Vm::save`] and the
 //! state hash cover with the memory.
 //!
-//! The block's life (design D7, `sched`): [`Vm::new`] leaves the initialisers pending; each [`Vm::tick`]
-//! runs tasks under its fuel — the initialisers, then `main` once [`Vm::start_main`] asked for it, then
-//! the handlers of the events [`Vm::deliver`] queued.
+//! The block's life (design D7, `sched`): [`Vm::new`] installs the quest's roles and leaves the
+//! initialisers pending; each [`Vm::tick`] fires the timers that are due, then runs tasks under its fuel —
+//! the initialisers, then the quest's start (in the home), then `main` once [`Vm::start_main`] asked for
+//! it, then the handlers of the events [`Vm::deliver`], `Enqueue` and the timers queued.
 
 use std::sync::Arc;
 
@@ -18,30 +19,39 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::fault::FaultKind;
 use crate::host::{Host, PromiseId, SrcLoc};
 use crate::layout::{
-    H_BYTECODE_VERSION, H_CURRENT_FN, H_EPOCH, H_HOST_API_VERSION, H_PC, H_PROGRAM_HASH, H_STATUS,
-    LINK_SENTINEL, LoadError, STATUS_RUNNING,
+    H_BYTECODE_VERSION, H_CURRENT_FN, H_EPOCH, H_HOST_API_VERSION, H_OWNER, H_PC, H_PROGRAM_HASH,
+    H_QUEST_START, H_STATUS, LINK_SENTINEL, LoadError, STATUS_RUNNING,
 };
 use crate::mem::{Checkpoint, RollbackError};
 use crate::migrate::Orphan;
 use crate::program::Program;
 pub use crate::promise::Resolved;
-use crate::sched::error_type;
 pub use crate::sched::{Delivery, Status, TickReport};
+use crate::sched::{QSTART_NONE, QSTART_WANTED, error_type};
 use crate::store::Store;
-use crate::types::TypeId;
-use crate::wire::{WireValue, to_wire};
+use crate::types::{TypeDesc, TypeId};
+use crate::wire::{FromWire, WireValue, fits, from_wire, to_wire};
 
 /// What an instance is created with.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VmConfig {
     pub mem_bytes: u32,
     /// The instance epoch (promise ids carry it).
     pub epoch: u32,
     /// The host-API version the HOST implements; a program built against another is refused.
     pub host_api_version: u32,
-    /// The host API's event names (`HostApi::events`): `deliver` of any other name is `UnknownEvent`.
+    /// The host API's event names (`HostApi::events`): `deliver` of a name that is neither one of them
+    /// nor one of the program's script events (`Program::events`) is `UnknownEvent`.
     /// Configuration, like the host-API version: nothing about it is kept in memory.
     pub events: Vec<String>,
+    /// Which instance of the program this is: 0 the home (or a program without a quest), `1 + i` part `i`
+    /// of its quest. Only handlers of this owner register. Kept in the memory's header too: a save loads
+    /// only as the instance it was.
+    pub instance: u16,
+    /// The quest's role values, by role name (a value of the role's type `T`, also for an optional role,
+    /// which is `None` when left out). [`Vm::new`] writes them into the role globals before the
+    /// initialisers; [`Vm::reset`] does again. A program without a quest takes none.
+    pub roles: Vec<(String, WireValue)>,
 }
 
 pub struct Vm {
@@ -57,6 +67,10 @@ pub struct Vm {
     pub(crate) events: Vec<String>,
     /// `program.content_hash()`, computed once.
     pub(crate) program_hash: u64,
+    /// `VmConfig::instance`.
+    pub(crate) instance: u16,
+    /// `VmConfig::roles`: configuration, for [`Vm::reset`].
+    pub(crate) roles: Vec<(String, WireValue)>,
     /// Values an edit kept aside (`migrate`): state outside the memory, saved and hashed with it.
     pub(crate) orphans: Vec<Orphan>,
 }
@@ -106,22 +120,62 @@ pub enum RunEnd {
 
 impl Vm {
     /// Checks the versions, validates the program, plans the layout and writes a fresh memory: the
-    /// header (layout, versions, program hash, epoch) and both allocators. The undo log starts empty.
+    /// header (layout, versions, program hash, epoch, instance, the quest's start wanted in the home) and
+    /// both allocators; then the role values go into their globals, whose initialisers never run. A role
+    /// missing, given twice, misfitting or unknown is [`LoadError::Role`]; an instance that is not the
+    /// home or a part of the program is `Invalid`. The undo log starts empty.
     pub fn new(program: Arc<Program>, cfg: VmConfig) -> Result<Vm, LoadError> {
+        let mut vm = Vm::fresh(program, cfg)?;
+        let skip = vm.install_roles()?;
+        let installed = vm
+            .set_init_skip(&skip)
+            .map_err(|f| LoadError::Invalid(format!("installing the roles: {}", f.message)))?;
+        if !installed {
+            return Err(LoadError::Invalid(
+                "the inbox has no room for the roles' set".into(),
+            ));
+        }
+        vm.store.mem.clear_log();
+        Ok(vm)
+    }
+
+    /// [`Vm::new`] before the roles: a fresh memory with nothing installed.
+    pub(crate) fn fresh(program: Arc<Program>, cfg: VmConfig) -> Result<Vm, LoadError> {
         check_program(&program, cfg.host_api_version)?;
         if !cfg.mem_bytes.is_multiple_of(8) {
             return Err(LoadError::Invalid(
                 "mem_bytes is not a multiple of 8".into(),
             ));
         }
+        let parts = program.quest.as_ref().map_or(0, |q| q.parts.len());
+        if usize::from(cfg.instance) > parts {
+            return Err(LoadError::Invalid(format!(
+                "instance {} is neither the home nor a part of the program",
+                cfg.instance
+            )));
+        }
+        let start = if program.quest.is_some() && cfg.instance == 0 {
+            QSTART_WANTED
+        } else {
+            QSTART_NONE
+        };
         let store = Store::new(u32::from(program.static_words), cfg.mem_bytes)?;
         let program_hash = program.content_hash();
-        let mut vm = Vm::adopt(program, program_hash, store, cfg.events);
+        let mut vm = Vm::adopt(
+            program,
+            program_hash,
+            store,
+            cfg.events,
+            cfg.instance,
+            cfg.roles,
+        );
         let header = [
             (H_BYTECODE_VERSION, u64::from(BYTECODE_VERSION)),
             (H_HOST_API_VERSION, u64::from(cfg.host_api_version)),
             (H_PROGRAM_HASH, vm.program_hash),
             (H_EPOCH, u64::from(cfg.epoch)),
+            (H_OWNER, u64::from(cfg.instance)),
+            (H_QUEST_START, start),
         ];
         let (heap, inbox) = (vm.heap, vm.inbox);
         let init = |store: &mut Store| {
@@ -133,8 +187,65 @@ impl Vm {
         };
         init(&mut vm.store)
             .map_err(|e| LoadError::Invalid(format!("writing a fresh memory: {e:?}")))?;
-        vm.store.mem.clear_log();
         Ok(vm)
+    }
+
+    /// Writes each role's value (`VmConfig::roles`) into its global; the set of those globals, one bit
+    /// per global (`sched::set_init_skip`).
+    pub(crate) fn install_roles(&mut self) -> Result<Vec<u64>, LoadError> {
+        let p = Arc::clone(&self.program);
+        let given = self.roles.clone();
+        let mut skip = vec![0u64; p.globals.len().div_ceil(64)];
+        let roles = p.quest.as_ref().map_or(&[][..], |q| q.roles.as_slice());
+        for (i, (name, _)) in given.iter().enumerate() {
+            if !roles.iter().any(|r| &r.name == name) || given[..i].iter().any(|g| &g.0 == name) {
+                return Err(LoadError::Role(name.clone()));
+            }
+        }
+        for r in roles {
+            let refused = || LoadError::Role(r.name.clone());
+            // `validate` checked the global and, for an optional role, its `Option[T]` type
+            let g = &p.globals[usize::from(r.global)];
+            let value = match given.iter().find(|(n, _)| n == &r.name) {
+                Some((_, v)) if !fits(&p.types, r.ty, v) => return Err(refused()),
+                Some((_, v)) if r.optional => {
+                    let field = match p.types.desc(g.ty) {
+                        Ok(TypeDesc::Enum { variants, .. }) => variants
+                            .get(1)
+                            .and_then(|s| s.1.first())
+                            .map(|f| f.0.clone()),
+                        _ => None,
+                    };
+                    WireValue::Variant {
+                        name: "Some".into(),
+                        fields: vec![(field.ok_or_else(refused)?, v.clone())],
+                    }
+                }
+                Some((_, v)) => v.clone(),
+                None if r.optional => WireValue::Variant {
+                    name: "None".into(),
+                    fields: vec![],
+                },
+                None => return Err(refused()),
+            };
+            let v = match from_wire(&mut self.store, self.heap, &p.types, g.ty, &value) {
+                Ok((v, _)) => v,
+                Err(FromWire::WrongType) => return Err(refused()),
+                Err(FromWire::Fault(k)) => {
+                    return Err(LoadError::Invalid(format!(
+                        "installing role {}: {}",
+                        r.name,
+                        k.describe()
+                    )));
+                }
+            };
+            self.put(g.slot, v, p.types.is_ref(g.ty)).map_err(|f| {
+                LoadError::Invalid(format!("installing role {}: {}", r.name, f.message))
+            })?;
+            let i = usize::from(r.global);
+            skip[i / 64] |= 1 << (i % 64);
+        }
+        Ok(skip)
     }
 
     /// The instance of `program` (whose content hash is `program_hash`) with the state `store`, both
@@ -145,6 +256,8 @@ impl Vm {
         program_hash: u64,
         store: Store,
         events: Vec<String>,
+        instance: u16,
+        roles: Vec<(String, WireValue)>,
     ) -> Vm {
         let l = store.layout;
         let heap = Heap {
@@ -165,8 +278,16 @@ impl Vm {
             heap,
             inbox,
             events,
+            instance,
+            roles,
             orphans: Vec::new(),
         }
+    }
+
+    /// The live timers as (due tick, id, event name), in (due, id) order — those the open segment set or
+    /// is cancelling included (`timers`).
+    pub fn timers(&self) -> Vec<(u64, u64, String)> {
+        self.timers_list()
     }
 
     /// Asks for `main` to run once the initialisers are done (before queued events). `false` when the
@@ -190,8 +311,9 @@ impl Vm {
 
     /// Runs tasks for up to `fuel` (less any debt an earlier tick left). `now` smaller than the latest
     /// `now` counts as the latest. Reports go to `host.report`; buffered commands and prints reach the
-    /// host when their segment commits. With `fuel` 0 nothing changes. Promise timeouts fire only on
-    /// ticks, so a host must keep ticking an instance that has parked handlers, even when it is idle.
+    /// host when their segment commits. With `fuel` 0 nothing changes. Promise timeouts and timers fire
+    /// only on ticks, so a host must keep ticking an instance that has parked handlers or live timers
+    /// ([`Vm::timers`]), even when it is idle.
     pub fn tick(&mut self, now: u64, fuel: u64, host: &mut dyn Host) -> TickReport {
         self.sched_tick(now, fuel, host)
     }
