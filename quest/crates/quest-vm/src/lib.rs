@@ -5,6 +5,7 @@ pub mod asm;
 mod builtins;
 pub mod bytecode;
 pub mod consts;
+pub mod dialogue;
 pub mod dict;
 pub mod eq;
 pub mod fault;

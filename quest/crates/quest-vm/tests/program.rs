@@ -2,6 +2,10 @@
 
 use quest_vm::asm::ProgramBuilder;
 use quest_vm::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op};
+use quest_vm::dialogue::{
+    CondDef, DialogueDef, DialogueGraph, DialogueKind, LineDef, NodeDef, OnceDef, OptionDef, Pick,
+    Speaker, StepDef,
+};
 use quest_vm::fuel::*;
 use quest_vm::host::HostFnKind;
 use quest_vm::program::{
@@ -470,6 +474,7 @@ fn validate_is_fast_on_many_globals_and_frames() {
         handlers: vec![],
         events: vec![],
         quest: None,
+        dialogues: DialogueGraph::default(),
         main_fn: None,
         host_sites: vec![],
         lines: vec![],
@@ -698,6 +703,83 @@ fn full() -> Program {
         start_fn: start.0,
         read_set: vec![stage.0],
     });
+
+    // A dialogue graph: a conversation declared in a stage, with a guarded node, a choice and an emit,
+    // and a scene that follows itself.
+    let boolean = pb.ty(TypeDesc::Bool);
+    let talk_cond = pb.declare("Q::talk$cond#0", 2);
+    pb.set_sig(talk_cond, vec![int, int], boolean);
+    let mut b = pb.body(talk_cond);
+    b.emit(Op::Ret, 0, 0, 0);
+    b.end();
+    let line = |id: &str, who: u8| LineDef {
+        id: id.into(),
+        speaker: Speaker::Cast(who),
+        subst: vec![],
+        ticks: 0,
+    };
+    let mut g = DialogueGraph::default();
+    let accept = g.block(vec![
+        StepDef::Emit {
+            event: 2,
+            script: false,
+            args: vec![],
+        },
+        StepDef::Return { exit: 1 },
+    ]);
+    let start = g.block(vec![
+        StepDef::Line {
+            line: line("talk.start", 1),
+            cond: CondDef::NONE,
+        },
+        StepDef::Choice {
+            timeout: Some(100),
+            options: vec![OptionDef {
+                text: line("talk.accept", 0),
+                guard: Some(talk_cond.0),
+                once: Some(1),
+                default: true,
+                body: accept,
+            }],
+            fallback: None,
+        },
+    ]);
+    let scene = g.block(vec![
+        StepDef::Pause { ticks: 30 },
+        StepDef::FollowUp { scene: 1 },
+    ]);
+    let dialogue = |name: &str, kind, body| DialogueDef {
+        name: String::from(name),
+        kind,
+        cast: 2,
+        stage: None,
+        target: None,
+        filter: None,
+        cast_cond: None,
+        topic: None,
+        exits: vec!["done".into()],
+        pick: Pick::Best,
+        stateless: false,
+        interruptible: true,
+        nodes: vec![NodeDef {
+            name: "start".into(),
+            cond: CondDef {
+                once: Some(OnceDef {
+                    site: 0,
+                    per: Some(talk_cond.0),
+                }),
+                guard: Some(talk_cond.0),
+            },
+            score: 2,
+            body,
+        }],
+        score: 0,
+    };
+    let mut talk = dialogue("Q::talk", DialogueKind::Conversation, start);
+    talk.stage = Some(1);
+    talk.exits.push("accepted".into());
+    g.dialogues = vec![talk, dialogue("Q::chatter", DialogueKind::Scene, scene)];
+    pb.set_dialogues(g);
     pb.finish().expect("full program is valid")
 }
 
@@ -707,6 +789,7 @@ fn roundtrip_bytes_identical() {
     assert!(!p.consts.is_empty() && !p.strings.is_empty() && !p.shapes.is_empty());
     assert!(!p.types.0.is_empty() && !p.fns.is_empty() && !p.globals.is_empty());
     assert!(!p.handlers.is_empty() && p.main_fn.is_some() && !p.host_sites.is_empty());
+    assert!(!p.dialogues.dialogues.is_empty() && !p.dialogues.steps.is_empty());
     assert!(
         !p.lines.is_empty() && !p.files.is_empty() && p.fns.iter().any(|f| !f.ref_slots.is_empty())
     );
@@ -719,9 +802,10 @@ fn roundtrip_bytes_identical() {
 }
 
 #[test]
-fn program_v4_roundtrip() {
+fn program_v5_roundtrip() {
     let p = full();
-    assert_eq!(p.bytecode_version, 4);
+    assert_eq!(p.bytecode_version, 5);
+    assert_eq!(p.dialogues.dialogues.len(), 2);
     assert!(p.fns.iter().any(|f| f.sig.is_some()) && p.fns.iter().any(|f| f.sig.is_none()));
     let q = p.quest.as_ref().expect("a quest");
     assert_eq!(p.events.len(), 1);

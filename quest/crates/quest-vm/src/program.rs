@@ -5,10 +5,10 @@
 //! flag, then a `u16` that is 0 when the flag is 0), then each table as a `u32` count followed by its
 //! elements, in the order of the struct's fields: `code` (8 bytes per instruction, see [`Instr::encode`]),
 //! `consts`, `strings` (`u32` length + UTF-8), `shapes`, `types`, `fns` (each with an optional
-//! signature), `globals`, `handlers` (each
-//! with its owner and an optional stage), `events`, then `quest` (a `u8` flag, then the [`QuestInfo`] when
-//! it is 1), `host_sites`, `lines`, `files`. Nothing may follow. Every flag and optional is a `u8` 0 or 1
-//! (an optional's value follows a 1 only). The encoding is canonical: bytes that parse are exactly
+//! signature), `globals`, `handlers` (each with its owner and an optional stage), `events`, then `quest`
+//! (a `u8` flag, then the [`QuestInfo`] when it is 1), `dialogues` (the [`DialogueGraph`], see
+//! [`crate::dialogue`]), `host_sites`, `lines`, `files`. Nothing may follow. Every flag and optional is a
+//! `u8` 0 or 1 (an optional's value follows a 1 only). The encoding is canonical: bytes that parse are exactly
 //! `to_bytes` of the program they parse to.
 //!
 //! `from_bytes` never allocates from an untrusted count (every element takes at least one byte, so a
@@ -17,6 +17,7 @@
 
 use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand, Wide};
 use crate::consts::STRUCT_FIELDS_MAX;
+use crate::dialogue::{self, DialogueGraph};
 use crate::hash::Fnv64;
 use crate::host::{HostFnKind, SrcLoc};
 use crate::object::FrameMaps;
@@ -25,7 +26,7 @@ use std::hash::Hasher;
 use crate::types::{ERROR_ENUM_NAME, TypeDesc, TypeId, TypeTable};
 
 /// Most elements of a table indexed by a `u16` id.
-const ID_TABLE_MAX: u32 = 65_536;
+pub(crate) const ID_TABLE_MAX: u32 = 65_536;
 
 pub const MAGIC: [u8; 8] = *b"QSPROG01";
 
@@ -50,7 +51,7 @@ impl std::fmt::Display for ProgramError {
 
 impl std::error::Error for ProgramError {}
 
-fn invalid<T>(why: impl Into<String>) -> Result<T, ProgramError> {
+pub(crate) fn invalid<T>(why: impl Into<String>) -> Result<T, ProgramError> {
     Err(ProgramError::Invalid(why.into()))
 }
 
@@ -217,6 +218,8 @@ pub struct Program {
     pub handlers: Vec<HandlerInfo>,
     pub events: Vec<EventInfo>,
     pub quest: Option<QuestInfo>,
+    /// Every dialogue, bark and scene (spec §5.11), run by the dialogue runner.
+    pub dialogues: DialogueGraph,
     pub main_fn: Option<u16>,
     pub host_sites: Vec<HostSite>,
     pub lines: Vec<LineEntry>,
@@ -234,41 +237,41 @@ impl FrameMaps for Program {
 
 // ---- bytes -------------------------------------------------------------------------------------------
 
-struct Writer(Vec<u8>);
+pub(crate) struct Writer(pub(crate) Vec<u8>);
 
 impl Writer {
-    fn u8(&mut self, v: u8) {
+    pub(crate) fn u8(&mut self, v: u8) {
         self.0.push(v);
     }
-    fn u16(&mut self, v: u16) {
+    pub(crate) fn u16(&mut self, v: u16) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn u64(&mut self, v: u64) {
+    pub(crate) fn u64(&mut self, v: u64) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     /// A table count. A table cannot have more than `u32::MAX` elements and still exist in memory on
     /// the targets that run this; the saturated value would fail to parse, never alias another program.
-    fn count(&mut self, n: usize) {
+    pub(crate) fn count(&mut self, n: usize) {
         self.u32(u32::try_from(n).unwrap_or(u32::MAX));
     }
-    fn str(&mut self, s: &str) {
+    pub(crate) fn str(&mut self, s: &str) {
         self.count(s.len());
         self.0.extend_from_slice(s.as_bytes());
     }
-    fn flag(&mut self, b: bool) {
+    pub(crate) fn flag(&mut self, b: bool) {
         self.u8(u8::from(b));
     }
     /// A `u8` 1 and the value, or a `u8` 0.
-    fn opt_u16(&mut self, v: Option<u16>) {
+    pub(crate) fn opt_u16(&mut self, v: Option<u16>) {
         self.flag(v.is_some());
         if let Some(v) = v {
             self.u16(v);
         }
     }
-    fn u16s(&mut self, v: &[u16]) {
+    pub(crate) fn u16s(&mut self, v: &[u16]) {
         self.count(v.len());
         for x in v {
             self.u16(*x);
@@ -276,15 +279,15 @@ impl Writer {
     }
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
 
-type Parse<T> = Result<T, ProgramError>;
+pub(crate) type Parse<T> = Result<T, ProgramError>;
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Parse<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Parse<&'a [u8]> {
         let left = self.bytes.len() - self.pos;
         if n > left {
             return Err(ProgramError::Truncated);
@@ -293,37 +296,41 @@ impl<'a> Reader<'a> {
         self.pos += n;
         Ok(s)
     }
-    fn array<const N: usize>(&mut self) -> Parse<[u8; N]> {
+    pub(crate) fn array<const N: usize>(&mut self) -> Parse<[u8; N]> {
         let mut a = [0u8; N];
         a.copy_from_slice(self.take(N)?);
         Ok(a)
     }
-    fn u8(&mut self) -> Parse<u8> {
+    pub(crate) fn u8(&mut self) -> Parse<u8> {
         Ok(self.array::<1>()?[0])
     }
-    fn u16(&mut self) -> Parse<u16> {
+    pub(crate) fn u16(&mut self) -> Parse<u16> {
         Ok(u16::from_le_bytes(self.array()?))
     }
-    fn u32(&mut self) -> Parse<u32> {
+    pub(crate) fn u32(&mut self) -> Parse<u32> {
         Ok(u32::from_le_bytes(self.array()?))
     }
-    fn u64(&mut self) -> Parse<u64> {
+    pub(crate) fn u64(&mut self) -> Parse<u64> {
         Ok(u64::from_le_bytes(self.array()?))
     }
-    fn count(&mut self) -> Parse<u32> {
+    pub(crate) fn count(&mut self) -> Parse<u32> {
         self.u32()
     }
-    fn str(&mut self) -> Parse<String> {
+    pub(crate) fn str(&mut self) -> Parse<String> {
         let n = usize::try_from(self.u32()?).map_err(|_| ProgramError::Truncated)?;
         let b = self.take(n)?;
         String::from_utf8(b.to_vec()).or_else(|_| invalid("a string is not UTF-8"))
     }
     /// `n` elements read by `f`. No capacity is reserved from `n`.
-    fn vec<T>(&mut self, f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
+    pub(crate) fn vec<T>(&mut self, f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
         let n = self.count()?;
         self.vec_n(n, f)
     }
-    fn vec_n<T>(&mut self, n: u32, mut f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
+    pub(crate) fn vec_n<T>(
+        &mut self,
+        n: u32,
+        mut f: impl FnMut(&mut Self) -> Parse<T>,
+    ) -> Parse<Vec<T>> {
         let mut v = Vec::new();
         for _ in 0..n {
             v.push(f(self)?);
@@ -331,32 +338,32 @@ impl<'a> Reader<'a> {
         Ok(v)
     }
     /// Like `vec`, for tables whose ids are 16 bits wide: a longer table is refused before it is read.
-    fn vec_ids<T>(&mut self, f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
+    pub(crate) fn vec_ids<T>(&mut self, f: impl FnMut(&mut Self) -> Parse<T>) -> Parse<Vec<T>> {
         let n = self.u32()?;
         if n > ID_TABLE_MAX {
             return invalid("a table is longer than its ids can address");
         }
         self.vec_n(n, f)
     }
-    fn named_ids(&mut self) -> Parse<Vec<(String, TypeId)>> {
+    pub(crate) fn named_ids(&mut self) -> Parse<Vec<(String, TypeId)>> {
         self.vec(|r| Ok((r.str()?, r.u16()?)))
     }
     /// A `u8` 0 or 1.
-    fn flag(&mut self) -> Parse<bool> {
+    pub(crate) fn flag(&mut self) -> Parse<bool> {
         match self.u8()? {
             0 => Ok(false),
             1 => Ok(true),
             _ => invalid("a flag is not canonical"),
         }
     }
-    fn opt_u16(&mut self) -> Parse<Option<u16>> {
+    pub(crate) fn opt_u16(&mut self) -> Parse<Option<u16>> {
         Ok(if self.flag()? {
             Some(self.u16()?)
         } else {
             None
         })
     }
-    fn u16s(&mut self) -> Parse<Vec<u16>> {
+    pub(crate) fn u16s(&mut self) -> Parse<Vec<u16>> {
         self.vec(|r| r.u16())
     }
 }
@@ -611,6 +618,7 @@ impl Program {
         if let Some(q) = &self.quest {
             write_quest(&mut w, q);
         }
+        dialogue::write_graph(&mut w, &self.dialogues);
         w.count(self.host_sites.len());
         for s in &self.host_sites {
             w.u16(s.host_fn);
@@ -714,6 +722,7 @@ impl Program {
         } else {
             None
         };
+        let dialogues = dialogue::read_graph(&mut r)?;
         let host_sites = r.vec_ids(|r| {
             let host_fn = r.u16()?;
             let kind = match r.u8()? {
@@ -755,6 +764,7 @@ impl Program {
             handlers,
             events,
             quest,
+            dialogues,
             main_fn,
             host_sites,
             lines,
@@ -922,6 +932,7 @@ impl Program {
             return invalid("two globals share a slot");
         }
         self.validate_events_and_quest()?;
+        dialogue::validate(self)?;
         for h in &self.handlers {
             if usize::from(h.event_ty) >= ntypes || usize::from(h.fn_id) >= nfns {
                 return invalid(format!("handler {} is out of range", h.event));

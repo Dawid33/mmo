@@ -55,6 +55,21 @@ pub const PARSE_DEPTH_MAX: usize = 256;
 /// as false.
 pub const COND_FUEL: u64 = 500;
 
+/// A timed line's duration: this many ticks, plus [`LINE_TICKS_PER_CHAR`] per character of its text.
+pub const LINE_BASE_TICKS: u32 = 30;
+
+/// A timed line's ticks per character of its source text.
+pub const LINE_TICKS_PER_CHAR: u32 = 1;
+
+/// The shortest derived duration of a timed line.
+pub const LINE_MIN_TICKS: u32 = 30;
+
+/// The longest derived duration of a timed line.
+pub const LINE_MAX_TICKS: u32 = 200;
+
+/// Steps of a program's dialogue graph (all its dialogues together).
+pub const GRAPH_STEPS_MAX: usize = 65_535;
+
 /// A read set (dialogue or part) above this many static words gets the `mirror-size` warning (`quest-lang`).
 pub const MIRROR_WORDS_WARN: u32 = 256;
 
@@ -83,5 +98,10 @@ mod tests {
         assert_eq!(PARSE_DEPTH_MAX, 256);
         assert_eq!(MIRROR_WORDS_WARN, 256);
         assert_eq!(COND_FUEL, 500);
+        assert_eq!(LINE_BASE_TICKS, 30);
+        assert_eq!(LINE_TICKS_PER_CHAR, 1);
+        assert_eq!(LINE_MIN_TICKS, 30);
+        assert_eq!(LINE_MAX_TICKS, 200);
+        assert_eq!(GRAPH_STEPS_MAX, 65_535);
     }
 }

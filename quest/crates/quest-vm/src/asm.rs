@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::{BYTECODE_VERSION, Builtin, Instr, Op, Operand as Kind, Wide};
+use crate::dialogue::DialogueGraph;
 use crate::host::HostFnKind;
 use crate::program::{
     EventInfo, FnInfo, FnSig, GlobalInfo, HandlerInfo, HostSite, LineEntry, Program, ProgramError,
@@ -144,6 +145,7 @@ pub struct ProgramBuilder {
     handlers: Vec<HandlerInfo>,
     events: Vec<EventInfo>,
     quest: Option<QuestInfo>,
+    dialogues: DialogueGraph,
     main_fn: Option<u16>,
     host_sites: Vec<HostSite>,
     lines: Vec<LineEntry>,
@@ -174,6 +176,7 @@ impl ProgramBuilder {
             handlers: Vec::new(),
             events: Vec::new(),
             quest: None,
+            dialogues: DialogueGraph::default(),
             main_fn: None,
             host_sites: Vec::new(),
             lines: Vec::new(),
@@ -421,6 +424,11 @@ impl ProgramBuilder {
         self.quest = Some(q);
     }
 
+    /// The program's dialogue graph (fn ids are this builder's; [`DialogueGraph::block`] lays out steps).
+    pub fn set_dialogues(&mut self, g: DialogueGraph) {
+        self.dialogues = g;
+    }
+
     pub fn main(&mut self, f: FnRef) {
         self.main_fn = Some(f.0);
     }
@@ -596,6 +604,7 @@ impl ProgramBuilder {
             handlers: self.handlers,
             events: self.events,
             quest: self.quest,
+            dialogues: self.dialogues,
             main_fn: self.main_fn,
             host_sites: self.host_sites,
             lines: self.lines,
