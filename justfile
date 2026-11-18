@@ -1452,9 +1452,12 @@ printf '%s ' VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_WORLD_ID=dev VOX
 # A host that exits 5 (EXIT_WORLD_ROLLBACK: the world went back to its last cut) or 137
 # (killed, e.g. `kill -9`) — or 3 (EXIT_FENCED: replaced, e.g. a hung host that woke after its
 # succession; restarted only because the hosts run `claim`) — is started again after 1 s — at
-# most 3 times within 60 s, then its loop gives up; one that exits 0 is not. Any member ending otherwise (login, the coordinator, a host loop)
-# takes the whole stack down, exit 1. Ctrl-C stops the hosts first and waits for them (their
-# leave cut needs the coordinator; 95 s, a host's own exit bound), then the coordinator, then the login service (60 s
+# most 3 times within 60 s, then its loop gives up; one that exits 0 is not. `just coordinators=<n>
+# dev-r3` runs n coordinator replicas (see `coordinators`); a replica that exits 137, 3 (ended by
+# another replica after a lapse) or 4 is started again the same way, as a new replica. Login or a
+# host loop ending otherwise — or the LAST coordinator replica's loop — takes the whole stack down,
+# exit 1; a replica's loop ending while another runs is only logged. Ctrl-C stops the hosts first and waits for them (their
+# leave cut needs the coordinator; 95 s, a host's own exit bound), then every coordinator replica, then the login service (60 s
 # each); what outlives its deadline is KILLed, and a second Ctrl-C kills at once.
 # Arguments are positional: `just dev-r3 3`, `just dev-r3 2 5` (`delay` holds every peer
 # frame that many ms; measurement only). A world whose super-region side was set

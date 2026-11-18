@@ -17,19 +17,27 @@
 #     DEV_R3_RESTART_MAX times within DEV_R3_RESTART_WINDOW_SECS; any other exit — 0, a host that
 #     left cleanly, included — or one restart too many, ends its loop; never a restart once the
 #     stack is stopping;
-#   - when any member ends on its own (login, the coordinator, a host loop) the stack goes
-#     down and this script exits 1;
+#   - a coordinator replica (the first or another, Elastic 2b) that exits 137 (killed), 3
+#     (EXIT_FENCED: another replica ended it after a lapse) or 4 (EXIT_COORDINATOR_FAILED) is
+#     started again after the same back-off, with the same env words — a NEW replica id each
+#     time (the shared certificate files keep the hosts' pin); bounded as a host's restarts; any
+#     other exit, or one restart too many, ends that replica's loop;
+#   - when login or a host loop ends on its own, or the LAST coordinator replica's loop ends, the
+#     stack goes down and this script exits 1 (a replica's loop ending while another coordinator
+#     loop runs is logged, and the stack stays up: what TODO.md's Elastic 2b hand check needs);
 #   - Ctrl-C (or TERM, or HUP: a closed terminal) stops the stack in order: every host
-#     server (their leave cut needs the coordinator), then the coordinator, then login. Each
+#     server (their leave cut needs the coordinator), then every coordinator replica, then login. Each
 #     stage has a deadline, after which what is left is KILLed; a second signal kills at
 #     once. Exit 0 only if everything stopped in time and is confirmed gone, else 1. Only
-#     this script decides: the host loops ignore HUP / TERM / INT, and a pid is signalled
-#     only while it is still the process started (its command line names the binary).
+#     this script decides: the host and coordinator loops ignore HUP / TERM / INT, and a pid is
+#     signalled only while it is still the process started (its command line names the binary).
 #
 #   scripts/dev_r3.sh <dir> <coordinator env words> <host 0 env words> [<host 1 env words> ...]
 #
 # Env words are `NAME=value` separated by spaces (no value holds a space). State in <dir>:
-# coordinator.log, host-<n>.log, host-<n>.pid (while the n-th host's server runs; n is the
+# coordinator.log (the first replica), coordinator-<k>.log (the k-th other), coordinator-<k>.pid
+# (while the k-th replica's server runs; 0: the first), host-<n>.log, host-<n>.pid (while the
+# n-th host's server runs; n is the
 # position on the command line, not a host id: ids come from the store), `stopping`, and the
 # pins the coordinator writes (coordinator.cert-sha256, login-link.cert-sha256). The login
 # service is registered with the coordinator's login link (VOXEL_LOGIN_LINK_BIND, 127.0.0.1:6490)
@@ -42,7 +50,8 @@
 # Coordinator replicas (Elastic 2b; `just coordinators=2 dev-r3`): DEV_R3_REPLICAS is a `|`-separated
 # list of env-word lists, one more coordinator each (its own VOXEL_COORDINATOR_BIND / VOXEL_LOGIN_LINK_BIND;
 # the same certificate files as the first, which has written them by then), started once the first
-# coordinator's pin exists, stopped with it, and any one ending takes the stack down like it.
+# coordinator's pin exists, restarted and stopped as the first is (above); the stack stays up while
+# any coordinator replica's loop runs.
 # DEV_R3_LOGIN_LINK (127.0.0.1:6490) is the login link target world `dev` is registered with (the
 # comma-separated addresses of every replica's login listener).
 set -uo pipefail
@@ -88,11 +97,11 @@ self=$0
 mkdir -p "$dir" "$(dirname "$login_log")"
 pin=$dir/coordinator.cert-sha256
 login_pin=$dir/login-link.cert-sha256
-rm -f "$pin" "$login_pin" "$dir"/host-*.pid "$dir/stopping"
+rm -f "$pin" "$login_pin" "$dir"/host-*.pid "$dir"/coordinator-*.pid "$dir/stopping"
 
 lpid=""
-cpid=""
-xpids=()
+# The coordinator replicas' loops (index 0: the first); an entry is unset once its loop ended.
+cloops=()
 rpid=""
 hpids=()
 interrupted=0
@@ -143,14 +152,33 @@ wait_gone() {
     done
 }
 
-# The host servers named by the remaining pid files that are still ours.
-host_servers() {
+# pid_servers <prefix>: the servers named by the remaining <prefix>-*.pid files that are still ours.
+pid_servers() {
     local f p
-    for f in "$dir"/host-*.pid; do
+    for f in "$dir/$1"-*.pid; do
         [ -s "$f" ] || continue
         p=$(cat "$f" 2>/dev/null) || continue
         if ours "$p" "$server"; then echo "$p"; fi
     done
+}
+
+# The host servers still running.
+host_servers() { pid_servers host; }
+
+# coord_log <k>: the k-th coordinator replica's log.
+coord_log() {
+    if [ "$1" -eq 0 ]; then echo "$dir/coordinator.log"; else echo "$dir/coordinator-$1.log"; fi
+}
+
+# stop_coordinators <what>: TERMs every coordinator replica's server still running and waits.
+stop_coordinators() {
+    local spids=()
+    mapfile -t spids < <(pid_servers coordinator)
+    if [ "${#spids[@]}" -gt 0 ]; then
+        say "stopping $1"
+        kill -TERM "${spids[@]}" 2>/dev/null || true
+        wait_gone "$stop_secs" "$1" "$server" "${spids[@]}"
+    fi
 }
 
 # stop_hosts <what>: TERMs every host server still running and waits for them.
@@ -179,16 +207,10 @@ stop() {
     if [ "${#hpids[@]}" -gt 0 ]; then wait_gone 5 "the host loops" "$self" "${hpids[@]}"; fi
     # A loop may have started a server after the first look (a restart racing the stop).
     stop_hosts "the hosts started late"
-    if [ -n "$cpid" ] && ours "$cpid" "$server"; then
-        say "stopping the coordinator"
-        kill -TERM "$cpid" 2>/dev/null || true
-        wait_gone "$stop_secs" "the coordinator" "$server" "$cpid"
-    fi
-    if [ "${#xpids[@]}" -gt 0 ]; then
-        say "stopping the other coordinator replicas"
-        kill -TERM "${xpids[@]}" 2>/dev/null || true
-        wait_gone "$stop_secs" "the other coordinator replicas" "$server" "${xpids[@]}"
-    fi
+    stop_coordinators "the coordinator replicas"
+    if [ "${#cloops[@]}" -gt 0 ]; then wait_gone 5 "the coordinator loops" "$self" "${cloops[@]}"; fi
+    # A loop may have started a replica after the first look (a restart racing the stop).
+    stop_coordinators "the coordinator replicas started late"
     if [ -n "$lpid" ] && ours "$lpid" "$login"; then
         say "stopping the login service"
         kill -TERM "$lpid" 2>/dev/null || true
@@ -258,6 +280,54 @@ host_loop() {
     done
 }
 
+# The <k>-th coordinator replica with <env words...> (0: the first, which writes the pins): started
+# again on exit 137, 3 or 4 — a new replica id each time — bounded as a host's restarts; never on
+# any other exit and never once stopping.
+coord_loop() {
+    local k=$1
+    shift
+    local log rc spid now t
+    local restarts=()
+    log=$(coord_log "$k")
+    : >"$log"
+    # Only the supervisor decides when a replica stops; the server gets default dispositions.
+    trap '' HUP TERM INT
+    while :; do
+        (
+            trap - HUP TERM INT
+            exec env "$@" RUST_BACKTRACE=1 setsid "$server" >>"$log" 2>&1 </dev/null
+        ) &
+        spid=$!
+        echo "$spid" >"$dir/coordinator-$k.pid"
+        if [ -e "$dir/stopping" ]; then kill -TERM "$spid" 2>/dev/null || true; fi
+        rc=0
+        wait "$spid" || rc=$?
+        rm -f "$dir/coordinator-$k.pid"
+        if [ -e "$dir/stopping" ]; then exit "$rc"; fi
+        case $rc in
+            137 | 3 | 4) ;;
+            *)
+                say "coordinator replica $k exited $rc; see $log"
+                exit "$rc"
+                ;;
+        esac
+        now=$SECONDS
+        local recent=()
+        for t in "${restarts[@]+"${restarts[@]}"}"; do
+            if ((now - t < restart_window)); then recent+=("$t"); fi
+        done
+        restarts=("${recent[@]+"${recent[@]}"}")
+        if [ "${#restarts[@]}" -ge "$restart_max" ]; then
+            say "coordinator replica $k exited $rc after $restart_max restarts within ${restart_window}s: giving up; see $log"
+            exit "$rc"
+        fi
+        restarts+=("$now")
+        say "coordinator replica $k exited $rc (137: killed; 3: ended by another replica; 4: failed): starting it again as a new replica"
+        sleep "$restart_backoff"
+        if [ -e "$dir/stopping" ]; then exit "$rc"; fi
+    done
+}
+
 VOXEL_SERVICE_TOKEN_FILE=$dir/service-token setsid "$login" serve >"$login_log" 2>&1 </dev/null &
 lpid=$!
 # Once the coordinator has written its login-link pin: world `dev` gets the link (no addresses:
@@ -270,13 +340,13 @@ lpid=$!
 ) &
 rpid=$!
 read -ra coord_words <<<"$coord_env"
-env "${coord_words[@]}" RUST_BACKTRACE=1 setsid "$server" >"$dir/coordinator.log" 2>&1 </dev/null &
-cpid=$!
+coord_loop 0 "${coord_words[@]}" &
+cloops[0]=$!
 say "login on http://127.0.0.1:8790 ($login_log), coordinator on 127.0.0.1:6480 ($dir/coordinator.log)"
 deadline=$((SECONDS + pin_wait_secs))
 until [ -s "$pin" ]; do
     if [ "$interrupted" = 1 ]; then exit 0; fi
-    if ! kill -0 "$cpid" 2>/dev/null; then
+    if ! kill -0 "${cloops[0]}" 2>/dev/null; then
         say "the coordinator exited; see $dir/coordinator.log" >&2
         exit 1
     fi
@@ -292,9 +362,9 @@ until [ -s "$pin" ]; do
 done
 for n in "${!replica_envs[@]}"; do
     read -ra rwords <<<"${replica_envs[$n]}"
-    env "${rwords[@]}" RUST_BACKTRACE=1 setsid "$server" >"$dir/coordinator-$((n + 1)).log" 2>&1 </dev/null &
-    xpids[n]=$!
-    say "coordinator replica $((n + 1)) ($dir/coordinator-$((n + 1)).log)"
+    coord_loop "$((n + 1))" "${rwords[@]}" &
+    cloops[n + 1]=$!
+    say "coordinator replica $((n + 1)) ($(coord_log "$((n + 1))"))"
 done
 for n in "${!host_envs[@]}"; do
     read -ra words <<<"${host_envs[$n]}"
@@ -306,22 +376,29 @@ for n in "${!host_envs[@]}"; do
     done
     say "host $n on UDP ${port:-?} ($dir/host-$n.log)"
 done
-# Watch: the first member to end on its own takes the stack down.
+# Watch: login or a host loop ending on its own takes the stack down; a coordinator replica's
+# loop ending does only if it was the last one.
 while :; do
     if [ "$interrupted" = 1 ]; then exit 0; fi
     ended=""
     rc=0
-    wait -n -p ended "${hpids[@]}" "${xpids[@]}" "$cpid" "$lpid" || rc=$?
+    wait -n -p ended "${hpids[@]}" "${cloops[@]}" "$lpid" || rc=$?
     if [ "$interrupted" = 1 ]; then exit 0; fi
     if [ -z "$ended" ]; then continue; fi
     what="?"
-    if [ "$ended" = "$cpid" ]; then what="the coordinator ($dir/coordinator.log)"; fi
     if [ "$ended" = "$lpid" ]; then what="the login service ($login_log)"; fi
     for n in "${!hpids[@]}"; do
         if [ "$ended" = "${hpids[$n]}" ]; then what="host $n ($dir/host-$n.log)"; fi
     done
-    for n in "${!xpids[@]}"; do
-        if [ "$ended" = "${xpids[$n]}" ]; then what="coordinator replica $((n + 1)) ($dir/coordinator-$((n + 1)).log)"; fi
+    for k in "${!cloops[@]}"; do
+        if [ "$ended" = "${cloops[$k]}" ]; then
+            unset 'cloops[k]'
+            if [ "${#cloops[@]}" -gt 0 ]; then
+                say "coordinator replica $k ended ($rc; $(coord_log "$k")); ${#cloops[@]} other replica(s) still run: the stack stays up" >&2
+                continue 2
+            fi
+            what="the last coordinator replica, $k ($(coord_log "$k"))"
+        fi
     done
     say "$what ended ($rc): stopping the stack" >&2
     exit 1
