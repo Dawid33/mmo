@@ -2938,7 +2938,8 @@ quest-run dir *args:
     {{cap}} {{cargo}} run -q --manifest-path quest/Cargo.toml -p quest-cli -- run {{dir}} {{args}}
 
 # The quest corpus goldens (bytecode hash, per-tick state hash and fuel, final memory, output) recorded on
-# native must be reproduced on wasm32 (node, wasm-bindgen-test-runner — from quest/'s own Cargo.lock).
+# native must be reproduced on wasm32 (node, wasm-bindgen-test-runner — from quest/'s own Cargo.lock). A
+# wasm32 half that ran no test fails the recipe.
 quest-wasm:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2946,5 +2947,8 @@ quest-wasm:
     root="$PWD/quest/target/tools/wasm-bindgen-$ver"
     [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
     {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml -p quest-corpus --test determinism
+    log=$(mktemp)
+    trap 'rm -f "$log"' EXIT
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
-        {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml -p quest-corpus --test determinism --target wasm32-unknown-unknown
+        {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml -p quest-corpus --test determinism --target wasm32-unknown-unknown 2>&1 | tee "$log"
+    grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$log" || { echo "quest-wasm: the wasm32 half ran no test" >&2; exit 1; }
