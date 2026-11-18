@@ -68,6 +68,8 @@ mod scenes;
 mod talk;
 
 use env::Core;
+pub use env::DialogueWorld;
+
 use talk::{Talk, conv_over, conv_quiet};
 
 /// Compiles the script directory an `edit` input names: the new program and its lines table.
@@ -227,17 +229,8 @@ impl World {
             .unwrap_or_default();
         let mut w = World {
             core: Core {
-                program_key: program.content_hash(),
-                program: Arc::clone(&program),
                 insts: Vec::new(),
-                people,
-                completed_by: BTreeSet::new(),
-                now: 0,
-                faults: Vec::new(),
-                api_events: stub_api().events,
-                roles,
-                mem_bytes,
-                mirrors: BTreeMap::new(),
+                env: DialogueWorld::new(Arc::clone(&program), people, roles, mem_bytes),
             },
             lines: BTreeMap::new(),
             show_ids: false,
@@ -270,7 +263,7 @@ impl World {
                 mem_bytes,
                 cfg.clone(),
                 id,
-                w.core.roles.clone(),
+                w.core.env.roles.clone(),
             )
             .map_err(load_error)?;
             w.core.insts.push(Inst { runner, name });
@@ -289,7 +282,7 @@ impl World {
     /// before `requires` and `where` read it or a mirror is taken of it. One that does not finish goes on
     /// at the first tick (no mirror until then).
     fn initialise(&mut self) {
-        let (now, fuel) = (self.core.now, self.fuel);
+        let (now, fuel) = (self.core.env.now, self.fuel);
         for inst in &mut self.core.insts {
             if inst.runner.vm.status() != Status::Failed {
                 inst.runner.vm.initialise(now, fuel, &mut inst.runner.host);
@@ -299,7 +292,7 @@ impl World {
 
     /// The `requires` conditions, then each bound role's `where`, over the home as it is.
     fn check_placement(&mut self) -> Result<(), String> {
-        let program = Arc::clone(&self.core.program);
+        let program = Arc::clone(&self.core.env.program);
         let Some(q) = program.quest.as_ref() else {
             return Ok(());
         };
@@ -316,9 +309,10 @@ impl World {
             }
         }
         for (k, r) in q.roles.iter().enumerate() {
-            let (Some(f), Some((_, value))) =
-                (r.cond, self.core.roles.iter().find(|(n, _)| *n == r.name))
-            else {
+            let (Some(f), Some((_, value))) = (
+                r.cond,
+                self.core.env.roles.iter().find(|(n, _)| *n == r.name),
+            ) else {
                 continue;
             };
             let params = program
@@ -330,7 +324,7 @@ impl World {
             // The earlier roles (an optional one as `Some(v)` / `None` where its type asks), then this one.
             let mut args = Vec::new();
             for (j, earlier) in q.roles[..k].iter().enumerate() {
-                let given = self.core.roles.iter().find(|(n, _)| *n == earlier.name);
+                let given = self.core.env.roles.iter().find(|(n, _)| *n == earlier.name);
                 let plain = given.map(|(_, v)| v.clone());
                 let ty = params.get(j).copied();
                 let wrapped = match &plain {
@@ -374,7 +368,7 @@ impl World {
 
     /// The tick the next [`World::step`] runs.
     pub fn now(&self) -> u64 {
-        self.core.now
+        self.core.env.now
     }
 
     pub fn outcome(&self) -> Outcome {
@@ -387,11 +381,11 @@ impl World {
     }
 
     pub fn people(&self) -> &People {
-        &self.core.people
+        &self.core.env.people
     }
 
     pub fn program(&self) -> &Arc<Program> {
-        &self.core.program
+        &self.core.env.program
     }
 
     /// Instance `i`'s VM (0 the home, `1 + i` part `i`).
@@ -421,7 +415,7 @@ impl World {
     /// Asks the home for `main` (`Vm::start_main`; again, `Vm::restart_main`, when a loaded state already ran
     /// it). `false` when the program has no `main`.
     pub fn start_main(&mut self) -> bool {
-        if self.core.program.main_fn.is_none() {
+        if self.core.env.program.main_fn.is_none() {
             return false;
         }
         let Some(home) = self.core.insts.first_mut() else {
@@ -442,12 +436,12 @@ impl World {
                 .reset()
                 .map_err(|e| format!("the {} did not reset: {e:?}", inst.name))?;
         }
-        self.setup_at = Some(self.core.now);
+        self.setup_at = Some(self.core.env.now);
         self.pending.clear();
         self.pending_mirrors.clear();
         self.sent.clear();
         self.initialise();
-        self.core.mirrors.clear();
+        self.core.env.clear_mirrors();
         self.core.take_mirrors();
         Ok(())
     }
@@ -471,13 +465,13 @@ impl World {
             self.setup_at = None;
         }
         self.sent.clear();
-        self.core.mirrors.clear();
+        self.core.env.clear_mirrors();
         self.core.take_mirrors();
         Ok(())
     }
 
     fn say(&mut self, line: String) {
-        let line = format!("[{}] {line}", self.core.now);
+        let line = format!("[{}] {line}", self.core.env.now);
         self.report.lines.push(line.clone());
         self.output.push(line);
     }
@@ -485,6 +479,7 @@ impl World {
     /// The lowest instance (other than `not`) with a handler of `event`.
     fn owner_of(&self, event: &str, not: Option<u16>) -> Option<u16> {
         self.core
+            .env
             .program
             .handlers
             .iter()
@@ -498,6 +493,7 @@ impl World {
     fn owners_of(&self, event: &str) -> Vec<u16> {
         let owners: BTreeSet<u16> = self
             .core
+            .env
             .program
             .handlers
             .iter()
@@ -533,6 +529,7 @@ impl World {
     fn send(&mut self, i: u32, event: String, value: WireValue) {
         let own = self
             .core
+            .env
             .program
             .handlers
             .iter()
@@ -547,7 +544,7 @@ impl World {
 
     /// Runs one tick (module docs).
     pub fn step(&mut self, inputs: &[Input]) -> StepReport {
-        let t = self.core.now;
+        let t = self.core.env.now;
         self.report = StepReport {
             tick: t,
             fuel: vec![0; self.core.insts.len()],
@@ -611,11 +608,11 @@ impl World {
         if self.outcome == Outcome::Running {
             self.collect_mirrors();
         }
-        self.report.faults = std::mem::take(&mut self.core.faults);
+        self.report.faults = std::mem::take(&mut self.core.env.faults);
         for (i, fault) in self.report.faults.clone() {
             self.say(format!("fault in a condition of instance {i}: {fault:?}"));
         }
-        self.core.now += 1;
+        self.core.env.now += 1;
         std::mem::take(&mut self.report)
     }
 
@@ -627,7 +624,7 @@ impl World {
             if next == script.len() && self.quiescent() {
                 return true;
             }
-            let now = self.core.now;
+            let now = self.core.env.now;
             let k = script[next..].iter().take_while(|(t, _)| *t <= now).count();
             let inputs: Vec<Input> = script[next..next + k]
                 .iter()
@@ -640,12 +637,12 @@ impl World {
     }
 
     fn tick_instance(&mut self, i: usize) {
-        let Core {
-            insts,
+        let Core { insts, env } = &mut self.core;
+        let DialogueWorld {
             people,
             completed_by,
             ..
-        } = &mut self.core;
+        } = env;
         let Some(inst) = insts.get_mut(i) else {
             return;
         };
@@ -692,7 +689,7 @@ impl World {
     // ---- the commands the world acts on -------------------------------------------------------------
 
     fn world_command(&mut self, i: u16, f: u16, args: &[WireValue]) {
-        let people = &self.core.people;
+        let people = &self.core.env.people;
         let name =
             |v: Option<&WireValue>| match (str_of(v.and_then(|p| field(p, "name"))), id_of(v)) {
                 (Some(n), _) => n.to_string(),
@@ -714,7 +711,7 @@ impl World {
                 }
                 for id in ps.iter().filter_map(|p| id_of(Some(p))) {
                     *self.completions.entry(id).or_insert(0) += 1;
-                    self.core.completed_by.insert(id);
+                    self.core.env.completed_by.insert(id);
                 }
                 self.say(format!("completed {}", names.join(", ")));
                 self.completed();
@@ -759,7 +756,7 @@ impl World {
                     return self.say("follow: bad arguments".into());
                 };
                 let line = format!("follow {} {}", people.name_of(c), name(args.get(1)));
-                if let Some(e) = self.core.people.entities.get_mut(&c) {
+                if let Some(e) = self.core.env.people.entities.get_mut(&c) {
                     e.following = Some(p);
                 }
                 self.say(line);
@@ -770,7 +767,7 @@ impl World {
 
     /// After `complete`: a one-off quest is over; a repeatable one resets (module docs).
     fn completed(&mut self) {
-        let program = Arc::clone(&self.core.program);
+        let program = Arc::clone(&self.core.env.program);
         let Some(repeat) = program.quest.as_ref().and_then(|q| q.repeat) else {
             self.outcome = Outcome::Completed;
             return;
@@ -778,7 +775,7 @@ impl World {
         // The run's conversations end (`Left`) and its scenes stop (no `SceneEnded`: the instance it would
         // reach is reset), and what its handlers attached or detached is dropped. Every conversation and scene
         // of this world is the quest's: there is only its program.
-        let now = self.core.now;
+        let now = self.core.env.now;
         let npcs: Vec<i64> = self.talks.keys().copied().collect();
         for npc in npcs {
             if let Some(tk) = self.talks.get_mut(&npc) {
@@ -813,13 +810,13 @@ impl World {
             self.outcome = Outcome::Reaped;
             return;
         }
-        self.setup_at = Some(self.core.now.saturating_add(repeat.cooldown.max(1)));
+        self.setup_at = Some(self.core.env.now.saturating_add(repeat.cooldown.max(1)));
     }
 
     // ---- mirrors ------------------------------------------------------------------------------------
 
     fn collect_mirrors(&mut self) {
-        let program = Arc::clone(&self.core.program);
+        let program = Arc::clone(&self.core.env.program);
         let Some(q) = program.quest.as_ref() else {
             return;
         };
@@ -885,8 +882,8 @@ impl World {
     /// the conversations and records, the scenes, the attachments, the messages for the next tick.
     pub fn hash64(&self) -> u64 {
         let mut h = Fnv64::default();
-        self.core.now.state_hash(&mut h);
-        self.core.program_key.state_hash(&mut h);
+        self.core.env.now.state_hash(&mut h);
+        self.core.env.program_key.state_hash(&mut h);
         let outcome: u8 = match self.outcome {
             Outcome::Running => 0,
             Outcome::Completed => 1,
@@ -897,8 +894,8 @@ impl World {
         outcome.state_hash(&mut h);
         self.setup_at.state_hash(&mut h);
         self.completions.state_hash(&mut h);
-        self.core.completed_by.state_hash(&mut h);
-        self.core.people.state_hash(&mut h);
+        self.core.env.completed_by.state_hash(&mut h);
+        self.core.env.people.state_hash(&mut h);
         self.namespace.hash_state(&mut h);
         for inst in &self.core.insts {
             inst.runner.vm.state_hash(&mut h);
@@ -918,11 +915,7 @@ impl World {
         self.pending.state_hash(&mut h);
         self.pending_mirrors.state_hash(&mut h);
         self.sent.state_hash(&mut h);
-        (self.core.mirrors.len() as u64).state_hash(&mut h);
-        for (i, d) in &self.core.mirrors {
-            i.state_hash(&mut h);
-            d.mirror.state_hash(&mut h);
-        }
+        self.core.env.hash_mirrors(&mut h);
         h.finish()
     }
 }

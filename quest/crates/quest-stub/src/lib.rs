@@ -17,4 +17,4 @@ pub use people::{
     Entity, EntityKind, Input, People, id_of, parse_people, parse_script, parse_wire,
 };
 pub use runner::{RUNNER_EVENTS, RunOutcome, Runner, bind, vm_config};
-pub use world::{EditFn, Outcome, StepReport, World};
+pub use world::{DialogueWorld, EditFn, Outcome, StepReport, World};

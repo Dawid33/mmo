@@ -14,6 +14,7 @@ impl World {
     pub(super) fn start_scene(&mut self, i: u16, scene: &str, cast: Vec<WireValue>) {
         let found = self
             .core
+            .env
             .program
             .dialogues
             .dialogues
@@ -23,8 +24,8 @@ impl World {
         let Some(k) = found else {
             return self.say(format!("play: no scene {scene}"));
         };
-        let now = self.core.now;
-        let play = ScenePlay::start(&mut self.core, InstanceId(u32::from(i)), k, cast, now);
+        let now = self.core.env.now;
+        let play = ScenePlay::start(&mut self.core.env, InstanceId(u32::from(i)), k, cast, now);
         self.scenes.push(play);
     }
 
@@ -44,11 +45,12 @@ impl World {
         let idle: Vec<WireValue> = npcs
             .iter()
             .filter(|id| !self.busy(**id))
-            .filter_map(|id| self.core.people.handle(*id))
+            .filter_map(|id| self.core.env.people.handle(*id))
             .collect();
-        let stage = self.stage();
+        let stage = self.core.env.stage();
         let candidates: Vec<Attachment> = self
             .core
+            .env
             .program
             .dialogues
             .dialogues
@@ -64,26 +66,29 @@ impl World {
                 })
             })
             .collect();
-        let now = self.core.now;
-        let Some((att, cast)) = cast_ambient(&mut self.core, &candidates, &idle, &self.played, now)
+        let now = self.core.env.now;
+        let Some((att, cast)) =
+            cast_ambient(&mut self.core.env, &candidates, &idle, &self.played, now)
         else {
             return;
         };
         let name = self
             .core
+            .env
             .program
             .dialogues
             .dialogues
             .get(usize::from(att.dialogue))
             .map(|d| d.name.clone())
             .unwrap_or_default();
-        self.played.insert((Some(self.core.program_key), name), now);
-        let play = ScenePlay::start(&mut self.core, att.instance, att.dialogue, cast, now);
+        self.played
+            .insert((Some(self.core.env.program_key), name), now);
+        let play = ScenePlay::start(&mut self.core.env, att.instance, att.dialogue, cast, now);
         self.scenes.push(play);
     }
 
     pub(super) fn tick_scenes(&mut self) {
-        let now = self.core.now;
+        let now = self.core.env.now;
         let mut outs = Vec::new();
         for s in &mut self.scenes {
             if s.ended() {
@@ -91,7 +96,7 @@ impl World {
             }
             let lead = s.cast().first().and_then(|c| id_of(Some(c))).unwrap_or(0);
             let rec = self.records.entry(lead).or_default();
-            outs.push(s.tick(&mut self.core, rec, now));
+            outs.push(s.tick(&mut self.core.env, rec, now));
         }
         for out in outs {
             self.scene_out(out);

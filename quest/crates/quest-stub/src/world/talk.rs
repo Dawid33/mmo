@@ -100,79 +100,14 @@ pub(super) fn conv_over(c: &Conversation) -> bool {
 }
 
 impl World {
-    /// The home's current stage (an index into `QuestInfo::stages`).
-    /// (Read from the home's dialogue mirror, as the conditions are: never a stage a segment in progress set.)
-    pub(super) fn stage(&self) -> Option<u16> {
-        let q = self.core.program.quest.as_ref()?;
-        match self.core.mirrored(0, q.stage_global)? {
-            WireValue::Variant { name, .. } => q
-                .stages
-                .iter()
-                .position(|s| s == name)
-                .and_then(|k| u16::try_from(k).ok()),
-            _ => None,
-        }
-    }
-
-    /// What is attached to `npc` for `player` now (module docs).
+    /// What is attached to `npc` for `player` now (module docs): nothing once the quest is over.
     pub(super) fn attachments(&mut self, player: &WireValue, npc: &WireValue) -> Vec<Attachment> {
         if self.outcome != Outcome::Running {
             return Vec::new();
         }
-        let Some(npc_id) = id_of(Some(npc)) else {
-            return Vec::new();
-        };
-        let stage = self.stage();
-        let program = Arc::clone(&self.core.program);
-        let cast = [player.clone(), npc.clone()];
-        let in_stage =
-            |d: &quest_vm::dialogue::DialogueDef| d.stage.is_none_or(|s| Some(s) == stage);
-        let mut out = Vec::new();
-        for (k, d) in program.dialogues.dialogues.iter().enumerate() {
-            let Ok(k) = u16::try_from(k) else { break };
-            if d.kind != DialogueKind::Conversation || d.cast != 2 || !in_stage(d) {
-                continue;
-            }
-            if self.detached.contains(&(0, npc_id, d.name.clone())) {
-                continue;
-            }
-            // A fault counts as false and is reported, as in any condition.
-            let holds = match d.target.or(d.filter) {
-                Some(f) => match self.core.eval_at(0, f, &self.core.cast_args(f, &cast), 1) {
-                    Ok(v) if d.target.is_some() => id_of(Some(&v)) == Some(npc_id),
-                    Ok(v) => v == WireValue::Bool(true),
-                    Err(fault) => {
-                        self.core.faults.push((0, fault));
-                        false
-                    }
-                },
-                None => false,
-            };
-            if holds {
-                out.push(Attachment {
-                    instance: InstanceId(0),
-                    dialogue: k,
-                });
-            }
-        }
-        for (i, n, name) in &self.attached {
-            if *n != npc_id {
-                continue;
-            }
-            let found = program
-                .dialogues
-                .dialogues
-                .iter()
-                .position(|d| d.name == *name && in_stage(d))
-                .and_then(|k| u16::try_from(k).ok());
-            if let Some(k) = found {
-                out.push(Attachment {
-                    instance: InstanceId(*i),
-                    dialogue: k,
-                });
-            }
-        }
-        out
+        self.core
+            .env
+            .attachments(player, npc, &self.attached, &self.detached)
     }
 
     /// The NPC `player` is talking to (a conversation not over).
@@ -189,7 +124,7 @@ impl World {
             Input::Pick { player, option } => self.pick(player, option),
             Input::Leave { player } => {
                 if let Some(npc) = self.talking_to(player) {
-                    let now = self.core.now;
+                    let now = self.core.env.now;
                     if let Some(tk) = self.talks.get_mut(&npc) {
                         let b = tk.conv.leave(now);
                         self.print_batch(npc, b);
@@ -210,8 +145,8 @@ impl World {
 
     pub(super) fn talk(&mut self, player: i64, npc: i64) {
         let (Some(p), Some(n)) = (
-            self.core.people.handle(player),
-            self.core.people.handle(npc),
+            self.core.env.people.handle(player),
+            self.core.env.people.handle(npc),
         ) else {
             return self.say(format!("talk: no entity {player} or {npc}"));
         };
@@ -241,9 +176,9 @@ impl World {
             self.pending
                 .push((u32::from(i), "Talked".into(), talked.clone()));
         }
-        let now = self.core.now;
+        let now = self.core.env.now;
         let rec = self.records.entry(npc).or_default();
-        let (conv, batch) = Conversation::start(&mut self.core, &attached, rec, p, n, now);
+        let (conv, batch) = Conversation::start(&mut self.core.env, &attached, rec, p, n, now);
         self.talks.insert(npc, Talk { player, conv });
         self.print_batch(npc, batch);
         self.talks
@@ -260,13 +195,13 @@ impl World {
             return;
         };
         let (Some(p), Some(n)) = (
-            self.core.people.handle(player),
-            self.core.people.handle(npc),
+            self.core.env.people.handle(player),
+            self.core.env.people.handle(npc),
         ) else {
             return;
         };
         let attached = self.attachments(&p, &n);
-        let now = self.core.now;
+        let now = self.core.env.now;
         let Some(tk) = self.talks.get_mut(&npc) else {
             return;
         };
@@ -275,7 +210,7 @@ impl World {
         };
         let rec = self.records.entry(npc).or_default();
         let result = tk.conv.pick(
-            &mut self.core,
+            &mut self.core.env,
             &attached,
             rec,
             serial,
@@ -292,14 +227,14 @@ impl World {
     }
 
     pub(super) fn tick_talks(&mut self) {
-        let now = self.core.now;
+        let now = self.core.env.now;
         let npcs: Vec<i64> = self.talks.keys().copied().collect();
         for npc in npcs {
             let Some(tk) = self.talks.get_mut(&npc) else {
                 continue;
             };
             let rec = self.records.entry(npc).or_default();
-            if let Some(b) = tk.conv.tick(&mut self.core, rec, now) {
+            if let Some(b) = tk.conv.tick(&mut self.core.env, rec, now) {
                 self.print_batch(npc, b);
             }
         }
@@ -310,7 +245,7 @@ impl World {
     pub(super) fn speaker(&self, v: &WireValue) -> String {
         match (str_of(field(v, "name")), id_of(Some(v))) {
             (Some(n), _) => n.to_string(),
-            (None, Some(id)) => self.core.people.name_of(id),
+            (None, Some(id)) => self.core.env.people.name_of(id),
             _ => show(v),
         }
     }
@@ -350,8 +285,8 @@ impl World {
         }
         let player = self.talks.get(&npc).map(|tk| tk.player);
         let (p, n) = (
-            player.and_then(|p| self.core.people.handle(p)),
-            self.core.people.handle(npc),
+            player.and_then(|p| self.core.env.people.handle(p)),
+            self.core.env.people.handle(npc),
         );
         for e in b.ended {
             let (Some(p), Some(n)) = (p.clone(), n.clone()) else {
@@ -374,7 +309,7 @@ impl World {
                 .push((e.instance.0, "DialogueEnded".into(), value));
         }
         if let Some(end) = b.end {
-            let who = self.core.people.name_of(npc);
+            let who = self.core.env.people.name_of(npc);
             self.say(format!("end {who}: {}", end_name(end)));
         }
     }
