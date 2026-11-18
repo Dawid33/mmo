@@ -862,6 +862,8 @@ Foreign `quest` commits are interleaved on `develop` and not listed.
 | T10b (inserted) | `b58d2379` fix(host): forget a peer whose hosts row was pruned (absent below next_host_id) |
 | T11 the world panel | — blocked (`crates/panel` untracked) |
 | T12 docs | `docs: Elastic 2b — coordinator replicas over one row, as built` (CLAUDE.md, TODO.md, this section) |
+| the r4 red, diagnosed | `2dba2724` test(takeover): a leaver's land request may be given before the test polls it |
+| final review fix wave | `f4c8cc93` fix(coordinator): a replayed Attach never overtakes a newer one committed elsewhere (G-I1); `b0b2045f` fix(world-manager): a pruned peer the journal keeps counts as seen dead (G-I2); `e269996e` fix(coordinator-rt): no busy loop while a write is in flight and a notice waits (S-I1); `95fb17b8` fix(coordinator): outbox takes bounded by the cache; a lost commit answer neither duplicates nor silently loses rows (S-I2, S-I3); `d1370be6` fix(world-file): a replaced coordinator core makes no cut id of the one it replaces (T3); `f01e9645` fix(dev-r3): a coordinator replica ending no longer takes the stack down (O-I1); `af7b63d9` fix(monitoring): WorldCoordinatorReplicasDown survives duplicate KSM series and stays silent with none registered; then `docs: Elastic 2b final review fix wave` (CLAUDE.md, TODO.md, this section) |
 
 ### "To confirm with Dawid" — defaults taken (not answered before execution)
 
@@ -1070,9 +1072,91 @@ SQL at the kill so the old dead-row path cannot win.
 | `just test-threads` | 297 + 3 + 10 ok |
 | `just test-r2` | 20/20 |
 | `just test-r3` | 49/49 |
-| `just test-r4` | **26/27 — `a_leavers_restart_is_a_new_host_and_its_land_is_given_at_once` FAILED** (`takeover.rs:377`, "timed out waiting: the coordinator records host 0's request for host 1's land", the `until` at ~:1974 on `core.lands_wanted() == [h(1)]`); alone 3 times: FAIL, FAIL, ok (33.7 s, 33.9 s, 10.4 s). Green in T6, T8 and T10b's full runs. Not diagnosed (no code changed in T12) — for the final review: unverified guess, the land-wanted window became ticker work in T6 (a lookup taken and answered between two observations) or a real stall of the `LandWanted` → `Leave` path. The WATCH test `a_clean_leave_…` passed. |
+| `just test-r4` | 26/27 at T12 — `a_leavers_restart_is_a_new_host_and_its_land_is_given_at_once` timed out at `takeover.rs:377` (alone: FAIL, FAIL, ok). **Diagnosed after T12: a test-only race, fixed in `2dba2724`** — since T6 the ticker declares the `Leave` in the same pass that applies the owners lookup, so `lands_wanted` clears within ~5 ms of being set and the test's ~35 ms poll could miss it; the test now accepts "recorded OR a succession for host 1 exists" (10/10 alone, `test-r4` 27/27, `test-r3` 49/49). No product change. |
 | `just determinism-wasm` | ok |
 | `just smoke` | ok (3 s) |
 | `just web-check` | ok |
 
 Client tests were not run (Dawid's hand check). Another session ran `quest/` tests concurrently during part of the run.
+
+### Final review fix wave (2026-11-18)
+
+The whole-branch review (three areas: store + server, game, ops + docs; findings in the ledger folder,
+`final-findings-*.md`, the list with the controller's rulings in `final-fix-wave-findings.md`) found no Critical and
+the items below; one fixer did them all, each with a regression test shown RED (the fix disabled) then GREEN. Report:
+`.superpowers/sdd/2026-11-17-elastic-2b-coordinator-replicas/final-fix-wave-report.md`.
+
+- **G-I1, a replayed `Attach` overtaking a newer one committed elsewhere** (`f4c8cc93`): the projection keeps each
+  host's newest applied `Attach` as `(boot, epoch)` (`WorldCuts::attach_epochs`, durable, forgotten with the host);
+  every logged host message carries the `(boot, epoch)` of the `Attach` its link opened with on this replica
+  (process-local `link_attach`, forgotten at the link's `LinkDown`); an `Attach` of the same boot with a lower epoch,
+  or a message of such a link, is dropped at its first apply and at a replay, and leaves the log. No wire change
+  (`HostMsg::Attach` already carried `epoch` and `boot`); the core format changed inside v5 again (re-forge). Rig hook
+  `RigCluster::hold_writes`. Tests: `coordinator::a_replayed_attach_never_overtakes_a_newer_one_committed_elsewhere`,
+  seeded `peer_schedule::a_replayed_attach_never_overtakes_a_newer_one` (RED: host 2 detached in the row).
+- **G-I2 = flagged T10b, `dead_seen`** (`b0b2045f`): `WorldManager::forget_absent_hosts` notes an absent id whose
+  forget the journal refuses as seen dead. Test: `peer_schedule::a_pruned_landless_peer_with_unsaved_traffic_rolls_the_world_back_never_stuck`
+  (RED: no stop in 600 cut rounds). A clean leaver never reaches this branch (its leave cut saved its traffic; and
+  `left_peers` keeps it out of the unsaved rule).
+- **S-I1, the busy loop while a write is in flight** (`e269996e`): the early return takes the notices off their channel
+  first. Hooks `hold_write_answers` / `answers_held` / `passes`. Test: `hosts::a_write_in_flight_while_notices_arrive_does_not_spin_the_loop`
+  (RED: 3,310,646 passes in 2.5 s).
+- **S-I2, a stale replica's take** and **S-I3, a lost commit answer** (`95fb17b8`): a take between transitions is
+  bounded by the taker's cache version (`version <= $v`, a transition's own by its new version; the rig mirrors it),
+  the held-newer-row path is gone, and a relayed row whose host the core no longer attaches here is dropped unsent. A
+  failed write remembers its outbox count and the hosts it took rows for; at lost-commit recognition the core drops
+  those outbox messages (`Coordinator::outbox_committed`) and the runtime closes those hosts' links so they re-attach
+  (`lost_answer_relinks=` on the `[coordinator] window=` line). Tests: `coordinator_rows::a_take_between_transitions_stops_at_its_cache_version`
+  (RED: the newer row taken), `hosts::a_lost_commit_answer_neither_duplicates_nor_silently_loses_outbox_rows` (RED: the
+  reply twice in the outbox; with only the relink disabled, host 0 never re-attaches).
+- **T3, the replace path's cut epoch** (`d1370be6`): `StoreHandle::raise_coordinator_epoch` (one statement on the
+  `coordinator` row, version untouched, lock notes updated) raises the epoch past its own and past every recorded
+  `cut_decisions` id's high half; no migration. Tests: `coordinator_rows::a_raised_epoch_is_past_every_recorded_cut_id`,
+  `hosts::a_replaced_coordinator_state_reuses_no_cut_id` (RED: epoch 1).
+- **O-I1, `dev_r3.sh`** (`f01e9645`): every coordinator replica runs in a loop of its own, started again on 137 / 3 / 4
+  as a new replica (bounded as a host's restarts); the stack goes down only when login, a host loop or the LAST
+  replica's loop ends. `bash -n` and `just --list` only (no live launch, by rule).
+- **The alert** (`af7b63d9`): `WorldCoordinatorReplicasDown` = `(sum by (namespace) (mmo_registered{role="coordinator"}) <
+  on (namespace) max by (namespace) (kube_deployment_spec_replicas{namespace=~"world-.*", deployment="coordinator"})) and
+  on (namespace) (sum by (namespace) (mmo_registered{role="coordinator"}) > 0)`. promtool v3.5.0: `check rules` SUCCESS
+  (13 rules in the world group); a `test rules` case (duplicate KSM series, none registered, all registered) passes,
+  and the old expression fails it (many-to-many matching).
+
+Rulings of the fix wave:
+- **S-I3's taken rows: healed by a re-attach, never read back** — the rows a lost-answer write took left the table with
+  the answer; reading them back needs them kept until acknowledged (a schema change, no migration allowed); the hosts
+  they were for have their links closed so their `Attach` reconciles what the rows carried — cost if wrong: a cut those
+  hosts are in aborts, once per lost commit answer (rare).
+- **The recognised write's `unacked` entry stays** until the next commit — the log still holds that write's inputs (a
+  rebase would apply them twice); only its outbox count and taken hosts are consumed — cost if wrong: none beyond
+  today's (a conflict with another writer before the next commit still ends the process, as before).
+- **`link_attach` is forgotten at `LinkDown`** — a link carries nothing after its down, and the map stays bounded; an
+  input injected into a core without a link (tests) is never treated as superseded — cost if wrong: none for real links.
+- **The G-I2 test ends at the stop**, not at a rollback: with no succession open the stopped host's lapse is a
+  succession, not a world rollback (only a stop during an open run rolls back) — cost if wrong: none (the regression is
+  the endless refusal).
+- **`HostToLogin::NoGate` without a kind: can wait** (controller ruling, recorded).
+- Deferred minors of the three reports stay deferred (controller: "can wait").
+
+Closing gate (sequential, at `af7b63d9` + docs):
+
+| Suite | Result |
+|---|---|
+| `just test-one game "--no-fail-fast"` | lib 159 passed, 3 failed (the known `lod::tests`); `it` 954 passed / 321 ignored; the other targets ok |
+| `just test-one game "--test it -- --include-ignored peer_schedule::"` | 185/185 ok (378 s) |
+| `just test-pg "--no-fail-fast -- --test-threads=4"` | unit 6; `it` 152 passed, 43 ignored |
+| `just test-one world-store "--no-fail-fast"` | unit 6; `it` 152 passed, 43 ignored |
+| `just test-one server "--features test-hooks --no-fail-fast"` | ok: lib 108, it 29, login_link 7, observer 3, store_world 4, … (slow ones ignored there) |
+| `just test-one login "--no-fail-fast"` | lib 3, `it` 85 (4 ignored) |
+| `just test-threads` | 299 + 3 + 10 ok |
+| `just test-r2` | 20/20 |
+| `just test-r3` | 52/52 |
+| `just test-r4` | 27/27 |
+| `just determinism-wasm` | ok |
+| `just smoke` | ok (12 s) |
+| `just web-check` | ok |
+
+The twin at 2 replicas (`twin-down` → `twin-up` → `twin-images` → `twin-apply` → `twin-check`): **PASS in 513 s**
+(`target/twin/check-20261118T154432Z/`). Per replica pod: transitions ≤ 7 per window, conflicts 0–3 per pod (≤ 1 per
+window), write failures 0, `lost_answer_relinks` 0; the longest-lived replica 122 transitions over 47 windows, 0
+conflicts.

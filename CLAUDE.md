@@ -329,7 +329,11 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     `COORDINATOR_CONFLICT_RETRIES` (8) in a row, then after `COORDINATOR_SAVE_RETRY_MS` — never an exit. NEVER logged:
     `HostMsg::Login`, login orders, the ticker's reads (`HostsRead`, `SuccessionsOpen`, `LandOwners`); a new input
     is classified (replayed or not, why) as in the plan's decision 3 table. Process fields are `kept` / `reset` in
-    `projection!`. The calendar's day only moves forward.
+    `projection!`. The calendar's day only moves forward. **A superseded link's messages never overtake**: the
+    projection keeps each host's newest applied `Attach` as `(boot, epoch)` (`WorldCuts::attach_epochs`; the host's
+    `epoch` grows per link up), every logged host message carries the `Attach` its link opened with on this replica,
+    and an older `Attach` of the same boot — or a message of its link — is dropped at its first apply AND at a
+    replay, and leaves the log (else a replica's delayed write re-stamps a host that moved to another replica).
   - **Store decisions run inside the transition** (`world-store/src/coordinator_tx.rs`): the CAS `UPDATE` first (it
     locks the row), then each `StoreDecision` (`DecideCut`, `BeginCut` = `record_cut_begin`, `Declare`,
     `EndLandless`, `Rollback`, `EndReplica`) in its own SAVEPOINT (a refusal is that decision's answer; the core
@@ -346,9 +350,13 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     to another live replica (`Coordinator::route_out`, at `take_transition`) is an `outbox` row (host, boot)
     written in the same transaction; whoever links the host relays it — taken in its own transitions, or by
     `take_outbox_later` on a `coordinator_row` NOTIFY / the `COORDINATOR_POLL_MS` (1 s) backstop with > 1 live
-    replica — only from a cache at least as new as the row's version; rows older than the host's newest applied
-    `Attach` are discarded, another boot's deleted unsent; at most once after commit. A replica's cache also follows
-    the row by NOTIFY (`load_coordinator_since`, forward only).
+    replica — a take is bounded by the taker's cache version (`version <= $v`: a newer row may have been decided after
+    its host attached elsewhere), and a row whose host the core no longer attaches HERE is dropped unsent; rows older
+    than the host's newest applied `Attach` are discarded, another boot's deleted unsent; at most once after commit.
+    A write whose commit answer was lost and is recognised as ours: its outbox rows are not inserted again
+    (`Coordinator::outbox_committed`), and the hosts whose rows it took are made to re-`Attach` (their links closed,
+    `lost_answer_relinks=` on the window line). A replica's cache also follows the row by NOTIFY
+    (`load_coordinator_since`, forward only).
   - **Version check**: with > 1 live replica, outputs leaving with nothing durable changed (`take_out`) wait for a
     `SELECT version`; a moved row → refresh and replay first.
   - Attachments: `LinkDown` detaches only this replica's attachment; `forget_absent_hosts` forgets only ids below the
@@ -370,7 +378,9 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     forgets an id a `hosts` read no longer shows and nothing attached holds (`forget_absent_hosts`); a host
     forgets dead rows no open succession names (`forget_dead_hosts`) and, from a successful directory read, ids
     ABSENT from it below its `next_host_id` that no run it holds names (`WorldManager::forget_absent_hosts`, a
-    pruned row — else a gate waits for that peer's sync forever and refuses every spawn).
+    pruned row — else a gate waits for that peer's sync forever and refuses every spawn); one the journal refuses
+    to forget (unsaved state traffic) is noted dead (`dead_seen`): the next cut stops the host for a rollback
+    (`take_unaccounted_dead`), never a world whose every cut part is refused.
     `VOXEL_HOST_NAME` (default empty) labels a process (logs, dev files, `hosts.name`, the Deployment), never a
     key: a registration lapses the other dirty live rows of its non-empty name at once (`seen_ms = 0`).
     `VOXEL_HOST_ORDINAL`, `VOXEL_HOSTS`, `VOXEL_ENTRY_HOST` are gone (ignored if set).
@@ -469,7 +479,8 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
     (measurement only); `worldctl super-region <url> <n>` (only before the first claim) + hosts run with
     `VOXEL_SUPER_REGION_REGIONS=n`.
   - `just dev-r3 <hosts> [delay]`: login + coordinator + every host under `scripts/dev_r3.sh` (restarts a host as
-    a NEW host on exit 5, 137, and 3 under `claim`; knobs in its header; state `target/dev-r3/`); `just host`,
+    a NEW host on exit 5, 137, and 3 under `claim`, a coordinator replica as a new replica on 137, 3, 4; the stack
+    goes down when login, a host loop or the LAST replica's loop ends; knobs in its header; state `target/dev-r3/`); `just host`,
     `coordinator`, `world-hosts-dev`, `drain-dev` (arguments: `just --list`; `host` and `coordinator` take the
     same ownership word). `just go-nogo-r3` re-forges each run and seams from the client's own region→host map
     (Elastic 2a Task 1); its first valid run is a hand check (TODO.md).
