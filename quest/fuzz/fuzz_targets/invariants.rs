@@ -8,7 +8,9 @@
 //! - it compiles (the generator's contract);
 //! - **fuel equivalence**: run at the fuel per tick, it ends with the output, the failed-or-not status and
 //!   the script state (static slots and heap) of the unlimited run. Not `Vm::hash64`: it covers the
-//!   instance's clock (`H_NOW`) and the fuel debt, which a smaller budget moves by design;
+//!   instance's clock (`H_NOW`) and the fuel debt, which a smaller budget moves by design. Not under the
+//!   `Timeout` failure rule: a promise's timeout is counted in ticks, and a budget changes how much another
+//!   handler did before it fires;
 //! - **rollback bar**: checkpoint before tick `k`, run to tick `j`, roll back: `hash64()` and `mem_bytes()`
 //!   are the checkpoint's; with the host put back, the same ticks give the same hashes and output;
 //! - **save/load**: saved before tick `k`, loaded into a fresh instance, it goes on as the uninterrupted
@@ -267,6 +269,18 @@ fn generated(i: &In) {
     {
         fuel = fuel.max(unlimited.fuel / BUDGET_TICKS_MAX + 1);
         ticks = unlimited.fuel / fuel + TICKS_SLACK + UNLIMITED_TICKS;
+    }
+    // A promise that times out is answered `PROMISE_TIMEOUT_TICKS` ticks after it was asked, a count of
+    // ticks, not of work: a budget changes how far another handler got by then (Task 55,
+    // `regressions/invariants/timeout-race`), so a run under the `Timeout` rule has no fuel equivalence.
+    let timeout_rule = i
+        .rule
+        .as_ref()
+        .is_some_and(|r| r.kind == FailureKind::Timeout);
+    if let Some(unlimited) = &unlimited
+        && unlimited.fuel <= TOTAL_FUEL_MAX
+        && !timeout_rule
+    {
         let budgeted = finish(&mut runner(&program, &stub), fuel, ticks)
             .unwrap_or_else(|| panic!("not finished at fuel {fuel} after {ticks} ticks\n{text}"));
         assert_eq!(
