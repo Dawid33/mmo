@@ -161,6 +161,11 @@ impl Types {
         id
     }
 
+    /// The id of `ty` when it was interned.
+    pub fn lookup(&self, ty: Ty) -> Option<TyId> {
+        self.ids.get(&ty).copied()
+    }
+
     /// Whether the type holds no variable (bound or not).
     pub fn is_ground(&self, id: TyId) -> bool {
         self.ground.get(id.0 as usize).copied().unwrap_or(true)

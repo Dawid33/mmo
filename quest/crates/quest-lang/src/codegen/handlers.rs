@@ -32,7 +32,7 @@ use crate::ty::{Ty, TyId};
 use quest_vm::Op;
 use quest_vm::ProgramBuilder;
 use quest_vm::asm::{FnBuilder, SlotRef};
-use quest_vm::host::HostFnKind;
+use quest_vm::host::{HostFnKind, QUEST_NAMESPACE};
 use quest_vm::types::TypeId;
 
 /// A host site's identity: host fn, kind (`HostFnKind` as a number), argument types, result type.
@@ -70,9 +70,14 @@ impl Gen<'_> {
                     Some(DefKind::Fn(f)) => f.handler,
                     _ => None,
                 };
+                // A script event by its qualified name, as `Program::events` has it.
                 let name = match event {
-                    Some(EventRef::Host(i)) => self.host.events.get(i as usize).map(|e| &e.name),
-                    Some(EventRef::Script(e)) => krate.def(e).map(|def| &def.name),
+                    Some(EventRef::Host(i)) => {
+                        self.host.events.get(i as usize).map(|e| e.name.clone())
+                    }
+                    Some(EventRef::Script(e)) => {
+                        krate.def(e).is_some().then(|| krate.qualified_name(e))
+                    }
                     None => None,
                 };
                 let (Some(name), Some(&f)) = (name, self.fns.get(&d)) else {
@@ -80,7 +85,7 @@ impl Gen<'_> {
                 };
                 let (file, span) = self.def_site(d);
                 if let Some(tid) = self.type_id(pb, event_ty, &file, span) {
-                    pb.handler(name, tid, f);
+                    pb.handler(&name, tid, f);
                 }
             }
         }
@@ -108,6 +113,46 @@ impl Gen<'_> {
 }
 
 impl Emit<'_, '_, '_> {
+    /// `emit(e)` (the statement `emit Ev(…)`) of a script event: `Enqueue` to this instance's own queue.
+    /// `false` when `f` is not the host's `emit` or the event is the host's (a host call, then).
+    pub(super) fn script_emit(&mut self, f: u32, args: &[Arg], dst: Option<SlotRef>) -> bool {
+        let is_emit = self
+            .g
+            .host
+            .fns
+            .get(f as usize)
+            .is_some_and(|hf| hf.namespace.is_none() && hf.name == "emit");
+        let [arg] = args else { return false };
+        let event = match self.g.typed.types.get(self.ty_of(&arg.value)) {
+            Ty::Adt(d) => self.g.events.get(&d).copied(),
+            _ => None,
+        };
+        let (true, Some(event)) = (is_emit, event) else {
+            return false;
+        };
+        let v = self.val(&arg.value);
+        self.fb.emit(Op::Enqueue, event, v.slot, 0u16);
+        self.done(v);
+        if let Some(d) = dst {
+            self.fb.emit(Op::LoadSmall, d, 0u16, 0u16);
+        }
+        true
+    }
+
+    /// `dialogue_depth()` (in a dialogue's condition): the host query `quest.dialogue_depth()`.
+    pub(super) fn dialogue_depth(&mut self, e: &Expr, args: &[Arg], dst: Option<SlotRef>) {
+        let f = self.g.host.fns.iter().position(|hf| {
+            hf.namespace.as_deref() == Some(QUEST_NAMESPACE) && hf.name == "dialogue_depth"
+        });
+        match f.and_then(|f| u32::try_from(f).ok()) {
+            Some(f) => self.host_call(e, f, None, args, dst),
+            None => self.not_yet(
+                "`dialogue_depth()` with this host (no `quest.dialogue_depth`)",
+                e.span,
+            ),
+        }
+    }
+
     /// A call of host fn `f` (a method's receiver `recv` is argument 0); its result into `dst` (`None`:
     /// dropped).
     pub(super) fn host_call(

@@ -228,6 +228,13 @@ pub fn infer(krate: &Crate, host: &HostApi) -> (Typed, Vec<Diagnostic>) {
     let order = inf.run(plan.order);
     inf.dialogue_checks();
     inf.typos();
+    // Every script event has a type, emitted or not: code generation registers them all.
+    for (i, def) in krate.defs.iter().enumerate() {
+        if matches!(def.kind, DefKind::Event(_)) {
+            inf.types
+                .intern(Ty::Adt(DefId(u32::try_from(i).unwrap_or(u32::MAX))));
+        }
+    }
     let sets: Vec<Vec<String>> = inf.sigs.values().map(|s| s.raises.clone()).collect();
     let errors = inf.error_table(&sets);
     let mut typed = Typed {

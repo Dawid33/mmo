@@ -82,11 +82,14 @@ pub fn signatures(tree: &SourceTree, host: &HostApi) -> BTreeMap<String, String>
         .collect()
 }
 
-/// A compiled program and the warnings its checks gave.
+/// A compiled program, the warnings its checks gave and its lines table.
 #[derive(Debug, Clone)]
 pub struct Compiled {
     pub program: Program,
     pub warnings: Vec<Diagnostic>,
+    /// Every dialogue line's source text by line id (provisional ids included): f-string holes are written
+    /// `{0}`, `{1}`, … in the order of the line's substitutions (`LineDef::subst`), a literal brace doubled.
+    pub lines: BTreeMap<String, String>,
 }
 
 /// The front end: modules, resolution and type inference; every diagnostic, sorted by file, line and
@@ -131,9 +134,10 @@ pub fn compile(tree: &SourceTree, host: &HostApi) -> Result<Compiled, Vec<Diagno
         return Err(diags);
     }
     match codegen::generate(&krate, &typed, host) {
-        Ok(program) => Ok(Compiled {
+        Ok((program, lines)) => Ok(Compiled {
             program,
             warnings: diags,
+            lines,
         }),
         Err(mut errors) => {
             errors.extend(diags);

@@ -8,7 +8,7 @@
 
 use super::{Emit, Val};
 use crate::ast::{BinOp, Span, UnOp};
-use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, HostItem, Prelude};
+use crate::hir::{Arg, DefId, DefKind, Expr, ExprKind, FStrPart, HostItem, Prelude, QuestFn};
 use crate::infer::Method;
 use crate::layout::each_expr;
 use crate::ty::{Ty, TyId};
@@ -523,7 +523,12 @@ impl Emit<'_, '_, '_> {
             }
             ExprKind::Prelude(p) => self.prelude(e, *p, args, dst),
             ExprKind::Field(recv, _) => self.method_call(e, recv, args, dst),
-            ExprKind::Host(HostItem::Fn(f)) => self.host_call(e, *f, None, args, dst),
+            ExprKind::Host(HostItem::Fn(f)) => {
+                if !self.script_emit(*f, args, dst) {
+                    self.host_call(e, *f, None, args, dst)
+                }
+            }
+            ExprKind::Quest(QuestFn::DialogueDepth) => self.dialogue_depth(e, args, dst),
             ExprKind::Host(HostItem::Struct(_) | HostItem::Event(_)) => {
                 let ty = self.ty_kind(e);
                 match dst {

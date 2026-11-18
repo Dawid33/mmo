@@ -7,7 +7,8 @@
 //! constructions, collections, fields and the built-in methods, `place.rs` writes into places (take →
 //! mutate → put back), `refs.rs` references and `&self` receivers, `matching.rs` `match`, `errors.rs` `raise`, `?`, `else` and the program's `$Error`
 //! enum (declared first in the type table), `handlers.rs` the handler table, host calls, `await` and
-//! detached promises. A struct or enum type (a host struct or event too: the host's names) takes its VM
+//! detached promises, `dialogue.rs` the script events, the synthesised pure fns' signatures and the dialogue
+//! graph. A struct or enum type (a host struct or event too: the host's names) takes its VM
 //! type id before its fields are lowered, so a type that contains itself names its own id. A construct a later task
 //! compiles is the error `not-yet` at its span ([`Emit::not_yet`]), so the code generator grows by
 //! adding cases.
@@ -32,6 +33,7 @@
 //! temporary first.
 
 mod data;
+mod dialogue;
 mod errors;
 mod expr;
 mod handlers;
@@ -59,14 +61,13 @@ const STATIC_WORDS_MAX: u32 = u16::MAX as u32;
 /// Words before a frame's parameters: return link, return value, error value.
 const FRAME_HEADER_WORDS: u32 = quest_vm::asm::FRAME_HEADER_WORDS as u32;
 
-/// `not-yet` for each dialogue, scene and quest: they are lowered by a later task (Tasks 43–44). Their
-/// synthesised fns and generated items never reach code generation.
-fn not_yet_dialogues(krate: &Crate) -> Vec<Diagnostic> {
+/// `not-yet` for each quest: quests are lowered by a later task (Task 44). Their synthesised fns, generated
+/// items and dialogues never reach code generation.
+fn not_yet_quests(krate: &Crate) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for def in &krate.defs {
         let noun = match &def.kind {
             DefKind::Quest(_) => "quest",
-            DefKind::Dialogue(_) if def.parent.is_none() => "dialogue",
             _ => continue,
         };
         let file = krate
@@ -87,14 +88,14 @@ fn not_yet_dialogues(krate: &Crate) -> Vec<Diagnostic> {
     out
 }
 
-/// Compiles a checked program (no error diagnostics were reported): the program, or the errors only
-/// code generation finds (`too-many-slots`, `not-yet`).
+/// Compiles a checked program (no error diagnostics were reported): the program and its lines table (line
+/// id → source text), or the errors only code generation finds (`too-many-slots`, `not-yet`).
 pub(crate) fn generate(
     krate: &Crate,
     typed: &Typed,
     host: &HostApi,
-) -> Result<Program, Vec<Diagnostic>> {
-    let pending = not_yet_dialogues(krate);
+) -> Result<(Program, dialogue::Lines), Vec<Diagnostic>> {
+    let pending = not_yet_quests(krate);
     if !pending.is_empty() {
         return Err(pending);
     }
@@ -109,6 +110,7 @@ pub(crate) fn generate(
         type_ids: BTreeMap::new(),
         error_ty: None,
         sites: BTreeMap::new(),
+        events: BTreeMap::new(),
         diags: Vec::new(),
     };
     g.declare_errors(&mut pb);
@@ -160,6 +162,9 @@ pub(crate) fn generate(
         pb.main(*m);
     }
     g.handlers(&mut pb);
+    g.script_events(&mut pb);
+    g.pure_sigs(&mut pb);
+    let lines = g.dialogues(&mut pb);
 
     // Frame sizes, for `too-many-slots`: (words, the function's index in `plan.fns`).
     let mut frames: Vec<(u32, usize)> = Vec::with_capacity(plan.fns.len());
@@ -205,7 +210,7 @@ pub(crate) fn generate(
     if !g.diags.is_empty() {
         return Err(g.diags);
     }
-    pb.finish().map_err(|e| {
+    let program = pb.finish().map_err(|e| {
         vec![Diagnostic::error(
             "internal",
             format!("code generation produced an invalid program: {e}"),
@@ -214,7 +219,8 @@ pub(crate) fn generate(
             0,
             0,
         )]
-    })
+    })?;
+    Ok((program, lines))
 }
 
 fn def_of(k: FnKind) -> DefId {
@@ -237,6 +243,8 @@ pub(crate) struct Gen<'a> {
     error_ty: Option<TypeId>,
     /// The host sites made so far: one per (host fn, kind, parameter types, result type).
     sites: BTreeMap<handlers::SiteKey, u16>,
+    /// Each script event's index in `Program::events` (`dialogue.rs`).
+    events: BTreeMap<DefId, u16>,
     diags: Vec<Diagnostic>,
 }
 
