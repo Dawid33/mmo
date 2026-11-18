@@ -1321,11 +1321,11 @@ fn quest_start_runs_after_the_initialisers_in_the_home_only() {
     // their own), in the home only.
     assert_eq!(logged(&hh), [(0, 7), (0, 9), (0, 6), (0, 8), (0, 6)]);
     assert_eq!(logged(&ph), [(0, 7), (0, 8)]);
-    // an edit does not start the quest again
+    // an edit does not start the quest again; its transitions are due (the edit may have changed them)
     let (mut next, _) = home.migrate(p.clone(), dog_cfg(0)).expect("migrates");
     let mut nh = RecordingHost::default();
     at(&mut next, &mut nh, 2);
-    assert!(logged(&nh).is_empty());
+    assert_eq!(logged(&nh), [(0, 6)]);
     // a reset does
     home.reset().expect("reset");
     let mut rh = RecordingHost::default();

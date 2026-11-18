@@ -12,7 +12,7 @@ use quest_vm::pure::{Mirror, PureFault};
 use quest_vm::types::{ERROR_ENUM_NAME, TypeDesc};
 use quest_vm::vm::{Status, Vm};
 use quest_vm::wire::WireValue;
-use quest_vm::{FaultKind, Fnv64, Op};
+use quest_vm::{FaultKind, Fnv64, LoadError, Op};
 use state_hash::StateHash;
 use std::hash::Hasher;
 
@@ -541,4 +541,87 @@ fn mirror_hash_ignores_order() {
         .collect(),
     };
     assert_ne!(mirror_hash(&l), mirror_hash(&s));
+}
+
+fn pong(n: i64) -> WireValue {
+    WireValue::Struct {
+        name: "Pong".into(),
+        fields: vec![("n".into(), int(n))],
+    }
+}
+
+#[test]
+fn install_mirror_mid_task_is_busy() {
+    let t = program();
+    let mut v = live(&t, 3, 4, &[10], 9);
+    v.deliver("Pong", &pong(200));
+    assert_eq!(
+        v.tick(1, 300, &mut RecordingHost::default()).status,
+        Status::Busy
+    );
+    let m = Mirror {
+        globals: [(t.a, int(77))].into_iter().collect(),
+    };
+    let paused = state(&v);
+    // Not now (retry later), unlike a mirror that can never fit.
+    assert_eq!(v.install_mirror(&m), Err(LoadError::Busy));
+    let bad = Mirror {
+        globals: [(9_999, int(1))].into_iter().collect(),
+    };
+    assert!(matches!(v.install_mirror(&bad), Err(LoadError::Invalid(_))));
+    assert_eq!(state(&v), paused);
+    assert_eq!(
+        v.tick(2, u64::MAX, &mut RecordingHost::default()).status,
+        Status::Idle
+    );
+    v.install_mirror(&m).unwrap();
+    assert_eq!(v.mirror(&[t.a]), m);
+}
+
+#[test]
+fn pure_eval_with_zombies_pending_costs_what_the_mirror_does() {
+    let t = program();
+    let long: Vec<i64> = (0..64).collect();
+    // A tick that ran `Ping` (releasing the long list) but ran out of fuel before the reap.
+    let mut found = None;
+    for fuel in 1..2_000 {
+        let mut v = live(&t, 3, 4, &long, 9);
+        v.deliver("Ping", &ping(3, 4, &[5], 9));
+        let r = v.tick(1, fuel, &mut RecordingHost::default());
+        if r.status == Status::Busy
+            && v.mirror(&[t.xs]).globals[&t.xs] == WireValue::List(vec![int(5)])
+        {
+            found = Some(v);
+            break;
+        }
+    }
+    let mut v = found.expect("a tick that ends with zombies pending");
+    let m = v.mirror(&[t.a, t.b, t.xs]);
+    let mut host = RecordingHost::default();
+    let least = (0..1_000)
+        .find(|&f| {
+            m.eval_pure(&t.prog, t.eval, &[int(2)], f, &mut host)
+                .is_ok()
+        })
+        .expect("the mirror answers within 1000 fuel");
+    let mirrored = m.eval_pure(&t.prog, t.eval, &[int(2)], least, &mut host);
+    assert_eq!(mirrored, Ok(int(6 + 4 + 1)));
+    assert_eq!(v.eval_pure(t.eval, &[int(2)], least, &mut host), mirrored);
+    assert_eq!(v.status(), Status::Busy, "the zombies are still pending");
+}
+
+#[test]
+fn mirror_tells_signed_zeros_apart() {
+    let one = |x: f64| Mirror {
+        globals: [(0, WireValue::List(vec![WireValue::Float(x)]))]
+            .into_iter()
+            .collect(),
+    };
+    assert_ne!(mirror_hash(&one(0.0)), mirror_hash(&one(-0.0)));
+    assert_ne!(one(0.0), one(-0.0));
+    // Any NaN is the one canonical NaN, equal to itself.
+    let other_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+    assert_eq!(mirror_hash(&one(f64::NAN)), mirror_hash(&one(other_nan)));
+    assert_eq!(one(f64::NAN), one(other_nan));
+    assert_eq!(one(1.5), one(1.5));
 }

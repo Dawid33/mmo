@@ -39,7 +39,8 @@
 //! # Quest transitions
 //! In the home of a quest program (`H_OWNER` 0), every committed segment of a handler, of `main` or of the
 //! start sets `H_TRANSITIONS`; the next task to start is then `QuestInfo::transitions_fn` (after any
-//! pending initialiser), in the same tick and on the same fuel. Its own segment does not set it again.
+//! pending initialiser), in the same tick and on the same fuel. Its own segment sets it again only when it
+//! entered a stage (the stage word changed), so a chain of transitions that already hold runs at once.
 //!
 //! # Tasks and segments
 //! A task runs one function from its entry until its `Ret` on the sentinel link: the pending
@@ -127,8 +128,12 @@ pub(crate) const TASK_MAIN: u64 = 2;
 pub(crate) const TASK_HANDLER: u64 = 3;
 /// The quest's start (`QuestInfo::start_fn`).
 pub(crate) const TASK_START: u64 = 4;
-/// The quest's transitions (`QuestInfo::transitions_fn`).
+/// The quest's transitions (`QuestInfo::transitions_fn`). Its argument (`H_TASK_ARG`) is the stage word it
+/// started in, or [`STAGE_UNKNOWN`].
 const TASK_TRANSITIONS: u64 = 5;
+/// A transitions task's argument when the stage word does not fit a `u16` (an immediate is odd, so 0 is
+/// never a stage).
+const STAGE_UNKNOWN: u16 = 0;
 // `H_QUEST_START`.
 pub(crate) const QSTART_NONE: u64 = 0;
 pub(crate) const QSTART_WANTED: u64 = 1;
@@ -485,7 +490,9 @@ impl Vm {
                 return corrupt("quest transitions in a program without a quest");
             };
             self.set_header(H_TRANSITIONS, 0)?;
-            self.begin_task(TASK_TRANSITIONS, 0, q.transitions_fn)?;
+            // The task's argument is the stage it starts in (`end_task` re-arms when it changed).
+            let stage = self.stage_word(q.stage_global)?;
+            self.begin_task(TASK_TRANSITIONS, stage, q.transitions_fn)?;
             return Ok(true);
         }
         if self.header(H_QUEST_START)? == QSTART_WANTED {
@@ -711,6 +718,19 @@ impl Vm {
         Ok(())
     }
 
+    /// The stage global's word (a field-less variant: an immediate) as a transitions task's argument;
+    /// [`STAGE_UNKNOWN`] when it does not fit one (then the run never re-arms).
+    fn stage_word(&self, global: u16) -> Exec<u16> {
+        let Some(g) = self.program.globals.get(usize::from(global)) else {
+            return corrupt("the stage global is out of range");
+        };
+        let w = self.rd(g.slot)?;
+        Ok(u16::try_from(w)
+            .ok()
+            .filter(|&w| w != STAGE_UNKNOWN)
+            .unwrap_or(STAGE_UNKNOWN))
+    }
+
     fn current_task(&self) -> Exec<Task> {
         let p = &self.program;
         let kind = self.header(H_TASK)?;
@@ -765,6 +785,16 @@ impl Vm {
                 if p.types.is_ref(h.event_ty) {
                     let ev = self.frame_slot(t.fn_id, FRAME_PARAM0)?;
                     self.put(ev, 0, true)?;
+                }
+            }
+            // A run that entered a stage re-arms: the new stage's own transition may already hold (a
+            // chain). One that entered none does not, so a run never repeats itself; fuel bounds a cycle.
+            TASK_TRANSITIONS => {
+                if let Some(q) = &p.quest
+                    && t.arg != STAGE_UNKNOWN
+                    && self.stage_word(q.stage_global)? != t.arg
+                {
+                    self.set_header(H_TRANSITIONS, 1)?;
                 }
             }
             _ => {}

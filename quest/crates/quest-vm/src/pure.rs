@@ -56,11 +56,25 @@ pub enum PureFault {
     BadCall,
 }
 
-/// The values of a set of globals, by global index (`Program::globals`).
-#[derive(Clone, Debug, PartialEq)]
+/// The values of a set of globals, by global index (`Program::globals`). Equal when their values are
+/// equal by representation ([`WireValue::bit_eq`]), as their hashes are: `-0.0` is a change from `0.0`.
+#[derive(Clone, Debug)]
 pub struct Mirror {
     pub globals: BTreeMap<u16, WireValue>,
 }
+
+impl PartialEq for Mirror {
+    fn eq(&self, other: &Mirror) -> bool {
+        self.globals.len() == other.globals.len()
+            && self
+                .globals
+                .iter()
+                .zip(&other.globals)
+                .all(|((i, a), (j, b))| i == j && a.bit_eq(b))
+    }
+}
+
+impl Eq for Mirror {}
 
 impl StateHash for Mirror {
     fn state_hash<H: Hasher>(&self, h: &mut H) {
@@ -234,8 +248,9 @@ impl Vm {
     /// Overwrites the globals of `m` with its values (a part's instance taking the home's mirror). Every
     /// write goes through the undo log, so a rollback undoes it. All or nothing: a global the program
     /// lacks, a value that does not fit its global's type, or a full heap is `Invalid` and changes nothing.
-    /// Refused while a task's segment is open (a task paused on fuel): the task reads one mirror from its
-    /// start to its end, and its abort would otherwise undo the install too; install it between tasks.
+    /// `Busy` while a task's segment is open (a task paused on fuel): the task reads one mirror from its
+    /// start to its end, and its abort would otherwise undo the install too; the caller keeps the mirror
+    /// and retries between tasks.
     pub fn install_mirror(&mut self, m: &Mirror) -> Result<(), LoadError> {
         let p = Arc::clone(&self.program);
         for (&i, w) in &m.globals {
@@ -252,9 +267,7 @@ impl Vm {
             }
         }
         if self.store.segment_is_open() {
-            return Err(LoadError::Invalid(
-                "a task is in progress: a mirror is installed between tasks".into(),
-            ));
+            return Err(LoadError::Busy);
         }
         let cp = self.store.mem.checkpoint();
         for (&i, w) in &m.globals {

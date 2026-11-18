@@ -289,29 +289,60 @@ impl Clone for WireValue {
     }
 }
 
+impl WireValue {
+    /// Equality by representation: as `==`, except that floats compare by their bits, any NaN canonical
+    /// (`-0.0` differs from `0.0`, NaN equals NaN) — what the state hash tells apart.
+    pub fn bit_eq(&self, other: &WireValue) -> bool {
+        let mut stack = vec![(self, other)];
+        while let Some((a, b)) = stack.pop() {
+            let same = match (a, b) {
+                (WireValue::Float(x), WireValue::Float(y)) => {
+                    canonical_bits(*x) == canonical_bits(*y)
+                }
+                (WireValue::Float(_), _) | (_, WireValue::Float(_)) => false,
+                // Same shape (the `==` of everything but the children, which go on the stack).
+                _ => a.shape_eq(b),
+            };
+            if !same {
+                return false;
+            }
+            let mut i = 0;
+            while let (Some(x), Some(y)) = (a.child(i), b.child(i)) {
+                stack.push((x, y));
+                i += 1;
+            }
+        }
+        true
+    }
+
+    /// The two values' kinds, scalars, lengths and names agree (children not compared).
+    fn shape_eq(&self, other: &WireValue) -> bool {
+        match (self, other) {
+            (WireValue::Unit, WireValue::Unit) => true,
+            (WireValue::Bool(x), WireValue::Bool(y)) => x == y,
+            (WireValue::Int(x), WireValue::Int(y)) => x == y,
+            (WireValue::Float(x), WireValue::Float(y)) => x == y,
+            (WireValue::Str(x), WireValue::Str(y)) => x == y,
+            (WireValue::List(x), WireValue::List(y)) => x.len() == y.len(),
+            (WireValue::Dict(x), WireValue::Dict(y)) => x.len() == y.len(),
+            (
+                WireValue::Struct { name: n, fields: f },
+                WireValue::Struct { name: m, fields: g },
+            )
+            | (
+                WireValue::Variant { name: n, fields: f },
+                WireValue::Variant { name: m, fields: g },
+            ) => n == m && f.len() == g.len() && f.iter().zip(g).all(|((x, _), (y, _))| x == y),
+            _ => false,
+        }
+    }
+}
+
 impl PartialEq for WireValue {
     fn eq(&self, other: &WireValue) -> bool {
         let mut stack = vec![(self, other)];
         while let Some((a, b)) = stack.pop() {
-            let same_shape = match (a, b) {
-                (WireValue::Unit, WireValue::Unit) => true,
-                (WireValue::Bool(x), WireValue::Bool(y)) => x == y,
-                (WireValue::Int(x), WireValue::Int(y)) => x == y,
-                (WireValue::Float(x), WireValue::Float(y)) => x == y,
-                (WireValue::Str(x), WireValue::Str(y)) => x == y,
-                (WireValue::List(x), WireValue::List(y)) => x.len() == y.len(),
-                (WireValue::Dict(x), WireValue::Dict(y)) => x.len() == y.len(),
-                (
-                    WireValue::Struct { name: n, fields: f },
-                    WireValue::Struct { name: m, fields: g },
-                )
-                | (
-                    WireValue::Variant { name: n, fields: f },
-                    WireValue::Variant { name: m, fields: g },
-                ) => n == m && f.len() == g.len() && f.iter().zip(g).all(|((x, _), (y, _))| x == y),
-                _ => false,
-            };
-            if !same_shape {
+            if !a.shape_eq(b) {
                 return false;
             }
             let mut i = 0;
@@ -1258,8 +1289,10 @@ impl StateHash for WireValue {
                     i.state_hash(h);
                 }
                 WireValue::Float(x) => {
+                    // Its bits (any NaN canonical): `-0.0` is another value than `0.0` here, as it is
+                    // in the instance's memory (`f64::state_hash` would fold the two).
                     h.write_u8(H_FLOAT);
-                    x.state_hash(h);
+                    h.write_u64(canonical_bits(*x));
                 }
                 WireValue::Str(s) => {
                     h.write_u8(H_STR);

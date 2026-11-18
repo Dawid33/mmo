@@ -27,7 +27,8 @@
 //!    due ticks and scopes; one whose script event is gone, or whose value no longer fits it, is dropped.
 //!
 //! The fresh instance has the old epoch, promise and timer serials and latest `now`, and a quest start
-//! that already began does not run again; everything else — `main`'s state, the arrival counter, the
+//! that already began does not run again, and its transitions are due (`H_TRANSITIONS`: a pending run is
+//! not lost, and the edit may have changed the conditions); everything else — `main`'s state, the arrival counter, the
 //! fuel debt — starts as in [`Vm::new`]. A failed instance migrates too: its initialised globals carry
 //! over and the new instance is not failed.
 //!
@@ -50,7 +51,7 @@ use crate::fault::FaultKind;
 use crate::interp::Fault;
 use crate::layout::{
     H_EPOCH, H_EV_HANDLER, H_INIT_CURSOR, H_NOW, H_PROMISE_SERIAL, H_QUEST_START, H_QUEUE_COUNT,
-    H_QUEUE_HEAD, H_RESUME_PARKED, H_TASK, H_TIMER_SERIAL, LoadError,
+    H_QUEUE_HEAD, H_RESUME_PARKED, H_TASK, H_TIMER_SERIAL, H_TRANSITIONS, LoadError,
 };
 use crate::program::{GlobalInfo, Program};
 use crate::sched::{QSTART_DONE, QSTART_WANTED, TASK_START, word_off};
@@ -311,6 +312,11 @@ impl Vm {
         if started && next.header(H_QUEST_START).map_err(invalid)? == QSTART_WANTED {
             next.set_header(H_QUEST_START, QSTART_DONE)
                 .map_err(invalid)?;
+        }
+        // A started quest's transitions are due: a pending run (or one cut off mid-run) is not lost with
+        // the old instance, and the edit may have changed the conditions themselves.
+        if started && next.instance == 0 && next.program.quest.is_some() {
+            next.set_header(H_TRANSITIONS, 1).map_err(invalid)?;
         }
         next.store.mem.clear_log();
         Ok((next, report))

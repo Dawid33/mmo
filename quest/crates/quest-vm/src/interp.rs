@@ -396,10 +396,15 @@ impl Vm {
             if m.left == 0 {
                 break Stop::Fuel;
             }
-            match self.reap_one(m) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(f) => break Stop::Fault(f),
+            // A pure evaluation reaps nothing: its rollback discards everything anyway, and a mirror holds
+            // no zombies, so reaping the instance's would spend the condition's fuel on the instance's
+            // garbage and make the live answer differ from the mirrored one.
+            if !self.pure_eval {
+                match self.reap_one(m) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(f) => break Stop::Fault(f),
+                }
             }
             let ins = match self.fetch(fn_id, pc) {
                 Ok(i) => i,

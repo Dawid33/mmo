@@ -1035,3 +1035,59 @@ fn play_of_an_unnamed_scene_is_not_yet() {
     };
     assert_eq!(codes, ["not-yet"]);
 }
+
+#[test]
+fn edit_keeps_transitions_due() {
+    let (mut r, p) = start(LOST_DOG);
+    ev(&mut r, "Go", 0);
+    ev(&mut r, "Find", 0);
+    assert_eq!(stage(&r.vm, &p), "Search");
+    // The edit loosens the transition: it holds already, and nothing else will run the transitions.
+    let edited = LOST_DOG.replace(
+        "-> Returning when find_dog.done and feed_dog.done",
+        "-> Returning when find_dog.done",
+    );
+    let p2 = program(&edited);
+    let api = stub_api();
+    let cfg = VmConfig {
+        mem_bytes: MEM,
+        epoch: 1,
+        host_api_version: api.version,
+        events: api.events.into_iter().map(|e| e.name).collect(),
+        instance: 0,
+        roles: roles(),
+    };
+    let Runner { vm, host, now } = r;
+    let (vm, _) = vm.migrate(Arc::clone(&p2), cfg).expect("migrates");
+    let mut r = Runner { vm, host, now };
+    settle(&mut r);
+    assert_eq!(stage(&r.vm, &p2), "Returning");
+    assert_eq!(count(&r, "entered Returning"), 1);
+}
+
+#[test]
+fn transition_chain_runs_at_once() {
+    // `B`'s transition holds the moment `B` is entered; no handler of `Entered` would run them again.
+    let src = r#"quest Q:
+    role farmer: Person
+    let ready = false
+
+    event Go:
+        n: int
+
+    @on(Go)
+    fn go(e):
+        ready = true
+
+    stage A:
+        -> B when ready
+    stage B:
+        -> C when ready
+    stage C:
+        -> A when not ready
+"#;
+    let (mut r, p) = start(src);
+    assert_eq!(stage(&r.vm, &p), "A");
+    ev(&mut r, "Go", 0);
+    assert_eq!(stage(&r.vm, &p), "C");
+}
