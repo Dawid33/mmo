@@ -254,6 +254,11 @@ impl World {
             edit: None,
         };
         w.core.insts.append(&mut insts);
+        // The home's initialisers set the state `requires` and `where` read; their commands are held until
+        // the placement is accepted (a refused one acts on none of them).
+        if let Some(home) = w.core.insts.first_mut() {
+            home.runner.host.holding = true;
+        }
         w.initialise();
         w.check_placement()?;
         for (k, name) in parts.into_iter().enumerate() {
@@ -271,6 +276,13 @@ impl World {
         for inst in &mut w.core.insts {
             inst.runner.host.in_world = true;
         }
+        // Placed: the home's held commands are acted on, as at a tick (the world's commands at the first).
+        w.with_world(0, |r| {
+            r.host.holding = false;
+            for (f, args) in std::mem::take(&mut r.host.held) {
+                r.host.command(f, &args);
+            }
+        });
         w.initialise();
         // The placed state is what a talk before the first commit reads (a `Setup` running over several
         // ticks takes no mirror until it ends).
@@ -283,11 +295,34 @@ impl World {
     /// at the first tick (no mirror until then).
     fn initialise(&mut self) {
         let (now, fuel) = (self.core.env.now, self.fuel);
-        for inst in &mut self.core.insts {
-            if inst.runner.vm.status() != Status::Failed {
-                inst.runner.vm.initialise(now, fuel, &mut inst.runner.host);
-            }
+        for i in 0..self.core.insts.len() {
+            self.with_world(i, |r| {
+                if r.vm.status() != Status::Failed {
+                    r.vm.initialise(now, fuel, &mut r.host);
+                }
+            });
         }
+    }
+
+    /// `f` over instance `i`'s runner, its host lent the world's people, namespace and completions (what its
+    /// queries read and its commands change); `None` for an instance this world does not have.
+    fn with_world<R>(&mut self, i: usize, f: impl FnOnce(&mut Runner) -> R) -> Option<R> {
+        let Core { insts, env } = &mut self.core;
+        let DialogueWorld {
+            people,
+            completed_by,
+            ..
+        } = env;
+        let inst = insts.get_mut(i)?;
+        let host = &mut inst.runner.host;
+        host.people = std::mem::take(people);
+        std::mem::swap(&mut host.namespace, &mut self.namespace);
+        host.completed_by.clone_from(completed_by);
+        let out = f(&mut inst.runner);
+        let host = &mut inst.runner.host;
+        *people = std::mem::take(&mut host.people);
+        std::mem::swap(&mut host.namespace, &mut self.namespace);
+        Some(out)
     }
 
     /// The `requires` conditions, then each bound role's `where`, over the home as it is.
@@ -637,23 +672,14 @@ impl World {
     }
 
     fn tick_instance(&mut self, i: usize) {
-        let Core { insts, env } = &mut self.core;
-        let DialogueWorld {
-            people,
-            completed_by,
-            ..
-        } = env;
-        let Some(inst) = insts.get_mut(i) else {
+        let fuel = self.fuel;
+        let Some(rep) = self.with_world(i, |r| r.step(fuel)) else {
+            return;
+        };
+        let Some(inst) = self.core.insts.get_mut(i) else {
             return;
         };
         let host = &mut inst.runner.host;
-        host.people = std::mem::take(people);
-        std::mem::swap(&mut host.namespace, &mut self.namespace);
-        host.completed_by.clone_from(completed_by);
-        let rep = inst.runner.step(self.fuel);
-        let host = &mut inst.runner.host;
-        *people = std::mem::take(&mut host.people);
-        std::mem::swap(&mut host.namespace, &mut self.namespace);
         let lines = std::mem::take(&mut host.output);
         let reports = std::mem::take(&mut host.reports);
         let routed = std::mem::take(&mut host.routed);

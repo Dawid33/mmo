@@ -95,6 +95,10 @@ pub struct StubHost {
     /// `follow`) are recorded in [`StubHost::world_cmds`] instead of printed here.
     pub(crate) in_world: bool,
     pub(crate) world_cmds: Vec<(u16, Vec<WireValue>)>,
+    /// Set by a [`crate::World`] while the home's initialisers run at placement: every command is held in
+    /// [`StubHost::held`], acted on only once the placement is accepted.
+    pub(crate) holding: bool,
+    pub(crate) held: Vec<(u16, Vec<WireValue>)>,
     pub(crate) namespace: Namespace,
     latency: u64,
     rules: Vec<(FailureRule, u32)>,
@@ -124,6 +128,8 @@ impl StubHost {
             people,
             in_world: false,
             world_cmds: Vec::new(),
+            holding: false,
+            held: Vec::new(),
             namespace: Namespace::default(),
             latency: cfg.latency,
             rules: cfg.failures.into_iter().map(|r| (r, 0)).collect(),
@@ -329,6 +335,10 @@ impl Host for StubHost {
         }
         fn item_of(v: Option<&WireValue>) -> Option<(&str, i64)> {
             str_of(v.and_then(|i| field(i, "kind"))).zip(int_of(v.and_then(|i| field(i, "count"))))
+        }
+        if self.holding {
+            self.held.push((f, args.to_vec()));
+            return;
         }
         if self.in_world
             && matches!(

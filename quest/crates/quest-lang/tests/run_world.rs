@@ -1169,3 +1169,42 @@ fn a_stage_handles_only_its_own_entered() {
         out.join("\n")
     );
 }
+
+const INIT_EFFECTS: &str = r#"fn mark(c: Creature, p: Player) -> int:
+    follow(c, p)
+    p.add_tag("marked")
+    return 1
+
+quest Q:
+    requires act() >= 1
+    role pet: Creature
+    role hero: Player
+    let marked = mark(pet, hero)
+    stage A:
+        @on(Entered)
+        fn a(e):
+            print(f"entered {marked}")
+"#;
+
+/// Task 55 (carried from the Task 54 review): the home's initialisers ran at placement before
+/// `requires` / `where` and before the world acted on commands: a world command in a `let` initialiser was
+/// printed by the bare host instead of acted on, and a command on the people changed a copy the world
+/// dropped. Its effects are held until the placement is accepted, then acted on by the world.
+#[test]
+fn an_initialisers_commands_act_once_placed() {
+    let people = "creature 7 name=\"Rufus\"\nplayer 1 name=\"Ana\"\nfact act=1\n";
+    let mut w = world(
+        INIT_EFFECTS,
+        people,
+        &[("pet", "Creature(7)"), ("hero", "Player(1)")],
+    )
+    .expect("placed");
+    let out = run(&mut w, "");
+    assert!(
+        out.iter().any(|l| l.ends_with("follow Rufus Ana")),
+        "{out:?}"
+    );
+    assert!(!out.iter().any(|l| l.contains("follow 7")), "{out:?}");
+    assert!(w.people().has_tag(1, "marked"));
+    assert_eq!(w.people().entities[&7].following, Some(1));
+}
