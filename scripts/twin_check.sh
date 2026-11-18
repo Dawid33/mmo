@@ -401,7 +401,9 @@ wait_until "$left" "committed cuts grow again (above $c1), within 60 s of the ki
 [ "$(coord_metric mmo_world_generation)" = "$gen" ] || fail "the world generation changed: $gen -> $(coord_metric mmo_world_generation)"
 [ "$(pod_uid "$pa")" = "$uid0" ] || fail "host-a's pod was replaced"
 [ "$(pod_restarts "$pa")" = "$r0" ] || fail "host-a restarted ($r0 -> $(pod_restarts "$pa"))"
-old_row_dead() { [ "$(row_state "$id_b")" = dead ]; }
+# Dead, or already pruned: the new pod's registration prunes a dead row owning nothing, and a pod that
+# takes a while to start registers after the coordinator ended the old row (the log line is the proof).
+old_row_dead() { [ "$(row_state "$id_b")" != live ]; }
 wait_until 60 "the killed host's old row $id_b ended (dead) by the coordinator" old_row_dead
 # Decision 9: a host that dies owning no land (the twin has no player to own any) is ENDED, not succeeded.
 # (The landed-crash path, a Crash succession, cannot run in the twin: no player claims land here.)
@@ -415,7 +417,7 @@ say "after: generation $gen, host-a untouched, successions declared $d0 -> $d1, 
 rows | sed 's/^/   hosts: /'
 has_new_live_id b "$id_a" "$id_b" || fail "host b has no live row under a new id: $(rows | tr '\n' ';')"
 id_b2=$(live_id b)
-[ "$(row_state "$id_b")" = dead ] || fail "host b's old id $id_b is not a dead row (state '$(row_state "$id_b")'): $(rows | tr '\n' ';')"
+[ "$(row_state "$id_b")" != live ] || fail "host b's old id $id_b is not a dead row (state '$(row_state "$id_b")'): $(rows | tr '\n' ';')"
 say "host b is now id $id_b2; its old id $id_b is dead"
 k logs "$pb" > "$out/host-b-after-crash.log" 2>&1 || true
 
