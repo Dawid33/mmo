@@ -1114,3 +1114,37 @@ fn a_transition_cycle_stops_and_is_reported() {
         r.host.reports
     );
 }
+
+/// Task 55 (carried from the Task 54 review): each stage handler's commit stored `H_TRANSITIONS = 1`,
+/// resetting the chain's count, so an A ↔ B cycle whose stages handle `Entered` re-armed every round — one
+/// `TransitionCycle` report after another and `Entered` dropped from a full queue. The cycle stops once,
+/// reported once, and the instance goes idle.
+#[test]
+fn a_transition_cycle_with_entered_handlers_stops_once() {
+    let p = program(
+        "quest Q:\n    role farmer: Person\n    let flip = true\n    stage A:\n        -> B when flip\n        @on(Entered)\n        fn a(e):\n            print(f\"A {e.stage}\")\n    stage B:\n        -> A when flip\n        @on(Entered)\n        fn b(e):\n            print(f\"B {e.stage}\")\n",
+    );
+    let mut r = Runner::for_instance(Arc::clone(&p), MEM, StubConfig::default(), 0, roles())
+        .expect("the program loads");
+    for _ in 0..20 {
+        r.step(FUEL);
+    }
+    assert_eq!(r.vm.status(), Status::Idle);
+    let cycles = r
+        .host
+        .reports
+        .iter()
+        .filter(
+            |x| matches!(x, Report::HandlerAborted { task, .. } if task.contains("transitions")),
+        )
+        .count();
+    assert_eq!(cycles, 1, "{:?}", r.host.reports);
+    assert!(
+        !r.host
+            .reports
+            .iter()
+            .any(|x| matches!(x, Report::EventDropped { .. })),
+        "{:?}",
+        r.host.reports
+    );
+}

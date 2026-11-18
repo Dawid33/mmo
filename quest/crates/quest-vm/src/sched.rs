@@ -437,6 +437,11 @@ impl Vm {
         let last = self.header(H_NOW)?;
         let now = now.max(last);
         self.set_header(H_NOW, now)?;
+        if now > last {
+            // A new tick: a chain stopped as a cycle may run again (once something re-arms it).
+            let transitions = self.header(H_TRANSITIONS)?;
+            self.set_header(H_TRANSITIONS, transitions & TRANSITIONS_ARMED)?;
+        }
         self.expire_promises(now)?;
         self.fire_timers(now)?;
         let Some(fresh) = self.meter_after_debt(fuel)? else {
@@ -821,6 +826,8 @@ impl Vm {
                             },
                         );
                         host.report(report);
+                        // Stopped for this tick: the count stays at the cap, so no handler re-arms it.
+                        self.set_header(H_TRANSITIONS, (chain + 1) << 1)?;
                     } else {
                         self.set_header(H_TRANSITIONS, (chain + 1) << 1 | TRANSITIONS_ARMED)?;
                     }
@@ -839,13 +846,18 @@ impl Vm {
         let now = self.header(H_NOW)?;
         self.commit_promises(now)?;
         self.commit_timers()?;
-        // The home's handlers, `main` and the start: the quest's transitions are due (spec §5.12).
+        // The home's handlers, `main` and the start: the quest's transitions are due (spec §5.12). The
+        // chain's count is kept (a stage's handlers run between the runs of one chain), and a chain stopped
+        // as a cycle stays stopped until the next tick.
         let kind = self.header(H_TASK)?;
         if self.instance == 0
-            && self.program.quest.is_some()
+            && let Some(q) = &self.program.quest
             && matches!(kind, TASK_HANDLER | TASK_MAIN | TASK_START)
         {
-            self.set_header(H_TRANSITIONS, 1)?;
+            let transitions = self.header(H_TRANSITIONS)?;
+            if transitions >> 1 < q.stages.len() as u64 {
+                self.set_header(H_TRANSITIONS, transitions | TRANSITIONS_ARMED)?;
+            }
         }
         self.store.segment_commit();
         self.clear_task()?;
