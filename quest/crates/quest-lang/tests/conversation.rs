@@ -252,6 +252,10 @@ impl DialogueEnv for Env {
         self.reports.push((i, fault));
     }
 
+    fn program_key(&self, i: InstanceId) -> Option<u64> {
+        self.insts.get(&i.0).map(|x| x.prog.content_hash())
+    }
+
     fn event(&self, i: InstanceId, event: u16, script: bool) -> Option<EventShape> {
         if !script {
             let e = self.api.events.get(usize::from(event))?;
@@ -958,6 +962,9 @@ fn emit_of_an_unknown_host_event_is_refused() {
         fn report(&mut self, i: InstanceId, fault: PureFault) {
             self.0.report(i, fault);
         }
+        fn program_key(&self, i: InstanceId) -> Option<u64> {
+            self.0.program_key(i)
+        }
         fn event(&self, i: InstanceId, e: u16, script: bool) -> Option<EventShape> {
             if script {
                 self.0.event(i, e, true)
@@ -1080,9 +1087,10 @@ fn three(swapped: bool) -> Vec<Arc<Program>> {
         "pub dialogue rumour(p: Player, npc: Person) topic \"B rumour\" @b.rumour priority 1:\n    npc: \"b rumour\" @b.rumour_line\n",
         "pub dialogue chat(p: Player, npc: Person) topic \"B chat\" @b.chat:\n    npc: \"b chat\" @b.chat_line\n",
     ];
+    // `c` shares the qualified names `hi` and `chat` with `a`: those ties are broken by program.
     let c = [
         "dialogue chat(p: Player, npc: Person) topic \"C chat\" @c.chat:\n    npc: \"c chat\" @c.chat_line\n",
-        "dialogue hello(p: Player, npc: Person):\n    npc: \"c hello\" @c.hello\n",
+        "dialogue hi(p: Player, npc: Person):\n    npc: \"c hi\" @c.hi\n",
     ];
     let join = |parts: &[&str]| {
         let mut v: Vec<&str> = parts.to_vec();
@@ -1098,17 +1106,49 @@ fn three(swapped: bool) -> Vec<Arc<Program>> {
     ]
 }
 
+/// A batch with the instance numbers mapped out: lines (id, speaker, args), the offer (menu, option ids)
+/// and the ends (reason, dialogue, exit), and the conversation's end.
+type Projected = (
+    Vec<(String, WireValue, Vec<WireValue>)>,
+    Option<(bool, Vec<String>)>,
+    Vec<(EndReason, String, String)>,
+    Option<EndReason>,
+);
+
+fn project(b: &Batch) -> Projected {
+    (
+        b.lines
+            .iter()
+            .map(|l| (l.id.clone(), l.speaker.clone(), l.args.clone()))
+            .collect(),
+        b.offer
+            .as_ref()
+            .map(|o| (o.menu, o.options.iter().map(|l| l.id.clone()).collect())),
+        b.ended
+            .iter()
+            .map(|e| (e.reason, e.dialogue.clone(), e.exit.clone()))
+            .collect(),
+        b.end,
+    )
+}
+
 /// The whole transcript of one talk (greeting, every topic in menu order, leave) and the final hashes.
-fn transcript(progs: &[Arc<Program>], order: &[usize]) -> (Vec<Batch>, u64, u64) {
+/// Program `k` is instance `numbering[k]`; the attachments come in program order `order`; `seen` tags the
+/// player (`b`'s greeting then scores 1).
+fn transcript(
+    progs: &[Arc<Program>],
+    order: &[usize],
+    numbering: &[u32],
+    seen: bool,
+) -> (Vec<Batch>, u64, u64) {
     let mut env = Env::new();
     for (k, p) in progs.iter().enumerate() {
-        env.add(u32::try_from(k).unwrap() + 1, p);
+        env.add(numbering[k], p);
     }
-    env.world.tags.insert((1, "seen".into()));
-    let att: Vec<Attachment> = order
-        .iter()
-        .flat_map(|&k| env.all(u32::try_from(k).unwrap() + 1))
-        .collect();
+    if seen {
+        env.world.tags.insert((1, "seen".into()));
+    }
+    let att: Vec<Attachment> = order.iter().flat_map(|&k| env.all(numbering[k])).collect();
     let mut rec = Records::default();
     let (mut c, b) = Conversation::start(&mut env, &att, &mut rec, player(1), person(9), 0);
     let mut out = vec![b];
@@ -1126,35 +1166,154 @@ fn transcript(progs: &[Arc<Program>], order: &[usize]) -> (Vec<Batch>, u64, u64)
     (out, hash(&c), hash(&rec))
 }
 
+const PERMS: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+];
+
 #[test]
 fn commutativity() {
-    let orders = [
-        [0, 1, 2],
-        [0, 2, 1],
-        [1, 0, 2],
-        [1, 2, 0],
-        [2, 0, 1],
-        [2, 1, 0],
-    ];
-    let base = transcript(&three(false), &orders[0]);
+    let ident = [1, 2, 3];
+    let base = transcript(&three(false), &PERMS[0], &ident, true);
     // The greeting: `b`'s tagged node scores 1, the others 0.
     assert_eq!(said(&base.0[0]), ["b.seen"]);
-    // Priority, then qualified name, then instance.
-    assert_eq!(
-        options(offer(&base.0[0])),
-        ["b.rumour", "a.chat", "c.chat", "b.chat"]
-    );
+    // Priority, then qualified name, then program (`a.chat` / `c.chat` tie on the name).
+    let menu = options(offer(&base.0[0]));
+    assert_eq!(menu[0], "b.rumour");
+    assert_eq!(menu[3], "b.chat");
     assert_eq!(base.0.len(), 6, "greeting, four topics, the leave");
     for swapped in [false, true] {
         let progs = three(swapped);
-        for order in &orders {
+        for order in &PERMS {
             assert_eq!(
-                transcript(&progs, order),
+                transcript(&progs, order, &ident, true),
                 base,
                 "order {order:?} swapped {swapped}"
             );
         }
     }
+    // Instance numbering does not decide a tie between programs: the same transcript with the instance
+    // numbers mapped out, for every numbering, with and without `b`'s scoring greeting.
+    for seen in [true, false] {
+        let progs = three(false);
+        let want: Vec<Projected> = transcript(&progs, &PERMS[0], &ident, seen)
+            .0
+            .iter()
+            .map(project)
+            .collect();
+        if !seen {
+            // `a.hi`, `b.hi` (its second node) and `c.hi` all score 0 and share the name `hi`.
+            assert_eq!(want[0].0.len(), 1);
+            assert!(["a.hi", "b.hi", "c.hi"].contains(&want[0].0[0].0.as_str()));
+        }
+        for numbering in PERMS {
+            let numbering: Vec<u32> = numbering
+                .iter()
+                .map(|&n| 10 + 7 * u32::try_from(n).unwrap())
+                .collect();
+            for order in &PERMS {
+                let got: Vec<Projected> = transcript(&progs, order, &numbering, seen)
+                    .0
+                    .iter()
+                    .map(project)
+                    .collect();
+                assert_eq!(
+                    got, want,
+                    "numbering {numbering:?} order {order:?} seen {seen}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn picked_topic_with_empty_entry_raises_ended() {
+    let src = r#"let open = false
+
+dialogue shut(p: Player, npc: Person) topic "Shut" @shut.topic:
+    node n when open:
+        npc: "x" @shut.x
+"#;
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", src)]));
+    let att = env.att(1, &["shut"]);
+    let mut rec = Records::default();
+    let (mut c, b) = Conversation::start(&mut env, &att, &mut rec, player(1), person(1), 0);
+    assert_eq!(options(offer(&b)), ["shut.topic"]);
+    let b = c
+        .pick(&mut env, &att, &mut rec, offer(&b).serial, 0, 1)
+        .unwrap();
+    assert_eq!(ended(&b), (EndReason::Finished, "shut", "done"));
+    assert_eq!(b.end, Some(EndReason::Finished));
+    assert!(matches!(c.state(), ConvState::Ended { .. }));
+}
+
+#[test]
+fn stale_topic_pick_on_an_emptied_menu_ends() {
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", TOPICS)]));
+    let att = env.att(1, &["alpha"]);
+    let mut rec = Records::default();
+    let (mut c, b) = Conversation::start(&mut env, &att, &mut rec, player(1), person(3), 0);
+    // `alpha` is detached before the pick: no greeting ran, and the menu is empty now.
+    let b = c
+        .pick(&mut env, &[], &mut rec, offer(&b).serial, 0, 1)
+        .unwrap();
+    assert!(b.ended.is_empty() && b.offer.is_none());
+    assert_eq!(b.end, Some(EndReason::Finished));
+    assert!(matches!(c.state(), ConvState::Ended { .. }));
+}
+
+#[test]
+fn rebind_keeps_a_longer_pause() {
+    let v1 = "dialogue slow(p: Player, npc: Person):\n    npc: \"one\" @slow.one\n    pause 50\n    npc: \"two\" @slow.two\n";
+    // One step: the position (after the pause) no longer resolves and the node restarts.
+    let v2 = "dialogue slow(p: Player, npc: Person):\n    npc: \"one\" @slow.one\n";
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", v1)]));
+    let att = env.att(1, &["slow"]);
+    let mut rec = Records::default();
+    let (mut c, _) = Conversation::start(&mut env, &att, &mut rec, player(1), person(1), 0);
+    assert_eq!(c.state(), &ConvState::Paused { until: 50 });
+    env.inst(1).prog = compiled(&[("main.qs", v2)]);
+    assert_eq!(c.rebind(&mut env), None);
+    assert_eq!(c.state(), &ConvState::Paused { until: 50 });
+    assert_eq!(c.tick(&mut env, &mut rec, 49), None);
+    let b = c.tick(&mut env, &mut rec, 50).expect("resumed");
+    assert_eq!(said(&b), ["slow.one"]);
+}
+
+#[test]
+fn rebind_restarting_a_caller_ends_edited() {
+    let v1 = r#"let yes = true
+
+dialogue outer(p: Player, npc: Person):
+    when yes:
+        detour inner
+
+dialogue inner(p: Player, npc: Person):
+    choice:
+        "A" @inner.a
+"#;
+    // `outer`'s path (into its `when`) no longer resolves, while `inner` still waits at its choice.
+    let v2 = v1.replace(
+        "    when yes:\n        detour inner\n",
+        "    npc: \"x\" @outer.x\n    detour inner\n",
+    );
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", v1)]));
+    let att = env.att(1, &["outer"]);
+    let mut rec = Records::default();
+    let (mut c, b) = Conversation::start(&mut env, &att, &mut rec, player(1), person(1), 0);
+    assert_eq!(options(offer(&b)), ["inner.a"]);
+    env.inst(1).prog = compiled(&[("main.qs", &v2)]);
+    let b = c.rebind(&mut env).expect("ended");
+    assert_eq!(ended(&b), (EndReason::Edited, "outer", "done"));
+    assert_eq!(b.end, Some(EndReason::Edited));
 }
 
 #[test]
