@@ -152,9 +152,24 @@ read set (dialogue or part) above 256 words gets the `mirror-size` warning (`MIR
 hash, output); `corpus/fail/<case>/` the expected diagnostics. When behaviour changes on purpose, re-bless:
 `QUEST_BLESS=1 just quest-test "-p quest-corpus"`, read the diff of the goldens, commit it.
 
+A run case may start `main.qs` with a config line (`#! fuel=200 ticks=500 latency=2 fail=Lost@2 chest=gold=3
+role=farmer=Person(3)`; `role=NAME=WIRE` repeats, one per role). A **world case** — a program with a quest, or a
+case with `people.txt` or `script.txt` (the formats of `quest run`, below) — runs in the stub's `World` as
+`quest run` does: placed with its people and roles, the script's inputs at their ticks, until the script is
+used up and the world is quiescent; an `edit <dir>` input compiles the case's subdirectory `<dir>/` (whose
+files no `mod` of the case reaches). Its golden's per-tick fuel is the sum over the instances, its hash
+`World::hash64`, its memory hash over every instance's memory; its report lines read `[tick] <instance>:
+<report>`. A run case's `expect.txt` starts with the compiler's warnings, one line each, and `output:` when
+there are any. The cases `dx*` are the dialogue examples, `qx*` the quest examples, `d_spec_*` / `q_spec_*` the
+spec's own (`docs/superpowers/specs/2026-11-16-*-examples.md`); each says in its header what was adapted for the
+stub and where the example's prose and the run differ. `d_commutative` is also run under every order of its
+`mod` lines, which must give one golden. The fuel-equivalence and save/load-at-every-tick suites run the plain
+(runner) cases only.
+
 **Testing rule (owner, 2026-11-16).** The plan's tests are the initial implementation's. From now on a test is
 written only as a regression for a bug that was actually found; never pre-emptively or "for coverage". Broad
-assurance comes from fuzzing, planned later.
+assurance comes from fuzzing, planned later. Phase 10 (dialogue and quests) was initial implementation too and
+carried its own tests; since its close-out (Task 49) the rule applies again.
 
 ## Known MVP limits
 
@@ -170,6 +185,21 @@ assurance comes from fuzzing, planned later.
   last tick (one tick old; a handler still running over several ticks shows what it had before it began).
 - A repeatable quest's reset ends the run's conversations (`Left`) and stops its scenes.
 - No `busy` bark yet: a talk to an NPC in another conversation or an uninterruptible scene is ignored.
+- `print`, `assert` and `assert_eq` are allowed in a pure function (a condition): they change no state.
+- `once` records are keyed by a site anchored on line ids (the option's, the first member's, the node's name and
+  first line, a `once:` block's first line), so they survive edits; `once: once: …` with the same first line
+  anchors both on one id and is refused (`site-collision`).
+- A handler that changes the stage in the middle of an event: each later handler of that event checks the stage
+  when it starts, so a handler of the new stage may run for the same event.
+- An edit whose current stage no longer exists falls back to the first stage, without cancelling the removed
+  stage's stage-scoped timers and without re-opening the first stage's objectives.
+- `mirror-size` does not count the generated `participants` list (bounded by the party; every part reads it), a
+  deviation from spec §5.11's "a list counts as unbounded"; every other `str`, `list` or `dict` global still
+  counts `MIRROR_WORDS_WARN` on its own.
+- A program whose dialogue graph passes `GRAPH_STEPS_MAX` (or holds more than 65 536 dialogues) is reported
+  as the code `internal`, not a named code.
+- `pause -1` (any operand starting with `-`, `(` or `[` after `pause` or `requires`) is a syntax error rather than
+  `not-constant`.
 - Float `==` inside collections compares bits; `to_upper` is ASCII only.
 - The trace of a re-raise after another failure inside one handler shows the latest entries.
 - The host must discard the old VM after a successful `migrate`.

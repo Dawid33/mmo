@@ -929,27 +929,27 @@ Fail cases, one per new code: `bad-where`, `role-assign`, `impure-condition`, `b
 
 ### Phase 10 spec coverage
 
-| Spec (folded) | Tasks |
-|---|---|
-| §5.11 form table, lexis (§5.13) | 36 |
-| §5.11 description not execution, pure conditions, `emit` as events | 38, 39, 43, 45 |
-| §5.11 purity, `COND_FUEL`, fault = false | 39, 41, 45 |
-| §5.11 the runner: pooled greetings, topic menu, walking steps, ends, `DialogueEnded`, `Done`, private | 45, 47 |
-| §5.11 scoring by conjuncts | 39 (scores), 45, 46 |
-| §5.11 filters, package-level stateless content | 38, 39, 47 |
-| §5.11 exits | 36, 38, 42, 45 |
-| §5.11 scenes, barks, follow-ups, interruption, ambient casting | 36, 42, 46, 47 |
-| §5.11 pacing (batches, timed lines, `pause`) | 42, 43, 45, 46 |
-| §5.11 across regions: read set, mirrors, routed `emit`, movable conversation | 39, 41, 45, 47 |
-| §5.11 mirror size | 39 |
-| §5.11 line ids, string table, edits | 38, 43, 45 |
-| §5.12 header, `repeatable` options, `at role` | 36, 38, 40, 44, 47 |
-| §5.12 `requires`, roles, optional roles, query subset | 36, 38, 39, 40, 47 |
-| §5.12 stages, transitions, `Entered` | 38, 44 |
-| §5.12 objectives, journal | 38, 39, 44 |
-| §5.12 participants, builtins, timers, `RoleLost`, repeatable reset | 40, 44, 47 |
-| §5.12 parts | 36, 38, 39, 40, 41, 44, 47 |
-| §9.1 stub host Phase 10 API, several instances | 37, 47, 48 |
+| Spec (folded) | Tasks | Corpus (Task 49, ✓) |
+|---|---|---|
+| §5.11 form table, lexis (§5.13) | 36 | every `dx*`; fail `dialogue_signature`, `bark_choice`, `scene_choice` |
+| §5.11 description not execution, pure conditions, `emit` as events | 38, 39, 43, 45 | `dx4_interrogation`, `dx5_vendors`; fail `impure_condition` |
+| §5.11 purity, `COND_FUEL`, fault = false | 39, 41, 45 | `d_fault_is_false` |
+| §5.11 the runner: pooled greetings, topic menu, walking steps, ends, `DialogueEnded`, `Done`, private | 45, 47 | `d_spec_*`, `dx2`, `dx6`, `dx7`, `d_detour_cycle`, `d_too_deep` |
+| §5.11 scoring by conjuncts | 39 (scores), 45, 46 | `dx1_saliency`, `d_spec_greeting`, `dx4` |
+| §5.11 filters, package-level stateless content | 38, 39, 47 | `qx5_town_life`, `d_commutative`; fail `stateless_dialogue` |
+| §5.11 exits | 36, 38, 42, 45 | `qx4_debt`; fail `unknown_exit` |
+| §5.11 scenes, barks, follow-ups, interruption, ambient casting | 36, 42, 46, 47 | `qx2_sealed_mine`, `qx5_town_life`, `dx2`; fail `scene_follow_up` |
+| §5.11 pacing (batches, timed lines, `pause`) | 42, 43, 45, 46 | `qx2_sealed_mine`, `dx3_timeouts`, `d_read_your_emit`; fail `not_constant_range` |
+| §5.11 across regions: read set, mirrors, routed `emit`, movable conversation | 39, 41, 45, 47 | `qx1_lost_dog`, `d_read_your_emit` |
+| §5.11 mirror size | 39 | `mirror_size`, `d_spec_farmer` |
+| §5.11 line ids, string table, edits | 38, 43, 45 | `missing_line_id`, `d_edit_ends_node`; fail `duplicate_line_id`, `bad_line_text`, `site_collision` |
+| §5.12 header, `repeatable` options, `at role` | 36, 38, 40, 44, 47 | `qx2`, `qx3_bandit_camp`; fail `bad_quest_option*` |
+| §5.12 `requires`, roles, optional roles, query subset | 36, 38, 39, 40, 47 | `q_spec_lostdog`, `qx1`; fail `bad_where`, `role_assign` |
+| §5.12 stages, transitions, `Entered` | 38, 44 | `qx1`, `q_spec_lostdog`; fail `entered_outside_stage`, `no_stage` |
+| §5.12 objectives, journal | 38, 39, 44 | `qx1`, `qx2`, `qx3`; fail `bad_objective_call`, `duplicate_def` |
+| §5.12 participants, builtins, timers, `RoleLost`, repeatable reset | 40, 44, 47 | `qx1`, `qx3`; fail `decline_outside_setup` |
+| §5.12 parts | 36, 38, 39, 40, 41, 44, 47 | `qx1`, `qx2`, `qx2_sealed_mine_no_room`; fail `bad_part_item`, `part_write` |
+| §9.1 stub host Phase 10 API, several instances | 37, 47, 48 | every world case; `distance_to` |
 
 **Not in Part 1** (all of it is Part 4): region anchors and `WorldView` host queries; `Intent`s; the VM's
 undo driven by region rollback; conversations as carried NPC state (`carry_components`, `Client.talking_to`);
@@ -2003,3 +2003,50 @@ Each line names where it was raised. None blocks Parts 1–5.
 ## As built
 
 (Written per Part: at Task 49, Task 55, Task 71 and Task 76 — what differs from this plan, with reasons.)
+
+### Part 1 — Phase 10 (Tasks 36–49 and 37b), written at Task 49 (2026-11-18)
+
+Built standalone in `quest/` as planned; every task reviewed clean after at most one fix round. The full record of
+rulings and minors is the SDD ledger, `.superpowers/sdd/2026-11-17-quest-script-completion/progress.md`. What
+differs from the plan, with the reason:
+
+- **Format and host API.** `BYTECODE_VERSION` went 1 → 6 (37b, 40, 41, 42, 44 — each a bump by one from the
+  current value, not the plan's absolute numbers); the stub's `HostApi` 2 → 6: named-argument defaults
+  (`HostFn.defaults`), fallible queries and commands (37b; a fallible command is checked against the current
+  tick when issued and buffered on success — keeps `place(...) else: decline()` meaningful), `has_tag` a fact on
+  every receiver and `kind` a fact, the relation `related(a, b)`, `HostTy::Dialogue`, and `Entity { id }` (any
+  entity) for `ItemGiven.to` / `Killed.victim`. A raw `Value` event field and `after` of a host event stay
+  `not-yet` (README limits).
+- **Syntax.** `emit Ev(…)` lowers to the prelude `emit(Ev(…))`; `quest`, `scene` and `repeatable` stay contextual
+  (the spec's §5.13 lists `quest` as reserved: Task 51 aligns it). Parser gaps left: an operand starting with
+  `-`, `(` or `[` after `pause` / `requires`; an objective named `at` or `count`.
+- **Codes beyond the plan's list:** `not-assignable` (a host property assigned), `no-stage`, `site-collision`.
+  `bad-line-text` was reachable only from a hand-built tree (the grammar said `syntax`); fixed at Task 49.
+  A graph past `GRAPH_STEPS_MAX` is still `internal` (a named code needs a 65 536-step case; not cheap).
+- **Semantics settled by ruling:** a program's top-level `let`s are home state in a quest program (a part mirrors
+  them and may not write them); statelessness is per dialogue (a filter or a dialogue outside any quest), not per
+  program; `once` record sites are anchored on line ids (FNV-1a 32; a collision is `site-collision`), so edits keep
+  spent records; transitions run after every committed home segment; an event no handler of this instance takes
+  is routed to the instance that has one; the default `RoleLost` → `fail()` holds unless the quest body handles
+  `RoleLost`; each top-level dialogue run raises its own `DialogueEnded` with its own exit; an empty node group
+  ends the conversation; ties after the qualified name go to the program's content hash, then position; a mirror
+  is not installed mid-segment (retried next tick); `mirror-size` leaves the generated `participants` out (Task
+  49; a spec §5.11 deviation, in the README).
+- **Added tunables:** `BATCH_STEPS_MAX` (4096 steps per batch) and `SCENE_FOLLOW_UPS_MAX` (16), beside the plan's.
+- **The stub world:** conditions are evaluated over each instance's dialogue mirror; roles are checked by struct
+  name as well as shape; a repeatable reset ends the run's conversations and scenes and drops its attachments;
+  `main` runs once in the home after placement; `people.txt` / `script.txt` are defaults for quest programs only.
+- **The corpus (Task 49):** world cases run in `World` (roles from the config line, `edit` from a subdirectory,
+  warnings in `expect.txt`); the fuel-equivalence and save/load suites run the runner cases only. The Lost Dog's
+  `NIGHT_TICKS` (300) and the Bandit Camp's `cooldown` (100) are shortened in their cases (a golden line per
+  tick); the Bandit Camp's unhandled `await world.add` became `let _ = … else 0`, the Debt's `errantry/trade` a
+  module, and the stub's missing lookups (`npc_named`, `here()`, `quest_open`) stand-ins — each case's header says so.
+- **Example discrepancies found** (case headers): the innkeeper's self-detour gives three tellings, not "three
+  inside the first" (`dx6_innkeeper`); the Bandit Camp's `exclusive` refusal cannot happen as written — `hired`
+  is a `Notice` handler, so a second `Hired` after the first moved the quest on finds no handler (`qx3`); the
+  §7 table's stale-menu pick re-sends the menu only when other topics remain — with none, the conversation ends
+  (`qx1`, `d_read_your_emit`).
+- **Open for Dawid:** the Sealed Mine plays an uninterruptible scene on the elder while the elder's menu may be
+  open, but the spec has one activity per NPC — which wins.
+- **Large files** (left as built): `quest-vm` `dialogue_run.rs` (~1560 lines) and its conversation module,
+  `quest-stub` `world.rs` / `people.rs`, `quest-lang` `codegen/quest.rs`, `quest-cli` `main.rs`.

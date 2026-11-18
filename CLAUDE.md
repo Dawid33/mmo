@@ -78,7 +78,10 @@ player-written quest blocks. `just quest-check | quest-test | quest-run <dir> | 
 **Tests in `quest/` (owner's rule, 2026-11-16):** the MVP plan's tests are the initial implementation's. Once it is
 built, a test is written ONLY as a regression for a bug that was actually found — never pre-emptively, not "for
 coverage", not alongside a new feature by default. Broad assurance comes from fuzzing (planned later), not from
-more hand-written tests.
+more hand-written tests. Phase 10 (dialogue and quests, plan
+`docs/superpowers/plans/2026-11-17-quest-script-completion.md` Part 1) was initial implementation too (Dawid,
+2026-11-17) and carried its own tests; it closed with its corpus (Task 49, 2026-11-18), so the regression-only rule
+applies again.
 
 ### Deployment
 
