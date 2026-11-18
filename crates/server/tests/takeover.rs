@@ -1971,9 +1971,13 @@ fn a_leavers_restart_is_a_new_host_and_its_land_is_given_at_once() {
     assert!(push(&mut t, h(0), id, a0, b1));
     t.until("the slime waits for host 1", WAIT, |t| t.sim(h(0)).manager.peer_unreceived_ids().iter().any(|(p, i, _)| *p == h(1) && *i == id));
     let asked = Instant::now();
-    t.until("the coordinator records host 0's request for host 1's land", WAIT, |t| {
+    // Recorded, or already given: since Elastic 2b the ticker declares the `Leave` in the very
+    // pass that applies the owners lookup and its commit clears the request, so `lands_wanted`
+    // can hold host 1 for less than one round of this loop (between cuts) and be missed.
+    t.until("the coordinator records host 0's request for host 1's land, or gave it already", WAIT, |t| {
         let c = t.w.coordinator.as_ref().unwrap();
         c.thread.with_core(|core| core.lands_wanted(), WAIT).expect("the core answers") == [h(1)]
+            || successions(&db).iter().any(|s| s[1] == h(1).0 as i64)
     });
     // Host 1's process starts again: a new host, owning nothing, the generation kept.
     let back = t.restart(&db, &dir, h(1), 3001);
