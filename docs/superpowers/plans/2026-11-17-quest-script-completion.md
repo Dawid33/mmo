@@ -2076,3 +2076,30 @@ differs from the plan, with the reason:
   open, but the spec has one activity per NPC — which wins.
 - **Large files** (left as built): `quest-vm` `dialogue_run.rs` (~1560 lines) and its conversation module,
   `quest-stub` `world.rs` / `people.rs`, `quest-lang` `codegen/quest.rs`, `quest-cli` `main.rs`.
+
+### Part 3 — Fuzzing (Tasks 53–55), written at Task 55 (2026-11-18)
+
+The fuzz crate (`quest/fuzz/`, its own workspace) holds seven targets as planned (`compile`, `program_bytes`,
+`vm_load`, `wire_decode`, `stub_inputs`, `invariants`, `conversation`); `just quest-fuzz <target> [secs] [jobs]`;
+README "Fuzzing" says how to run, re-seed and turn a crash into a regression. What differs, with the reason:
+
+- **The first campaign** (controller ruling: 10 minutes per target, one job, serially, CPU-capped — not the
+  plan's 7 × 30 minutes after asking): `compile` 116 978 executions, `program_bytes` 2 062 043, `vm_load`
+  336 497, `wire_decode` 5 624 076, `stub_inputs` 1 415 758, `conversation` 17 065 — no finding. `invariants`
+  (~3 executions/s under the sanitizer) stopped three times, each fixed and the target run again: ~384, ~788,
+  ~1 019 executions, then a clean 600 s of 2 228. No compiler timeout, so no `too-complex` code was added.
+- **Found by the campaign — all three in the `invariants` target itself, none in the language:** fuel
+  equivalence claimed under the `Timeout` failure rule (a promise timeout is counted in ticks, so a budget
+  changes how far another handler got: README "Known limits"); the unlimited run unbounded in fuel (a heavy
+  generated program, 258 M fuel, past libFuzzer's timeout under the sanitizer: `UNLIMITED_FUEL_MAX`); a world
+  loaded back mid-cooldown lost its repeatable's due `Setup` (the target claimed it was had; `World::setup_due`).
+  The inputs are kept under `quest/fuzz/regressions/invariants/` for `cargo fuzz run` (a target's own bug has no
+  crate test to hold it).
+- **Known bugs fixed first** (Task 52/54 reviews), each with a crate regression test: a transition cycle whose
+  stages handle `Entered` re-armed every round (the chain count is kept across handler commits, reset per tick);
+  a late scene catch-up past `RUNNER_EVALS_MAX` ended `Finished` instead of yielding (the beat is put back and
+  walked again); the home's initialisers' commands ran before placement was accepted and outside the world (held
+  until accepted; Task 62 says the game does the same); `World::load_vms` forgot which mirror each part was sent,
+  so an unchanged mirror was installed again and the world's hash parted (Task 54's
+  `crash-world-load-vms-remirror`; a record kept while the part bears it out; Task 63 says the game keeps it).
+  `BYTECODE_VERSION` stays 7: no fix changed the format, no golden changed.

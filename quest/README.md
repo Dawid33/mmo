@@ -178,8 +178,9 @@ carried its own tests; since its close-out (Task 49) the rule applies again.
 ## Fuzzing
 
 `fuzz/` is a cargo-fuzz crate (libFuzzer) with its own workspace and lockfile, excluded from this workspace, so
-neither `quest-check` nor `quest-test` builds it. `just quest-fuzz <target> [secs=60] [jobs=1]` runs one target
-(cargo-fuzz is installed pinned under `target/tools/` on first use; a 10 s per-input timeout, 2 GiB RSS):
+neither `quest-check` nor `quest-test` builds it. `just quest-fuzz <target> [secs=60] [jobs=1]` runs one target,
+CPU-capped like every `just` recipe (cargo-fuzz is installed pinned under `target/tools/` on first use; a 10 s
+per-input timeout, 2 GiB RSS). Run one target at a time on a shared box; a target stops at its first crash.
 
 | Target | Input | Holds |
 |---|---|---|
@@ -188,13 +189,26 @@ neither `quest-check` nor `quest-test` builds it. `just quest-fuzz <target> [sec
 | `vm_load` | a byte picking a run case (`RUN[b % len]`), then a saved state | `Vm::load` is `Err`, or the VM runs 200 ticks |
 | `wire_decode` | bytes as a wire value | `WireValue::decode` is `Ok`/`Err`; a value re-encodes to bytes that decode to it |
 | `stub_inputs` | bytes as lossy UTF-8 | `parse_people` and `parse_script` return |
+| `invariants` | 32 seed bytes for a generated program, then fuel, latency, a failure rule, ticks `k` and `j`, a world case, flags | spec §11 over the generated program (fuel equivalence, the rollback bar, save/load, no leaks) and over a corpus world case (fuel equivalence, save/load to the same `World::hash64`) — its module docs list each |
+| `conversation` | a byte picking a Phase 10 case, then ops (talk, pick, leave, done, tick, checkpoint, rollback, edit, shuffle) | the conversation runner over the stub's `DialogueWorld`: picks refused only for a stale offer, rollback to the checkpoint's hash, attachment order commutes, every conversation closes |
 
-The corpora (`fuzz/corpus/<target>/`, git-ignored) are seeded by `fuzz/seeds.sh` when a target has none: the
-corpus's sources, people and script files, and through `quest-corpus`'s `examples/dump_seeds.rs` each run case's
-program bytes, a state saved halfway through its run and wire values. Re-run `fuzz/seeds.sh` after a bytecode or
-save-format change (old seeds then only reach the version check). A crash is written to
-`fuzz/artifacts/<target>/`; replay it with `quest/target/tools/cargo-fuzz-<ver>/bin/cargo-fuzz fuzz run <target>
-<file>` from `quest/`, and keep it as a regression test.
+**Seeds.** The corpora (`fuzz/corpus/<target>/`, git-ignored) are seeded by `fuzz/seeds.sh` when a target has
+none: the corpus's sources, people and script files, and through `quest-corpus`'s `examples/dump_seeds.rs` each
+run case's program bytes, a state saved halfway through its run and wire values; `invariants` and
+`conversation` get byte strings written by the script. **Re-run `fuzz/seeds.sh` after a bytecode or
+save-format change** (a `BYTECODE_VERSION` bump): old seeds then only reach the version check. Files libFuzzer
+found are kept beside the seeds.
+
+**A crash becomes a regression.** A crash, timeout or leak is written to `fuzz/artifacts/<target>/`
+(git-ignored). Replay it from `quest/` with `target/tools/cargo-fuzz-<ver>/bin/cargo-fuzz fuzz run <target>
+<file>`, shrink it with `... fuzz tmin <target> <file>`, and name the bug. Then write the regression test in the
+crate that owns the bug (the input inline when it is under 20 lines, else a file under
+`fuzz/regressions/<target>/` read by the test), see it fail, fix, see it pass, replay the artifact, and commit
+`fix(quest…): <what> (fuzz)`. A bug in a target itself (a property it over-claims) is fixed in the target, and
+its input kept under `fuzz/regressions/<target>/` for `cargo fuzz run <target> fuzz/regressions/<target>/*` (the files: given the directory, libFuzzer
+fuzzes into it). A compiler timeout on a quadratic path is to be fixed, or bounded with a new `too-complex` diagnostic, with its
+regression (none found yet). The first campaign (10 minutes per target) is recorded in the plan's "As
+built" (`docs/superpowers/plans/2026-11-17-quest-script-completion.md`).
 
 ## Known limits
 
@@ -218,8 +232,12 @@ save-format change (old seeds then only reach the version check). A crash is wri
   is refused (`site-collision`).
 - A `let` named in `pause`, `(ticks=…)`, `count` or `timeout=` stands for its initialiser's literal, read at
   compile time: assigning the `let` at run time does not change the duration or the count.
+- Fuel equivalence (a run at any budget per tick ends as the unlimited run) holds under the same host timing,
+  not across a promise **timeout**: it is counted in ticks (`PROMISE_TIMEOUT_TICKS`), so a budget changes how
+  much another handler did before it fires.
 - A quest's transitions that chain into as many stages as the quest has (a cycle, `A → B → A`, both holding)
-  stop where they stand, reported (`TransitionCycle`), instead of running every tick.
+  stop where they stand, reported (`TransitionCycle`), instead of running every tick; the stages' handlers
+  re-arm them no earlier than the next tick.
 - A handler that changes the stage in the middle of an event: each later handler of that event checks the stage
   when it starts, so a handler of the new stage may run for the same event.
 - An edit whose current stage no longer exists falls back to the first stage, without cancelling the removed
