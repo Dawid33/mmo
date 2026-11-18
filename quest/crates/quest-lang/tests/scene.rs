@@ -712,3 +712,35 @@ fn late_catch_up_yields_and_goes_on() {
     assert_eq!(play.tick(&mut env, &mut rec, late + 1).lines.len(), 1);
     assert!(!play.ended());
 }
+
+/// Task 55 (carried from the Task 54 review): past `RUNNER_EVALS_MAX` evaluations a late catch-up ended the
+/// scene `Finished` even when the clock had already moved in the call; it yields then, as the steps budget
+/// does, and ends only a call that never moved the clock. Each beat here evaluates one condition.
+#[test]
+fn late_catch_up_past_the_evaluation_cap_yields() {
+    let src = r#"scene tick(a: Person):
+    node start:
+        a: "Tock."                                  @c.tock (ticks=1) when act() == 0
+        -> start
+"#;
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", src)]));
+    let mut rec = Records::default();
+    let mut play = env.play(1, "tick", vec![person(1)], 0);
+    let late = 10_000;
+    let first = play.tick(&mut env, &mut rec, late);
+    assert!(!first.lines.is_empty() && first.lines.len() < late as usize);
+    assert!(!play.ended(), "a yield is not an end: {:?}", first.ended);
+    let mut total = first.lines.len();
+    loop {
+        let out = play.tick(&mut env, &mut rec, late);
+        assert_eq!(out.ended, None);
+        if out.lines.is_empty() {
+            break;
+        }
+        total += out.lines.len();
+    }
+    assert_eq!(total, late as usize + 1);
+    assert_eq!(play.tick(&mut env, &mut rec, late + 1).lines.len(), 1);
+    assert!(!play.ended());
+}

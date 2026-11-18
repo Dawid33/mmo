@@ -37,7 +37,9 @@
 //!
 //! **Bounded.** One call walks at most [`BATCH_STEPS_MAX`] steps; a late tick that has more to catch up on
 //! goes on at the next call. One call makes at most `RUNNER_EVALS_MAX` evaluations: the one past it ends the
-//! scene `Finished`.
+//! scene `Finished` when the clock has not moved in the call; after it moved, the beat being walked is put
+//! back as it was when it began (its frame, the records, its lines and emits) and walked again at the next
+//! call.
 //!
 //! **Hearing** (lines go to the clients within `HEAR_RANGE_BLOCKS` of the speaker) and **one activity per
 //! NPC** (a scene is cast only from idle people) are the caller's. A bark (`bark(npc, d)`) is a play of a
@@ -153,6 +155,15 @@ impl ScenePlay {
         let mut fresh = true;
         while self.state != State::Ended && now >= self.next_at {
             let base = self.next_at;
+            // A beat cut short by the evaluation cap is walked again from here at the next call.
+            let begun = (!fresh).then(|| {
+                (
+                    self.frame.clone(),
+                    rec.clone(),
+                    out.lines.len(),
+                    out.emits.len(),
+                )
+            });
             match self.beat(env, rec, base, &mut out, &mut budget, &mut evals, fresh) {
                 Beat::Wait(at) => {
                     self.next_at = at;
@@ -161,7 +172,18 @@ impl ScenePlay {
                         fresh = false;
                     }
                 }
-                Beat::Yield => break,
+                Beat::Yield => {
+                    if spent(evals)
+                        && let Some((frame, records, lines, emits)) = begun
+                    {
+                        // What the beat evaluated since the cap is not to be trusted.
+                        self.frame = frame;
+                        *rec = records;
+                        out.lines.truncate(lines);
+                        out.emits.truncate(emits);
+                    }
+                    break;
+                }
                 Beat::End(reason) => self.end(reason, &mut out),
                 Beat::FollowUp(target) => {
                     self.end(SceneReason::Finished, &mut out);
@@ -325,8 +347,8 @@ impl ScenePlay {
     }
 
     /// One beat at tick `at` (module docs). `budget` counts the call's steps, `evals` its evaluations
-    /// (past `RUNNER_EVALS_MAX` the scene ends `Finished`); `fresh`: the clock has not moved in this call
-    /// yet.
+    /// (past `RUNNER_EVALS_MAX` the scene ends `Finished`, or yields once the clock moved); `fresh`: the
+    /// clock has not moved in this call yet.
     #[allow(clippy::too_many_arguments)]
     fn beat(
         &mut self,
@@ -345,7 +367,12 @@ impl ScenePlay {
         }
         loop {
             if spent(*evals) {
-                return Beat::End(SceneReason::Finished);
+                // A late catch-up goes on at the next call (`tick` puts the beat back as it began).
+                return if fresh {
+                    Beat::End(SceneReason::Finished)
+                } else {
+                    Beat::Yield
+                };
             }
             if *budget >= BATCH_STEPS_MAX {
                 // A whole call's steps without the clock moving: a loop that never takes a tick.
