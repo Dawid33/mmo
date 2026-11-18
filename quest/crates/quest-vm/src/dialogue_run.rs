@@ -15,6 +15,11 @@
 //! nothing to say (closed at once, no end raised). Attachments are kept by (instance, qualified name), sorted:
 //! the order they come in never matters.
 //!
+//! **Ends.** The greeting and each topic picked from the menu is a top-level run: each raises its own
+//! [`Ended`] to its own instance when it ends — `Finished` with its exit when it goes back to the menu,
+//! else the reason the conversation ended while it ran. Ending at the menu raises nothing more; the
+//! conversation's own end is its [`ConvState`].
+//!
 //! **Walking.** One call walks the steps until a choice (an [`Offer`]), a `pause`, or the end: one batch.
 //! Conditions are evaluated at that moment; an `Err` counts as false (an empty substitution, an emit not
 //! sent) and is reported once per fault site (instance and fn) per conversation. Group members are picked
@@ -178,7 +183,8 @@ pub struct Batch {
     pub lines: Vec<SaidLine>,
     pub offer: Option<Offer>,
     pub emits: Vec<Emitted>,
-    pub ended: Option<Ended>,
+    /// The top-level dialogue runs that ended, in order (the conversation's own end is its state).
+    pub ended: Vec<Ended>,
 }
 
 /// A line: its id, its speaker and its substitutions (in hole order; an empty string where one faulted).
@@ -209,13 +215,14 @@ pub struct Emitted {
     pub value: WireValue,
 }
 
-/// The end (the host raises `DialogueEnded` from it). `dialogue` is the outermost dialogue (the greeting
-/// or topic running, else the last that ran; `instance` `None` and `dialogue` empty when none ran); `exit`
-/// its exit's name (`done` for a bare `return`, the end of its last node, and any reason but `Finished`).
+/// The end of one top-level dialogue run (the picked greeting, or a topic picked from the menu): the host
+/// raises `DialogueEnded` from it to `instance`. `Finished` with its exit's name (`done` for a bare
+/// `return` or the end of its last node) when it returned to the menu, or when the conversation ended
+/// `Finished` inside it (an empty node group); otherwise the conversation's end reason and `done`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ended {
     pub reason: EndReason,
-    pub instance: Option<InstanceId>,
+    pub instance: InstanceId,
     pub dialogue: String,
     pub exit: String,
 }
@@ -241,8 +248,9 @@ pub struct Conversation {
     /// The serial of the latest offer.
     serial: u32,
     state: ConvState,
-    /// The outermost dialogue that ended last.
-    last: Option<Outer>,
+    /// Whether a top-level dialogue ran (a hub with nothing on it then ends `Finished`, else it is closed:
+    /// nothing to say).
+    ran: bool,
     /// Fault sites reported: (instance, fn), or (instance, `u32::from(event) | EMIT_SITE`) for an emit.
     reported: BTreeSet<(InstanceId, u32)>,
     /// The latest tick a call was made at.
@@ -285,13 +293,6 @@ struct Cursor {
     /// The next step's offset in the block.
     next: u32,
     via: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Outer {
-    instance: InstanceId,
-    name: String,
-    exit: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -402,7 +403,7 @@ impl Conversation {
             pending: None,
             serial: 0,
             state: ConvState::Running,
-            last: None,
+            ran: false,
             reported: BTreeSet::new(),
             now,
             reoffer: None,
@@ -551,7 +552,7 @@ impl Conversation {
             return Batch::default();
         }
         Batch {
-            ended: Some(self.finish(reason)),
+            ended: self.finish(reason).into_iter().collect(),
             ..Batch::default()
         }
     }
@@ -585,7 +586,7 @@ impl Conversation {
         }
         if gone {
             return Some(Batch {
-                ended: Some(self.finish(EndReason::Edited)),
+                ended: self.finish(EndReason::Edited).into_iter().collect(),
                 ..Batch::default()
             });
         }
@@ -641,32 +642,14 @@ impl Conversation {
         out
     }
 
-    /// Ends the conversation: the [`Ended`] to raise.
-    fn finish(&mut self, reason: EndReason) -> Ended {
-        let ended = match (self.frames.first(), &self.last) {
-            (Some(f), _) => Ended {
-                reason,
-                instance: Some(f.instance),
-                dialogue: f.name.clone(),
-                exit: "done".into(),
-            },
-            (None, Some(o)) => Ended {
-                reason,
-                instance: Some(o.instance),
-                dialogue: o.name.clone(),
-                exit: if reason == EndReason::Finished {
-                    o.exit.clone()
-                } else {
-                    "done".into()
-                },
-            },
-            (None, None) => Ended {
-                reason,
-                instance: None,
-                dialogue: String::new(),
-                exit: "done".into(),
-            },
-        };
+    /// Ends the conversation: the [`Ended`] of the top-level dialogue running, if one is.
+    fn finish(&mut self, reason: EndReason) -> Option<Ended> {
+        let ended = self.frames.first().map(|f| Ended {
+            reason,
+            instance: f.instance,
+            dialogue: f.name.clone(),
+            exit: "done".into(),
+        });
         self.frames.clear();
         self.pending = None;
         self.state = ConvState::Ended {
@@ -1000,7 +983,7 @@ impl<'a> Walk<'a> {
         }
         topics.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| (&a.1, a.2).cmp(&(&b.1, b.2))));
         if topics.is_empty() {
-            if self.c.last.is_none() {
+            if !self.c.ran {
                 // Neither a greeting nor a topic: nothing to say.
                 self.c.state = ConvState::Closed;
             } else {
@@ -1062,7 +1045,8 @@ impl<'a> Walk<'a> {
 
     /// Ends the conversation (the batch carries the end).
     fn end(&mut self, reason: EndReason) {
-        self.out.ended = Some(self.c.finish(reason));
+        let ended = self.c.finish(reason);
+        self.out.ended.extend(ended);
     }
 
     /// Walks until an offer, a pause or the end.
@@ -1297,9 +1281,12 @@ impl<'a> Walk<'a> {
             .and_then(|(_, d)| d.exits.get(usize::from(exit)).cloned())
             .unwrap_or_else(|| "done".into());
         let Some(caller) = self.c.frames.last() else {
-            self.c.last = Some(Outer {
+            // A top-level run ends: back to the menu.
+            self.c.ran = true;
+            self.out.ended.push(Ended {
+                reason: EndReason::Finished,
                 instance: f.instance,
-                name: f.name,
+                dialogue: f.name,
                 exit: exit_name,
             });
             return;
@@ -1519,7 +1506,7 @@ impl StateHash for Conversation {
         self.pending.state_hash(h);
         self.serial.state_hash(h);
         self.state.state_hash(h);
-        self.last.state_hash(h);
+        self.ran.state_hash(h);
         self.reported.state_hash(h);
         self.now.state_hash(h);
         self.reoffer.state_hash(h);
@@ -1542,14 +1529,6 @@ impl StateHash for Cursor {
         self.block.state_hash(h);
         self.next.state_hash(h);
         self.via.state_hash(h);
-    }
-}
-
-impl StateHash for Outer {
-    fn state_hash<H: Hasher>(&self, h: &mut H) {
-        self.instance.state_hash(h);
-        self.name.state_hash(h);
-        self.exit.state_hash(h);
     }
 }
 

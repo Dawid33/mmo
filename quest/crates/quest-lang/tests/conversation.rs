@@ -285,9 +285,19 @@ fn offer(b: &Batch) -> &Offer {
     b.offer.as_ref().expect("an offer")
 }
 
+fn ends(b: &Batch) -> Vec<(EndReason, &str, &str)> {
+    b.ended
+        .iter()
+        .map(|e| (e.reason, e.dialogue.as_str(), e.exit.as_str()))
+        .collect()
+}
+
+/// The batch's one end.
 fn ended(b: &Batch) -> (EndReason, &str, &str) {
-    let e = b.ended.as_ref().expect("an end");
-    (e.reason, e.dialogue.as_str(), e.exit.as_str())
+    match ends(b).as_slice() {
+        [one] => *one,
+        other => panic!("not one end: {other:?}"),
+    }
 }
 
 /// Spec §5.11's farmer, and the dialogue it detours into.
@@ -452,6 +462,8 @@ fn topic_returns_to_reevaluated_menu() {
         .pick(&mut env, &att, &mut rec, first.serial, 2, 1)
         .expect("picked");
     assert_eq!(said(&b), ["t.a"]);
+    assert_eq!(ended(&b), (EndReason::Finished, "alpha", "done"));
+    assert_eq!(b.ended[0].instance, InstanceId(1));
     assert_eq!(options(offer(&b)), ["t.beta", "t.gamma", "t.alpha"]);
     assert!(offer(&b).serial != first.serial);
     // The world changed: the next return shows the topic it unlocks.
@@ -464,9 +476,10 @@ fn topic_returns_to_reevaluated_menu() {
         options(offer(&b)),
         ["t.beta", "t.gamma", "t.alpha", "t.tagged"]
     );
-    // Leaving the menu ends the conversation; the last topic run is the outermost dialogue.
+    // Leaving the menu ends the conversation; every run has already raised its end.
     let b = c.leave(3);
-    assert_eq!(ended(&b), (EndReason::Left, "beta", "done"));
+    assert!(b.ended.is_empty());
+    assert!(matches!(c.state(), ConvState::Ended { .. }));
     assert!(c.leave(4) == Batch::default(), "nothing once ended");
 }
 
@@ -613,6 +626,62 @@ fn exit_arms() {
     assert_eq!(ended(&b), (EndReason::Left, "confront", "done"));
 }
 
+/// `confront` as a topic, the way quest-examples §4 attaches it.
+fn debt_topic_env() -> (Env, Vec<Attachment>) {
+    let src = DEBT.replace(
+        "dialogue confront(p: Player, npc: Person) exits paid, stalled:",
+        "dialogue confront(p: Player, npc: Person) topic \"About the debt\" @confront.topic exits paid, stalled:",
+    );
+    let mut env = Env::new();
+    env.add(1, &compiled(&[("main.qs", &src)]));
+    env.world.skills.insert((1, "trade".into()), 3);
+    let att = env.att(1, &["confront"]);
+    (env, att)
+}
+
+#[test]
+fn topic_return_raises_dialogue_ended_with_its_exit() {
+    let (mut env, att) = debt_topic_env();
+    let mut rec = Records::default();
+    let (mut c, b) = Conversation::start(&mut env, &att, &mut rec, player(1), person(4), 0);
+    assert!(b.ended.is_empty());
+    assert_eq!(options(offer(&b)), ["confront.topic"]);
+    let b = c
+        .pick(&mut env, &att, &mut rec, offer(&b).serial, 0, 1)
+        .unwrap();
+    assert_eq!(said(&b), ["confront.oh", "haggle.hard"]);
+    assert!(
+        b.ended.is_empty(),
+        "the detour into `haggle` is no top-level run"
+    );
+    let b = c
+        .pick(&mut env, &att, &mut rec, offer(&b).serial, 0, 2)
+        .unwrap();
+    assert_eq!(said(&b), ["confront.square"]);
+    // `confront` returned `paid` and the player is back at the menu.
+    assert_eq!(ended(&b), (EndReason::Finished, "confront", "paid"));
+    assert_eq!(b.ended[0].instance, InstanceId(1));
+    assert!(offer(&b).menu);
+    assert_eq!(c.state(), &ConvState::AwaitingPick);
+    let b = c.leave(3);
+    assert!(b.ended.is_empty(), "nothing further: {:?}", b.ended);
+    assert!(matches!(c.state(), ConvState::Ended { .. }));
+}
+
+#[test]
+fn leaving_mid_topic_ends_it_left_done() {
+    let (mut env, att) = debt_topic_env();
+    let mut rec = Records::default();
+    let (mut c, b) = Conversation::start(&mut env, &att, &mut rec, player(1), person(4), 0);
+    let b = c
+        .pick(&mut env, &att, &mut rec, offer(&b).serial, 0, 1)
+        .unwrap();
+    assert_eq!(options(offer(&b)), ["haggle.half", "haggle.back"]);
+    let b = c.leave(2);
+    assert_eq!(ended(&b), (EndReason::Left, "confront", "done"));
+    assert!(matches!(c.state(), ConvState::Ended { .. }));
+}
+
 const TIMEOUTS: &str = r#"dialogue soft(p: Player, npc: Person):
     choice(timeout=10):
         "A" @soft.a
@@ -680,7 +749,7 @@ fn pause_ends_batch() {
     let mut rec = Records::default();
     let (mut c, b) = Conversation::start(&mut env, &att, &mut rec, player(1), person(1), 20);
     assert_eq!(said(&b), ["slow.one"]);
-    assert!(b.ended.is_none() && b.offer.is_none());
+    assert!(b.ended.is_empty() && b.offer.is_none());
     assert_eq!(c.state(), &ConvState::Paused { until: 25 });
     assert_eq!(c.tick(&mut env, &mut rec, 24), None);
     let b = c.tick(&mut env, &mut rec, 25).expect("resumed");
