@@ -15,7 +15,13 @@
 //!   link's current `Attach` on; every row before it is acknowledged (the cursor moves past it)
 //!   and never delivered — a row decided for an older attach never reaches the manager — but a
 //!   `CoordMsg::Generation` (an `Attach` refused for a stale world generation has no `Attached`
-//!   row). Each row is delivered once, in `seq` order.
+//!   row). Each row is delivered once, in `seq` order. A down, and each `Attach` sent, cancel the
+//!   GET in flight (or its backoff wait) and the loop polls again at once — after a transport
+//!   failure on a new client (the failed one is dropped first): a GET riding a connection that
+//!   died silently never outlives the link (final review I2), and with the client's HTTP/2
+//!   keep-alive (`svc_link::pinned_http2_client`) such a connection fails within 10 s anyway, under
+//!   the coordinator's 15 s mailbox stall. It keeps polling while down: a refused `Attach`'s
+//!   `Generation` row is read with the link down.
 //!
 //! **Down / up.** The link starts down. Down, it drops what it is given and probes with empty
 //! batches (stamped with the last `Attach`'s pair, `(0, 0)` before any) under the retry backoff
@@ -35,6 +41,11 @@
 //! the next one. Trust is the coordinator's pinned certificate (`svc_link::pinned_client_config`);
 //! the pin is read again at each client (re)build. 401 / 412 are configuration errors: logged as
 //! such, the link stays down and keeps retrying. The service token is never logged.
+//!
+//! **The thread ends** (no runtime, a panic — final review M4): the main loop's [`WorldLink::pump`]
+//! finds its channel disconnected, logs an error once and the link reads down for good
+//! ([`WorldLink::is_up`] false): the host stops attaching, its mailbox stalls and the coordinator
+//! detaches it; nothing respawns the thread silently.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -87,6 +98,8 @@ pub struct HttpWorldLink {
     generation: u64,
     /// Whether this generation's `Attach` was sent (nothing else goes before it).
     attach_sent: bool,
+    /// The link's thread ended (its channel disconnected): down for good, said once.
+    dead: bool,
     wake: Receiver<()>,
     /// Dropped with the link: the thread ends.
     _stop: oneshot::Sender<()>,
@@ -128,6 +141,7 @@ impl HttpWorldLink {
                     events: events_tx,
                     wake: wake_tx,
                     mailbox_go: Notify::new(),
+                    mailbox_restart: Notify::new(),
                     state: RefCell::new(State {
                         urls,
                         url: 0,
@@ -159,6 +173,7 @@ impl HttpWorldLink {
             up: false,
             generation: 0,
             attach_sent: false,
+            dead: false,
             wake,
             _stop: stop,
         }
@@ -204,7 +219,20 @@ impl WorldLink for HttpWorldLink {
                 Some(event) => event,
                 None => match self.events.try_recv() {
                     Ok(event) => event,
-                    Err(_) => return,
+                    Err(crossbeam::channel::TryRecvError::Empty) => return,
+                    Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                        // Its thread ended (final review M4): never "up" again, said once.
+                        if !self.dead {
+                            self.dead = true;
+                            self.up = false;
+                            crate::health::Health::global().world_link_up(false);
+                            log::error!(
+                                "[world-link] the link's thread ended (see the lines above): the link to the world \
+                                 coordinator is down for good; this host attaches no more and is detached as stalled"
+                            );
+                        }
+                        return;
+                    }
                 },
             };
             match event {
@@ -234,8 +262,12 @@ struct Thread {
     pin: Box<dyn Fn() -> io::Result<String> + Send>,
     events: Sender<Event>,
     wake: Sender<()>,
-    /// Wakes the mailbox loop once there is a boot to poll for.
+    /// Wakes the mailbox loop once there is a boot to poll for (an `Attach` sent).
     mailbox_go: Notify,
+    /// Cancels the mailbox loop's GET in flight, or its backoff wait: the link went down, or an
+    /// `Attach` was sent (the next poll starts at once, on the current state — and on a new
+    /// client after a transport failure).
+    mailbox_restart: Notify,
     state: RefCell<State>,
 }
 
@@ -436,6 +468,9 @@ impl Thread {
         st.steady = false;
         st.gate_epoch = None;
         st.gate_open = false;
+        // Its GET in flight may ride the connection that failed: cancelled (a wake only; the
+        // mailbox loop runs when this one awaits).
+        self.mailbox_restart.notify_waiters();
         if st.up {
             st.up = false;
             drop(st);
@@ -622,6 +657,7 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
             _ => false,
         };
         if attach {
+            link.mailbox_restart.notify_waiters();
             link.mailbox_go.notify_one();
             if std::mem::replace(&mut attached_once, true) {
                 crate::health::Health::global().world_link_reattached();
@@ -668,7 +704,17 @@ async fn mailbox_loop(link: &Thread) {
         };
         let after = link.state.borrow().cursor;
         let url = link.url();
-        match link.mailbox(&url, boot, after).await {
+        // Registered before the GET is first polled (`select!` polls both): a down or an
+        // `Attach` while it is out cancels it (final review I2).
+        let read = tokio::select! {
+            read = link.mailbox(&url, boot, after) => read,
+            _ = link.mailbox_restart.notified() => {
+                log::debug!("[world-link] the mailbox read in flight is cancelled (the link went down, or an Attach was sent)");
+                backoff = svc_link::LINK_RETRY_MIN_MS;
+                continue;
+            }
+        };
+        match read {
             Ok(page) => {
                 backoff = svc_link::LINK_RETRY_MIN_MS;
                 fails.reset();
@@ -682,7 +728,11 @@ async fn mailbox_loop(link: &Thread) {
                 link.failed(&f, &url);
                 let wait = if matches!(f, Failure::NoPin) { PIN_RETRY_MS } else { backoff };
                 backoff = next_backoff(backoff);
-                tokio::time::sleep(Duration::from_millis(wait)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(wait)) => {}
+                    // A new `Attach` is not kept waiting out a backoff of the old state.
+                    _ = link.mailbox_restart.notified() => backoff = svc_link::LINK_RETRY_MIN_MS,
+                }
             }
         }
     }

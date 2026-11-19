@@ -5,7 +5,10 @@
 //!
 //! - `host_link` is a URL or a comma list of URLs (`https://coordinator.<ns>.svc.cluster.local:6480`;
 //!   a dev world with several coordinator replicas lists each); `host_link_cert` is the
-//!   coordinator's pin (`svc_link::pinned_http2_client`). A failed request moves to the next URL.
+//!   coordinator's pin (`svc_link::pinned_http2_client`). A failed request moves to the next URL;
+//!   one that failed in transport (not an HTTP status) also replaces the world's client, so the next
+//!   request dials a new connection instead of riding a pooled one that may be dead (final review
+//!   I2; the client's HTTP/2 keep-alive closes a silently dead one within 10 s besides).
 //! - **Orders**: a join POSTs [`LoginToHost::SpawnPlayer`] to [`PATH_COORD_LOGIN_ORDERS`] — 202
 //!   once its row is committed in the gate host's mailbox — and waits for the
 //!   [`HostToLogin::SpawnAck`] matched by `(player_token, session_epoch)`, all within
@@ -175,7 +178,9 @@ struct WorldClient {
     urls: Vec<String>,
     /// The URL in use (a failed request moves to the next).
     url: AtomicUsize,
-    client: reqwest::Client,
+    /// The pinned client and its generation: replaced after a transport failure
+    /// ([`Self::transport_failed`]), never after an HTTP status.
+    client: Mutex<(u64, reqwest::Client)>,
     token: String,
     /// The joins waiting for an answer, by `(player_token, session_epoch)`.
     waiters: Mutex<BTreeMap<(String, u64), oneshot::Sender<Answer>>>,
@@ -184,6 +189,29 @@ struct WorldClient {
 }
 
 impl WorldClient {
+    /// The client in use, with its generation (what [`Self::transport_failed`] names).
+    fn client(&self) -> (u64, reqwest::Client) {
+        self.client.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// A request on the client of generation `generation` failed in transport (connect, TLS, a
+    /// reset, a timeout): its connection may be dead without hyper knowing (a lost node, a
+    /// conntrack blackhole), so the client is replaced — its pool with it — unless another
+    /// request replaced it already. `why` is logged.
+    fn transport_failed(&self, generation: u64, why: &str) -> Failure {
+        let mut current = self.client.lock().unwrap_or_else(|p| p.into_inner());
+        if current.0 == generation {
+            match svc_link::pinned_http2_client(&self.cert) {
+                Ok(fresh) => {
+                    log::debug!("[login] world {}: a request failed in transport ({why}): a new client dials afresh", self.world);
+                    *current = (generation + 1, fresh);
+                }
+                Err(e) => log::warn!("[login] world {}: the HTTPS client could not be made again ({e}); the old one is kept", self.world),
+            }
+        }
+        Failure::Transport(why.to_string())
+    }
+
     fn url(&self) -> String {
         self.urls[self.url.load(Ordering::SeqCst) % self.urls.len()].clone()
     }
@@ -216,17 +244,17 @@ impl WorldClient {
     /// POST `order` to `url` within `timeout`.
     async fn post_at(&self, url: &str, order: &LoginToHost, timeout: Duration) -> Result<(), Failure> {
         let body = game::encode_packet(order).map_err(|e| Failure::Body(format!("encode: {e}")))?;
-        let resp = self
-            .client
+        let (generation, client) = self.client();
+        let resp = client
             .post(format!("{url}{PATH_COORD_LOGIN_ORDERS}"))
             .headers(self.headers())
             .timeout(timeout)
             .body(body)
             .send()
             .await
-            .map_err(|e| Failure::Transport(svc_link::error_chain(&e)))?;
+            .map_err(|e| self.transport_failed(generation, &svc_link::error_chain(&e)))?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| Failure::Transport(svc_link::error_chain(&e)))?;
+        let bytes = resp.bytes().await.map_err(|e| self.transport_failed(generation, &svc_link::error_chain(&e)))?;
         if status == StatusCode::ACCEPTED {
             return Ok(());
         }
@@ -261,16 +289,16 @@ impl WorldClient {
 
     /// GET one page of answers past `after` from `url`.
     async fn answers(&self, url: &str, after: u64) -> Result<LoginPage, Failure> {
-        let resp = self
-            .client
+        let (generation, client) = self.client();
+        let resp = client
             .get(format!("{url}{PATH_COORD_LOGIN_ANSWERS}?after={after}&wait_ms={ANSWERS_WAIT_MS}"))
             .headers(self.headers())
             .timeout(Duration::from_millis(ANSWERS_WAIT_MS + ANSWERS_POLL_SLACK_MS))
             .send()
             .await
-            .map_err(|e| Failure::Transport(svc_link::error_chain(&e)))?;
+            .map_err(|e| self.transport_failed(generation, &svc_link::error_chain(&e)))?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| Failure::Transport(svc_link::error_chain(&e)))?;
+        let bytes = resp.bytes().await.map_err(|e| self.transport_failed(generation, &svc_link::error_chain(&e)))?;
         if status != StatusCode::OK {
             return Err(Failure::Status(status, String::from_utf8_lossy(&bytes).chars().take(64).collect()));
         }
@@ -535,7 +563,7 @@ impl WorldClients {
             cert,
             urls,
             url: AtomicUsize::new(0),
-            client,
+            client: Mutex::new((0, client)),
             token,
             waiters: Mutex::default(),
             states: Mutex::default(),

@@ -518,9 +518,29 @@ pub fn pinned_client_config(pin: &str) -> io::Result<rustls::ClientConfig> {
         .with_no_client_auth())
 }
 
+/// How long a [`pinned_http2_client`] waits for a new connection (TCP and TLS) to the
+/// coordinator: a replica whose address answers nothing (a lost node, a blackholed route) fails
+/// the call in this time, and the caller tries again (the next address of the Service's DNS name).
+pub const HTTP_CONNECT_TIMEOUT_MS: u64 = 5_000;
+
+/// How often a [`pinned_http2_client`] PINGs its HTTP/2 connection, idle or not (final review I2):
+/// a pooled connection that died silently — a node lost, a conntrack blackhole: no FIN, no RST —
+/// is noticed by a PING left unanswered, not by TCP (many minutes). With
+/// [`HTTP_KEEP_ALIVE_TIMEOUT_MS`] a dead connection fails every request on it within 10 s, under
+/// the coordinator's 15 s mailbox stall (`game::coordinator::MAILBOX_STALL_MS`): a host's link goes
+/// down and re-attaches on a fresh connection before the stall rule would detach it once more.
+pub const HTTP_KEEP_ALIVE_INTERVAL_MS: u64 = 5_000;
+
+/// How long a [`pinned_http2_client`]'s keep-alive PING may wait for its acknowledgement before the
+/// connection is closed (every request on it fails, the next one dials anew).
+pub const HTTP_KEEP_ALIVE_TIMEOUT_MS: u64 = 5_000;
+
 /// An HTTPS client that trusts exactly the listener whose certificate hashes to `pin`
 /// ([`pinned_client_config`]), ALPN `h2`, HTTP/2 only, no proxy: what the hosts and the login
-/// service call the coordinator's API with.
+/// service call the coordinator's API with. A new connection fails after
+/// [`HTTP_CONNECT_TIMEOUT_MS`]; every connection is PINGed every [`HTTP_KEEP_ALIVE_INTERVAL_MS`],
+/// idle too, and closed when a PING waits [`HTTP_KEEP_ALIVE_TIMEOUT_MS`] (a silently dead connection
+/// is noticed in at most their sum).
 pub fn pinned_http2_client(pin: &str) -> io::Result<reqwest::Client> {
     let mut tls = pinned_client_config(pin)?;
     tls.alpn_protocols = vec![b"h2".to_vec()];
@@ -528,6 +548,10 @@ pub fn pinned_http2_client(pin: &str) -> io::Result<reqwest::Client> {
         .use_preconfigured_tls(tls)
         .http2_prior_knowledge()
         .no_proxy()
+        .connect_timeout(std::time::Duration::from_millis(HTTP_CONNECT_TIMEOUT_MS))
+        .http2_keep_alive_interval(std::time::Duration::from_millis(HTTP_KEEP_ALIVE_INTERVAL_MS))
+        .http2_keep_alive_timeout(std::time::Duration::from_millis(HTTP_KEEP_ALIVE_TIMEOUT_MS))
+        .http2_keep_alive_while_idle(true)
         .build()
         .map_err(|e| io::Error::other(error_chain(&e)))
 }
