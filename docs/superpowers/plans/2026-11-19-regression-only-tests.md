@@ -53,9 +53,10 @@ slotmapd 19 (vendored), state-hash 18, auth 11, block-mesh 9, login-api 3, pg-te
   `decode_packet`, the world-store blob decoders, `HostMsg`/`CoordMsg`/peer message decoding, rollback undo
   (`hash(before) == hash(after undo)`) over random inputs, the seeded handoff schedule).
 - **D6 Owner's uncommitted edits are never swept.** The working tree has the owner's changes (e.g.
-  `crates/world-store/tests/fixtures/world_map.bin`). Each commit uses a pathspec (other sessions share the index);
+  `crates/world-store/tests/fixtures/world_map.bin`). Other sessions share the index, so
   check `git diff --cached --name-only` before committing. A file with the owner's hunks is staged hunk by hunk (`-U3 --recount`), never
-  wholesale.
+  wholesale, and then committed from the index with NO pathspec: `git commit -- <path>` takes the whole working-tree
+  file, owner hunks included.
 
 ## Global Constraints
 
@@ -64,8 +65,8 @@ slotmapd 19 (vendored), state-hash 18, auth 11, block-mesh 9, login-api 3, pg-te
 - No whole crate suite per task. Each task verifies by building its test targets (`--no-run`) plus `just smoke`.
   Everything runs once, through the new `just test`, in Task 13 (tell the owner first; it includes the client tests).
 - Never format from the repo root or with `--all`.
-- A kept test keeps its slow tag if it has one; Task 12 rewrites the tag text to
-  `#[ignore = "slow: >100ms — run via just test"]` everywhere (`test-full` is gone).
+- A kept test keeps its slow tag `#[ignore = "slow: >100ms — run via just test-full"]` if it has one; a kept test
+  measured slower than 100 ms without one gets it (owner, 2026-11-19).
 - Marker format, used by the checker (Task 3): the doc comment directly above the test fn (attributes may sit between
   it and the fn) contains a line starting `Regression:` or `Gate:`. Example:
   `/// Regression: a LOD root arriving as hundreds of cells starved the mesher (live, 2026-09-19; fix a1b2c3d4).`
@@ -116,7 +117,7 @@ slotmapd 19 (vendored), state-hash 18, auth 11, block-mesh 9, login-api 3, pg-te
 - [ ] **Step 4: Run it** (`python3 scripts/test_inventory.py inventory > docs/…-inventory.tsv`). Expected: about 4,600
   rows, and per-crate counts within a few percent of the "Size of the job" table. Print a summary: rows per crate ×
   `proposed`.
-- [ ] **Step 5: Commit** the script and the TSV (pathspec), message `chore(tests): inventory every test and its origin`.
+- [ ] **Step 5: Commit** the script and the TSV (D6), message `chore(tests): inventory every test and its origin`.
 
 ### Task 2: Classify, then the owner's checkpoint
 
@@ -189,7 +190,7 @@ Every crate task uses the same steps. The groups:
 - [ ] **Step 5: Smoke.** Run `just smoke`. Expected: pass. While a recipe still names a deleted filter (`smoke`'s
   `simple:: region_runner::`), fix that recipe line in this task: drop the filter, or point it at kept tests of the same
   crate. A filter left matching zero tests is a bug (Review Focus).
-- [ ] **Step 6: Commit** with a pathspec of the group's paths and `justfile` hunks only (D6). Message
+- [ ] **Step 6: Commit** the group's paths and its `justfile` hunks only (D6). Message
   `test(<crates>): keep only regression tests and gates`, with the counts (deleted / kept) in the body.
 
 ### Task 12: Recipes, rules and docs
@@ -205,64 +206,64 @@ Every crate task uses the same steps. The groups:
   remaining test (grep the inventory). A recipe whose tests are all gone is deleted. Then remove it from CLAUDE.md
   and from any recipe that calls it (e.g. `test` → `test-game test-client …`).
 - [ ] **Step 2: Add `test-audit` to `smoke`** as its first step (it takes well under a second).
-- [ ] **Step 3: One `just test` runs every test everywhere** (the owner's ask, 2026-11-19). Replace today's `test`
-  (which chains `test-game test-client test-server test-worldgen` and skips ignored tests) and `test-full` with one
-  bash recipe. It runs each stage below in order and **keeps going after a failure**. At the end it prints one
-  `PASS`/`FAIL` line per stage and exits 1 if any stage failed. Every `cargo` line is under `{{cap}}` and passes
-  `--include-ignored` (slow-tagged tests included; the 100 ms tag now only keeps `test-one` fast). There are no
-  `--skip`s: under the new rule every remaining test is a regression or a gate, so all of them run. The stages:
+- [ ] **Step 3: `just test` runs every fast test everywhere; `just test-full` adds the slow ones** (owner, 2026-11-19:
+  "just test to run all tests everywhere", then "any test longer than 100ms should be in just test-full, not just
+  test"). Both are ONE bash recipe body, parameterised: `test` runs it with no ignored tests, `test-full` with
+  `--include-ignored` (a test slower than 100 ms carries `#[ignore = "slow: >100ms — run via just test-full"]`, so it
+  runs only in `test-full`). It runs each stage below in order and **keeps going after a failure**; at the end it prints
+  one `PASS`/`FAIL` line per stage and exits 1 if any stage failed. Every `cargo` line is under `{{cap}}`. No `--skip`s:
+  every remaining test is a regression or a gate. The stages:
   1. `test-audit`.
-  2. The root workspace: `cargo test --workspace --exclude rapier3d --exclude parry3d --exclude slotmapd -- --include-ignored --test-threads={{test_threads}}`,
-     with `--features server/test-hooks` if that feature survived Task 9. Before writing the line, check the vendored
-     crates' real package names (`cargo metadata --no-deps`).
+  2. The root workspace: `cargo test --workspace --exclude <the vendored forks' package names> [--features server/test-hooks] -- [--include-ignored] --test-threads={{test_threads}}`
+     (check the package names with `cargo metadata --no-deps`).
   3. The vendored forks: `physics-next-upstream`, plus `cargo test -p slotmapd`.
-  4. The serial multi-host and threaded targets, `--test-threads=1` (whichever of `roles`, `hosts`, `takeover`,
-     `threaded_world` survived), with `MMO_TEST_DATABASE_URL` set as `test-r2/3/4` set it. Stage 2 must `--skip`
-     exactly these targets so they do not run twice in parallel. These two lines are the only filters allowed, and
-     a comment says why.
-  5. Postgres: the recipe depends on `pg-up` (it waits for the database) and exports `MMO_TEST_DATABASE_URL` for every
-     cargo stage, so `world-store` and `login` Postgres tests run in stage 2 instead of skipping.
+  4. The serial multi-host targets (`takeover`, and any other that survived), `--test-threads=1`, with
+     `MMO_TEST_DATABASE_URL` set as `test-r4` sets it; stage 2 excludes them by target so they do not also run in
+     parallel (the only filter allowed, with a comment saying why).
+  5. Postgres: the recipe depends on `pg-up` and exports `MMO_TEST_DATABASE_URL` for every cargo stage.
   6. wasm: `determinism-wasm`, `slint-wasm`, `client-wasm` (those whose targets survived).
   7. `quest-test`, and `quest-fuzz-replay <t>` for each directory under `quest/fuzz/regressions/`.
-  8. Outside the workspace: `water-proto-test -- --include-ignored` if `prototypes/water` keeps a test. `tools/*` are
-     workspace members and run in stage 2.
+  8. Outside the workspace: `water-proto-test` (with `--include-ignored` in `test-full`) if `prototypes/water` keeps a
+     test. `tools/*` are workspace members and run in stage 2.
   9. Non-Rust: `site-test`, `python3 -m unittest discover -s scripts/tests` (if a test survived Task 11), and
      `site-theme-check`.
 
-  Delete `test-game`, `test-client`, `test-server`, `test-worldgen` and `test-full`, and every reference to them, including
-  the slow-tag text `run via just test-full` → `run via just test` in every kept test
-  (justfile comments, CLAUDE.md, `docs/` text that tells a reader to run them; leave dated plans alone).
-  `test-one`, `test-pg`, `test-login-pg`, `test-r2/3/4` and `test-threads` stay as narrow entry points if their
-  tests survived. Benchmarks that are not tests (`keepup-budget`, `soak`, `region_load_cost`'s recipe, `perf-*`)
-  keep their own recipes and are not part of `just test`, unless Task 2 kept their test as a regression or gate. A
-  kept one runs in stage 2 like any other.
+  Delete `test-game`, `test-client`, `test-server` and `test-worldgen`, and every reference to them (justfile comments,
+  CLAUDE.md, `docs/` text that tells a reader to run them; leave dated plans alone). `test-one`, `test-pg`,
+  `test-login-pg`, `test-r2/3/4` and `test-threads` stay as narrow entry points only if their tests survived.
+  Benchmarks that are not tests (`keepup-budget`, `soak`, `perf-*`) keep their own recipes and are in neither.
 - [ ] **Step 4: Rewrite CLAUDE.md "Testing".** Lead with the rule, worded like the quest paragraph: from 2026-11-19 the
   whole repository follows it. A test is written ONLY as a regression for a bug that was actually found, never
   pre-emptively, not "for coverage", not alongside a new feature. It carries `/// Regression: <bug> (<evidence>)`.
   Gates (`/// Gate:`) are the determinism and quality goldens of D2, and a new gate needs the owner. `just test-audit`
   (in `smoke`) enforces both markers. Broad assurance comes from fuzzing (the follow-up plan). Keep the verification
   bullets that still hold (`test-one`, `smoke`, `determinism-wasm`, `test-threads` if it survives, the 100 ms slow
-  tag, `install_real_block_props`). Replace "`just test` / `just test-full` only when the user asks" with: "`just test`
-  runs every test in the repository (both workspaces, the vendored forks, wasm, Postgres, the quest fuzz regressions,
-  the website and scripts). Run it before calling a wide change done, and say so first: it is long". Drop any bullet whose tests are gone. Point the quest paragraph at the shared rule
+  tag, `install_real_block_props`). State the owner's rule (2026-11-19) verbatim in substance: the only tests ever
+  COMMITTED are regression tests (plus the gates); temporary tests written while working are fine but are deleted
+  before the commit. A test slower than 100 ms is tagged `#[ignore = "slow: >100ms — run via just test-full"]`: `just
+  test` runs every fast test everywhere (both workspaces, the vendored forks, wasm, Postgres, the quest fuzz
+  regressions, the website and scripts), `just test-full` adds the slow ones. Replace "`just test` / `just test-full`
+  only when the user asks" accordingly. Drop any bullet whose tests are gone. Point the quest paragraph at the shared rule
   instead of restating it.
 - [ ] **Step 5: Fix the architecture rules that cite deleted tests.** Grep CLAUDE.md for test names and paths
   (`physics_goldens`, `handoff_schedule`, `threaded_world`, `peer_schedule`, `scene_hash_golden`, `forge_quality`,
   `DensityFn`, `test-r2/3/4`, `twin-check` excepted). Each one either still exists or its sentence is reworded.
 - [ ] **Step 6: TODO.md.** Add an entry: "Fuzzing for the game workspace (plan to write), replacing the deleted broad
   tests", listing D5's candidates.
-- [ ] **Step 7: Commit** (pathspec; `CLAUDE.md`, `TODO.md` and `justfile` carry owner hunks, so stage per hunk). Message
+- [ ] **Step 7: Commit** (D6; `CLAUDE.md`, `TODO.md` and `justfile` carry owner hunks, so stage per hunk). Message
   `docs: the game workspace keeps only regression tests and gates; test-audit in smoke`.
 
-### Task 13: Closing — `just test`, once
+### Task 13: Closing — `just test-full`, once
 
 - [ ] **Step 1:** `just test-audit`. Expected: exit 0, and counts equal to the TSV's kept rows.
-- [ ] **Step 2:** Tell the owner that `just test` is about to run (it is long; it includes the client tests, which
-  CLAUDE.md makes opt-in), then run `just test`. Expected: every stage prints `PASS`, and the exit code is 0. A
+- [ ] **Step 2:** Tell the owner that `just test-full` is about to run (it is long; it includes the client tests, which
+  CLAUDE.md makes opt-in), then run `just test-full` (which covers everything `just test` runs). Expected: every stage
+  prints `PASS`, and the exit code is 0. Measure each kept test's time (`-Zunstable-options --report-time`); one over
+  100 ms without the slow tag gets it. A
   failure means a kept test lost a helper or a fixture, or the recipe is wrong: fix that. Never delete the test to
   make it pass.
 - [ ] **Step 3:** Prove the recipe reports failures: break one kept test locally (flip an assertion), run that stage
   alone, and confirm the summary line says `FAIL` and the exit code is 1. Revert the change.
 - [ ] **Step 4:** `just smoke` and `just clippy`. Expected: pass.
 - [ ] **Step 5:** Report the final numbers (tests before → after, per crate), the recipes removed, the `just test`
-  run's wall time per stage, and the CLAUDE.md changes. Commit any fix from Steps 2–4 with a pathspec.
+  run's wall time per stage, and the CLAUDE.md changes. Commit any fix from Steps 2–4 (D6).

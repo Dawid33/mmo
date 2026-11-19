@@ -131,7 +131,7 @@ jobs := shell('n=$(( $(nproc) * $1 / 100 )); echo $(( n > 0 ? n : 1 ))', cpu_per
 
 # Every recipe inherits these: cargo reads
 # CARGO_BUILD_JOBS for rustc parallelism, libtest reads RUST_TEST_THREADS for
-# test threads (an explicit `--test-threads`, as in `test-full`, still wins).
+# test threads (an explicit `--test-threads`, as in `test` / `test-full`, still wins).
 # Raw `cargo` outside `just` is capped by `[build] jobs` in .cargo/config.toml.
 export CARGO_BUILD_JOBS := jobs
 export RUST_TEST_THREADS := jobs
@@ -534,7 +534,7 @@ asset-viewer *args:
 
 # Creature models (docs/superpowers/specs/2026-10-29-creature-asset-pipeline.md):
 # tools/creatures/src/<df_id>.toml → assets/models/creatures/<df_id>.bbmodel +
-# the manifest creatures.json. No ids: every source. Then `just creature-check`.
+# the manifest creatures.json. No ids: every source.
 creatures *ids:
     python3 tools/creatures/build.py {{ids}}
 
@@ -562,11 +562,6 @@ creature-sheet id:
 # Creature models done (approved / draft / todo per category) and the next to build.
 creature-progress *args:
     python3 tools/creatures/progress.py {{args}}
-
-# The creature lint: every manifest model through the real parser (no reader
-# warnings, required clips + loop modes, budgets, rest bounds).
-creature-check:
-    {{cap}} {{cargo}} test -q -p bbmodel --test it creatures::
 
 # Game models from a text prompt (tools/assets/generate.py): a Leonardo.ai picture,
 # then 3D AI Studio TRELLIS.2 image-to-3D -> assets/models/<name>.glb. Costs
@@ -749,9 +744,6 @@ forge-proto *args:
 
 # Water prototype (prototypes/water/, standalone, no engine deps): bodies + frontier
 # CA vs cell-only CA. Plan: docs/superpowers/plans/2026-09-22-water-prototype.md.
-water-proto-test *args:
-    cd prototypes/water && {{cap}} cargo test --release {{args}}
-
 # Scenario table for both water models (a TIMING run: ask before running on the shared box).
 # `just water-proto --golden` prints only final state hashes (not a timing run).
 water-proto *args:
@@ -781,10 +773,6 @@ forge-bench size="16000" cell="16":
 # e.g. `just forge-ui --seed D5C0DE021A`. Localhost only.
 forge-ui port="8787" *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- --serve {{port}} {{args}}
-
-# Headless region-load cost breakdown (gen/derive/serde/mesh).
-bench-region:
-    {{cap}} {{cargo}} test -p worldgen --release --test region_load_cost -- --ignored --nocapture
 
 # Self-screenshot probe: the pulled-quad render path draws real terrain. Run it
 # on a real adapter after a Bevy bump (`just adapter=6700 pull-smoke`) — the
@@ -1044,22 +1032,19 @@ site-test:
 
 # ---- Test -----------------------------------------------------------------
 
-# Scoped per-crate on purpose: first-party crates only (the vendored physics
-# forks are path dependencies, tested through physics-next and
-# `physics-next-upstream`), and each crate's suite is big enough on its own.
-#
-# Tests measured >100ms (2026-07-08, debug build) carry
-# `#[ignore = "slow: >100ms — run via just test-full"]`, so the default run is
-# the fast feedback loop and `test-full` adds them back via --include-ignored.
-# Tag new slow tests the same way; re-measure with:
+# Every committed test is a regression test (a bug seen in play or in a log) or a gate
+# (CLAUDE.md, Testing; `test-audit` checks the marker). Tests measured >100ms carry
+# `#[ignore = "slow: >100ms — run via just test-full"]`, so `just test` is the fast sweep
+# and `test-full` adds them back via --include-ignored. Tag new slow tests the same way;
+# measure with:
 #   RUSTC_BOOTSTRAP=1 cargo test -p <crate> -- -Zunstable-options --report-time
 
-# The routine check, hard-limited to `smoke_timeout` seconds (default 60). Even
-# the "quick" per-crate suites below build every game test module and a
-# Bevy-sized client test binary, which is far too slow for a while-iterating loop. So
-# smoke runs two modules of the game test binary (rollback restore regressions,
-# the region runner's input regressions) and the server lib tests, TYPE-CHECKS the server's integration
-# tests (all tagged slow, so nothing else would notice them rotting — a new
+# The routine check, hard-limited to `smoke_timeout` seconds (default 60). `just test`
+# builds every test binary, a Bevy-sized client one included, which is far too slow for a
+# while-iterating loop. So smoke runs `test-audit`, two modules of the game test binary
+# (rollback restore regressions, the region runner's input regressions) and the server lib
+# tests, TYPE-CHECKS the server's takeover test (tagged slow, so nothing else would
+# notice it rotting — a new
 # `ClientPacket` variant once left one uncompilable), and only TYPE-CHECKS the client
 # (lib + bin + tests): building or linking a client test binary means a full
 # Bevy codegen, which can never fit the budget. Client unit tests are an
@@ -1081,6 +1066,7 @@ smoke:
         fi
         if [ "$rc" -ne 0 ]; then exit "$rc"; fi
     }
+    step python3 scripts/test_inventory.py check
     step {{cargo}} test -q -p game --test it -- rollback_restore:: region_runner::
     step {{cargo}} test -q -p server --lib
     step {{cargo}} check -q -p server --tests --features test-hooks
@@ -1686,8 +1672,8 @@ test-audit *paths:
     python3 scripts/test_inventory.py check {{paths}}
 
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
-#   just test-one game "--test it lod_streaming::pristine"
-#   just test-one client "--lib world_scale::"
+#   just test-one game "--test it lod_streaming::"
+#   just test-one client "--lib meshing::"
 # Naming `--lib` / `--test <target>` matters: it skips building (and linking)
 # every other test binary in the crate. Most integration tests live in ONE
 # binary per crate, `--test it` (tests/it.rs); filter it by file name +
@@ -1696,55 +1682,11 @@ test-audit *paths:
 test-one crate *args:
     {{cap}} {{cargo}} test -p {{crate}} {{args}}
 
-# Run the world-store tests against the dev Postgres (needs `just pg-up`).
-test-pg *args:
-    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one world-store "{{args}}"
-
-# Run the login tests against the dev Postgres (needs `just pg-up`).
-test-login-pg *args:
-    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one login "{{args}}"
-
-# The split-roles end-to-end tests (crates/server/tests/roles.rs, all slow): a coordinator
-# and a host over a real service link on localhost, against the dev Postgres (`pg-up`).
-test-r2:
-    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--features test-hooks --test roles -- --include-ignored"
-
-# The multi-host end-to-end tests (crates/server/tests/hosts.rs, all slow): a coordinator
-# and several hosts over real service and peer links on localhost, against the dev
-# Postgres (`pg-up`). Serial: each test already runs several hosts' region threads.
-test-r3:
-    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--features test-hooks --test hosts -- --include-ignored --test-threads=1"
-
-# The takeover crash table (crates/server/tests/takeover.rs, all slow): hosts under `claim`
-# with a lease shortened for the test, a real coordinator declaring successions, an heir
-# adopting, every crash point of R4's table, against the dev Postgres (`pg-up`). Serial.
+# The takeover rig's regression (crates/server/tests/takeover.rs, slow): hosts under `claim`
+# with a lease shortened for the test and a real coordinator, against the dev Postgres
+# (`pg-up`). Serial. `just test-full` runs it too.
 test-r4:
     MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--features test-hooks --test takeover -- --include-ignored --test-threads=1"
-
-# Region threading: a player walking across the seam between two regions that
-# run on different threads. Two layers, both tagged slow (so smoke / test-one /
-# test skip them and only the long `test-full` sweep ran them):
-#   - game `handoff_schedule`: the walk there and back under SEEDED scheduling
-#     jitter (permuted tick order, late inputs, missed ticks) — a failure
-#     names a seed that replays exactly — plus the rest of the game's seam
-#     tests: the manager's handoff (`handoff_manager`), the halo, intents,
-#     mining / placing / chests / piles across a seam, slimes, people and
-#     bodies crossing, body arrivals, and entities crossing between hosts over
-#     the peer session (`peer_session`, `peer_schedule`) and the peer journal
-#     (`peer_journal`) (`seam_tests` below;
-#     `voxel_body` is its own target);
-#   - server `threaded_world`: the same walk on real OS threads. Serial on
-#     purpose: each test already spawns 9+ region threads.
-# ~80 s–2 min warm (game ~45 s, the real-thread layer ~35 s, measured 2026-11-07). Run after
-# touching handoff, the WorldManager, region_threads or anything that crosses
-# a seam. The client-side twin (bit-exact convergence under late scheduling)
-# needs a Bevy-sized test binary, so it stays an explicit opt-in:
-#   just test-one client "--test it -- --include-ignored crossing::crossing_converges_under_late_region"
-seam_tests := "handoff_schedule:: handoff_manager:: peer_session:: peer_schedule:: peer_journal:: halo:: across_seam across_the_seam crosses_seam intents::intent_to_unloaded_owner mining::cooldown_does_not_cross item_piles::pickup_from_neighbour_pile item_piles::deposit_outside_region handoff_state::dynamic_arrival handoff_state::replayed_dynamic_arrival handoff_state::sleeping_body_arrives_asleep"
-test-threads:
-    {{cap}} {{cargo}} test -p game --test it -- --include-ignored {{seam_tests}}
-    {{cap}} {{cargo}} test -p game --test voxel_body -- --include-ignored body_leaving_region drops_travel_with_a_crossing_body replayed_voxel_body_arrival
-    {{cap}} {{cargo}} test -p server --test threaded_world -- --include-ignored --test-threads=1
 
 # Cross-target determinism: the same physics scene must end in the same state
 # on native and on wasm32 (node via wasm-bindgen-test-runner) —
@@ -1765,32 +1707,6 @@ determinism-wasm:
         {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test -p physics-next --test state_hash_wasm --target wasm32-unknown-unknown
-
-# The Slint screens' embedded sprites draw on wasm32 (node), where Slint would
-# hand them to the browser and the software renderer panicked
-# (crates/slint-ui/tests/wasm_images.rs, src/wasm_images.rs). Run it after a
-# Slint bump or a change to crates/slint-ui/build.rs. Same runner as
-# determinism-wasm.
-slint-wasm:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
-    root="$PWD/target/tools/wasm-bindgen-$ver"
-    [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
-        {{cap}} {{cargo}} test -p slint-ui --test wasm_images --target wasm32-unknown-unknown
-
-# The browser client's page → sim worker server-frame codec on wasm32 (node):
-# crates/client/tests/web_frame_wasm.rs (natively: `just test-one client "--lib web_frame::"`).
-# Builds the client lib for wasm32 (slow cold). Same runner as determinism-wasm.
-client-wasm:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
-    root="$PWD/target/tools/wasm-bindgen-$ver"
-    [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
-        {{cap}} {{cargo}} test -p client --test web_frame_wasm --target wasm32-unknown-unknown
 
 # Upstream rapier's own determinism tests, run from the vendored rapier 0.36
 # fork (docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md),
@@ -2540,77 +2456,49 @@ orion-login-token-push:
     fi
     unset tok
 
-# Whole quick suites (slow tests skipped). Minutes, not seconds — reach for
-# `smoke` / `test-one` while iterating and keep this for a broader sweep.
-test: test-game test-client test-server test-worldgen
+# Every test in the repository that is not tagged slow: both Rust workspaces (the root and
+# quest/), the vendored forks' upstream tests, the wasm32 determinism gates, the quest fuzz
+# regressions and the website's node test — after `test-audit`. Every committed test is a
+# regression or a gate (CLAUDE.md, Testing); a test slower than 100 ms carries
+# `#[ignore = "slow: >100ms — run via just test-full"]` and runs only in `test-full`.
+# Keeps going after a failing stage and ends with one PASS/FAIL line per stage.
+test: (_test_all "fast")
 
-# Rollback/undo invariants and seeded randomized rollback (quick subset).
-test-game:
-    {{cap}} {{cargo}} test -p game
+# `just test` plus every slow-tagged test (`--include-ignored`), the takeover rig against the
+# dev Postgres included (started first).
+test-full: pg-up (_test_all "full")
 
-# Client headless suite: sim-bridge, conversion, interpolation, meshing (quick subset).
-test-client:
-    {{cap}} {{cargo}} test -p client
-
-# Server suite compile-check: every server test is currently tagged slow
-# (multi-second region-thread rigs), so the quick run builds them and runs 0.
-test-server:
-    {{cap}} {{cargo}} test -p server --features test-hooks
-
-# Worldgen suite: pure-function generation + the dev disk cache.
-test-worldgen:
-    {{cap}} {{cargo}} test -p worldgen
-
-# Everything, slow correctness tests included — run before calling work done.
-# Still skips wall-clock perf gates, evidence-only tests, and the explicit
-# region-load benchmark; those retain their dedicated recipes.
-test-full:
-    {{cap}} {{cargo}} test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
-    {{cap}} {{cargo}} test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
-    {{cap}} {{cargo}} test -p server --features test-hooks -- --include-ignored --test-threads={{test_threads}}
-    {{cap}} {{cargo}} test -p worldgen -- --include-ignored --test-threads={{test_threads}} --skip region_load_cost
-
-# Keep-up budget benchmark (release): measures the region-tick cost and
-# asserts the death-spiral inequality (worst frame < tick period). Fails with
-# a number when a game change makes the sim too slow for the client to keep up.
-keepup-budget:
-    {{cap}} {{cargo}} test -p client --release --test keepup_budget -- --ignored --nocapture
-
-# Wall-clock keep-up soak (release, ~40s + build): real tick cadence + 60/s
-# fabricated input; fails if the prediction log trends up (death-spiral
-# signature). Debug builds measure but don't assert. Full output (incl. the
-# reconcile tracing) goes to target/soak.log; the [client-budget] / [soak]
-# summary lines are reprinted at the end so the attribution is readable.
-soak:
+_test_all mode:
     #!/usr/bin/env bash
     set -uo pipefail
-    log=target/soak.log
-    {{cap}} {{cargo}} test -p client --release --test reconcile_keepup soak_realtime_keepup -- --ignored --nocapture --test-threads=1 2>&1 | tee "$log"
-    rc=${PIPESTATUS[0]}
+    ign=""
+    [ "{{mode}}" = full ] && ign="--include-ignored"
+    results=()
+    stage() {
+        local name=$1; shift
+        echo "=== $name"
+        if "$@"; then results+=("PASS $name"); else results+=("FAIL $name"); fi
+    }
+    stage test-audit just test-audit
+    # The root workspace. The vendored forks run their upstream subset below; server's
+    # `takeover` target needs `test-hooks` and Postgres, so it runs on its own (test-full).
+    stage workspace {{cap}} {{cargo}} test --workspace --exclude rapier3d --exclude parry3d --exclude slotmapd \
+        -- $ign --test-threads={{test_threads}}
+    stage physics-next-upstream just physics-next-upstream
+    stage slotmapd {{cap}} {{cargo}} test -p slotmapd -- $ign
+    if [ "{{mode}}" = full ]; then stage takeover just test-r4; fi
+    stage determinism-wasm just determinism-wasm
+    stage quest just quest-test "--workspace -- $ign"
+    stage quest-wasm just quest-wasm
+    for d in quest/fuzz/regressions/*/; do
+        t=$(basename "$d")
+        stage "quest-fuzz-replay $t" just quest-fuzz-replay "$t"
+    done
+    stage site-test just site-test
     echo
-    echo "=== soak summary (full log: $log) ==="
-    cat <<'LEGEND'
-    [client-budget] = game-loop wall-time attribution, one line per 5s window:
-      window   actual window length (s)
-      util     busy share of the window (window - idle); this harness never
-               blocks the loop, so it always reads 100% here
-      tick     progress_world_one_tick calls (client ticks): count n, summed
-               wall time, mean, slowest single call
-      recon    reconcile passes for server events; replayed = predicted ticks
-               rolled back + re-simulated (separates replay cost from match cost)
-      snap     region snapshot loads (teardown + Rollback clone + world insert)
-      idle     time blocked waiting for events (live client select! only; 0 here)
-      other    window - idle - (tick+recon+snap): loop overhead, and in this
-               harness the time spent outside the manager (server sim, sleeps)
-      sim      per-region Tick executions incl. reconcile replays: count n,
-               ctrl = controller pass (physics; the hot part), input = input
-               step, scan = boundary scan; sim n > tick n x regions => replaying
-      worst    region with the highest avg per-execution cost
-    [soak]     1s home-region prediction-log depth samples; a rising series is
-               the death-spiral signature the test asserts against
-    LEGEND
-    grep -E "client-budget|\[soak\]" "$log" || true
-    exit $rc
+    echo "=== just {{ if mode == "full" { "test-full" } else { "test" } }}"
+    printf '%s\n' "${results[@]}"
+    ! printf '%s\n' "${results[@]}" | grep -q '^FAIL'
 
 # ---- Lint / format --------------------------------------------------------
 

@@ -1,3 +1,14 @@
+Regression-only tests (plans/2026-11-19-regression-only-tests.md, inventory beside it) — DONE 2026-11-19: every test
+outside the vendored forks that does not reproduce a bug seen in play or in a log was deleted (~3,900); 40 regression
+tests and 69 gates remain, `just test-audit` (in `smoke`) refuses an unmarked test, `just test` / `test-full` run
+everything (fast / with the slow-tagged). Next:
+- Fuzzing for the game workspace (plan to write), replacing the deleted broad tests — candidates: the wire codec
+  (`decode_packet`), the world-store blob decoders, `HostMsg` / `CoordMsg` / peer message decoding, rollback undo
+  (`hash(before) == hash(after undo)`) over random inputs, the seeded handoff schedule.
+- Decide: the creature lint (`bbmodel` `creatures::`, recipe `creature-check`) was deleted with the rest; restore it
+  as a `Gate:` if `just creatures` should keep linting every model through the real parser.
+- `crates/world-store/tests/fixtures/world_map.bin` carries an uncommitted change and no test reads it any more.
+
 Direction (2026-10-20): Dwarf Fortress–style game on the multi-region engine, MVP = fortress
 mode. No phased plan (rejected 2026-10-20): implement features piece by piece, roughly
 modelling DF; reference research in docs/superpowers/specs/2026-10-20-dwarf-fortress-research/
@@ -273,7 +284,7 @@ Stud world — full replacement of voxel chunks (master plan docs/superpowers/pl
 - Re-brick on exposure (2026-11-11, `game/src/stud_rebrick.rs`): a dug hole's walls and floor are real bricks, and natural cliff faces are too (the recipe's apron makes `pristine_chunk` exposure-aware; cliff chunks stay pristine). Open: worlds stored before the apron (`FORMAT_STUD_GROUND` 1) keep smooth cliffs at region seams until re-forged; a carve cutting through a real brick re-splits the rest order-dependently; filler fragments (a much-dug chunk, a sheer cliff's wall layers) are never merged back.
 - (recheck on voxels) Tiles placed by a player (`Intent::PlaceBlock`) are not marked constructed.
 - Lost test coverage still open, listed per stage in the plan's P10b entry (mesh parity, a real-adapter terrain probe, real-thread regions from `RegionSeed::Fresh`, step-edge seam agreement on real terrain, the halo memory probe, …); restored 2026-11-11: stud-body buoyancy, a replayed stud-body arrival's drops, tree-across-a-seam on every placement, cliffs closed at genesis, tree window-independence, frozen lake / sea.
-- Postgres was never run for migration `0005_drop_voxel_terrain` (compiled only): `just test-pg` / `just test-r2` before shipping.
+- Postgres was never run for migration `0005_drop_voxel_terrain` (compiled only): run a world on it (`just dev-r2`) before shipping.
 
 Stud chunks (experiment, 2026-11-09; plan docs/superpowers/plans/2026-11-09-stud-chunks.md, spec specs/2026-11-08-stud-chunks-design.md) — implemented, `just run-studs` to look. Open decisions:
 - Step height: `STUD_STEP_HEIGHT_M = 0.65` (auto-step one brick); LEGO-style controllers auto-step a plate and jump a brick. Decide at the first playtest (feel not yet judged).

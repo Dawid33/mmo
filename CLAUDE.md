@@ -33,7 +33,7 @@ Old RTS pivot is on branch `ds/rtsPivot`. `TODO.md` tracks the current direction
 The root `justfile` is canonical — `just --list`. Key recipes: `build`, `run` (debug launch straight into
 an adventure), `run-two` (two players adventuring at one site), `play` (real start: main menu → generator →
 world map → Adventure tab), `server` + `client` (dev server on 127.0.0.1:6466), `web`, `smoke`, `test-one`,
-`test-threads`, `determinism-wasm`, `clippy`, `world-map`. **Keep the justfile in sync**: any new or
+`test`, `test-full`, `test-audit`, `determinism-wasm`, `clippy`, `world-map`. **Keep the justfile in sync**: any new or
 changed build/run/test command updates its recipe in the same change.
 
 - **Toolchain**: one DATED nightly pinned in `rust-toolchain.toml` (used only to keep `target/` small —
@@ -77,10 +77,9 @@ player-written quest blocks. `just quest-check | quest-test | quest-run <dir> | 
 `docs/superpowers/plans/2026-11-16-quest-script-language-mvp.md` (the MVP, built) and
 `docs/superpowers/plans/2026-11-17-quest-script-completion.md` (everything after it, in order: Phase 10, leftovers,
 fuzzing, the game, packages).
-**Tests in `quest/` (owner's rule, 2026-11-16):** the MVP plan's tests are the initial implementation's. Once it is
-built, a test is written ONLY as a regression for a bug that was actually found — never pre-emptively, not "for
-coverage", not alongside a new feature by default. Broad assurance comes from fuzzing (completion plan Part 3), not from
-more hand-written tests. Phase 10 (dialogue and quests, plan
+**Tests in `quest/` (owner's rule, 2026-11-16; the whole repository since 2026-11-19 — Testing below):** the MVP
+plan's tests are the initial implementation's; since it was built only regression tests are committed. Broad assurance
+comes from fuzzing (completion plan Part 3), not from more hand-written tests. Phase 10 (dialogue and quests, plan
 `docs/superpowers/plans/2026-11-17-quest-script-completion.md` Part 1) was initial implementation too (Dawid,
 2026-11-17) and carried its own tests; it closed with its corpus (Task 49, 2026-11-18), so the regression-only rule
 applies again.
@@ -180,28 +179,34 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
 
 ## Testing
 
-**Never run whole game/server/client suites as a routine check.** Verify with:
+**The only tests ever committed are regression tests** (owner's rule, 2026-11-19 — the whole repository, as `quest/`
+since 2026-11-16): a test reproduces a bug that was actually SEEN — in play or in a log (a runtime log, a probe's or a
+hand check's output) — and carries `/// Regression: <the bug> (<where it was seen, the fix>)` (`//` in node, `#` in
+python) right above it. Temporary tests written while working (to drive a change, to check an idea) are fine and are
+deleted before the commit; never commit one pre-emptively, "for coverage", or alongside a new feature. A bug found by
+a review or by another test is not a regression of this kind; a fuzzer's crash is (its output is the log). The other committed kind is a **gate** (`/// Gate:
+<what it guards>`): the determinism and quality goldens (`wasm_determinism`, `physics_goldens::`, `state_hash_wasm`,
+`scene_hash_golden`, `forge_quality`, the `DensityFn` mirror) and `physics-next`'s pins of the vendored forks'
+`// mmo-fork` hunks; a new gate needs the owner. `just test-audit` (first step of `smoke`) fails on any test without
+one of the two markers (vendored forks excepted). Broad assurance comes from fuzzing (planned, `TODO.md`), not from
+more hand-written tests. Inventory and plan: `docs/superpowers/plans/2026-11-19-regression-only-tests.md`.
+
+Verify with:
 
 - `just test-one <crate> "<cargo test args>"` for exactly the touched tests. Integration tests are ONE
   `it` binary per crate (`--test it <file>::`); files that touch process-global state (`HASH_MODE`, the
-  forged world, a logger, wasm32, perf gates) keep their own `[[test]]` target — a new such file needs one.
-  Server test targets `roles`, `coordinator_rt`, `hosts` and `takeover` need `--features test-hooks`
-  (`just test-r2` / `test-r3` / `test-r4` / `test-server` pass it; `observer` does not); Postgres-backed
-  tests take their throwaway database from `crates/pg-test-support` (`MMO_TEST_DATABASE_URL`). Multi-host:
-  `just test-r3` (real hosts over real links, serial), `just test-r4` (the takeover crash table, serial)
-  plus the seeded layer `game` `peer_schedule::` / `peer_journal::` (part of `just test-threads`); the
-  browser's frame codec on wasm32: `just client-wasm`.
-- After a wide change run each touched crate's whole non-client suite once — filtered runs let two broken
-  world-store tests sit unnoticed.
+  forged world, a logger, wasm32) keep their own `[[test]]` target — a new such file needs one. Server's
+  `takeover` target needs `--features test-hooks` and Postgres (`just test-r4`; `crates/pg-test-support`,
+  `MMO_TEST_DATABASE_URL`).
 - `just smoke` — the default sanity check, hard-limited to 60 s. It only type-checks the client; running
   client tests (`just test-one client "--lib <filter>"`) is a slow opt-in — **ask first**.
-- `just test-threads` after touching handoff, `WorldManager`, `region_threads` or anything crossing a seam
-  (seeded scheduling jitter in `game/tests/handoff_schedule.rs` + real threads in `server/tests/threaded_world.rs`;
-  scheduling-sensitive correctness goes in the seeded layer).
 - `just determinism-wasm` after touching sim math, the physics forks, or anything hashed/serialized.
   `physics_goldens::` pins physics behaviour (re-record only on purpose).
-- `just test` / `just test-full` only when the user asks or a change is wide — say so first.
-- Tag tests slower than 100 ms `#[ignore = "slow: >100ms — run via just test-full"]`.
+- A test slower than 100 ms is tagged `#[ignore = "slow: >100ms — run via just test-full"]`. `just test` runs every
+  fast test everywhere (both workspaces, the vendored forks' upstream subset, the wasm32 gates, the quest fuzz
+  regressions, the website's node test), `just test-full` adds the slow ones (and the takeover rig against the dev
+  Postgres). Both keep going after a failing stage and end with a PASS/FAIL line per stage; run them when the user
+  asks or a change is wide — say so first.
 - Headless client harnesses must use a tiny world (`set_lod_table(&[])`, near radius 0) or they OOM.
 - A test whose outcome reads block props calls `common::install_real_block_props()` first.
 
@@ -273,7 +278,7 @@ changes belong in `deploy/modules/monitoring/`, not in the UI.
   `all` only: login→process push, 127.0.0.1:6490) + `_CERT_HASH_FILE`, `VOXEL_OWNERSHIP=allinone|static|claim`,
   `VOXEL_HOST_NAME`, `VOXEL_WORLD_ID` (in every link hello), `VOXEL_SUPER_REGION_REGIONS` (16; checked against the
   world row). `just dev-r2` runs login + coordinator + one `static` host `h0` (state in git-ignored
-  `target/dev-r2/`); `just coordinator|host`, `just test-r2`.
+  `target/dev-r2/`); `just coordinator|host`.
   **The coordinator takes the same `VOXEL_OWNERSHIP` as its hosts**: its own environment decides whether it
   declares successions (`roles::coordinator_crash_policy`, from that word alone); a host's `Attach` carries its
   crash policy, and the coordinator refuses one that is not its own (the error names `VOXEL_OWNERSHIP`).
@@ -602,7 +607,6 @@ Factorio install or `FACTORIO_DATA`; Wube's sprites are not shippable). Sources 
 generated into `slint-ui-game` / `slint-ui-frontend` / `slint-ui-tools`. Compiled with the `fortress` theme
 only (`build_common.rs` `single_theme_overlay`). In widgets never bind `visible`/`opacity`/shadows on a
 component's ROOT (forces inlining, bloats codegen). Every root component calls `GameTheme.apply()` in `init`.
-After a Slint bump run `just slint-wasm`.
 
 **Worldgen** (`crates/worldgen`) — `generate_region(RegionCoords, …)` (`generate_columns` for a window,
 `generate_region_forged` for an explicit forged world) is a pure function of coordinates (+ the installed
