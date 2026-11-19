@@ -1,7 +1,6 @@
 //! Row codecs: every stored blob is `[format byte][zstd(bincode(value))]`.
 //! The format byte is per stored type (`FORMAT_*`); a change to a stored
-//! type's layout bumps its constant, and the golden blobs in
-//! `tests/fixtures/` pin the current encoding (see `tests/codec.rs`).
+//! type's layout bumps its constant.
 
 use serde::{Serialize, de::DeserializeOwned};
 

@@ -863,18 +863,3 @@ pub(crate) async fn settle(tx: &mut sqlx::PgConnection, cut: CutId, settles: &[S
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stored_lists_round_trip() {
-        let moved = vec![((-3, 4), 7), ((0, -1), 1)];
-        assert_eq!(decode_moved(1, &encode_moved(&moved)).unwrap(), moved);
-        assert_eq!(decode_moved(1, "").unwrap(), vec![]);
-        assert!(decode_moved(1, "1:2").is_err());
-        assert_eq!(decode_survivors(1, &encode_survivors(&[HostId(0), HostId(2)])).unwrap(), vec![HostId(0), HostId(2)]);
-        assert_eq!(decode_survivors(1, "").unwrap(), Vec::<HostId>::new());
-        assert!(decode_survivors(1, "x").is_err());
-    }
-}

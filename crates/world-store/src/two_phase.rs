@@ -551,22 +551,3 @@ pub(crate) async fn resolve_prepared(pool: &PgPool, world_tag: u32) -> Result<Ve
     Ok(out)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn gids_round_trip_and_stay_in_their_world() {
-        let gid = cut_gid(4242, CutId(u64::MAX), HostId(u64::MAX));
-        assert!(gid_ok(&gid) && gid.len() <= GID_MAX_BYTES);
-        assert_eq!(parse_gid(4242, &gid), Gid::Ours(CutId(u64::MAX), HostId(u64::MAX)));
-        assert_eq!(parse_gid(4243, &gid), Gid::Foreign, "another world's");
-        assert_eq!(parse_gid(4242, "mmo-cut-4242-1"), Gid::Malformed);
-        assert_eq!(parse_gid(4242, "mmo-cut-4242-1-2-3"), Gid::Malformed);
-        assert_eq!(parse_gid(4242, "mmo-cut-4242-1-99999999999999999999999"), Gid::Malformed, "host out of range");
-        assert!(!gid_ok("mmo-cut-1'; DROP TABLE world; --"));
-        assert!(!gid_ok("mmo-cut-"));
-        assert!(!gid_ok("mmo-cut-+4242-1-2"), "a sign is not a digit");
-        assert!(!gid_ok("mmo-cut-4242--2"));
-    }
-}

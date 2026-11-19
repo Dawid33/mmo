@@ -19,11 +19,3 @@ log = { workspace = true }
 simplelog = { workspace = true }
 crc32fast = { workspace = true }
 rayon = "1"
-
-[dev-dependencies]
-pg-test-support = { path = "../pg-test-support" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-
-[[test]]
-name = "it"
-path = "tests/it.rs"

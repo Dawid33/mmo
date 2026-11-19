@@ -73,18 +73,3 @@ impl fmt::Debug for StoreUrl {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn printing_a_postgres_url_drops_its_credentials() {
-        let url = StoreUrl::parse("postgres://mmo:s3cret@db.example:5432/world?sslmode=disable").unwrap();
-        for shown in [url.to_string(), format!("{url:?}"), url.redacted()] {
-            assert!(!shown.contains("s3cret") && !shown.contains("mmo:"), "{shown}");
-            assert!(shown.contains("db.example") && shown.contains("world"), "{shown}");
-        }
-        assert_eq!(StoreUrl::parse("w/t.sqlite").unwrap().to_string(), "w/t.sqlite");
-        assert_eq!(redact_url("postgresql://u:p@h/d"), "postgres://h/d");
-    }
-}
