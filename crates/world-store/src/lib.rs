@@ -29,6 +29,7 @@ use std::fmt;
 
 pub use codec::*;
 pub use coordinator_tx::{AfterCommit, Bootstrapped, TransitionWrite, TransitionWritten};
+pub use mailbox::MailboxHead;
 pub use counters::StoreCounters;
 pub use fence::{Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};

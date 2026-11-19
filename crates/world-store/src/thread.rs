@@ -128,7 +128,7 @@ pub(crate) enum Request {
     /// the next ones of its boot read (`mailbox.rs`). host, boot, after, limit.
     MailboxRead(HostId, u64, u64, u32, Reply<Vec<(u64, Vec<u8>)>>),
     /// Coordinator HTTP API: per host with unread mailbox rows, its oldest's boot and `at_ms`.
-    MailboxOldest(Reply<Vec<(HostId, u64, u64, u64)>>),
+    MailboxOldest(Reply<Vec<crate::MailboxHead>>),
     /// Coordinator HTTP API: the login answers after a cursor. after, limit.
     LoginAnswersRead(u64, u32, Reply<Vec<(u64, Vec<u8>)>>),
     /// Elastic 2b Task 4: a coordinator replica registers (`replicas.rs`).

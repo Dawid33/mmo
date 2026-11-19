@@ -25,6 +25,10 @@ use sqlx::{PgPool, Row};
 
 use crate::StoreError;
 
+/// One host's unread mailbox, as [`mailbox_oldest_pg`] reads it: `(host, boot, at_ms, rows)` — the
+/// boot and `at_ms` of its oldest row, and how many rows it has.
+pub type MailboxHead = (HostId, u64, u64, u64);
+
 /// What SQLite answers for every mailbox call.
 pub(crate) const MAILBOX_UNSUPPORTED: &str = "the host mailbox and the login answers need Postgres (the coordinator's HTTP API)";
 
@@ -49,7 +53,7 @@ pub(crate) async fn mailbox_read_pg(pool: &PgPool, host: HostId, boot: u64, afte
 
 /// One row per host with unread rows: `(host, boot, at_ms, rows)` — the boot and `at_ms` of its
 /// oldest (lowest `seq`) and how many rows it has (every boot's). One plain read, no lock.
-pub(crate) async fn mailbox_oldest_pg(pool: &PgPool) -> Result<Vec<(HostId, u64, u64, u64)>, StoreError> {
+pub(crate) async fn mailbox_oldest_pg(pool: &PgPool) -> Result<Vec<MailboxHead>, StoreError> {
     let rows = sqlx::query(
         "SELECT DISTINCT ON (host) host, boot, at_ms, COUNT(*) OVER (PARTITION BY host) FROM outbox ORDER BY host, seq",
     )

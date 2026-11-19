@@ -855,8 +855,8 @@ pub struct CoordinatorRuntime {
     /// With the `hosts` read in flight (`Delivery::Mailbox`): each host's oldest unread mailbox
     /// row ([`Input::HostsRead`]'s `mailbox_oldest`), on its way, then as answered.
     /// Each element `(host, boot, at_ms, rows)` (`rows`: the host's unread rows, for the gauges).
-    mailbox_rx: Option<Answer<Vec<(HostId, u64, u64, u64)>>>,
-    mailbox_read: Option<Result<Vec<(HostId, u64, u64, u64)>, String>>,
+    mailbox_rx: Option<Answer<Vec<world_store::MailboxHead>>>,
+    mailbox_read: Option<Result<Vec<world_store::MailboxHead>, String>>,
     /// Post-commit effects of committed transitions, in flight or waiting to be tried again.
     after: Vec<AfterJob>,
     /// Lookups of cut outcomes in flight or waiting to be tried again.
