@@ -193,13 +193,15 @@ resource "kubernetes_pod_disruption_budget_v1" "coordinator" {
 
 # ClusterIP, one port: hosts and the login service dial
 # https://coordinator.<ns>.svc.cluster.local:6480 (HTTP/2 over TCP; output login_link) and
-# the Service routes each connection to a Ready replica only (the /readyz probe: a replica
-# whose join has not committed, or one waiting for its forge, gets none). A replica that
-# dies breaks its connections; the dialer reconnects through the Service. This was a
-# headless Service before the HTTP API (UDP, published not-ready addresses): Kubernetes
-# cannot change cluster_ip in place, so an apply REPLACES the Service. The health port is
-# here for the ServiceMonitor (charts/world-monitor), which therefore scrapes Ready
-# replicas only.
+# the Service routes each connection to a Ready replica (the /readyz probe: a replica whose
+# join has not committed, or one waiting for its forge, gets none). A replica that dies
+# breaks its connections; the dialer reconnects through the Service. A NEW world gets a
+# ClusterIP Service. An EXISTING world's Service was headless (cluster_ip "None", UDP):
+# cluster_ip is Optional+Computed in the provider, so dropping it from the config keeps the
+# headless value in state and an apply only updates the ports in place. It is replaced
+# only explicitly (`-replace=module.world.kubernetes_service_v1.coordinator`, the orion
+# runbook, TODO.md). Both work: hosts and login dial by DNS name over TCP. The health port
+# is here for the ServiceMonitor (charts/world-monitor).
 resource "kubernetes_service_v1" "coordinator" {
   metadata {
     name      = "coordinator"

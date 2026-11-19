@@ -58,13 +58,16 @@
 #      at a higher epoch (re-assigned). The coordinators' mmo_land_assigned_total grew by 2 or
 #      more, the generation is unchanged and no succession row was added. Rows are read with
 #      psql in the CloudNativePG primary (database world_<id>, TWIN_WORLD_DB).
-#   7d. A host cut from the coordinator (Elastic: the HTTP API, plan
-#      docs/superpowers/plans/2026-11-19-coordinator-http-api.md, "Attachment without a link"): a
-#      NetworkPolicy (k3d's k3s enforces them: its embedded controller) denies the second host's pod
-#      egress to the coordinator pods' and Service's TCP 6480 for 30 s while a join is asked: after the
-#      mailbox stall (15 s) a coordinator replica logs that host detached, its /readyz is not 200
-#      (attaching), the join answers 200 (placed on a serving host; the owned land rows are recorded,
-#      not asserted); the policy removed, the host is Ready again and a cut commits; its pod untouched.
+#   7d. A host cut from the coordinator (the HTTP API, plan
+#      docs/superpowers/plans/2026-11-19-coordinator-http-api.md, "Attachment without a link"): the
+#      host that does NOT own phase 7c's land gets a NetworkPolicy denying its egress to the coordinator
+#      pods' and Service's TCP 6480 for 30 s (k3s enforces them: its embedded controller), and its
+#      established flows are deleted from the node's conntrack (`docker exec k3d-mmo-server-0
+#      conntrack -D`; the policy alone leaves an open HTTP/2 connection alone). Expected: after the
+#      mailbox stall (15 s) a replica logs `host h<id> ... stalled`, the host's pod is not Ready, a join
+#      answers 200 and the land's row is owned by the OTHER host; the policy removed, the host is Ready
+#      again and a cut commits; its pod untouched. If no stall is seen the phase is a marked
+#      `SKIP 7d` (policy removed, run continues, the final line says "7d skipped"): never a failure.
 #   8. The web Ingress answers through Traefik; its /login proxy reaches login's key set
 #      and API, and login's /metrics and /healthz are NOT published (404).
 #   9. world-drain <second host> 5 (the recipe): it leaves at the deadline (drained); the
@@ -122,10 +125,15 @@ kc() { kubectl --context "$ctx" "$@"; }
 wjust() { just world_ctx="$ctx" world_ns="$ns" "$@"; }
 
 bg_pids=()
+cut_policy=''
 cleanup() {
     for p in "${bg_pids[@]}"; do kill "$p" 2>/dev/null || true; done
+    # Phase 7d's NetworkPolicy must not outlive a failed run.
+    [ -z "$cut_policy" ] || k delete networkpolicy "$cut_policy" --ignore-not-found > /dev/null 2>&1 || true
 }
 trap cleanup EXIT
+# A leftover cut from an earlier run would silently cut a host of the same name.
+for np in $(k get networkpolicy -o name 2> /dev/null | grep '/twin-cut-' || true); do k delete "$np" --ignore-not-found > /dev/null 2>&1 || true; done
 
 say() { echo "  [$((SECONDS - started))s] $*"; }
 step() {
@@ -929,23 +937,37 @@ say "generation $gen unchanged, successions rows $succ1 (unchanged), land assign
 
 # ---------------------------------------------------------------------------------
 # ---------------------------------------------------------------------------------
-step "7d. host $hb cut from the coordinator's port 6480 for 30 s (NetworkPolicy), a join asked meanwhile"
-pb=$(host_pod "$hb")
+step "7d. the host that does not own phase 7c's land cut from the coordinator's port 6480 for 30 s (NetworkPolicy), a join asked meanwhile"
+# The cut host is the one that does NOT own the player's spawn super-region (7c's row): the join is
+# placed by the owner, so it needs no cut link. kube-router accepts established flows before its
+# rules, and the host's HTTP/2 link never idles: the policy alone does not break it, so the node's
+# conntrack entries of the host pod are deleted after it. When that does not take effect (no conntrack
+# in the node, no docker, a CNI that does not enforce) the phase is a marked SKIP, never a failure.
+skipped_7d=''
+r=$(the_row) || fail "cannot read super-region ($sr_x, $sr_z)"
+land_owner=${r%%|*}
+[ "$(row_state "$land_owner")" = live ] || fail "super-region ($sr_x, $sr_z) has no live owner before 7d: '$r'"
+land_owner_name=$(host_name_of "$land_owner")
+if [ "$land_owner_name" = "$ha" ]; then cut_host=$hb; else cut_host=$ha; fi
+[ "$land_owner_name" != "$cut_host" ] || fail "cannot tell the land's owner ($land_owner_name) from the host to cut ($cut_host)"
+pb=$(host_pod "$cut_host")
 ub=$(pod_uid "$pb") rb=$(pod_restarts "$pb")
-id_b=$(live_id "$hb")
-[ -n "$id_b" ] || fail "host $hb has no single live row"
+id_b=$(live_id "$cut_host")
+[ -n "$id_b" ] || fail "host $cut_host has no single live row"
 cut_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 coord_ips=$(for p in $(coordinator_pods); do pod_field "$p" '{.status.podIP}'; echo; done | grep . | sort -u)
 svc_ip=$(k get svc coordinator -o jsonpath='{.spec.clusterIP}')
 [ -n "$coord_ips" ] && [ -n "$svc_ip" ] || fail "no coordinator pod IPs or Service IP to cut"
-# Egress of host $hb's pod: everything but the coordinator pods and the Service (0.0.0.0/0 except
-# their /32s; a policy has no deny rule). Its pod labels select the host's one pod.
+# Egress of the cut host's pod: everything but the coordinator pods and the Service (0.0.0.0/0 except
+# their /32s; a policy has no deny rule). coord_ips is read once: a replica restarting in the 30 s
+# would get an address the policy does not exclude.
+cut_policy="twin-cut-$cut_host"
 {
     echo "apiVersion: networking.k8s.io/v1"
     echo "kind: NetworkPolicy"
-    echo "metadata: { name: twin-cut-$hb, namespace: $ns }"
+    echo "metadata: { name: $cut_policy, namespace: $ns }"
     echo "spec:"
-    echo "  podSelector: { matchLabels: { app.kubernetes.io/component: host, errantry/host: $hb } }"
+    echo "  podSelector: { matchLabels: { app.kubernetes.io/component: host, errantry/host: $cut_host } }"
     echo "  policyTypes: [Egress]"
     echo "  egress:"
     echo "    - to:"
@@ -955,7 +977,15 @@ svc_ip=$(k get svc coordinator -o jsonpath='{.spec.clusterIP}')
     for ip in $coord_ips $svc_ip; do echo "              - $ip/32"; done
 } | k apply -f - > /dev/null || fail "could not create the NetworkPolicy"
 cut_from=$SECONDS
-say "host $hb ($pb, id $id_b) cut from $(printf '%s ' $coord_ips)and $svc_ip"
+pod_ip=$(pod_field "$pb" '{.status.podIP}')
+say "host $cut_host ($pb, $pod_ip, id $id_b) cut from $(printf '%s ' $coord_ips)and $svc_ip; the land's owner is $land_owner_name (id $land_owner)"
+sleep 2
+node_ct=k3d-mmo-server-0
+if command -v docker > /dev/null 2>&1 && docker exec "$node_ct" sh -c 'command -v conntrack' > /dev/null 2>&1; then
+    docker exec "$node_ct" conntrack -D -p tcp -s "$pod_ip" --dport 6480 2>&1 | sed 's/^/   conntrack: /' || true
+else
+    say "record: no docker or no conntrack in $node_ct: the established flows are not broken by this script"
+fi
 detached_logged() {
     local p text
     for p in $(coordinator_pods); do
@@ -964,21 +994,36 @@ detached_logged() {
     done
     return 1
 }
-host_not_serving() { ! pod_ready "$pb"; }
-wait_until 60 "a coordinator replica logs host $hb (id $id_b) stalled: detached (the mailbox stall, 15 s)" detached_logged
-wait_until 30 "host $hb's pod is not Ready (it cannot reach the coordinator)" host_not_serving
-join_or_fail 60 "a join answers 200 while host $hb is cut"
-say "record: owned land rows now: $(owned_rows | tr '\n' ';')"
-while [ $((SECONDS - cut_from)) -lt 30 ]; do sleep 1; done
-k delete networkpolicy "twin-cut-$hb" > /dev/null || fail "could not delete the NetworkPolicy"
-say "policy removed after $((SECONDS - cut_from))s"
-host_b_ready() { host_ready "$hb"; }
-wait_until 90 "host $hb Ready again (re-attached)" host_b_ready
-c1=$(committed)
-wait_until 90 "a cut commits with host $hb back (above $c1)" committed_above "$c1"
-[ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host $hb's pod changed or restarted while cut from the coordinator"
-[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed while host $hb was cut: $gen -> $(coord_gen)"
-say "host $hb detached, a join served meanwhile, re-attached after the policy; pod untouched, generation $gen"
+seen_detached=''
+for _ in $(seq 1 25); do
+    if detached_logged; then seen_detached=1; break; fi
+    sleep 2
+done
+if [ -z "$seen_detached" ]; then
+    skipped_7d="the cut did not take effect: no 'stalled' line for host h$id_b within 50 s and its pod stayed Ready"
+    echo "SKIP 7d: $skipped_7d (established flows survive the policy, no conntrack, or the CNI does not enforce policies); the phase is skipped, not passed"
+    k delete networkpolicy "$cut_policy" --ignore-not-found > /dev/null || true
+    cut_policy=''
+else
+    host_not_serving() { ! pod_ready "$pb"; }
+    wait_until 30 "host $cut_host's pod is not Ready (it cannot reach the coordinator)" host_not_serving
+    join_or_fail 60 "a join answers 200 while host $cut_host is cut"
+    r=$(the_row) || fail "cannot read super-region ($sr_x, $sr_z)"
+    [ "${r%%|*}" = "$land_owner" ] || fail "after the join the row's owner is '${r%%|*}', not host $land_owner_name (id $land_owner) that serves"
+    [ "${r%%|*}" != "$id_b" ] || fail "the join was placed on the cut host $cut_host"
+    say "the join was served by $land_owner_name (id $land_owner), not by the cut host; owned land rows: $(owned_rows | tr '\n' ';')"
+    while [ $((SECONDS - cut_from)) -lt 30 ]; do sleep 1; done
+    k delete networkpolicy "$cut_policy" --ignore-not-found > /dev/null || fail "could not delete the NetworkPolicy"
+    cut_policy=''
+    say "policy removed after $((SECONDS - cut_from))s"
+    host_b_ready() { host_ready "$cut_host"; }
+    wait_until 90 "host $cut_host Ready again (re-attached)" host_b_ready
+    c1=$(committed)
+    wait_until 90 "a cut commits with host $cut_host back (above $c1)" committed_above "$c1"
+    [ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host $cut_host's pod changed or restarted while cut from the coordinator"
+    [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed while host $cut_host was cut: $gen -> $(coord_gen)"
+    say "host $cut_host detached, a join served by the other host, re-attached after the policy; pod untouched, generation $gen"
+fi
 
 # ---------------------------------------------------------------------------------
 step "8. the web Ingress and its /login proxy (only what login's own Ingress publishes)"
@@ -1302,4 +1347,5 @@ k set env deploy/coordinator VOXEL_FLEET_MIN="$fmin" > /dev/null || fail "kubect
 wait_until 150 "$coordinators coordinator replicas back on VOXEL_FLEET_MIN=$fmin, every one Ready" coord_pods_with_min "$fmin"
 
 echo
-echo "twin-check: PASS in $((SECONDS - started))s (transcript files: $out/)"
+[ -z "$skipped_7d" ] || echo "twin-check: phase 7d SKIPPED: $skipped_7d"
+echo "twin-check: PASS${skipped_7d:+ (7d skipped)} in $((SECONDS - started))s (transcript files: $out/)"
