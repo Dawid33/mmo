@@ -649,9 +649,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Whether this host already holds `player`: online (any session), parked, parking,
-    /// moving, its body being created, awaited after a hand-off, or a login of it waiting
-    /// for a park.
     /// `player`'s record when this host holds the player ONLY as a parked record (not online,
     /// parking, being created or awaiting its park).
     pub(super) fn parked_only(&self, player: PlayerId) -> Option<&PlayerRecord> {
@@ -663,6 +660,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         (!live).then_some(record)
     }
 
+    /// Whether this host already holds `player`: online (any session), parked, parking,
+    /// moving, its body being created, awaited after a hand-off, or a login of it waiting
+    /// for a park.
     pub(super) fn holds_player(&self, player: PlayerId) -> bool {
         self.player_of.values().any(|p| *p == player)
             || self.parked_players.contains_key(&player)

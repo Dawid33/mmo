@@ -3765,6 +3765,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         // this host holds its newest copy, so the player goes there as a move ([`Self::move_to_peer`]:
         // queued, conserved; the session follows as an observer of the new home).
         if held_here && self.is_foreign(target) && record.as_ref().is_some_and(|r| r.region == target) {
+            // Its claim, as a restore here would take it up: `move_to_peer` hands over the
+            // session's claim (`adventurer_of`), not the record's.
+            if let Some(site) = record.as_ref().and_then(|r| self.restored_adventure(r)) {
+                self.adventurer_of.insert(id, site);
+            }
             let landing = self.landing_in(target);
             let m = Moving { from: target, target, landing, then: Vec::new() };
             return self.move_to_peer(id, m, record.map(Box::new), now_ms);
@@ -3823,13 +3828,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Put a returning player back: its body and `Client` in the record's region
     /// (`RestorePlayer`, waking it if parked), and its adventure — only if the
     /// history still knows its site.
+    /// The adventure claim a restored `record` brings back: its site, unless the coordinator's
+    /// view knows no such site. Before the coordinator's first view the host cannot tell: the
+    /// claim stands. The filter is only this host's early guess: the coordinator's answer to
+    /// `PlayerOnline` is final (`ClaimIs`).
+    fn restored_adventure(&self, record: &PlayerRecord) -> Option<SiteId> {
+        record.adventure.filter(|site| self.world_view.is_none() || self.site_regions.contains_key(site))
+    }
+
     fn restore_player(&mut self, id: ClientId, record: PlayerRecord, now_ms: u64) {
         let region = record.region;
-        // Before the coordinator's first view the host cannot tell: the claim stands. The
-        // filter is only this host's early guess: the coordinator's answer to
-        // `PlayerOnline` is final (`ClaimIs`).
-        let known = |site: SiteId| self.world_view.is_none() || self.site_regions.contains_key(&site);
-        let adventure = record.adventure.filter(|&site| known(site));
+        let adventure = self.restored_adventure(&record);
         self.homes.insert(id, region);
         if let Some(&player) = self.player_of.get(&id) {
             self.creating.insert(id, (region, player, record.clone()));
