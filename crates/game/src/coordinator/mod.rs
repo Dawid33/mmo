@@ -282,13 +282,14 @@ pub struct Coordinator {
     /// Mailbox rows ([`Delivery::Mailbox`], [`Self::route_out`]), in order: they leave with the
     /// next transition, written in its transaction.
     outbox: Vec<OutboxMsg>,
-    /// The hosts whose older mailbox rows the next transition deletes before it inserts its own:
-    /// an `Attach` applied (its rows decided before it are reconciled by it), a detach, a host's
-    /// end. In order, a host possibly more than once ([`Self::drop_mailbox`]): a transition handed
-    /// back puts its drops at the head, so a write recognised as committed after all removes
-    /// exactly its own and a drop decided after it stays ([`Self::outbox_committed`]); the store
-    /// deletes a host's rows once however often it is named.
-    outbox_drop: Vec<HostId>,
+    /// The mailbox rows the next transition deletes before it inserts its own ([`MailboxDrop`]):
+    /// every row of a host — an `Attach` applied (its rows decided before it are reconciled by
+    /// it), a detach, a host's end — or of one stalled boot no attachment holds (the ticker's
+    /// orphan rule, [`Self::drop_orphan_mailbox`]). In order, a host possibly more than once
+    /// ([`Self::drop_mailbox`]): a transition handed back puts its drops at the head, so a write
+    /// recognised as committed after all removes exactly its own and a drop decided after it stays
+    /// ([`Self::outbox_committed`]); the store deletes a row once however often it is named.
+    outbox_drop: Vec<MailboxDrop>,
     /// Hosts' messages about a world cut this cache cannot know yet — an id above its last one
     /// ([`Self::take_refresh_wanted`]): the row moved past this cache (a host got the `BeginCut`
     /// of a transition another replica committed). Never looked up while the cache may be stale
@@ -1488,7 +1489,16 @@ impl Coordinator {
     /// (an `Attach`, a detach, a host's end). Never deduplicated: each entry is one decision's
     /// (positional, for [`Self::outbox_committed`]).
     pub(super) fn drop_mailbox(&mut self, host: HostId) {
-        self.outbox_drop.push(host);
+        self.outbox_drop.push(MailboxDrop { host, boot: None });
+    }
+
+    /// `host`'s mailbox rows of boot `boot` — a boot no attachment holds, whose oldest row waited
+    /// past [`MAILBOX_STALL_MS`] unread (the ticker's orphan rule, `input.rs` `stalled_mailboxes`)
+    /// — are deleted by the next transition; its rows of any other boot stay. Decided from a
+    /// ticker's read (never logged): a rebase drops it with the rest of `outbox_drop`, and the
+    /// next read decides it again if the rows are still there and still nobody's.
+    pub(super) fn drop_orphan_mailbox(&mut self, host: HostId, boot: u64) {
+        self.outbox_drop.push(MailboxDrop { host, boot: Some(boot) });
     }
 
     /// `t` back in the core (not committed as far as this replica knows): its messages ahead of

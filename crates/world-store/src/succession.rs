@@ -340,9 +340,12 @@
 //!    A transition with no core (coordinator HTTP API) runs `UPDATE coordinator SET version =
 //!    version + 1 WHERE id = 1 AND version = $v RETURNING …` instead: the same one row, the same
 //!    lock, the same `Conflict`.
-//! 3. The mailbox (coordinator HTTP API, `mailbox.rs`), in this order: `DELETE FROM outbox WHERE
-//!    host = ANY($outbox_drop)`; `INSERT INTO outbox (…, at_ms)` of each message (a new row each:
-//!    no existing row locked; the Elastic 2b inserts are these); `INSERT INTO login_outbox` of
+//! 3. The mailbox (coordinator HTTP API, `mailbox.rs`), in this order: `DELETE FROM outbox o USING
+//!    UNNEST($hosts, $boots) d WHERE o.host = d.host AND (d.boot IS NULL OR o.boot = d.boot)` (ONE
+//!    statement: a host's every row, or — the ticker's orphan rule — only its rows of a stalled boot
+//!    no attachment holds; the same rows a whole-host drop would lock, a subset of them);
+//!    `INSERT INTO outbox (…, at_ms)` of each message (a new row each: no existing row locked; the
+//!    Elastic 2b inserts are these); `INSERT INTO login_outbox` of
 //!    each login answer (new rows); `DELETE FROM login_outbox WHERE at_ms < $before` (the prune).
 //!    The `outbox_drop` delete locks `outbox` rows only, inserted by earlier transitions that
 //!    committed before this one could hold `coordinator`: only a host's poll (below) may hold one

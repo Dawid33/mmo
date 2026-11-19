@@ -55,7 +55,7 @@ pyroscope_pprofrs = { workspace = true, optional = true }
 # Push CPU profiles to a local Pyroscope (`just profile-server`); gated so
 # normal builds don't pull the agent in. Runtime-activated by the PYROSCOPE env.
 pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
-# The coordinator's test hooks (`CoordinatorThread::{inspect, with_core, crash_before_claim_reply}`):
+# The coordinator's test hooks (`CoordinatorThread::{inspect, with_core}` and its `hold_*` hooks):
 # off in production builds; the `roles` and `coordinator_rt` tests need them (`required-features`).
 test-hooks = []
 

@@ -49,8 +49,9 @@ pub const COORDINATOR_STATE_VERSION: u8 = 8;
 /// Its messages leave as the core's [`super::Delivery`] says: [`super::Delivery::Direct`] — all in
 /// `out`, for the runtime to send on its own links; [`super::Delivery::Mailbox`] — `out` is empty
 /// and every message is an `outbox` row (a host's mailbox, at the boot it is attached as), written
-/// in the same transaction. `outbox_drop` names the hosts whose older mailbox rows the transaction
-/// deletes BEFORE it inserts `outbox` (an applied `Attach`, a detach, a host's end).
+/// in the same transaction. `outbox_drop` names the mailbox rows the transaction deletes BEFORE it
+/// inserts `outbox` ([`MailboxDrop`]: every row of a host — an applied `Attach`, a detach, a host's
+/// end — or the rows of one boot of it no attachment holds, which stalled: the ticker's orphan rule).
 /// `login_outbox`: what the hosts told the login service ([`super::HostMsg::Login`]), durable with
 /// this transition. `core_changed`: `core` (or `history`) differs from the last one written — when
 /// `false` the transition carries only rows, decisions or login answers, and the runtime may write
@@ -62,7 +63,7 @@ pub struct Transition {
     pub out: Vec<(Target, CoordMsg)>,
     pub decisions: Vec<StoreDecision>,
     pub outbox: Vec<OutboxMsg>,
-    pub outbox_drop: Vec<HostId>,
+    pub outbox_drop: Vec<MailboxDrop>,
     pub login_outbox: Vec<crate::LoginOut>,
     pub core_changed: bool,
 }
@@ -81,6 +82,24 @@ impl Transition {
     /// Its mailbox rows, drops and login answers, counted.
     pub fn shape(&self) -> WriteShape {
         WriteShape { rows: self.outbox.len(), drops: self.outbox_drop.len(), logins: self.login_outbox.len() }
+    }
+}
+
+/// One mailbox delete of a transition (`outbox_drop`), run before its rows are inserted: every
+/// row of `host` (`boot: None` — an applied `Attach`, a detach, a host's end), or only its rows of
+/// boot `boot` (`Some`: a boot no attachment holds whose oldest row waited past
+/// [`super::MAILBOX_STALL_MS`] — the ticker's orphan rule, `input.rs` `stalled_mailboxes`; never
+/// a row of another boot of the host, so never one of a current attachment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxDrop {
+    pub host: HostId,
+    pub boot: Option<u64>,
+}
+
+impl MailboxDrop {
+    /// Whether this drop deletes a row of `host` at `boot`.
+    pub fn covers(&self, host: HostId, boot: u64) -> bool {
+        self.host == host && self.boot.is_none_or(|b| b == boot)
     }
 }
 

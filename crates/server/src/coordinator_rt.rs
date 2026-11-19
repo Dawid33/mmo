@@ -454,9 +454,6 @@ pub struct CoordinatorThread {
     stop: Sender<Stop>,
     #[cfg(feature = "test-hooks")]
     inspect: Sender<Inspect>,
-    /// [`CoordinatorThread::crash_before_claim_reply`] is armed.
-    #[cfg(feature = "test-hooks")]
-    crash_before_claim_reply: Arc<AtomicBool>,
     /// [`CoordinatorThread::hold_decision_retries`] is armed.
     #[cfg(feature = "test-hooks")]
     hold_decision_retries: Arc<AtomicBool>,
@@ -615,15 +612,6 @@ impl CoordinatorThread {
     #[doc(hidden)]
     pub fn kill(self) {
         let _ = self.stop_without_save();
-    }
-
-    /// Test hook: the coordinator crashes right after the save that releases its next
-    /// claim-granting reply commits, before that reply (or anything released with it)
-    /// leaves; the thread ends [`ServerExit::CoordinatorFailed`]. Wait for it with [`Self::is_finished`].
-    #[doc(hidden)]
-    #[cfg(feature = "test-hooks")]
-    pub fn crash_before_claim_reply(&self) {
-        self.crash_before_claim_reply.store(true, Ordering::SeqCst);
     }
 
     /// Test hook: `f` of the core as it stands after the host messages handled so far;
@@ -826,9 +814,6 @@ pub struct CoordinatorRuntime {
     /// `projection!`); checked before every write.
     delivery: Delivery,
     fenced: Fenced,
-    /// Test hook ([`CoordinatorThread::crash_before_claim_reply`]).
-    #[cfg(feature = "test-hooks")]
-    crash_before_claim_reply: Arc<AtomicBool>,
     /// Test hook ([`CoordinatorThread::hold_decision_retries`]).
     #[cfg(feature = "test-hooks")]
     hold_decision_retries: Arc<AtomicBool>,
@@ -954,6 +939,10 @@ struct WriteTally {
     mailbox_rows: u64,
     login_rows: u64,
     core_less: u64,
+    /// Refreshes (`refreshes=`): this cache rebased onto a newer row it did not write, without a
+    /// conflict (a notice, a version check) — each a whole core read, decoded and replayed onto;
+    /// another replica's core-less version bump costs this one such (the final review's question 8).
+    refreshes: u64,
 }
 
 impl WriteTally {
@@ -974,6 +963,7 @@ impl WriteTally {
             mailbox_rows: 0,
             login_rows: 0,
             core_less: 0,
+            refreshes: 0,
         }
     }
 }
@@ -1068,8 +1058,32 @@ fn core_less_kind(msg: &CoordMsg) -> bool {
     )
 }
 
-/// A transition about to be written without a core carries only [`core_less_kind`] messages; any
-/// other is logged (and stops a debug build: it could reach its host twice).
+/// Whether store decision `d` may be issued in a transition written WITHOUT a core (final review
+/// M3). Such a write that fails is never remembered (above), and a conflict after it rebases: if it
+/// did commit, the replay may decide the same decision again, and the store runs it twice. A
+/// decision that sets a mark in the core (a cut's `DecideCut` — `run.taken`; its `BeginCut` — the
+/// new `cuts.run`; `Declare` — `declaring`; `EndLandless` — `ending`; `Rollback` — `rolling`) or
+/// changes it otherwise (`EndReplica` — the live set; re-issued after a failed write only beside
+/// a core, `hand_back` clears `committed_raw`) always rides with a core. Only the decisions that
+/// touch no durable field are core-less, each idempotent in the store and answered again by a
+/// later read or ask:
+/// - `AssignLand`: takes only an absent or free row (`WHERE owner = -1`); a second issue finds it
+///   owned (`Owned`, the askers told `LandIs` / the assignee `Assigned` again: [`core_less_kind`]);
+///   its askers and provisional counts are process fields.
+/// - `AddHost { expect_wanted }`: adds only while the wanted rows number `expect_wanted`; a second
+///   issue meets the first's row (`NotNeeded`).
+/// - `DrainHost`: the row `draining` again, `drain_at_ms = LEAST(…)`: the same mark.
+/// - `RemoveHost`: a second finds no row (`Gone`).
+///
+/// The fleet's decisions keep no durable state (process fields in `projection!`).
+fn core_less_decision(d: &game::coordinator::StoreDecision) -> bool {
+    use game::coordinator::StoreDecision;
+    matches!(d, StoreDecision::AssignLand(_) | StoreDecision::AddHost(_) | StoreDecision::DrainHost(_) | StoreDecision::RemoveHost(_))
+}
+
+/// A transition about to be written without a core carries only [`core_less_kind`] messages and
+/// [`core_less_decision`] decisions; any other is logged (and stops a debug build: a message could
+/// reach its host twice, a decision run twice in the store).
 fn check_core_less(t: &game::coordinator::Transition) {
     for o in t.outbox.iter().filter(|o| !core_less_kind(&o.msg)) {
         log::error!(
@@ -1078,6 +1092,10 @@ fn check_core_less(t: &game::coordinator::Transition) {
             o.host
         );
         debug_assert!(false, "a core-less transition carries {}", describe(&o.msg));
+    }
+    for d in t.decisions.iter().filter(|d| !core_less_decision(d)) {
+        log::error!("[coordinator] a transition with nothing durable changed carries the store decision {d:?}: it could run twice");
+        debug_assert!(false, "a core-less transition carries the store decision {d:?}");
     }
 }
 
@@ -1114,8 +1132,6 @@ impl CoordinatorRuntime {
         let (stop_tx, stop_rx) = crossbeam::channel::bounded(1);
         #[cfg(feature = "test-hooks")]
         let (inspect_tx, inspect_rx) = crossbeam::channel::unbounded();
-        #[cfg(feature = "test-hooks")]
-        let crash_before_claim_reply = Arc::new(AtomicBool::new(false));
         #[cfg(feature = "test-hooks")]
         let hold_decision_retries = Arc::new(AtomicBool::new(false));
         #[cfg(feature = "test-hooks")]
@@ -1190,8 +1206,6 @@ impl CoordinatorRuntime {
             delivery,
             fenced,
             #[cfg(feature = "test-hooks")]
-            crash_before_claim_reply: crash_before_claim_reply.clone(),
-            #[cfg(feature = "test-hooks")]
             hold_decision_retries: hold_decision_retries.clone(),
             #[cfg(feature = "test-hooks")]
             hold_hosts_reads: hold_hosts_reads.clone(),
@@ -1239,8 +1253,6 @@ impl CoordinatorRuntime {
             stop: stop_tx,
             #[cfg(feature = "test-hooks")]
             inspect: inspect_tx,
-            #[cfg(feature = "test-hooks")]
-            crash_before_claim_reply,
             #[cfg(feature = "test-hooks")]
             hold_decision_retries,
             #[cfg(feature = "test-hooks")]
@@ -1341,15 +1353,6 @@ impl CoordinatorRuntime {
             }
             health.world_generation(self.core.world_generation());
             health.successions_open(self.core.successions_open_count() as u64);
-            #[cfg(feature = "test-hooks")]
-            if self.crash_before_claim_reply.load(Ordering::SeqCst)
-                && out.iter().any(|(_, m)| matches!(m, CoordMsg::Reply { reply, .. } if reply.grants_claim()))
-            {
-                // Its transition was written; it never leaves.
-                log::warn!("[coordinator] test crash before a claim-granting reply left");
-                self.down(ApiRefusal::NotReady);
-                return ServerExit::CoordinatorFailed;
-            }
             self.send(out);
             if let Some(timeout) = stopping {
                 return self.finish(timeout);
@@ -1417,8 +1420,10 @@ impl CoordinatorRuntime {
     /// it was stamped with (as the QUIC link's messages carried the `Attach` their link opened
     /// with: the superseded-attach rule drops an older link's at apply and at replay) — and its
     /// answer kept until the transition covering it committed ([`BatchWaiter`]). An EMPTY batch
-    /// (the host's idle post, or its probe after a drop) applies nothing and is answered at once:
-    /// whether the core holds the host attached as that pair. A batch opening with an `Attach` is
+    /// (the host's idle post, or its probe after a drop) applies nothing: answered `attached: true`
+    /// at once when the core holds the host attached as that pair (and `false` at once with one
+    /// live replica); otherwise it waits like a batch that changed nothing durable, so that a
+    /// `false` comes only from a cache confirmed current (final review M1). A batch opening with an `Attach` is
     /// admitted first ([`Self::admit_attach`]); one refused is answered `attached: false` at once
     /// and nothing of it applied. A batch of an attachment the core holds DETACHED (a stalled
     /// mailbox) is applied as any other: the core drops its messages (`superseded`, at apply and at
@@ -1431,7 +1436,18 @@ impl CoordinatorRuntime {
                 ApiCall::Batch { host, batch, done } => {
                     let game::coordinator::HostBatch { boot, epoch, msgs } = batch;
                     if msgs.is_empty() {
-                        let _ = done.send(Ok(BatchAck { attached: attached_as(&self.core, host, boot, epoch) }));
+                        // `attached: true` at once: the core holds that very pair. `false` only
+                        // from a current cache (final review M1): with more than one live replica
+                        // this cache may not have seen the host's `Attach` committed elsewhere, and
+                        // a `false` makes a healthy host re-attach (aborting a running cut) — so it
+                        // waits as a batch changing nothing durable does (`pump_clean_batches`: the
+                        // row's version read, a refresh first if it moved; or the covering commit).
+                        let attached = attached_as(&self.core, host, boot, epoch);
+                        if attached || self.core.replicas_live().len() <= 1 {
+                            let _ = done.send(Ok(BatchAck { attached }));
+                        } else {
+                            self.apply_batch(host, boot, epoch, msgs, done, now);
+                        }
                         continue;
                     }
                     match msgs.first() {
@@ -2182,7 +2198,12 @@ impl CoordinatorRuntime {
             return Ok(out);
         }
         if !self.write_next() {
-            if self.core.replicas_live().contains(&self.core.replica()) && !self.core.evicted() {
+            if self.core.evicted() {
+                // Ended by the row (final review M2): nothing it applied leaves, no batch is
+                // answered from it — `run` ends the thread next, and `down` refuses every waiter.
+                return Ok(out);
+            }
+            if self.core.replicas_live().contains(&self.core.replica()) {
                 self.joined();
             }
             self.pump_version_check(now)?;
@@ -2447,7 +2468,10 @@ impl CoordinatorRuntime {
         }
         let history = (!row.history.is_empty()).then_some(row.history.as_slice());
         match self.core.refresh(&row.core, history, row.version) {
-            Ok(true) => self.reissue_login_orders(now),
+            Ok(true) => {
+                self.tally.refreshes += 1;
+                self.reissue_login_orders(now)
+            }
             Ok(false) => {}
             Err(e) => {
                 log::error!("[coordinator] the row at version {} does not load ({e}); stopping as fenced", row.version);
@@ -2905,7 +2929,9 @@ impl CoordinatorRuntime {
     /// `up` / `down` in answer order, `-` for none); under the HTTP API's mailbox delivery also the
     /// hosts detached as stalled (`stalled=`), the mailbox and login-answer rows the committed
     /// transitions inserted (`mailbox_rows=`, `login_rows=`) and how many transitions wrote no
-    /// core (`core_less=`) — the write volume of the coordinator HTTP API plan's Review Focus 5.
+    /// core (`core_less=`) — the write volume of the coordinator HTTP API plan's Review Focus 5 —
+    /// and the refreshes onto another replica's row (`refreshes=`, what each version bump costs
+    /// the other replicas).
     fn report_writes(&mut self) {
         let window = self.tally.since.elapsed();
         if window < game::METRICS_REPORT_INTERVAL {
@@ -2918,12 +2944,13 @@ impl CoordinatorRuntime {
             && t.assigned == 0
             && t.added + t.drained + t.removed == 0
             && t.stalled == 0
+            && t.refreshes == 0
         {
             return;
         }
         log::info!(
             "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={} \
-             assigned={} added={} drained={} removed={} scale={} stalled={} mailbox_rows={} login_rows={} core_less={}",
+             assigned={} added={} drained={} removed={} scale={} stalled={} mailbox_rows={} login_rows={} core_less={} refreshes={}",
             window.as_secs_f32(),
             t.transitions,
             t.core_bytes,
@@ -2939,7 +2966,8 @@ impl CoordinatorRuntime {
             t.stalled,
             t.mailbox_rows,
             t.login_rows,
-            t.core_less
+            t.core_less,
+            t.refreshes
         );
     }
 

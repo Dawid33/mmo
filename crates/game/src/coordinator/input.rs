@@ -109,7 +109,8 @@ pub enum Input {
     /// next read brings them again. `mailbox_oldest` (coordinator HTTP API): per host with an
     /// unread mailbox row, `(host, boot, the store ms its oldest row was inserted at)` — part of
     /// the read, never logged; a row older than [`super::MAILBOX_STALL_MS`] of an attached boot
-    /// is applied as an [`Input::HostStalled`] (logged).
+    /// is applied as an [`Input::HostStalled`] (logged), one of a boot no attachment holds has
+    /// that boot's rows dropped (not logged: `stalled_mailboxes`' orphan rule).
     HostsRead {
         rows: Vec<HostSeen>,
         desired: Vec<super::DesiredHost>,
@@ -290,8 +291,34 @@ impl Coordinator {
     /// before `now_ms` (store ms) — and belongs to the current attachment: not older than the
     /// store time its `Attach` was applied at (less [`super::ATTACH_CLOCK_SLACK_MS`]) — is stalled,
     /// applied as a logged [`Input::HostStalled`] of that attachment's `(boot, epoch)`.
+    ///
+    /// **Orphans** (final review I1): a head row older than [`super::MAILBOX_STALL_MS`] whose boot
+    /// is NOT the one its host is attached as (not attached at all, or as another boot) has no
+    /// reader the coordinator knows of — a rollback's `Generation` rows to every attached host
+    /// right before `detach_all` (a host dead then never reads its own), a `Generation` told to a
+    /// refused `Attach` whose process is gone. Nothing else would ever delete it (host ids are never
+    /// reused), and the mailbox gauges and `WorldMailboxStalled` would count it for ever. Its
+    /// boot's rows are dropped by the next transition ([`Self::drop_orphan_mailbox`]: by
+    /// `(host, boot)`, never a row of another boot — so never one of a current attachment of the
+    /// same id). A younger head is left alone (a refused old-generation host may yet read its
+    /// `Generation`); a live host of that boot reading its mailbox acknowledges the head long
+    /// before the stall time. Not logged (a ticker read's effect): a rebase drops the pending
+    /// drop, and the next read decides it again only if the rows are still there and still nobody's
+    /// on the rebased core — a re-`Attach` of that boot committed meanwhile makes it its own again;
+    /// one in the same transition is applied after the drop and its rows inserted after it.
     fn stalled_mailboxes(&mut self, oldest: &[(HostId, u64, u64)], now_ms: u64) {
         for &(host, boot, at_ms) in oldest {
+            let waited = now_ms.saturating_sub(at_ms);
+            if waited > super::MAILBOX_STALL_MS && self.attachment(host) != Some(boot) {
+                log::info!(
+                    "coordinator: host {host}'s mailbox has a row of boot {boot:#x} unread for {waited} ms (over {} ms), \
+                     which no attachment holds (attached as {:?}): that boot's rows are dropped",
+                    super::MAILBOX_STALL_MS,
+                    self.attachment(host)
+                );
+                self.drop_orphan_mailbox(host, boot);
+                continue;
+            }
             let Some((b, epoch)) = self.newest_attach(host).filter(|(b, _)| *b == boot) else { continue };
             let current = self.attached_at_ms(host).is_some_and(|since| at_ms + super::ATTACH_CLOCK_SLACK_MS >= since);
             if self.attachment(host) == Some(b) && current && now_ms.saturating_sub(at_ms) > super::MAILBOX_STALL_MS {

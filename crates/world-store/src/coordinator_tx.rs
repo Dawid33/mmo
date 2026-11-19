@@ -20,8 +20,8 @@
 //!    A transition with no `core` (the coordinator HTTP API: outputs with nothing durable behind
 //!    them still need their mailbox rows) is `UPDATE coordinator SET version = version + 1 WHERE
 //!    id = 1 AND version = $v`: the same fence, no `core` or `history` written.
-//! 3. The mailbox (coordinator HTTP API, `mailbox.rs`): the rows of `outbox_drop`'s hosts
-//!    deleted, then the `outbox` rows inserted (`at_ms` = the database clock), then the
+//! 3. The mailbox (coordinator HTTP API, `mailbox.rs`): the rows `outbox_drop` names (a host's
+//!    every row, or one boot's of it) deleted, then the `outbox` rows inserted (`at_ms` = the database clock), then the
 //!    `login_outbox` rows, then the login answers older than `login_prune_before_ms` pruned.
 //!    Nothing is taken: a host reads its own mailbox (the Elastic 2b relay between replicas is
 //!    gone).
@@ -35,8 +35,8 @@
 //! lookups (a host's `cut_decided`, a start's `resolve_prepared`, the listeners' poll).
 
 use game::coordinator::{
-    AddHost, AssignLand, Assigned, CallStamp, DecisionAnswer, DrainHost, HostAdded, HostDrained, HostRemoved, RemoveHost, ReplicaId,
-    StoreDecision,
+    AddHost, AssignLand, Assigned, CallStamp, DecisionAnswer, DrainHost, HostAdded, HostDrained, HostRemoved, MailboxDrop, RemoveHost,
+    ReplicaId, StoreDecision,
 };
 use game::{CutId, Declared, HostId, LandlessEnd, Tick};
 use sqlx::{PgPool, Row};
@@ -55,8 +55,10 @@ use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 /// as — Postgres only (a transition with an outbox message is `Unsupported` on SQLite). `core` is
 /// `None` for a transition that changed nothing
 /// durable but still carries mailbox rows — its compare-and-set bumps `version` and writes
-/// neither `core` nor `history` (`history` is then ignored). `outbox_drop`: the hosts whose
-/// rows are deleted BEFORE `outbox` is inserted (an applied `Attach`, a detach, an end).
+/// neither `core` nor `history` (`history` is then ignored). `outbox_drop`: the rows deleted
+/// BEFORE `outbox` is inserted — every row of a host (`boot: None`: an applied `Attach`, a detach,
+/// an end) or only its rows of one boot (`Some`: the ticker's orphan rule, a stalled boot no
+/// attachment holds).
 /// `login_outbox`: the answers to the login service (`game::encode_packet` bytes), inserted
 /// after `outbox`. `login_prune_before_ms`: the `login_outbox` rows inserted before this
 /// database clock (ms since the epoch) are deleted. SQLite: `login_outbox` is `Unsupported`,
@@ -69,7 +71,7 @@ pub struct TransitionWrite {
     pub decisions: Vec<StoreDecision>,
     pub replica: ReplicaId,
     pub outbox: Vec<(HostId, u64, Vec<u8>)>,
-    pub outbox_drop: Vec<HostId>,
+    pub outbox_drop: Vec<MailboxDrop>,
     pub login_outbox: Vec<Vec<u8>>,
     pub login_prune_before_ms: Option<u64>,
 }
@@ -195,9 +197,19 @@ pub(crate) async fn write_pg(
     // The mailbox (lock walk: `succession.rs`'s notes). Its rows are locked only by coordinator
     // statements, after the `coordinator` row, and by a host's read of its own rows (holding
     // nothing else): no edge. The drops first: an `Attach`'s older rows go before its new ones.
+    // ONE statement for every drop: a `NULL` boot deletes all the host's rows, a boot only that
+    // boot's (the orphan rule: never a row of another boot of the host).
     if !w.outbox_drop.is_empty() {
-        let hosts: Vec<i64> = w.outbox_drop.iter().map(|h| crate::rows::i(h.0)).collect();
-        sqlx::query("DELETE FROM outbox WHERE host = ANY($1)").bind(&hosts).execute(&mut *tx).await?;
+        let hosts: Vec<i64> = w.outbox_drop.iter().map(|d| crate::rows::i(d.host.0)).collect();
+        let boots: Vec<Option<i64>> = w.outbox_drop.iter().map(|d| d.boot.map(crate::rows::i)).collect();
+        sqlx::query(
+            "DELETE FROM outbox o USING UNNEST($1::bigint[], $2::bigint[]) AS d(host, boot) \
+             WHERE o.host = d.host AND (d.boot IS NULL OR o.boot = d.boot)",
+        )
+        .bind(&hosts)
+        .bind(&boots)
+        .execute(&mut *tx)
+        .await?;
     }
     let insert = format!("INSERT INTO outbox (version, host, boot, msg, at_ms) VALUES ($1, $2, $3, $4, {PG_NOW_MS})");
     for (host, boot, msg) in &w.outbox {

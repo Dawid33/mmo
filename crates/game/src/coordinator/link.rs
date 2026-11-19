@@ -5,7 +5,7 @@ use crate::HostId;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::{CallStamp, CoordMsg, Coordinator, HostMsg, Input, OutboxMsg, ReplicaId, StoreDecision, Target};
+use super::{CallStamp, CoordMsg, Coordinator, HostMsg, Input, MailboxDrop, OutboxMsg, ReplicaId, StoreDecision, Target};
 
 /// The host's end of the link to the world coordinator: messages out, messages in, in
 /// order (FIFO each way while the link is up).
@@ -84,8 +84,8 @@ pub struct RigWrite {
     pub replica: ReplicaId,
     /// Mailbox rows to insert.
     pub outbox: Vec<OutboxMsg>,
-    /// The hosts whose mailbox rows are deleted first.
-    pub outbox_drop: Vec<HostId>,
+    /// The mailbox rows deleted first ([`MailboxDrop`]).
+    pub outbox_drop: Vec<MailboxDrop>,
     /// The answers to the login service.
     pub login_outbox: Vec<crate::LoginOut>,
     /// The store's clock at the write (what the mailbox rows are stamped with).
@@ -148,7 +148,7 @@ impl RigStore {
         self.writes += 1;
         let stamp = CallStamp { replica: w.replica, version };
         self.committed.extend(w.decisions.into_iter().map(|d| (stamp, d)));
-        self.outbox.retain(|r| !w.outbox_drop.contains(&r.host));
+        self.outbox.retain(|r| !w.outbox_drop.iter().any(|d| d.covers(r.host, r.boot)));
         for m in w.outbox {
             self.push_outbox(version, m.host, m.boot, m.msg, w.at_ms);
         }
