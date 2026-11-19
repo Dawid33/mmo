@@ -213,7 +213,6 @@ base64 = "0.22"
 # The login service's HTTP API — crates/login.
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
-tower = { version = "0.5", features = ["util"] }
 # Prometheus metrics of the login service (no protobuf, no process collector).
 prometheus = { version = "0.14", default-features = false }
 assert-json-diff = "=2.0.2"

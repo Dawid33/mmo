@@ -1,7 +1,7 @@
 //! Blockbench models in Bevy: a `.bbmodel` asset loader on top of the
 //! engine-free `bbmodel` crate, and a component that spawns one.
 //!
-//! ```ignore
+//! ```text
 //! let model: Handle<BbModelAsset> = asset_server.load("models/soldier.bbmodel");
 //! commands.spawn((BbModel(model), Transform::from_xyz(x, y, z)));
 //! ```
@@ -14,7 +14,7 @@
 //!
 //! Animations play through [`BbAnimationPlayer`] on the same entity:
 //!
-//! ```ignore
+//! ```text
 //! commands.spawn((BbModel(model), BbAnimationPlayer::playing("walk")));
 //! player.crossfade("idle", 0.2); // later, from a system
 //! ```

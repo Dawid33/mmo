@@ -2483,9 +2483,9 @@ _test_all mode:
     # The root workspace. The vendored forks run their upstream subset below; server's
     # `takeover` target needs `test-hooks` and Postgres, so it runs on its own (test-full).
     stage workspace {{cap}} {{cargo}} test --workspace --exclude rapier3d --exclude parry3d --exclude slotmapd \
-        -- $ign --test-threads={{test_threads}}
+        --no-fail-fast -- $ign --test-threads={{test_threads}}
     stage physics-next-upstream just physics-next-upstream
-    stage slotmapd {{cap}} {{cargo}} test -p slotmapd -- $ign
+    stage slotmapd {{cap}} {{cargo}} test -p slotmapd --no-fail-fast -- $ign
     if [ "{{mode}}" = full ]; then stage takeover just test-r4; fi
     stage determinism-wasm just determinism-wasm
     stage quest just quest-test "--workspace -- $ign"
