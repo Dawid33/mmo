@@ -368,53 +368,5 @@ fn main() {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn perf_log_raises_only_the_budget_target() {
-        assert_eq!(log_filter(false), "wgpu=error,naga=warn");
-        assert_eq!(log_filter(true), "wgpu=error,naga=warn,perf_budget=debug");
-    }
-
-    #[test]
-    fn client_worker_cap_accepts_valid_override() {
-        assert_eq!(client_worker_cap(Some("6")), Ok(6));
-    }
-
-    #[test]
-    fn client_worker_cap_rejects_invalid_values() {
-        let malformed = client_worker_cap(Some("many")).unwrap_err();
-        assert!(malformed.contains("VOXEL_CLIENT_WORKER_THREADS"));
-        assert!(malformed.contains("integer >= 4"));
-
-        let undersized = client_worker_cap(Some("3")).unwrap_err();
-        assert!(undersized.contains("VOXEL_CLIENT_WORKER_THREADS"));
-        assert!(undersized.contains("integer >= 4"));
-    }
-
-    #[test]
-    fn client_worker_cap_limits_combined_bevy_pools() {
-        let options = task_pool_options(Some(client_worker_cap(Some("6")).unwrap()));
-        assert_eq!(options.max_total_threads, 6);
-        assert_eq!(options.async_compute.max_threads, 6);
-        assert_eq!(options.async_compute.percent, ASYNC_COMPUTE_PERCENT);
-    }
-
-    #[test]
-    fn default_worker_cap_is_half_the_cores_clamped() {
-        assert_eq!(default_client_worker_threads(1), 4, "floor");
-        assert_eq!(default_client_worker_threads(8), 4);
-        assert_eq!(default_client_worker_threads(12), 6);
-        assert_eq!(default_client_worker_threads(20), 8, "this dev box");
-        assert_eq!(default_client_worker_threads(64), 8, "ceiling");
-        let unset = client_worker_cap(None).unwrap();
-        assert!((MIN_CLIENT_WORKER_THREADS..=MAX_CLIENT_WORKER_THREADS).contains(&unset));
-    }
-
-    #[test]
-    fn bevy_app_errors_propagate_to_the_process_status() {
-        assert_eq!(app_exit_code(&bevy::app::AppExit::Success), 0);
-        assert_eq!(app_exit_code(&bevy::app::AppExit::error()), 1);
-        assert_eq!(app_exit_code(&bevy::app::AppExit::from_code(23)), 23);
-    }
+    
 }

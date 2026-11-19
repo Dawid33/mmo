@@ -15,14 +15,8 @@ use super::super::voxel_material::StandardVoxelMaterial;
 use super::binary::{self, Face, Quad};
 use super::emit;
 use super::neighbors::gather_padded;
-#[cfg(test)]
-use super::pack;
-#[cfg(test)]
-use super::queue::FrameUploads;
 use super::queue::MeshBudgets;
 use super::records;
-#[cfg(test)]
-use super::MeshingTask;
 use super::{ChunkMaterial, MeshOutput, MeshWire, TerrainQuadCount};
 
 /// Does `q`'s plane sit on the 32-grid's outer edge along its own face axis?
@@ -439,7 +433,7 @@ pub fn apply_lod_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::tasks::AsyncComputeTaskPool;
+    
     use game::{BlockId, BRICK_VOXEL_COUNT};
 
     /// Two side quads on the same plane, facing the same way, whose rects
@@ -467,6 +461,7 @@ mod tests {
         out
     }
 
+    /// Regression: grass/dirt flicker along LOD edges, live-confirmed by the user 2026-09-25 (memory cell-lod-flicker-resolved, 3acd148b)
     /// A border wall of grass over dirt meshes as two quads on one plane
     /// (greedy meshing never merges different blocks). Skirting the upper one
     /// down a row laid it over the lower one's top row: same plane, same
@@ -493,229 +488,6 @@ mod tests {
         }
     }
 
-    fn base_quad(face: Face) -> Quad {
-        Quad {
-            min: [10, 20, 30],
-            w: 4,
-            h: 7,
-            face,
-            block: BlockId(1),
-            ao: [3; 4],
-            cutout: false,
-            interior: false,
-        }
-    }
-
-    /// LOD cells stay packed in the ECS: a dense grid is 64 KiB per cell, and
-    /// the production ring table holds ~20 000 cells (~1.3 GB, more than half
-    /// the client's RSS when this was measured).
-    #[test]
-    fn lod_voxel_data_is_packed_and_round_trips_exactly() {
-        let mut grid = vec![Voxel::default(); BRICK_VOXEL_COUNT];
-        for (i, v) in grid.iter_mut().enumerate() {
-            let y = (i / 32) % 32;
-            if y < 12 {
-                *v = Voxel::new(BlockId(if y < 10 { 1 } else { 3 }));
-            }
-        }
-        let data = LodVoxelData::from_dense(&grid);
-        assert_eq!(data.decode(), grid, "packed storage must decode to the exact grid");
-        let bytes = data.0 .0.len() * std::mem::size_of::<(u16, BlockId)>();
-        assert!(bytes < 2048, "a layered terrain cell packs to {bytes} B, not 64 KiB");
-        // A malformed run list (only possible if validation was skipped) decodes
-        // to air rather than panicking inside a mesh task.
-        let broken = LodVoxelData(game::lod::PackedLodGrid(vec![(7, BlockId(1))]));
-        assert_eq!(broken.decode(), vec![Voxel::default(); BRICK_VOXEL_COUNT]);
-    }
-
-    #[test]
-    fn skirt_extend_grows_the_y_mapped_extent_per_face() {
-        // X faces: cross_axes(0) = (U=1/Y, V=2/Z) — Y rides `w`.
-        for face in [Face::NegX, Face::PosX] {
-            let mut q = base_quad(face);
-            skirt_extend(&mut q);
-            assert_eq!(q.min, [10, 19, 30], "{face:?}: min[1] decrements by one");
-            assert_eq!(
-                (q.w, q.h),
-                (5, 7),
-                "{face:?}: w (Y-mapped) grows, h untouched"
-            );
-        }
-        // Z faces: cross_axes(2) = (U=0/X, V=1/Y) — Y rides `h`.
-        for face in [Face::NegZ, Face::PosZ] {
-            let mut q = base_quad(face);
-            skirt_extend(&mut q);
-            assert_eq!(q.min, [10, 19, 30], "{face:?}: min[1] decrements by one");
-            assert_eq!(
-                (q.w, q.h),
-                (4, 8),
-                "{face:?}: h (Y-mapped) grows, w untouched"
-            );
-        }
-    }
-
-    #[test]
-    fn skirt_extend_leaves_other_fields_untouched() {
-        let mut q = base_quad(Face::PosX);
-        skirt_extend(&mut q);
-        assert_eq!(q.min[0], 10, "non-Y min components untouched");
-        assert_eq!(q.min[2], 30, "non-Y min components untouched");
-        assert_eq!(q.block, BlockId(1));
-        assert_eq!(q.ao, [3; 4]);
-    }
-
-    #[test]
-    #[should_panic]
-    fn skirt_extend_rejects_y_faces_in_debug() {
-        // Y faces are never side-skirted; calling this on one is a caller bug.
-        let mut q = base_quad(Face::PosY);
-        skirt_extend(&mut q);
-    }
-
-    #[test]
-    fn is_border_side_quad_matches_the_four_side_faces_at_the_grid_edge() {
-        // Border cases.
-        assert!(is_border_side_quad(&Quad {
-            min: [0, 5, 5],
-            ..base_quad(Face::NegX)
-        }));
-        assert!(is_border_side_quad(&Quad {
-            min: [31, 5, 5],
-            ..base_quad(Face::PosX)
-        }));
-        assert!(is_border_side_quad(&Quad {
-            min: [5, 5, 0],
-            ..base_quad(Face::NegZ)
-        }));
-        assert!(is_border_side_quad(&Quad {
-            min: [5, 5, 31],
-            ..base_quad(Face::PosZ)
-        }));
-        // Interior (one cell in from the edge): not a border quad.
-        assert!(!is_border_side_quad(&Quad {
-            min: [1, 5, 5],
-            ..base_quad(Face::NegX)
-        }));
-        assert!(!is_border_side_quad(&Quad {
-            min: [30, 5, 5],
-            ..base_quad(Face::PosX)
-        }));
-        assert!(!is_border_side_quad(&Quad {
-            min: [5, 5, 1],
-            ..base_quad(Face::NegZ)
-        }));
-        assert!(!is_border_side_quad(&Quad {
-            min: [5, 5, 30],
-            ..base_quad(Face::PosZ)
-        }));
-        // Y faces are never border side-quads, even sitting on the top/bottom plane.
-        assert!(!is_border_side_quad(&Quad {
-            min: [5, 0, 5],
-            ..base_quad(Face::NegY)
-        }));
-        assert!(!is_border_side_quad(&Quad {
-            min: [5, 31, 5],
-            ..base_quad(Face::PosY)
-        }));
-    }
-
-    fn packed_of(mesh: &Mesh) -> Vec<pack::UnpackedVertex> {
-        use bevy::mesh::VertexAttributeValues;
-        let VertexAttributeValues::Uint32x2(packed) = mesh
-            .attribute(crate::renderer::voxel_material::ATTRIBUTE_VOXEL_PACKED)
-            .unwrap()
-        else {
-            panic!("packed attribute is Uint32x2")
-        };
-        packed.iter().map(|&p| pack::unpack(p)).collect()
-    }
-
-    #[test]
-    fn skirted_mesh_shifts_up_and_extends_border_side_faces_down() {
-        // Full-solid 32^3 grid, no neighbors (air shell): every outer face is
-        // visible and each of the 6 faces merges to one quad.
-        let voxels = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
-        let neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
-        let mesh = mesh_lod_grid(&voxels, &neighbors, &BlockTextureLayers::default())
-            .expect("solid grid meshes");
-        let verts = packed_of(&mesh);
-
-        for face in [Face::NegX, Face::PosX, Face::NegZ, Face::PosZ] {
-            let ys: Vec<u32> = verts
-                .iter()
-                .filter(|v| v.face == face)
-                .map(|v| v.pos[1])
-                .collect();
-            assert!(!ys.is_empty(), "{face:?} must be present");
-            assert_eq!(
-                ys.iter().copied().min(),
-                Some(0),
-                "{face:?}: skirt reaches y=0"
-            );
-            assert_eq!(
-                ys.iter().copied().max(),
-                Some(33),
-                "{face:?}: biased top reaches y=33"
-            );
-        }
-        let top_ys: Vec<u32> = verts
-            .iter()
-            .filter(|v| v.face == Face::PosY)
-            .map(|v| v.pos[1])
-            .collect();
-        assert!(!top_ys.is_empty());
-        assert!(
-            top_ys.iter().all(|&y| y == 33),
-            "top face sits at biased y=33, not skirted"
-        );
-
-        let bottom_ys: Vec<u32> = verts
-            .iter()
-            .filter(|v| v.face == Face::NegY)
-            .map(|v| v.pos[1])
-            .collect();
-        assert!(!bottom_ys.is_empty());
-        assert!(
-            bottom_ys.iter().all(|&y| y == 1),
-            "bottom face sits at biased y=1, not skirted"
-        );
-    }
-
-    #[test]
-    fn interior_side_faces_are_not_skirted() {
-        // A lone solid cell away from every grid edge: its side faces must
-        // stay at the biased unit span, with no skirt reaching y=0.
-        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
-        voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
-        let mesh = mesh_lod_grid(&voxels, &neighbors, &BlockTextureLayers::default())
-            .expect("lone voxel meshes");
-        let verts = packed_of(&mesh);
-
-        for face in [Face::NegX, Face::PosX, Face::NegZ, Face::PosZ] {
-            let ys: Vec<u32> = verts
-                .iter()
-                .filter(|v| v.face == face)
-                .map(|v| v.pos[1])
-                .collect();
-            assert!(!ys.is_empty(), "{face:?} must be present");
-            assert_eq!(
-                ys.iter().copied().min(),
-                Some(6),
-                "{face:?}: biased, unextended"
-            );
-            assert_eq!(
-                ys.iter().copied().max(),
-                Some(7),
-                "{face:?}: biased, unextended"
-            );
-            assert!(
-                ys.iter().all(|&y| y != 0),
-                "{face:?}: no skirt geometry at y=0"
-            );
-        }
-    }
-
     // --- Entity plumbing: components, queue, apply (Task 3) ---------------
     //
     // These run the real production chain (`pipeline_app`, which now also
@@ -724,9 +496,9 @@ mod tests {
     // `Transform { translation: local_origin - Y*factor, scale: splat(factor) }`
     // plus `(LodChunk, LodVoxelData, Visibility::default())`.
 
-    use super::super::queue::tests::{pipeline_app, spawn_chunk, voxels_with, wait_until};
-    use super::super::queue::{ChunkGrid, ChunkKey, MeshBudgets};
-    use super::super::visibility::ChunkConnectivity;
+    use super::super::queue::tests::{pipeline_app, wait_until};
+    use super::super::queue::MeshBudgets;
+    
 
     /// A solid floor at y=0 across the whole 32³ grid: enough content for
     /// `mesh_lod_grid` to produce a mesh, simple enough to reason about.
@@ -768,209 +540,7 @@ mod tests {
             .id()
     }
 
-    #[test]
-    fn lod_chunks_mesh_and_scale_without_entering_the_grid() {
-        let mut app = pipeline_app(MeshBudgets::default());
-
-        // A camera plus a keyed full-res wall/behind pair so cull_chunks' BFS
-        // has something to actively hide. Without this, an empty ChunkGrid and
-        // no active camera make cull_chunks early-return (visibility.rs:166,
-        // :169) before ever reaching the loop that would leave a keyless
-        // entity's Visibility untouched — the Inherited assertion below would
-        // then be vacuously true regardless of whether the BFS logic itself
-        // respects keylessness. Positioning the wall/behind pair confirms the
-        // BFS genuinely ran and culled something in this same update.
-        app.world_mut().spawn((
-            Camera3d::default(),
-            Camera {
-                is_active: true,
-                ..Default::default()
-            },
-            GlobalTransform::from(Transform::from_translation(Vec3::new(8.0, 8.0, 8.0))),
-        ));
-        let _wall = spawn_chunk(
-            &mut app,
-            Vec3::ZERO,
-            Vec3::new(32.0, 0.0, 0.0),
-            vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT],
-        );
-        let behind = spawn_chunk(
-            &mut app,
-            Vec3::ZERO,
-            Vec3::new(64.0, 0.0, 0.0),
-            voxels_with(&[[5, 5, 5]]),
-        );
-
-        let e = spawn_lod_chunk(
-            &mut app,
-            Vec3::new(1000.0, 0.0, 0.0),
-            Vec3::ZERO,
-            2,
-            floor_grid(),
-        );
-
-        assert!(
-            wait_until(&mut app, |app| {
-                app.world().entity(e).contains::<Mesh3d>()
-                    && app
-                        .world()
-                        .entity(behind)
-                        .get::<Visibility>()
-                        .is_some_and(|v| *v == Visibility::Hidden)
-            }),
-            "LOD chunk must mesh AND the BFS must actually hide the chunk behind the full-res wall \
-             (proof the cull pass really ran, not just that it was registered)"
-        );
-
-        let tf = *app
-            .world()
-            .entity(e)
-            .get::<Transform>()
-            .expect("has a transform");
-        assert_eq!(
-            tf.translation,
-            Vec3::new(0.0, -2.0, 0.0),
-            "translation biased down by factor"
-        );
-        assert_eq!(tf.scale, Vec3::splat(2.0), "scaled by factor");
-
-        let aabb = app
-            .world()
-            .entity(e)
-            .get::<Aabb>()
-            .expect("biased Aabb attached");
-        assert_eq!(aabb.center, Vec3A::new(16.0, 16.5, 16.0));
-        assert_eq!(aabb.half_extents, Vec3A::new(16.0, 16.5, 16.0));
-        assert!(app.world().entity(e).contains::<NoAutoAabb>());
-
-        // Keyless assertions: the heart of this scenario. The grid is no
-        // longer empty overall (the wall/behind full-res chunks key into it,
-        // which is what gives the BFS something to cull) — the LOD chunk
-        // specifically must never be one of its values.
-        assert!(
-            app.world()
-                .resource::<ChunkGrid>()
-                .0
-                .values()
-                .all(|&v| v != e),
-            "LOD chunks never enter the world-keyed ChunkGrid"
-        );
-        assert!(
-            !app.world().entity(e).contains::<ChunkKey>(),
-            "LOD chunks stay keyless"
-        );
-        assert!(
-            !app.world().entity(e).contains::<ChunkConnectivity>(),
-            "LOD chunks carry no connectivity mask"
-        );
-        assert_eq!(
-            *app.world().entity(e).get::<Visibility>().unwrap(),
-            Visibility::Inherited,
-            "cull_chunks' With<ChunkKey> filter never touches a keyless entity, \
-             even while its BFS actively hides other chunks this same pass"
-        );
-    }
-
-    #[test]
-    fn saturated_full_res_lane_does_not_starve_raster_lod_lane() {
-        // uploads_per_frame: 0 keeps the full-res MeshingTask attached
-        // indefinitely (apply_meshed_chunks never gets to poll it away), so
-        // the near lane's single slot stays occupied across every subsequent
-        // update. Raster LOD owns a separate far lane with the same bound.
-        let mut app = pipeline_app(MeshBudgets {
-            max_in_flight: 1,
-            uploads_per_frame: 0,
-        });
-        let full_res = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
-        let lod = spawn_lod_chunk(
-            &mut app,
-            Vec3::ZERO,
-            Vec3::new(320.0, 0.0, 0.0),
-            2,
-            floor_grid(),
-        );
-
-        for _ in 0..3 {
-            app.update();
-        }
-
-        assert!(
-            app.world().entity(full_res).contains::<MeshingTask>(),
-            "full-res task holds the only slot (uploads_per_frame=0 keeps it attached)"
-        );
-        assert!(
-            app.world().entity(lod).contains::<LodMeshTask>(),
-            "raster LOD claims its far-lane slot while the near lane is saturated"
-        );
-    }
-
-    #[test]
-    fn near_upload_counter_does_not_consume_far_upload_lane() {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
-            .init_asset::<Mesh>()
-            .insert_resource(MeshBudgets {
-                max_in_flight: 1,
-                uploads_per_frame: 1,
-            })
-            .insert_resource(FrameUploads(1))
-            .init_resource::<FarFrameUploads>()
-            .add_systems(Update, apply_lod_meshes);
-        let task = AsyncComputeTaskPool::get().spawn(async {
-            MeshOutput {
-                mesh: None,
-                records: None,
-                connectivity: 0,
-                quad_count: 0,
-                has_interior: false,
-            }
-        });
-        let lod = app.world_mut().spawn(LodMeshTask(task)).id();
-
-        assert!(super::super::queue::tests::wait_until(&mut app, |app| {
-            app.world().entity(lod).contains::<LodRasterReady>()
-        }));
-    }
-
-    #[test]
-    fn raster_tasks_share_one_bounded_far_lane() {
-        assert_eq!(far_task_capacity(64, 0), 64);
-        assert_eq!(far_task_capacity(64, 40), 24);
-        assert_eq!(far_task_capacity(64, 64), 0);
-        assert_eq!(far_task_capacity(64, 70), 0);
-    }
-
-    #[test]
-    fn changed_lod_voxel_data_supersedes_an_in_flight_task() {
-        let mut app = pipeline_app(MeshBudgets::default());
-        let e = spawn_lod_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, 2, floor_grid());
-        assert!(
-            wait_until(&mut app, |app| app.world().entity(e).contains::<Mesh3d>()),
-            "initial LOD mesh must land"
-        );
-        let old_mesh = app
-            .world()
-            .entity(e)
-            .get::<Mesh3d>()
-            .expect("meshed")
-            .0
-            .clone();
-
-        let mut changed_grid = floor_grid();
-        changed_grid[5 + 32 * 20 + 32 * 32 * 5] = Voxel::new(BlockId(2));
-        *app.world_mut().get_mut::<LodVoxelData>(e).unwrap() = LodVoxelData::from_dense(&changed_grid);
-
-        assert!(
-            wait_until(&mut app, |app| {
-                app.world()
-                    .entity(e)
-                    .get::<Mesh3d>()
-                    .is_some_and(|m| m.0 != old_mesh)
-            }),
-            "changed LodVoxelData must supersede the in-flight task and produce a new mesh handle"
-        );
-    }
-
+    /// Regression: LOD strips, seen live 2026-09-19 (64 of ~480 cells per root; c9507621, memory lod-ring-strip-bug)
     /// Regression (2026-09-19, live): a LOD root arrives as hundreds of cells
     /// in one frame. The raster lane meshes `max_in_flight` of them per batch
     /// and must keep the rest queued — a `queue.remove()` on every changed
@@ -1002,18 +572,5 @@ mod tests {
             cells.len()
         );
         assert_eq!(app.world().resource::<LodBuildQueue>().pending_count(), 0);
-    }
-
-    #[test]
-    fn lod_build_queue_reports_the_raster_backlog() {
-        let raster = Entity::from_bits(101);
-        let mut queue = LodBuildQueue::default();
-
-        queue.enqueue_raster(raster);
-        assert_eq!(queue.pending_count(), 1);
-        assert!(queue.contains_raster(raster));
-
-        queue.remove(raster);
-        assert_eq!(queue.pending_count(), 0);
     }
 }

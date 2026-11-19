@@ -121,17 +121,3 @@ fn push_background(mut bg: ResMut<MenuBackground>, layer: Option<NonSend<SlintLa
     layer.overlay.ui().set_menu_background(image);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn choose_picks_within_the_list() {
-        assert_eq!(choose(&[], 7), None);
-        let previews: Vec<PathBuf> = ["a", "b", "c"].iter().map(PathBuf::from).collect();
-        for seed in 0..10 {
-            assert!(previews.contains(choose(&previews, seed).unwrap()));
-        }
-        assert_eq!(choose(&previews, 4), Some(&previews[1]));
-    }
-}

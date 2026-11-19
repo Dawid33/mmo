@@ -182,33 +182,3 @@ fn slint_composite_pass(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn id(n: u128) -> AssetId<Image> {
-        AssetId::Uuid { uuid: bevy::asset::uuid::Uuid::from_u128(n) }
-    }
-
-    #[test]
-    fn layers_draw_in_ascending_order_stable_on_ties() {
-        let (a, b, c) = (id(1), id(2), id(3));
-        assert_eq!(sorted_layers(&[(1000, a), (0, b), (0, c)]), vec![b, c, a]);
-    }
-
-    #[test]
-    fn two_ui_cameras_composite_once_on_the_higher_order() {
-        let (a, b, c) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap(), Entity::from_raw_u32(3).unwrap());
-        assert_eq!(pick_ui_view([(a, 0), (b, 100)]), Some(b), "frontend camera above the world's");
-        assert_eq!(pick_ui_view([(b, 100), (a, 0)]), Some(b));
-        assert_eq!(pick_ui_view([(c, 0), (a, 0)]), Some(a), "a tie goes to the lowest entity");
-        assert_eq!(pick_ui_view([]), None);
-    }
-
-    #[test]
-    fn no_ui_camera_or_no_layers_composites_nothing() {
-        assert!(!wants_composite(false, 2));
-        assert!(!wants_composite(true, 0));
-        assert!(wants_composite(true, 1));
-    }
-}

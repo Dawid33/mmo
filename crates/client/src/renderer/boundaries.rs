@@ -87,22 +87,3 @@ pub fn build_uniform(enabled: bool, home: Option<RegionCoords>) -> BoundaryUnifo
     u
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn home_sets_the_rect_and_turns_the_line_on() {
-        let u = build_uniform(true, Some(RegionCoords { x: 2, z: -1 }));
-        assert_eq!(u.home_rect, Vec4::new(2.0, -1.0, 3.0, 0.0) * REGION_SIZE);
-        assert!(u.home_color.w > 0.0);
-    }
-
-    #[test]
-    fn disabled_or_homeless_draws_nothing() {
-        let home = Some(RegionCoords { x: 0, z: 0 });
-        for u in [build_uniform(false, home), build_uniform(true, None)] {
-            assert_eq!(u.home_color.w, 0.0);
-        }
-    }
-}

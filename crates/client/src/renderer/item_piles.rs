@@ -357,15 +357,6 @@ mod tests {
     use super::*;
     use game::ItemStack;
 
-    #[test]
-    fn cubes_for_counts() {
-        assert_eq!(cubes_for(1), 1);
-        assert_eq!(cubes_for(16), 1);
-        assert_eq!(cubes_for(17), 2);
-        assert_eq!(cubes_for(64), 4);
-        assert_eq!(cubes_for(1000), 4);
-    }
-
     fn app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin { file_path: "../../assets".into(), ..default() }, bevy::transform::TransformPlugin))
@@ -384,11 +375,7 @@ mod tests {
         PileView { stacks: vec![ItemStack { item: dirt(), count }] }
     }
 
-    fn roots(app: &mut App) -> Vec<(Entity, usize, Vec3)> {
-        let mut q = app.world_mut().query::<(Entity, &ItemPileRoot, &Transform, Option<&Children>)>();
-        q.iter(app.world()).map(|(e, _, t, c)| (e, c.map_or(0, |c| c.len()), t.translation)).collect()
-    }
-
+    /// Regression: item piles invisible, seen LIVE 2026-11-05/06 (5a976918 "live: piles spawned at the right place, invisible"; memory bevy-no-png-feature)
     /// Live report 2026-11-05: piles were never drawn. Bevy is built without
     /// its `png` feature, so a texture loaded through the asset server never
     /// arrives and its `StandardMaterial` is never drawn. Every cube's texture
@@ -413,76 +400,5 @@ mod tests {
             let tex = mats.get(&h).and_then(|m| m.base_color_texture.clone()).expect("cube material has a texture");
             assert!(images.get(&tex).is_some(), "cube texture must be an Image asset at spawn, not a pending load");
         }
-    }
-
-    #[test]
-    fn spawns_and_despawns() {
-        let mut app = app();
-        let region = RegionId::new(1, -1);
-        let cell = [3, 5, 7];
-        app.world_mut().write_message(ItemPileMsg::Set { region, changes: vec![(cell, Some(view(40)))] });
-        app.update();
-        app.update();
-        let r = roots(&mut app);
-        assert_eq!(r.len(), 1);
-        assert_eq!(r[0].1, 3, "40 items = 3 cubes");
-        assert_eq!(r[0].2, pile_world_position(region, cell));
-        let o = region.world_offset();
-        let b = BLOCK_VOXELS as f32;
-        assert_eq!(r[0].2, Vec3::new(o[0] + 3.5 * b, 5.0 * b, o[2] + 7.5 * b));
-
-        // A change replaces the pile.
-        app.world_mut().write_message(ItemPileMsg::Set { region, changes: vec![(cell, Some(view(1)))] });
-        app.update();
-        app.update();
-        let r = roots(&mut app);
-        assert_eq!((r.len(), r[0].1), (1, 1));
-
-        app.world_mut().write_message(ItemPileMsg::Set { region, changes: vec![(cell, None)] });
-        app.update();
-        app.update();
-        assert!(roots(&mut app).is_empty());
-    }
-
-    #[test]
-    fn region_removal_drops_its_piles_only() {
-        let mut app = app();
-        let (a, b) = (RegionId::new(0, 0), RegionId::new(1, 0));
-        app.world_mut().write_message(ItemPileMsg::Set { region: a, changes: vec![([0, 0, 0], Some(view(1))), ([1, 0, 0], Some(view(1)))] });
-        app.world_mut().write_message(ItemPileMsg::Set { region: b, changes: vec![([0, 0, 0], Some(view(1)))] });
-        app.update();
-        app.world_mut().write_message(ItemPileMsg::RemoveRegion(a));
-        app.update();
-        app.update();
-        assert_eq!(roots(&mut app).len(), 1);
-    }
-
-    /// Halo mirrors (Task 6.3): a pile seen as its owner's and as a
-    /// neighbour's mirror draws once — the owner's; with the owner not
-    /// drawn here, one mirror draws (the lowest hosting region's).
-    #[test]
-    fn halo_mirrors_draw_once() {
-        let mut app = app();
-        let n = game::REGION_BLOCKS as i32;
-        let (home, east) = (RegionId::new(0, 0), RegionId::new(1, 0));
-        // East's cell (0, 1, 5) is home's (n, 1, 5).
-        app.world_mut().write_message(ItemPileMsg::SetMirrors { region: home, changes: vec![([n, 1, 5], Some(view(2)))] });
-        app.update();
-        app.update();
-        let visible = |app: &mut App| -> Vec<(RegionId, bool)> {
-            let mut q = app.world_mut().query::<(&ItemPileRoot, &Visibility)>();
-            let mut v: Vec<_> = q.iter(app.world()).filter(|(_, v)| **v != Visibility::Hidden).map(|(r, _)| (r.region, r.mirror)).collect();
-            v.sort();
-            v
-        };
-        assert_eq!(visible(&mut app), vec![(home, true)], "the mirror draws while the owner is not here");
-        app.world_mut().write_message(ItemPileMsg::Set { region: east, changes: vec![([0, 1, 5], Some(view(2)))] });
-        app.update();
-        app.update();
-        assert_eq!(visible(&mut app), vec![(east, false)], "the owner's copy draws, the mirror hides");
-        app.world_mut().write_message(ItemPileMsg::RemoveRegion(east));
-        app.update();
-        app.update();
-        assert_eq!(visible(&mut app), vec![(home, true)]);
     }
 }

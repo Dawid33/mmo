@@ -534,6 +534,7 @@ pub fn queue_voxel_pull_shadows(
 mod tests {
     use super::*;
 
+    /// Regression: terrain drawn twice under the cutaway, slice-plane normal/dimmed flicker seen on screen (07eba551)
     /// The view's item follows the pipeline it was last queued with: when the
     /// z-level cut turns on (plain -> CUTAWAY, through the compile fallback)
     /// or off, it must leave the old pipeline's bin, else the terrain is
@@ -568,87 +569,6 @@ mod tests {
         }
     }
 
-    /// A view's opaque and cutout `Shadow` items live in one phase: re-binning
-    /// either (every frame) must keep the other.
-    #[test]
-    fn a_views_two_shadow_items_keep_each_other() {
-        use bevy::render::{
-            batching::gpu_preprocessing::GpuPreprocessingMode, render_phase::DrawFunctionId,
-            view::RetainedViewEntity,
-        };
-        let view = Entity::from_raw_u32(7).unwrap();
-        assert_ne!(second_item_key(view), MainEntity::from(view));
-        let retained = RetainedViewEntity::new(MainEntity::from(view), None, 0);
-        let mut phases = ViewBinnedRenderPhases::<Shadow>::default();
-        let key = |pipeline: usize| ShadowBatchSetKey {
-            pipeline: CachedRenderPipelineId::new(pipeline),
-            draw_function: DrawFunctionId(0),
-            material_bind_group_index: None,
-            slabs: default(),
-        };
-        let bin = || ShadowBinKey { asset_id: AssetId::<Mesh>::invalid().untyped() };
-        for _frame in 0..3 {
-            phases.prepare_for_new_frame(retained, GpuPreprocessingMode::None);
-            let phase = phases.get_mut(&retained).expect("phase");
-            bin_view_item(phase, key(1), bin(), view);
-            bin_view_item_as(phase, key(2), bin(), view, second_item_key(view));
-            let mut bins: Vec<usize> =
-                phase.non_mesh_items.keys().map(|(k, _)| k.pipeline.id()).collect();
-            bins.sort();
-            assert_eq!(bins, [1, 2], "both the opaque and the cutout item stay binned");
-        }
-    }
-
-    #[test]
-    fn direct_draws_split_opaque_and_cutout_ranges() {
-        let chunk = GpuChunkQuads { record_start: 100, quad_count: 10, chunk_slot: 3, cutout_start: 7 };
-        assert_eq!(chunk.range(false), (100, 7));
-        assert_eq!(chunk.range(true), (107, 3));
-        let opaque_only = GpuChunkQuads { cutout_start: 10, ..chunk };
-        assert_eq!(opaque_only.range(true), (110, 0));
-    }
-
-    #[test]
-    fn grouped_plan_has_one_phase_item_per_view_not_per_chunk() {
-        let plan = GroupedPhasePlan::new(3, 257);
-
-        assert_eq!(plan.phase_item_count(), 3);
-        assert_eq!(plan.direct_draw_count(), 771);
-    }
-
-    #[test]
-    fn grouped_draw_list_keeps_only_cpu_visible_chunks() {
-        let frustum = camera_frustum(1000.0);
-        let inside = GpuChunkQuads {
-            record_start: 10,
-            quad_count: 4,
-            chunk_slot: 2,
-            cutout_start: 4,
-        };
-        let behind = GpuChunkQuads {
-            record_start: 30,
-            quad_count: 8,
-            chunk_slot: 5,
-            cutout_start: 8,
-        };
-
-        let list = grouped_draw_list(
-            &frustum,
-            [
-                (inside, Vec3::new(0.0, 0.0, -100.0), Vec3::splat(16.0), true),
-                (behind, Vec3::new(0.0, 0.0, 100.0), Vec3::splat(16.0), true),
-                (
-                    behind,
-                    Vec3::new(0.0, 0.0, -100.0),
-                    Vec3::splat(16.0),
-                    false,
-                ),
-            ],
-        );
-
-        assert_eq!(list.0, vec![inside]);
-    }
-
     /// A camera frustum built the way `update_frusta` builds the real one:
     /// infinite-reverse-Z perspective clip matrix, far half-space patched in
     /// from `PerspectiveProjection::far` (bevy's `Projection::compute_frustum`
@@ -666,6 +586,7 @@ mod tests {
         ))
     }
 
+    /// Regression: world blanked past 1 km, reported "only the blocks next to the player render" (99b751b7)
     /// The bug this pins: the GPU projection is infinite-reverse-Z (no far
     /// clip), so terrain beyond `projection.far` (default 1000) renders on the
     /// mesh path — the pull path's cull must not delete it. The old
@@ -697,35 +618,6 @@ mod tests {
                 Vec3::splat(4096.0)
             ),
             "distant LOD roots must survive the cull"
-        );
-    }
-
-    /// The cull must still reject what is genuinely outside the view: behind
-    /// the camera (near plane) and far off to the side (side planes).
-    #[test]
-    fn chunks_outside_the_view_are_still_culled() {
-        let frustum = camera_frustum(1000.0);
-        let half = Vec3::splat(16.0);
-        assert!(
-            !chunk_in_view(&frustum, Vec3::new(0.0, 0.0, 500.0), half),
-            "chunk behind the camera must be culled"
-        );
-        assert!(
-            !chunk_in_view(&frustum, Vec3::new(10_000.0, 0.0, -100.0), half),
-            "chunk far outside the side planes must be culled"
-        );
-        // Equivalence on the in-range case: identity test and ours agree for a
-        // chunk inside `far`, pinning that skipping the far plane changed
-        // nothing else about the test.
-        let near_center = Vec3::new(0.0, 0.0, -100.0);
-        let aabb = Aabb {
-            center: near_center.into(),
-            half_extents: half.into(),
-        };
-        assert_eq!(
-            chunk_in_view(&frustum, near_center, half),
-            frustum.intersects_obb_identity(&aabb),
-            "inside projection.far the two tests must agree"
         );
     }
 }

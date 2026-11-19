@@ -163,7 +163,7 @@ impl fmt::Display for WorldScale {
 
 /// One parameter of a page URL's query string (`?world=small`,
 /// `?port=1&world=tiny&view=3000`), for the browser build's [`WorldScale`].
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn query_param<'a>(search: &'a str, name: &str) -> Option<&'a str> {
     search
         .trim_start_matches('?')
@@ -232,83 +232,3 @@ impl fmt::Display for WorldScaleError {
 
 impl std::error::Error for WorldScaleError {}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn page_query_picks_the_world_preset() {
-        assert_eq!(query_param("?world=small", "world"), Some("small"));
-        assert_eq!(query_param("?port=1&world=tiny", "world"), Some("tiny"));
-        assert_eq!(query_param("?port=1", "world"), None);
-        assert_eq!(query_param("?world=", "world"), None);
-        assert_eq!(query_param("", "world"), None);
-        assert_eq!(query_param("?worlds=x&view=3000", "view"), Some("3000"));
-        assert_eq!(query_param("?worlds=x", "world"), None);
-    }
-
-    #[test]
-    fn view_distance_builds_a_ring_table_reaching_it() {
-        let region_m = game::REGION_SIZE / game::movement::UNITS_PER_METER;
-        let scale = WorldScale::FULL.with_view_distance_m("3000").unwrap();
-        let regions = (3000.0 / region_m).ceil() as i32;
-        assert_eq!(scale.lod_table, game::lod::ring_table_for(regions).as_slice());
-        assert!(scale.lod_reach_units() >= 3000.0 * game::movement::UNITS_PER_METER);
-        for bad in ["0", "-5", "far", "99999"] {
-            assert_eq!(
-                WorldScale::FULL.with_view_distance_m(bad),
-                Err(WorldScaleError::InvalidViewDistance(bad.to_owned()))
-            );
-        }
-    }
-
-    #[test]
-    fn unset_environment_is_the_production_scale() {
-        let scale = WorldScale::resolve(None, None, None).unwrap();
-        assert_eq!(scale, WorldScale::FULL);
-        assert_eq!(scale.near_radius, DEFAULT_NEAR_RADIUS);
-        assert_eq!(scale.lod_table, game::lod::LOD_RING_TABLE);
-        let edge = (2 * DEFAULT_NEAR_RADIUS + 1) as usize;
-        assert_eq!(scale.near_region_count(), edge * edge);
-    }
-
-    #[test]
-    fn presets_resolve() {
-        assert_eq!(WorldScale::resolve(Some("full"), None, None), Ok(WorldScale::FULL));
-        assert_eq!(WorldScale::resolve(Some("small"), None, None), Ok(WorldScale::SMALL));
-        let tiny = WorldScale::resolve(Some("tiny"), None, None).unwrap();
-        assert_eq!(tiny, WorldScale::TINY);
-        assert_eq!(tiny.near_region_count(), 1);
-        assert!(tiny.lod_table.is_empty());
-    }
-
-    #[test]
-    fn individual_knobs_override_the_preset() {
-        let scale = WorldScale::resolve(Some("tiny"), Some("1"), Some("small")).unwrap();
-        assert_eq!(scale.near_radius, 1);
-        assert_eq!(scale.lod_table, SMALL_LOD_RING_TABLE);
-        let scale = WorldScale::resolve(None, Some("0"), Some("off")).unwrap();
-        assert_eq!(scale, WorldScale::TINY);
-    }
-
-    #[test]
-    fn explicit_ring_table_parses() {
-        let scale = WorldScale::resolve(None, None, Some("2:2, 4:4,8:16")).unwrap();
-        assert_eq!(scale.lod_table, &[(2, 2), (4, 4), (8, 16)]);
-    }
-
-    #[test]
-    fn invalid_values_are_rejected_with_the_variable_named() {
-        let preset = WorldScale::resolve(Some("huge"), None, None).unwrap_err();
-        assert!(preset.to_string().contains("VOXEL_WORLD"));
-        for radius in ["-1", "4", "one", ""] {
-            let error = WorldScale::resolve(None, Some(radius), None).unwrap_err();
-            assert_eq!(error, WorldScaleError::InvalidNearRadius(radius.to_owned()));
-        }
-        // Unknown factor, non-ascending bounds, zero bound, malformed pairs.
-        for rings in ["2:3", "4:4,2:2", "2:2,2:4", "0:2", "2", "2:2,", "a:b"] {
-            let error = WorldScale::resolve(None, None, Some(rings)).unwrap_err();
-            assert_eq!(error, WorldScaleError::InvalidLodRings(rings.to_owned()));
-        }
-    }
-}

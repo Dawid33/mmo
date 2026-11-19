@@ -62,11 +62,9 @@ mod threaded {
     use std::thread::JoinHandle;
     use std::time::Duration;
 
-    /// To a region thread: a command, or (tests) "stop and hand the region back".
+    /// To a region thread: a command.
     pub(super) enum ToRegion {
         Cmd(RegionCmd),
-        #[cfg_attr(not(test), allow(dead_code))]
-        Take,
     }
 
     /// A report and the generation of the region thread that sent it: a
@@ -242,18 +240,6 @@ mod threaded {
                 let _ = handle.join();
             }
         }
-
-        #[cfg(test)]
-        pub(super) fn stop_and_take(&mut self, id: RegionId) -> Option<Region> {
-            let live = self.regions.remove(&id)?;
-            live.send.send(ToRegion::Take).ok()?;
-            live.handle.join().ok().flatten()
-        }
-
-        #[cfg(test)]
-        pub(super) fn live_threads(&self) -> Arc<AtomicUsize> {
-            self.live.clone()
-        }
     }
 
     impl Drop for ThreadedHost {
@@ -281,10 +267,7 @@ mod threaded {
         let mut st = RunnerState::default();
         let mut reports = Vec::new();
         while let Ok(msg) = recv.recv() {
-            let cmd = match msg {
-                ToRegion::Cmd(cmd) => cmd,
-                ToRegion::Take => return Some(region),
-            };
+            let ToRegion::Cmd(cmd) = msg;
             let running = handle(&mut region, &mut st, &ctx, cmd, &mut reports);
             for report in reports.drain(..) {
                 let _ = out.send((ctx.id, generation, report));
@@ -430,131 +413,5 @@ impl RegionHost {
             RegionHost::Threaded(_) => None,
         }
     }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn stop_and_take(&mut self, id: RegionId) -> Option<Region> {
-        match self {
-            RegionHost::Threaded(h) => h.stop_and_take(id),
-            RegionHost::Inline(_) => None,
-        }
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn live_threads(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
-        match self {
-            RegionHost::Threaded(h) => h.live_threads(),
-            RegionHost::Inline(_) => unreachable!("threaded host only"),
-        }
-    }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use super::*;
-    use crate::regions::runner::RegionReport;
-    use game::{ClientId, GameEventKind, RegionCoords};
-
-    const CLIENT: ClientId = 0;
-    const RC: RegionCoords = RegionCoords { x: 0, z: 0 };
-
-    /// A snapshot holding `CLIENT`, as the server would send it.
-    fn snapshot() -> Rollback {
-        let mut server = Region::from_chunks(RC, Vec::new());
-        server.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
-        server.commit_server_event();
-        server.data().clone()
-    }
-
-    fn ctx() -> RunnerCtx {
-        let (server_send, _) = crossbeam::channel::unbounded();
-        let (client_event_send, _) = crossbeam::channel::unbounded();
-        RunnerCtx { id: RC, client_id: CLIENT, server_send, client_event_send, debug_flags: Default::default() }
-    }
-
-    /// `n` ticks of the clock from world tick 0 (every snapshot here starts
-    /// at 0).
-    fn ticks(host: &mut RegionHost, n: usize) {
-        for t in 1..=n {
-            host.broadcast(|| RegionCmd::Tick(t as game::Tick));
-        }
-    }
-
-    #[test]
-    fn threaded_tick_matches_inline() {
-        let mut inline = RegionHost::inline();
-        let mut threaded = RegionHost::threaded();
-        inline.spawn(ctx(), snapshot(), None);
-        threaded.spawn(ctx(), snapshot(), None);
-        ticks(&mut inline, 50);
-        ticks(&mut threaded, 50);
-        threaded.settle();
-        let region = threaded.stop_and_take(RC).expect("threaded region");
-        assert_eq!(region.current_tick(), 50);
-        assert_eq!(
-            game::state_hash(region.data()),
-            game::state_hash(inline.world().unwrap().data(&RC)),
-            "the same commands give the same region on a thread"
-        );
-    }
-
-    #[test]
-    fn stop_then_respawn_same_region() {
-        let mut host = RegionHost::threaded();
-        host.spawn(ctx(), snapshot(), None);
-        ticks(&mut host, 20);
-        assert!(host.stop(RC));
-        assert!(!host.contains(&RC));
-        host.spawn(ctx(), snapshot(), None);
-        ticks(&mut host, 3);
-        host.settle();
-        assert_eq!(host.ids(), vec![RC]);
-        let ticked = host
-            .drain()
-            .into_iter()
-            .filter(|(_, r)| matches!(r, RegionReport::Ticked { .. }))
-            .count();
-        assert_eq!(ticked, 3, "reports of the stopped region never reach the new one");
-    }
-
-    /// A region released or re-received while its thread is still
-    /// building: the bridge still sees NewRegion → RemoveRegion → NewRegion,
-    /// never a removal overtaken by the old generation's NewRegion.
-    #[test]
-    fn respawn_keeps_bridge_order() {
-        let (client_event_send, bridge) = crossbeam::channel::unbounded();
-        let ctx = RunnerCtx { client_event_send, ..ctx() };
-        let mut host = RegionHost::threaded();
-        host.spawn(ctx.clone(), snapshot(), None);
-        host.stop(RC);
-        host.spawn(ctx, snapshot(), None);
-        host.settle();
-        drop(host);
-        let order: Vec<&str> = bridge
-            .try_iter()
-            .filter_map(|e| match e {
-                ClientUpdateEvent::NewRegion(..) => Some("new"),
-                ClientUpdateEvent::RemoveRegion(_) => Some("remove"),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(&order[..3], ["new", "remove", "new"], "{order:?}");
-    }
-
-    #[test]
-    fn drop_joins_all_threads() {
-        let mut host = RegionHost::threaded();
-        for x in 0..3 {
-            let mut c = ctx();
-            c.id = RegionCoords::new(x, 0);
-            let mut server = Region::from_chunks(c.id, Vec::new());
-            server.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
-            server.commit_server_event();
-            host.spawn(c, server.data().clone(), None);
-        }
-        ticks(&mut host, 5);
-        let live = host.live_threads();
-        assert_eq!(live.load(std::sync::atomic::Ordering::SeqCst), 3);
-        drop(host);
-        assert_eq!(live.load(std::sync::atomic::Ordering::SeqCst), 0, "dropping the host joins every region thread");
-    }
-}

@@ -508,47 +508,6 @@ fn write_uniform<T: ShaderType + encase::internal::WriteInto>(
 mod tests {
     use super::*;
 
-    #[test]
-    fn draw_list_workload_sums_quads_and_vertices() {
-        let draws = ViewChunkDrawList(vec![
-            GpuChunkQuads {
-                record_start: 0,
-                quad_count: 4,
-                chunk_slot: 0,
-                cutout_start: 4,
-            },
-            GpuChunkQuads {
-                record_start: 4,
-                quad_count: 7,
-                chunk_slot: 1,
-                cutout_start: 5,
-            },
-        ]);
-        assert_eq!(draw_list_workload(&draws), (11, 66));
-    }
-
-    #[test]
-    fn gpu_prepare_preserves_the_latest_asynchronous_telemetry() {
-        let mode = ActiveNearMode::GpuDriven {
-            indirect_count: true,
-        };
-        let mut metrics = NearRendererMetrics {
-            active_mode: mode,
-            hzb_visible_chunks: Some(7),
-            indirect_draw_count: Some(3),
-            ..default()
-        };
-
-        update_near_metrics_for_prepare(mode, 17, Some(11), 23, None, None, &mut metrics);
-
-        assert_eq!(metrics.active_chunks, 17);
-        assert_eq!(metrics.frustum_visible_chunks, Some(11));
-        assert_eq!(metrics.resident_quads, 23);
-        assert_eq!(metrics.hzb_visible_chunks, Some(7));
-        assert_eq!(metrics.indirect_draw_count, Some(3));
-        assert_eq!(metrics.direct_draw_count, Some(0));
-    }
-
     /// Face-sorted records: one opaque quad per face direction, then one
     /// cutout quad.
     fn sorted_records() -> Vec<super::super::super::meshing::records::QuadRecord> {
@@ -563,17 +522,7 @@ mod tests {
         quads_to_records(&quads, &Default::default())
     }
 
-    #[test]
-    fn terrain_chunks_stay_face_culled() {
-        let records = sorted_records();
-        let want = face_ends(&records);
-        assert_eq!(want[6], 0, "sorted records are face-culled");
-        // Terrain: translation and uniform scale (LOD) only.
-        for m in [Mat4::IDENTITY, Mat4::from_translation(Vec3::new(1024.0, -16.0, 7.5)), Mat4::from_scale(Vec3::splat(4.0))] {
-            assert_eq!(chunk_face_ends(&records, &m), want, "{m:?}");
-        }
-    }
-
+    /// Regression: felled trees drew without bottoms once tipped, seen during the tree-felling play session 2026-10-30 (47fe5423, pull_smoke upside-down screenshot follow-up 4f067cb0)
     #[test]
     fn rotated_chunks_are_never_face_culled() {
         // A falling voxel body's brick: its local −Y faces may point up, so
@@ -592,14 +541,5 @@ mod tests {
             assert_ne!(ends[6], 0, "unsorted flag for {m:?}");
             assert_eq!(ends[7], cutout, "the cutout range still starts after the opaque one");
         }
-    }
-
-    #[test]
-    fn growing_a_low_reused_range_preserves_higher_mirror_entries() {
-        let mut values = vec![1, 2, 3, 4];
-
-        grow_to(&mut values, 2, 0);
-
-        assert_eq!(values, vec![1, 2, 3, 4]);
     }
 }

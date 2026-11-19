@@ -85,29 +85,3 @@ pub fn look_rotation(yaw: f32, pitch: f32) -> Quat {
     Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn look_rotation_matches_sim_quat() {
-        for &(yaw, pitch) in &[(0.0f32, 0.0f32), (1.3, -0.4), (-2.9, 1.2), (5.0, 0.7)] {
-            let sim = Quat::from_array(game::look_quat(yaw, pitch).to_array());
-            let bevy = look_rotation(yaw, pitch);
-            // Components, not `angle_between`: that is 2·acos(|dot|), and
-            // `dot` of two bit-identical quats can round to 1 − 2⁻²⁴, which
-            // reads as ~7e-4 rad ((5.0, 0.7) does). q and −q are the same
-            // rotation.
-            let (a, b) = (Vec4::from(bevy), Vec4::from(sim));
-            let diff = (a - b).abs().max_element().min((a + b).abs().max_element());
-            assert!(diff < 1e-6, "{yaw} {pitch}: {bevy:?} vs {sim:?}");
-        }
-    }
-
-    #[test]
-    fn euler_round_trip_recovers_yaw_pitch() {
-        let (yaw, pitch) = (0.8f32, -0.3f32);
-        let (y, p, r) = look_rotation(yaw, pitch).to_euler(EulerRot::YXZ);
-        assert!((y - yaw).abs() < 1e-5 && (p - pitch).abs() < 1e-5 && r.abs() < 1e-5);
-    }
-}

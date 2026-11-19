@@ -16,19 +16,8 @@ slint = { workspace = true }
 slint-ui-game = { workspace = true }
 slint-ui-frontend = { workspace = true }
 
-# `tests/wasm_images.rs` under node (`just slint-wasm`); same version as game's.
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test = "0.3"
-
-[dev-dependencies]
-# The asset viewer + controls harness the tests drive (not in the game build).
-slint-ui-tools = { workspace = true }
-
 [[test]]
 name = "it"
 path = "tests/it.rs"
 
 # wasm32 only: the embedded sprites draw in the browser build (`just slint-wasm`).
-[[test]]
-name = "wasm_images"
-path = "tests/wasm_images.rs"

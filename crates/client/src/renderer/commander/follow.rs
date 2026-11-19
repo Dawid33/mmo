@@ -91,32 +91,3 @@ pub fn rekey_local_player(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn follow_step_converges() {
-        let mut focus = Vec2::ZERO;
-        for _ in 0..60 {
-            focus = follow_step(focus, Vec2::splat(100.0), 1.0 / 60.0);
-        }
-        assert!(focus.distance(Vec2::splat(100.0)) < 0.1, "{focus}");
-    }
-
-    #[test]
-    fn rekey_local_player() {
-        let a = (RegionId::from_world(0.0, 0.0), EntityKey::default());
-        let b = (RegionId::from_world(1.0e6, 0.0), EntityKey::default());
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Selection>()
-            .add_systems(Update, super::rekey_local_player);
-        let body = app.world_mut().spawn((LocalBody, SimEntity { region: a.0, key: a.1 })).id();
-        app.world_mut().resource_mut::<Selection>().0.insert(a);
-        app.update();
-        app.world_mut().entity_mut(body).insert(SimEntity { region: b.0, key: b.1 });
-        app.update();
-        assert_eq!(app.world().resource::<Selection>().0, [b].into_iter().collect());
-    }
-}

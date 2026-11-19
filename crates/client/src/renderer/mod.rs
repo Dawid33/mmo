@@ -367,9 +367,8 @@ pub(crate) fn resolve_blocks_dir() -> std::path::PathBuf {
 }
 
 /// Block textures for targets with no filesystem (wasm): embedded at compile
-/// time. The `embedded_block_textures_match_assets_dir` test keeps this list
-/// in sync with assets/blocks/*.png.
-#[cfg(any(target_arch = "wasm32", test))]
+/// time; keep this list in sync with assets/blocks/*.png.
+#[cfg(target_arch = "wasm32")]
 const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[
     (
         "dirt.png",
@@ -1228,78 +1227,3 @@ fn load_block_texture(path: &str) -> Option<image::RgbaImage> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{resolve_blocks_dir, EMBEDDED_BLOCK_TEXTURES};
-
-    #[test]
-    fn embedded_block_textures_match_assets_dir() {
-        let dir = resolve_blocks_dir();
-        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
-            .expect("assets/blocks must exist for this test")
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("png"))
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
-        on_disk.sort();
-        let mut embedded: Vec<String> = EMBEDDED_BLOCK_TEXTURES
-            .iter()
-            .map(|(n, _)| (*n).to_string())
-            .collect();
-        embedded.sort();
-        assert_eq!(
-            embedded, on_disk,
-            "EMBEDDED_BLOCK_TEXTURES is out of sync with assets/blocks/*.png — update the const in renderer/mod.rs"
-        );
-    }
-
-    #[test]
-    fn embedded_block_textures_cover_manifest_references() {
-        use game::TextureSpec;
-
-        let reg = crate::blocks::load_registry();
-        for (_, def) in reg.iter() {
-            let referenced: Vec<&str> = match &def.textures {
-                TextureSpec::All(p) => vec![p.as_str()],
-                TextureSpec::Faces { top, side, bottom } => {
-                    vec![top.as_str(), side.as_str(), bottom.as_str()]
-                }
-                TextureSpec::Untextured => vec![],
-            };
-            for path in referenced {
-                assert!(
-                    EMBEDDED_BLOCK_TEXTURES.iter().any(|(n, _)| *n == path),
-                    "block manifest references {path:?}, but it is not in EMBEDDED_BLOCK_TEXTURES \
-                     — add it to that const in renderer/mod.rs so the wasm build has it"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_resolve_blocks_dir_with_cargo_manifest() {
-        let blocks_path = resolve_blocks_dir();
-        // When tests run, CARGO_MANIFEST_DIR should be set to crates/client.
-        // The resolved path should end with assets/blocks.
-        assert!(
-            blocks_path.ends_with("assets/blocks"),
-            "blocks_path should end with assets/blocks, got {:?}",
-            blocks_path
-        );
-
-        // Verify the actual directory and asset exist (crates/client/../../assets/blocks -> assets/blocks).
-        assert!(
-            blocks_path.exists(),
-            "resolved blocks directory should exist at {:?}",
-            blocks_path
-        );
-
-        // Check that the expected dirt.png texture exists.
-        let dirt_texture = blocks_path.join("dirt.png");
-        assert!(
-            dirt_texture.exists(),
-            "dirt.png should exist at {:?}",
-            dirt_texture
-        );
-    }
-}

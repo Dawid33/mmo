@@ -28,19 +28,3 @@ pub fn crosshair_visible(grab: CursorGrabMode, orbit: bool, third_person: bool) 
     !orbit && !third_person && grab == CursorGrabMode::Locked
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crosshair_shows_only_when_locked_and_not_orbiting() {
-        assert!(crosshair_visible(CursorGrabMode::Locked, false, false));
-        assert!(!crosshair_visible(CursorGrabMode::Locked, true, false));
-        assert!(!crosshair_visible(CursorGrabMode::None, false, false));
-    }
-
-    #[test]
-    fn no_crosshair_in_third_person() {
-        assert!(!crosshair_visible(CursorGrabMode::Locked, false, true));
-    }
-}

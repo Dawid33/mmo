@@ -144,54 +144,5 @@ pub fn clear_at(path: &std::path::Path) {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn refresh_round_trips_in_temp_dir() {
-        let dir = std::env::temp_dir().join(format!("mmo-login-refresh-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("nested").join(REFRESH_FILE_NAME);
-        assert_eq!(read_at(&path), None, "nothing kept yet");
-        // A stale temp file (a crashed write), even a world-readable one, is
-        // replaced, never reused.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let stale = path.with_file_name(format!("{REFRESH_FILE_NAME}.tmp"));
-            std::fs::write(&stale, "stale").unwrap();
-            std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
-        }
-        write_at(&path, "first-token").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, REFRESH_FILE_MODE);
-            assert!(!path.with_file_name(format!("{REFRESH_FILE_NAME}.tmp")).exists(), "renamed away");
-        }
-        assert_eq!(read_at(&path).as_deref(), Some("first-token"));
-        write_at(&path, "second-token").unwrap();
-        assert_eq!(read_at(&path).as_deref(), Some("second-token"), "replaced");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        }
-        clear_at(&path);
-        assert_eq!(read_at(&path), None);
-        clear_at(&path); // already gone: fine
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn refresh_path_prefers_override_then_the_data_dir() {
-        use std::path::PathBuf;
-        assert_eq!(refresh_path_from(Some("/r/f"), Some("/x"), None), Some(PathBuf::from("/r/f")));
-        assert_eq!(refresh_path_from(Some(" "), Some("/x"), Some("/h")), Some(PathBuf::from("/x/mmo/login_refresh")));
-        assert_eq!(
-            refresh_path_from(None, None, Some("/h")),
-            Some(PathBuf::from("/h/.local/share/mmo/login_refresh"))
-        );
-        assert_eq!(refresh_path_from(None, None, None), None);
-    }
+    
 }

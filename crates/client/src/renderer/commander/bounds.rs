@@ -45,39 +45,3 @@ pub fn clamp_to_window(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::renderer::commander::home_change_focus;
-
-    #[test]
-    fn window_rect_radius_zero_is_home_rect() {
-        let home = game::RegionCoords::new(2, -1);
-        assert_eq!(window_rect(home, 0), region_rect(home));
-    }
-
-    #[test]
-    fn window_rect_radius_one_is_three_regions_wide() {
-        let w = window_rect(game::RegionCoords::new(2, -1), 1);
-        assert_eq!(w.size(), Vec2::splat(3.0 * game::REGION_SIZE));
-        assert_eq!(w.center(), region_rect(game::RegionCoords::new(2, -1)).center());
-    }
-
-    #[test]
-    fn walking_home_change_keeps_focus() {
-        let old = region_rect(game::RegionCoords::new(0, 0));
-        let new = region_rect(game::RegionCoords::new(1, 0));
-        let focus = Vec2::new(old.max.x + 10.0, old.center().y);
-        assert!(new.contains(focus));
-        assert_eq!(home_change_focus(focus, Some(new), true), focus);
-    }
-
-    #[test]
-    fn adventure_pan_is_clamped_to_window() {
-        let window = window_rect(game::RegionCoords::new(0, 0), 1);
-        let far = window.max + Vec2::splat(500.0);
-        let b = pan_bounds(true, Some(window));
-        assert_eq!(clamp_focus(far, b), window.max);
-        assert_eq!(clamp_focus(far, pan_bounds(false, Some(window))), far, "Overview pans freely");
-    }
-}

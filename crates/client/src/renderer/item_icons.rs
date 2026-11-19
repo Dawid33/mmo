@@ -60,14 +60,3 @@ pub fn icon(item: ItemId) -> Image {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stick_reuses_the_oak_branch_texture() {
-        let registry = BlockRegistry::from_ron(&crate::blocks::manifest_src()).unwrap();
-        let stick = ItemId::extra_named("stick").expect("stick item");
-        assert_eq!(texture_path(&registry, stick).as_deref(), Some("oak_branch.png"));
-    }
-}

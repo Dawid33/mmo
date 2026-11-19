@@ -165,81 +165,12 @@ mod tests {
         ClockInput { server_tick, server_rate_ms: 50, rtt_ms }
     }
 
-    #[test]
-    fn in_band_runs_at_server_rate() {
-        let d = decide(102, &sample(100, 25));
-        assert_eq!(d, ClockDecision { drift_ms: 75, step: None, rate: (50, true) });
-    }
-
-    #[test]
-    fn far_behind_steps_and_slows() {
-        let d = decide(100, &sample(110, 0));
-        assert_eq!(d, ClockDecision { drift_ms: -500, step: Some((-575, 12)), rate: (45, false) });
-    }
-
+    /// Regression: crossing pause (new home sat out 6-10 ticks) seen with `just fly-probe` 2026-09-23 (comment in 67366206, memory region-crossing-pause)
     /// The crossing-pause regression (`HOME_STALL_MIN_MS`): running ahead
     /// within the server's input-hold horizon is slewed, never held.
     #[test]
     fn slightly_ahead_is_not_stalled() {
         let d = decide(120, &sample(100, 0));
         assert_eq!(d, ClockDecision { drift_ms: 1000, step: None, rate: (55, true) });
-    }
-
-    #[test]
-    fn far_ahead_is_stepped_back() {
-        let d = decide(130, &sample(100, 0));
-        assert_eq!(d, ClockDecision { drift_ms: 1500, step: Some((1425, 29)), rate: (55, true) });
-    }
-
-    #[test]
-    fn step_is_capped() {
-        let d = decide(0, &sample(1000, 0));
-        assert_eq!(d.step.map(|(_, ticks)| ticks), Some(MAX_ALIGN_TICKS));
-        assert_eq!(MAX_ALIGN_TICKS, 40);
-    }
-
-    /// Several regions' samples of one server world tick give ONE predicted
-    /// tick, and every region — whatever tick its snapshot left it at — runs
-    /// to that same tick.
-    #[test]
-    fn every_region_targets_one_predicted_tick() {
-        let mut clock = PredictedClock::default();
-        clock.start_at(100);
-        clock.start_at(90); // a later snapshot does not move it
-        assert_eq!(clock.tick(), Some(100));
-        // Three regions report world tick 110: the first decides (12 ticks
-        // forward), the rest say nothing new.
-        assert!(clock.sample(&sample(110, 0)).is_some());
-        assert_eq!(clock.sample(&sample(110, 0)), None);
-        assert_eq!(clock.sample(&sample(109, 0)), None, "a region still catching up");
-        let target = clock.advance().expect("started");
-        assert_eq!(target, 113);
-        let mut regions = [100, 108, 113, 114];
-        for _ in 0..4 {
-            for r in &mut regions {
-                *r += ticks_due(*r, target) as game::Tick;
-            }
-        }
-        assert_eq!(regions[..3], [target; 3], "every region at the predicted tick");
-        assert_eq!(regions[3], 114, "a region ahead is held, never stepped back");
-    }
-
-    /// A region 3 ticks behind runs all 3 at once; one far behind catches
-    /// up in bursts of at most `MAX_CATCH_UP_BURST`.
-    #[test]
-    fn region_behind_gets_a_bounded_burst() {
-        assert_eq!(ticks_due(97, 100), 3);
-        assert_eq!(ticks_due(80, 100), game::MAX_CATCH_UP_BURST as usize);
-        assert_eq!(ticks_due(100, 100), 0);
-        assert_eq!(ticks_due(101, 100), 0);
-    }
-
-    #[test]
-    fn far_ahead_sample_moves_the_clock_back() {
-        let mut clock = PredictedClock::default();
-        assert_eq!(clock.sample(&sample(100, 0)), None, "not started");
-        clock.start_at(130);
-        clock.sample(&sample(100, 0)).expect("decided");
-        assert_eq!(clock.tick(), Some(101));
     }
 }

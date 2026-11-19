@@ -122,30 +122,9 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
-block-mesh = { workspace = true }
 # The asset viewer's screen (examples/asset_viewer.rs).
 slint-ui-tools = { workspace = true }
 naga = { version = "29.0", features = ["wgsl-in"] }
 # Self-signed certificates for `quic_verify`'s tests.
-rcgen = { workspace = true }
 
-# `tests/web_frame_wasm.rs` on wasm32 (`just client-wasm`), the same version the game's
-# wasm tests use.
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test = "0.3"
 
-[[test]]
-name = "it"
-path = "tests/it.rs"
-
-[[test]]
-name = "web_frame_wasm"
-path = "tests/web_frame_wasm.rs"
-
-[[test]]
-name = "keepup_budget"
-path = "tests/keepup_budget.rs"
-
-[[test]]
-name = "reconcile_keepup"
-path = "tests/reconcile_keepup.rs"

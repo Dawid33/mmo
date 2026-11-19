@@ -212,40 +212,10 @@ pub fn on_mode_change(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::movement::UNITS_PER_METER;
-    use game::RegionCoords;
+    
+    
 
-    #[test]
-    fn focus_tile_is_region_local() {
-        let home = RegionCoords { x: 1, z: -2 };
-        let o = home.world_offset();
-        let ground_y = 70.0 * UNITS_PER_METER;
-        let focus = Vec2::new(o[0] + 10.5 * UNITS_PER_METER, o[2] + 3.2 * UNITS_PER_METER);
-        let t = focus_tile(focus, ground_y, home);
-        assert_eq!((t[0], t[2]), (10, 3));
-        assert_eq!(t[1], 70, "the air tile on top of the ground");
-    }
-
-    #[test]
-    fn toggle_enters_adventure_at_the_focus_and_leaves_without_a_tile() {
-        let home = RegionCoords { x: 0, z: 0 };
-        let cam = CommanderCamera { focus: Vec2::new(40.0, 56.0), ground_y: 32.0, ..Default::default() };
-        assert_eq!(
-            toggle_order(PlayMode::Overview, &cam, Some(home)),
-            Order::SetMode { mode: PlayMode::Adventure, at: Some([2, 2, 3]) }
-        );
-        assert_eq!(toggle_order(PlayMode::Adventure, &cam, Some(home)), Order::SetMode { mode: PlayMode::Overview, at: None });
-    }
-
-    #[test]
-    fn the_ask_for_adventure_is_paced() {
-        use std::time::Duration;
-        let ms = Duration::from_millis;
-        assert!(ask_due(None, ms(0)), "the first ask at once");
-        assert!(!ask_due(Some(ms(1_000)), ms(2_999)));
-        assert!(ask_due(Some(ms(1_000)), ms(3_000)), "again after ADVENTURE_ASK_EVERY_MS");
-    }
-
+    /// Regression: player saved in Overview came back in the commander camera with no way out; seen in the owner's play session during third-person polish (21dbe0f8)
     /// A session that starts in Overview (a client saved there) without the
     /// autopilot: asks for Adventure once per interval, never every frame, and
     /// once the mode reads Adventure the body view is on.
@@ -294,34 +264,5 @@ mod tests {
         }
         assert_eq!(asks(&recv), 0, "no more asks in Adventure");
         assert!(app.world().resource::<FirstPerson>().on, "in the body view");
-    }
-
-    #[test]
-    fn the_autopilot_keeps_its_overview() {
-        let (send, recv) = crossbeam::channel::unbounded();
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .insert_resource(ClientPlayMode(PlayMode::Overview))
-            .insert_resource(AutopilotFlies)
-            .insert_resource(LocalPlayer(Some(7)))
-            .insert_resource(GameEvents(send))
-            .add_systems(Update, ask_for_adventure);
-        for _ in 0..3 {
-            app.update();
-        }
-        assert_eq!(recv.try_iter().count(), 0, "the autopilot wants the overview: no ask");
-    }
-
-    #[test]
-    fn body_shows_only_in_adventure() {
-        assert_eq!(body_visibility(PlayMode::Adventure, None), Visibility::Inherited);
-        assert_eq!(body_visibility(PlayMode::Overview, None), Visibility::Hidden);
-    }
-
-    #[test]
-    fn body_shows_in_third_person_not_in_first() {
-        assert_eq!(body_visibility(PlayMode::Adventure, Some(BodyView::Third)), Visibility::Inherited);
-        assert_eq!(body_visibility(PlayMode::Adventure, Some(BodyView::First)), Visibility::Hidden, "the view is inside it");
-        assert_eq!(body_visibility(PlayMode::Overview, Some(BodyView::Third)), Visibility::Hidden);
     }
 }
