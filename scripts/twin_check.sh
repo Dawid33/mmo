@@ -1,19 +1,29 @@
 #!/usr/bin/env bash
 # The k3d twin's integration check (`just twin-check`; plans
-# docs/superpowers/plans/2026-11-15-r5-k8s.md, Task 13, and
-# docs/superpowers/plans/2026-11-15-elastic-1-hosts-as-deployments.md, Task 12). Runs
-# against a FRESH `just twin-apply` (it forges the world): the modules, images and server
-# code of the world on Kubernetes, end to end, with no client. The hosts are the
-# Deployments host-a and host-b (pods selected by app.kubernetes.io/component=host and
-# errantry/host=<name>; a pod's name is random, a host's id is issued at registration).
+# docs/superpowers/plans/2026-11-15-r5-k8s.md, Task 13,
+# docs/superpowers/plans/2026-11-15-elastic-1-hosts-as-deployments.md, Task 12, and
+# docs/superpowers/plans/2026-11-19-elastic-4-reconciler-scaling.md, Task 6). Runs against a
+# FRESH `just twin-apply` (it forges the world): the modules, images and server code of the
+# world on Kubernetes, end to end, with no client. The hosts are made by the fleet reconciler
+# (Deployment fleet) from the coordinator's desired_hosts rows: Deployments host-<name> with
+# names the store issues (h1, h2, …; pods selected by app.kubernetes.io/component=host and
+# errantry/host=<name>; a pod's name is random, a host's id is issued at registration). Host
+# names are discovered, never assumed; the twin's fleet is min = max = TWIN_HOSTS (2: k3d maps
+# exactly the node ports of two slots, 30466-30469; checked at the start).
 # The coordinator runs TWIN_COORDINATORS replicas (default 2, the module's default; checked
-# at the start). Counters (cuts decided, successions) are summed over the live replica pods
-# (each counts what it wrote); hosts live is the ticker's (mmo_coordinator_is_ticker 1); the
-# world generation must be the same on every replica that answers.
-#   1. pg Ready, login / toolbox / web rolled out; every coordinator replica and both hosts
-#      run, unready, /readyz "forge" (nothing forged by a pod). 1b: a host waiting for the
-#      forge stops on a plain SIGTERM at once with exit code 0 (PID 1's signal path).
-#   2. worldctl forge from the toolbox; every coordinator replica and both hosts become Ready.
+# at the start). Counters (cuts decided, successions, fleet decisions) are summed over the live
+# replica pods (each counts what it wrote); hosts live is the ticker's (mmo_coordinator_is_ticker
+# 1); the world generation must be the same on every replica that answers.
+#   1. pg Ready, login / toolbox / web rolled out; every coordinator replica and the fleet
+#      reconciler run, unready, /readyz "forge" (nothing forged by a pod); no host Deployment
+#      exists (nothing wants one before the forge). 1b: a pod waiting for the forge (the
+#      reconciler's) stops on a plain SIGTERM at once with exit code 0 (PID 1's signal path).
+#   2. worldctl forge from the toolbox; every coordinator replica and the reconciler become Ready.
+#      2c: the two hosts appear by themselves (the coordinator's "below the minimum" rule adds
+#      the desired rows h1, h2 — at most one decision per 10 s — and the reconciler creates
+#      their Deployments): each on the coordinator's image, its Service on node ports
+#      port_base + 2·slot and + 1 (30466-30469), both Ready; mmo_fleet_added_total summed over
+#      the replicas 0 -> 2.
 #      2b: every host has a PodDisruptionBudget that allows no disruption (0), the
 #      coordinator one with min_available 1 over its replicas; an eviction dry run of a
 #      host pod is recorded (refused or not: not a check).
@@ -21,11 +31,12 @@
 #      command: the link is the coordinator's, no --quic / --wt).
 #   4. Coordinator /metrics: exactly one ticker, every replica counts them all live; 2 hosts
 #      live, a committed world cut; `worldctl hosts`: one live row per host name.
-#   5. host-b's pod force-killed: a new pod is Ready, under a NEW id; the old id is ended
-#      (landless: dead, or already pruned), no succession, generation unchanged; host-a's pod
-#      is untouched, cuts commit again.
-#   6. host-a scaled to 0 (SIGTERM): it leaves with a committed leave cut, no succession;
-#      scaled to 1: a new id; the killed host-b's old row is gone (pruned at this registration).
+#   5. The second host's pod force-killed: a new pod (same Deployment, same name) is Ready,
+#      under a NEW id; the old id is ended (landless: dead, or already pruned), no succession,
+#      generation unchanged; the first host's pod is untouched, cuts commit again.
+#   6. The first host scaled to 0 (SIGTERM): it leaves with a committed leave cut, no
+#      succession; scaled to 1: a new id; the killed host's old row is gone (pruned at this
+#      registration). The reconciler leaves a Deployment at 0 alone.
 #   7. One coordinator replica killed mid-play: the ticker's pod force-deleted. A join through
 #      the login service (an account issued by `login account issue-refresh`, POST /v1/join
 #      through the web proxy) answers 200 before the kill and again within 90 s of it; cuts
@@ -33,9 +44,10 @@
 #      another replica becomes the ticker; both hosts' coordinator links end up on a live
 #      replica (a host that was on the killed one logs `world coordinator link up` again);
 #      the generation is unchanged; the Deployment brings the replica count back, all Ready.
-#   7b. Every replica killed and restarted: the coordinator scaled to 0 (no pod left), then
-#      back to its count: every host re-attaches (`world coordinator link up` after the
-#      start, both hosts Ready), a cut commits, the generation is unchanged.
+#   7b. Every replica killed and restarted: the coordinator scaled to 0 (no pod left; the
+#      reconciler's /readyz says "stopped"), then back to its count: every host re-attaches
+#      (`world coordinator link up` after the start, both hosts Ready), a cut commits, the
+#      generation is unchanged.
 #   7c. Land assigned, idle, released, re-assigned (Elastic 3; the twin's hosts run
 #      VOXEL_LAND_IDLE_MS=20000, the module's land_idle_ms): once no super_regions row is owned
 #      (phase 7's land went back), a join through the login service (phase 7's helper, no
@@ -48,26 +60,37 @@
 #      psql in the CloudNativePG primary (database world_<id>, TWIN_WORLD_DB).
 #   8. The web Ingress answers through Traefik; its /login proxy reaches login's key set
 #      and API, and login's /metrics and /healthz are NOT published (404).
-#   9. world-drain b 5 (the recipe): host-b leaves at the deadline and stays up drained
-#      (/readyz "drained", /livez 200), not restarted, no new `hosts` row; host-a runs on;
-#      world-status names the drained host and world-start does not wait for it; then
-#      `rollout restart deployment/host-b` brings it back Ready under a new id.
-#  10. world-stop then world-start (the recipes): the hosts leave with committed leave
-#      cuts, every coordinator replica stops after them (the count recorded in the
-#      annotation errantry/replicas), everything comes back Ready at that count.
+#   9. world-drain <second host> 5 (the recipe): it leaves at the deadline (drained); the
+#      coordinator marks its desired row draining (mmo_fleet_drained_total grows), removes the
+#      row once the host left (mmo_fleet_removed_total grows) and the reconciler deletes its
+#      Deployment, Service and PDB — all by themselves, no apply, no `rollout restart`; then a
+#      third name appears (min 2) on the freed slot (its node ports), Ready. The first host
+#      runs on untouched; cuts commit; the generation is unchanged.
+#  10. world-stop then world-start (the recipes): the reconciler stops first (its Deployment
+#      at 0, no pod), the hosts leave with committed leave cuts, every coordinator replica
+#      stops after them (the count recorded in the annotation errantry/replicas); everything
+#      comes back Ready at that count, the reconciler at 1 and Ready. Then a stray: a
+#      Deployment host-zz labelled for this world (errantry/fleet, errantry/host=zz; replicas 0)
+#      made by hand is deleted by the reconciler within a few passes; the hosts are untouched.
+#  10b. The reconciler's pod deleted mid-play: nothing running changes (the host Deployments,
+#      their pods and restarts; cuts commit meanwhile); a new reconciler pod is Ready and, a
+#      few passes on, has created and deleted nothing.
 #  11. Records (asserts nothing): each pod's memory after the forge and five minutes
 #      after the world-start, any pod log line about a file it could not write, and each
 #      coordinator replica's `[coordinator] window=` lines (transitions, conflicts, assigned).
 # Every wait has a timeout and says what it waited for. Exit 0 = pass, 1 = a check
 # failed (pods, events and logs are dumped and saved under target/twin/check-<time>/).
 # Env: TWIN_CONTEXT (k3d-mmo), TWIN_NAMESPACE (world-twin), TWIN_COORDINATORS (2),
-# TWIN_WORLD_DB (world_twin).
+# TWIN_HOSTS (2), TWIN_WORLD_DB (world_twin).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ctx="${TWIN_CONTEXT:-k3d-mmo}"
 ns="${TWIN_NAMESPACE:-world-twin}"
 coordinators="${TWIN_COORDINATORS:-2}"
+# The fleet's size (the root's fleet.min = fleet.max), and the world id (the errantry/fleet label).
+fleet_hosts="${TWIN_HOSTS:-2}"
+world_id="${ns#world-}"
 world_db="${TWIN_WORLD_DB:-world_twin}"
 out="target/twin/check-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$out"
@@ -94,8 +117,10 @@ dump() {
     echo
     echo "---- pods"
     k get pods -o wide || true
-    echo "---- hosts rows"
-    wjust world-hosts 2>&1 | tail -20 || true
+    echo "---- hosts rows, desired hosts"
+    wjust world-hosts 2>&1 | tail -30 || true
+    echo "---- host Deployments, Services, PDBs"
+    k get deploy,svc,pdb -l "errantry/fleet=$world_id" 2>&1 || true
     echo "---- events (last 30)"
     k get events --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
     for pod in $(k get pods -o name 2>/dev/null | sed 's#^pod/##'); do
@@ -142,6 +167,14 @@ live_pod() {
     k get pods -l "$1" -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers 2>/dev/null |
         awk '$2 == "<none>" { print $1; exit }' || true
 }
+# fleet_pod: the fleet reconciler's pod not being deleted ('' if none).
+fleet_pod() { live_pod app.kubernetes.io/component=fleet; }
+# fleet_ready: its pod is Ready and answers /readyz 200.
+fleet_ready() {
+    local p
+    p=$(fleet_pod)
+    [ -n "$p" ] && pod_ready "$p" && proxy "$p" readyz > /dev/null 2>&1
+}
 # coordinator_pods: every coordinator replica pod not being deleted, one per line.
 coordinator_pods() {
     k get pods -l app.kubernetes.io/component=coordinator -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers 2>/dev/null |
@@ -163,7 +196,22 @@ host_ready() {
     p=$(host_pod "$1")
     [ -n "$p" ] && pod_ready "$p"
 }
-all_ready() { coords_ready && host_ready a && host_ready b; }
+# host_names: the host Deployments' names without `host-` (h1 h2 …), in number order, one per line.
+host_names() {
+    k get deploy -l app.kubernetes.io/component=host -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
+        sed -n 's/^host-//p' | sort -V || true
+}
+# hosts_ready <n>: exactly n host Deployments, each host's pod Ready.
+hosts_ready() {
+    local names h n=0
+    names=$(host_names)
+    for h in $names; do
+        host_ready "$h" || return 1
+        n=$((n + 1))
+    done
+    [ "$n" = "$1" ]
+}
+all_ready() { coords_ready && fleet_ready && hosts_ready "$fleet_hosts"; }
 # host_replaced_and_ready <name> <old uid>: host <name> has a new pod, Ready.
 host_replaced_and_ready() {
     local p uid
@@ -294,7 +342,39 @@ has_new_live_id() {
     case " $* " in *" $id "*) return 1 ;; esac
     return 0
 }
-all_ids() { rows | awk '{ print $1 }' | tr '\n' ' '; }
+
+# --- the desired hosts (worldctl desired, through the world-ctl recipe) -------------------
+
+# desired: `worldctl desired`'s lines (`<name> slot=<n> <wanted|draining> age=<ms>`); '' when the
+# read fails (callers that need a row treat that as "not yet").
+desired() { wjust world-ctl desired 2>/dev/null | grep -E '^[^ ]+ slot=[0-9]+ ' || true; }
+# desired_state <name>: wanted / draining, '' when there is no such row.
+desired_state() { desired | awk -v n="$1" '$1 == n { print $3 }'; }
+# desired_slot <name>: its slot, '' when there is no such row.
+desired_slot() { desired | awk -v n="$1" '$1 == n { sub(/^slot=/, "", $2); print $2 }'; }
+# node_ports <name>: Service host-<name>'s node ports `<quic> <wt>` ('' when there is none).
+node_ports() {
+    k get svc "host-$1" -o jsonpath='{.spec.ports[?(@.name=="quic")].nodePort} {.spec.ports[?(@.name=="wt")].nodePort}' 2>/dev/null || true
+}
+# host_image <name>: Deployment host-<name>'s `host` container image.
+host_image() { k get deploy "host-$1" -o jsonpath='{.spec.template.spec.containers[?(@.name=="host")].image}' 2>/dev/null || true; }
+# coordinator_image: the coordinator Deployment's `coordinator` container image (what a new host gets).
+coordinator_image() { k get deploy/coordinator -o jsonpath='{.spec.template.spec.containers[?(@.name=="coordinator")].image}'; }
+# objects_of <name>: host <name>'s Deployment, Service and PDB that exist, as `kind/name` words.
+objects_of() {
+    local o
+    for o in deploy svc pdb; do
+        k get "$o" --ignore-not-found "host-$1" -o name 2>/dev/null || echo "$o/unknown(read failed)"
+    done | tr '\n' ' '
+}
+# host_gone <name>: no desired row, Deployment, Service or PDB of that name (a failed read is not gone).
+host_gone() {
+    local listing
+    listing=$(desired)
+    [ -n "$listing" ] || return 1
+    printf '%s\n' "$listing" | awk -v n="$1" '$1 == n { f = 1 } END { exit f }' || return 1
+    [ -z "$(objects_of "$1" | tr -d ' ')" ]
+}
 
 # --- logs -------------------------------------------------------------------------
 
@@ -340,10 +420,18 @@ memory_snapshot() {
 
 echo "twin-check: context $ctx, namespace $ns; transcript files in $out/"
 kc get nodes > /dev/null || fail "the cluster ($ctx) does not answer: just twin-up && just twin-apply"
-hostdeps=$(k get deploy -l app.kubernetes.io/component=host -o jsonpath='{.items[*].metadata.name}')
-[ "$hostdeps" = "host-a host-b" ] || fail "expected the host Deployments host-a host-b, found: '$hostdeps'"
+k get deploy/fleet > /dev/null 2>&1 || fail "no Deployment fleet in $ns (the fleet reconciler, Elastic 4): just twin-apply with this tree"
 want=$(k get deploy/coordinator -o jsonpath='{.spec.replicas}')
 [ "$want" = "$coordinators" ] || fail "the coordinator Deployment wants $want replica(s), this check expects $coordinators (TWIN_COORDINATORS)"
+# The fleet's dials: phases 2c and 9 count on min = max = TWIN_HOSTS (two slots, the node ports k3d maps).
+env_of() { k get "deploy/$1" -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$2\")].env[?(@.name==\"$3\")].value}"; }
+fmin=$(env_of coordinator coordinator VOXEL_FLEET_MIN)
+fmax=$(env_of coordinator coordinator VOXEL_FLEET_MAX)
+[ "$fmin" = "$fleet_hosts" ] && [ "$fmax" = "$fleet_hosts" ] ||
+    fail "the coordinator runs VOXEL_FLEET_MIN='$fmin' VOXEL_FLEET_MAX='$fmax'; this check expects both $fleet_hosts (TWIN_HOSTS; the root's fleet.min / fleet.max)"
+port_base=$(env_of fleet fleet VOXEL_FLEET_PORT_BASE)
+case "$port_base" in ''|*[!0-9]*) fail "the fleet Deployment's VOXEL_FLEET_PORT_BASE is '$port_base', not a port" ;; esac
+say "fleet: min = max = $fleet_hosts, node ports from $port_base, world id $world_id"
 
 # ---------------------------------------------------------------------------------
 step "1. the database, login, toolbox and web are up; the world waits for its forge"
@@ -355,24 +443,25 @@ k rollout status deploy/toolbox --timeout=300s > /dev/null || fail "toolbox did 
 say "toolbox rolled out"
 k rollout status deploy/web --timeout=300s > /dev/null || fail "web did not roll out in 300s"
 say "web rolled out"
+# Nothing wants a host before the forge: no desired row, so the reconciler (itself waiting) made none.
+[ -z "$(host_names)" ] || fail "host Deployments exist before any forge: $(host_names | tr '\n' ' ')(is this twin fresh? just twin-down && just twin-up && just twin-apply)"
 waiting_pods() {
-    local a b c n=0
-    a=$(host_pod a) b=$(host_pod b)
-    [ -n "$a" ] && [ -n "$b" ] && pod_running "$a" && pod_running "$b" && waiting_forge "$a" && waiting_forge "$b" || return 1
+    local c f n=0
+    f=$(fleet_pod)
+    [ -n "$f" ] && pod_running "$f" && waiting_forge "$f" || return 1
     for c in $(coordinator_pods); do
         pod_running "$c" && waiting_forge "$c" || return 1
         n=$((n + 1))
     done
     [ "$n" = "$coordinators" ]
 }
-wait_until 180 "$coordinators coordinator replicas, host-a and host-b Running, each waiting for the forge (mmo_waiting{why=forge} 1)" waiting_pods
+wait_until 180 "$coordinators coordinator replicas and the fleet reconciler Running, each waiting for the forge (mmo_waiting{why=forge} 1)" waiting_pods
 coords=$(coordinator_pods | tr '\n' ' ')
-pa=$(host_pod a)
-pb=$(host_pod b)
-say "coordinator replicas: $coords"
+pf=$(fleet_pod)
+say "coordinator replicas: $coords; fleet reconciler: $pf"
 # Record (not a check): restarts before the forge, with the end of the previous run's log.
 # shellcheck disable=SC2086 # one word per pod
-for pod in $coords "$pa" "$pb"; do
+for pod in $coords "$pf"; do
     n=$(pod_restarts "$pod")
     if [ "${n:-0}" != 0 ]; then
         k logs "$pod" --previous > "$out/$pod.before-forge.previous.log" 2>&1 || true
@@ -381,7 +470,7 @@ for pod in $coords "$pa" "$pb"; do
     fi
 done
 # shellcheck disable=SC2086 # one word per pod
-for pod in $coords "$pa" "$pb"; do
+for pod in $coords "$pf"; do
     pod_ready "$pod" && fail "$pod is Ready before any forge (is this twin fresh? just twin-down && just twin-up && just twin-apply)"
     body=$(readyz "$pod")
     case "$body" in
@@ -389,37 +478,75 @@ for pod in $coords "$pa" "$pb"; do
         *) fail "$pod /readyz does not say forge: $body" ;;
     esac
 done
+[ -z "$(host_names)" ] || fail "host Deployments appeared before any forge: $(host_names | tr '\n' ' ')"
+added0=$(coord_sum mmo_fleet_added_total) || fail "no coordinator replica answers mmo_fleet_added_total"
+[ "$added0" = 0 ] || fail "the coordinators added $added0 host(s) before any forge"
 
-step "1b. a host waiting for the forge stops at once on SIGTERM, exit code 0"
-uid1=$(pod_uid "$pb")
-k get pod "$pb" -w -o jsonpath='{.metadata.uid} {.status.containerStatuses[0].state.terminated.exitCode}{"\n"}' \
-    > "$out/host-b-sigterm.watch" 2>&1 &
+step "1b. a pod waiting for the forge (the fleet reconciler's) stops at once on SIGTERM, exit code 0"
+uid1=$(pod_uid "$pf")
+k get pod "$pf" -w -o jsonpath='{.metadata.uid} {.status.containerStatuses[0].state.terminated.exitCode}{"\n"}' \
+    > "$out/fleet-sigterm.watch" 2>&1 &
 bg_pids+=("$!")
-follow "$pb" "$out/host-b-sigterm.log"
+follow "$pf" "$out/fleet-sigterm.log"
 sleep 2
 t0=$SECONDS
-k delete pod "$pb" --wait=false > /dev/null
-wait_until 30 "the waiting host-b pod $pb gone (its grace period is 100 s)" gone "$pb" "$uid1"
+k delete pod "$pf" --wait=false > /dev/null
+# Its grace period is 30 s: gone within 20 s means it exited by itself (the exit code says how).
+wait_until 20 "the waiting fleet pod $pf gone (its grace period is 30 s)" gone "$pf" "$uid1"
 stop_secs=$((SECONDS - t0))
 sleep 1
-exit_code=$(awk -v u="$uid1" '$1 == u && $2 != "" { print $2 }' "$out/host-b-sigterm.watch" | tail -1)
-[ -n "$exit_code" ] || fail "no exit code of the old host-b pod seen (watch: $out/host-b-sigterm.watch)"
-[ "$exit_code" = 0 ] || fail "the waiting host-b pod exited $exit_code on SIGTERM, not 0"
-grep -qF "stop signal while waiting for a world: exiting" "$out/host-b-sigterm.log" ||
-    fail "the waiting host-b's log has no 'stop signal while waiting for a world' line ($out/host-b-sigterm.log)"
-say "host-b stopped in ${stop_secs}s with exit code 0: $(grep -F 'stop signal while waiting' "$out/host-b-sigterm.log" | tail -1)"
-wait_until 120 "a new host-b pod Running and waiting for the forge" waiting_pods
-pb=$(host_pod b)
-pod_ready "$pb" && fail "the new host-b pod is Ready before any forge"
+exit_code=$(awk -v u="$uid1" '$1 == u && $2 != "" { print $2 }' "$out/fleet-sigterm.watch" | tail -1)
+[ -n "$exit_code" ] || fail "no exit code of the old fleet pod seen (watch: $out/fleet-sigterm.watch)"
+[ "$exit_code" = 0 ] || fail "the waiting fleet pod exited $exit_code on SIGTERM, not 0"
+grep -qF "stop signal while waiting for a world: exiting" "$out/fleet-sigterm.log" ||
+    fail "the waiting fleet pod's log has no 'stop signal while waiting for a world' line ($out/fleet-sigterm.log)"
+say "the fleet pod stopped in ${stop_secs}s with exit code 0: $(grep -F 'stop signal while waiting' "$out/fleet-sigterm.log" | tail -1)"
+wait_until 120 "a new fleet pod Running and waiting for the forge" waiting_pods
+pf=$(fleet_pod)
+pod_ready "$pf" && fail "the new fleet pod is Ready before any forge"
 
 # ---------------------------------------------------------------------------------
-step "2. forge from the toolbox; the world becomes Ready"
+step "2. forge from the toolbox; the coordinator and the reconciler become Ready"
 t0=$SECONDS
 wjust world-ctl forge > "$out/forge.txt" 2>&1 || { tail -20 "$out/forge.txt"; fail "worldctl forge failed"; }
 tail -5 "$out/forge.txt" | sed 's/^/   forge: /'
 say "forge done in $((SECONDS - t0))s"
-wait_until 300 "$coordinators coordinator replicas, host-a and host-b Ready" all_ready
+coords_and_fleet_ready() { coords_ready && fleet_ready; }
+wait_until 300 "$coordinators coordinator replicas and the fleet reconciler Ready" coords_and_fleet_ready
+
+step "2c. the hosts appear by themselves: the coordinator adds $fleet_hosts desired rows, the reconciler their Deployments"
+# The ticker adds one row per decision (at most one per 10 s, each after a hosts read); the
+# reconciler creates each row's objects within a pass (2 s); a host is Ready once registered and attached.
+want_names=$(seq 1 "$fleet_hosts" | sed 's/^/h/' | tr '\n' ' ')
+names_are_first() { [ "$(host_names | tr '\n' ' ')" = "$want_names" ]; }
+wait_until 120 "the host Deployments $want_names(desired rows added by the coordinator, created by the reconciler)" names_are_first
+desired | sed 's/^/   desired: /'
+wait_until 300 "$fleet_hosts hosts Ready" hosts_ready "$fleet_hosts"
 memory_snapshot "after the forge (toolbox peak = the forge)"
+cimg=$(coordinator_image)
+ports_seen=''
+for h in $(host_names); do
+    img=$(host_image "$h")
+    [ "$img" = "$cimg" ] || fail "host $h runs image '$img', not the coordinator's '$cimg' (the image rule)"
+    [ "$(desired_state "$h")" = wanted ] || fail "host $h's desired row is '$(desired_state "$h")', not wanted"
+    slot=$(desired_slot "$h")
+    case "$slot" in ''|*[!0-9]*) fail "host $h has no desired slot: $(desired | tr '\n' ';')" ;; esac
+    ports=$(node_ports "$h")
+    [ "$ports" = "$((port_base + 2 * slot)) $((port_base + 2 * slot + 1))" ] ||
+        fail "host $h (slot $slot) has node ports '$ports', not $((port_base + 2 * slot)) $((port_base + 2 * slot + 1))"
+    ports_seen="$ports_seen $ports"
+    say "host $h: slot $slot, node ports $ports, image $img"
+done
+# shellcheck disable=SC2086 # one word per port
+[ "$(printf '%s\n' $ports_seen | sort -n | tr '\n' ' ')" = "$(seq "$port_base" $((port_base + 2 * fleet_hosts - 1)) | tr '\n' ' ')" ] ||
+    fail "the hosts' node ports are$ports_seen, not $port_base-$((port_base + 2 * fleet_hosts - 1)) (the ports k3d maps)"
+added=$(coord_sum mmo_fleet_added_total) || fail "no coordinator replica answers mmo_fleet_added_total"
+[ "$added" = "$fleet_hosts" ] || fail "the coordinators' mmo_fleet_added_total is $added, not $fleet_hosts (0 before the forge)"
+say "mmo_fleet_added_total $added0 -> $added; the reconciler created $(metric "$(fleet_pod)" mmo_fleet_created_total || echo '?') object(s)"
+# The hosts' names from here on: ha the first, hb the second (phase 9 replaces hb by a new name, hc).
+ha=$(host_names | sed -n 1p)
+hb=$(host_names | sed -n 2p)
+hostdeps=$(host_names | sed 's/^/host-/' | tr '\n' ' ')
 
 step "2b. every host has a PodDisruptionBudget that allows no disruption"
 for d in $hostdeps; do
@@ -439,14 +566,14 @@ if [ "$coordinators" -gt 1 ]; then
     say "PodDisruptionBudget coordinator: minAvailable 1, expectedPods $expected, disruptionsAllowed $allowed"
 fi
 # Record only: whether this k3s refuses an eviction dry run of a host pod by its budget.
-pa=$(host_pod a)
+pa=$(host_pod "$ha")
 ev=$(printf '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"%s","namespace":"%s"},"deleteOptions":{"dryRun":["All"]}}' "$pa" "$ns")
 if said=$(printf '%s' "$ev" | k create --raw "/api/v1/namespaces/$ns/pods/$pa/eviction?dryRun=All" -f - 2>&1); then
     say "record: an eviction dry run of $pa was ALLOWED by the API server: $(printf '%s' "$said" | head -c 200)"
 else
     say "record: an eviction dry run of $pa was refused: $(printf '%s' "$said" | tr '\n' ' ' | head -c 200)"
 fi
-[ "$(host_pod a)" = "$pa" ] && pod_ready "$pa" || fail "host-a's pod changed after the eviction dry run"
+[ "$(host_pod "$ha")" = "$pa" ] && pod_ready "$pa" || fail "host $ha's pod changed after the eviction dry run"
 
 # ---------------------------------------------------------------------------------
 step "3. register the world in the twin's login service"
@@ -486,38 +613,38 @@ wait_until 60 "mmo_cuts_decided_total{outcome=committed} >= 1" committed_above 0
 gen=$(coord_gen) || fail "no mmo_world_generation"
 say "world generation $gen, committed cuts $(committed)"
 rows | sed 's/^/   hosts: /'
-id_a=$(live_id a)
-id_b=$(live_id b)
-[ -n "$id_a" ] && [ -n "$id_b" ] || fail "not exactly one live dirty row each for a and b: $(rows | tr '\n' ';')"
-say "host a is id $id_a, host b is id $id_b"
+id_a=$(live_id "$ha")
+id_b=$(live_id "$hb")
+[ -n "$id_a" ] && [ -n "$id_b" ] || fail "not exactly one live dirty row each for $ha and $hb: $(rows | tr '\n' ';')"
+say "host $ha is id $id_a, host $hb is id $id_b"
 
 # ---------------------------------------------------------------------------------
-step "5. crash: host-b's pod force-deleted"
-pa=$(host_pod a)
-pb=$(host_pod b)
+step "5. crash: host $hb's pod force-deleted"
+pa=$(host_pod "$ha")
+pb=$(host_pod "$hb")
 r0=$(pod_restarts "$pa")
 uid0=$(pod_uid "$pa")
 uid1=$(pod_uid "$pb")
 d0=$(coord_sum mmo_successions_declared_total) || fail "no mmo_successions_declared_total"
 s0=$(coord_sum mmo_successions_settled_total) || fail "no mmo_successions_settled_total"
-say "before: generation $gen, host-a pod $pa restarts $r0, successions declared $d0 settled $s0"
-# Decision 9's precondition (below): host b owns no land. A twin where a player made it claim some
+say "before: generation $gen, host $ha pod $pa restarts $r0, successions declared $d0 settled $s0"
+# Decision 9's precondition (below): host $hb owns no land. A twin where a player made it claim some
 # would see a Crash succession instead — this phase checks the landless end only.
 land_b=$(row_land "$id_b")
-[ "$land_b" = 0 ] || fail "phase 5 needs host b (id $id_b) landless, it owns land=$land_b: the landless-end check does not apply (a landed host's death is a Crash succession)"
+[ "$land_b" = 0 ] || fail "phase 5 needs host $hb (id $id_b) landless, it owns land=$land_b: the landless-end check does not apply (a landed host's death is a Crash succession)"
 t0=$SECONDS
 k delete pod "$pb" --grace-period=0 --force > /dev/null 2>&1
 # The new pod registers under a new id: Ready without waiting for the old row to be ended.
-wait_until 60 "a new host-b pod Ready" host_replaced_and_ready b "$uid1"
-pb=$(host_pod b)
-say "new host-b pod $pb Ready $((SECONDS - t0))s after the kill"
+wait_until 60 "a new host $hb pod Ready" host_replaced_and_ready "$hb" "$uid1"
+pb=$(host_pod "$hb")
+say "new host $hb pod $pb Ready $((SECONDS - t0))s after the kill"
 c1=$(committed) || fail "the coordinator does not answer after the crash"
 left=$((60 - (SECONDS - t0)))
 [ "$left" -gt 0 ] || left=1
 wait_until "$left" "committed cuts grow again (above $c1), within 60 s of the kill" committed_above "$c1"
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed: $gen -> $(coord_gen)"
-[ "$(pod_uid "$pa")" = "$uid0" ] || fail "host-a's pod was replaced"
-[ "$(pod_restarts "$pa")" = "$r0" ] || fail "host-a restarted ($r0 -> $(pod_restarts "$pa"))"
+[ "$(pod_uid "$pa")" = "$uid0" ] || fail "host $ha's pod was replaced"
+[ "$(pod_restarts "$pa")" = "$r0" ] || fail "host $ha restarted ($r0 -> $(pod_restarts "$pa"))"
 # Dead, or already pruned: the new pod's registration prunes a dead row owning nothing, and a pod that
 # takes a while to start registers after the coordinator ended the old row (the log line is the proof).
 # Any other state (live, or anything else a listing may show) is not an end.
@@ -535,53 +662,58 @@ wait_until 60 "the killed host's old row $id_b ended by the coordinator (dead or
 d1=$(coord_sum mmo_successions_declared_total) || fail "no mmo_successions_declared_total after the kill"
 s1=$(coord_sum mmo_successions_settled_total) || fail "no mmo_successions_settled_total after the kill"
 o1=$(coord_max mmo_successions_open) || fail "no mmo_successions_open after the kill"
-say "after: generation $gen, host-a untouched, successions declared $d0 -> $d1, settled $s0 -> $s1, open $o1"
+say "after: generation $gen, host $ha untouched, successions declared $d0 -> $d1, settled $s0 -> $s1, open $o1"
 [ "$d1" = "$d0" ] || fail "a landless host's death declared a succession: declared $d0 -> $d1 (decision 9: ended, none)"
 [ "$o1" = 0 ] || fail "a succession is open after a landless host's death: $o1"
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed after the landless host's death: $gen -> $(coord_gen)"
 rows | sed 's/^/   hosts: /'
-has_new_live_id b "$id_a" "$id_b" || fail "host b has no live row under a new id: $(rows | tr '\n' ';')"
-id_b2=$(live_id b)
-old_row_gone_or_dead || fail "host b's old id $id_b is neither dead nor pruned (state '$(row_state "$id_b")'): $(rows | tr '\n' ';')"
-say "host b is now id $id_b2; its old id $id_b is dead or pruned ('$(row_state "$id_b")')"
-k logs "$pb" > "$out/host-b-after-crash.log" 2>&1 || true
+has_new_live_id "$hb" "$id_a" "$id_b" || fail "host $hb has no live row under a new id: $(rows | tr '\n' ';')"
+id_b2=$(live_id "$hb")
+old_row_gone_or_dead || fail "host $hb's old id $id_b is neither dead nor pruned (state '$(row_state "$id_b")'): $(rows | tr '\n' ';')"
+say "host $hb is now id $id_b2; its old id $id_b is dead or pruned ('$(row_state "$id_b")')"
+k logs "$pb" > "$out/host-$hb-after-crash.log" 2>&1 || true
 
 # ---------------------------------------------------------------------------------
-step "6. clean leave: host-a scaled to 0 (SIGTERM), then back to 1"
-pa=$(host_pod a)
+step "6. clean leave: host $ha scaled to 0 (SIGTERM), then back to 1"
+pa=$(host_pod "$ha")
 uid0=$(pod_uid "$pa")
 d0=$(coord_sum mmo_successions_declared_total)
-follow "$pa" "$out/host-a-leave.log"
+dep_uid=$(k get "deploy/host-$ha" -o jsonpath='{.metadata.uid}')
+follow "$pa" "$out/host-$ha-leave.log"
 sleep 2
 t0=$SECONDS
-k scale deploy/host-a --replicas=0 > /dev/null
-wait_until 100 "the leaving host-a pod gone" no_pods "app.kubernetes.io/component=host,errantry/host=a"
-say "host-a left in $((SECONDS - t0))s"
+k scale "deploy/host-$ha" --replicas=0 > /dev/null
+wait_until 100 "the leaving host $ha pod gone" no_pods "app.kubernetes.io/component=host,errantry/host=$ha"
+say "host $ha left in $((SECONDS - t0))s"
 sleep 1
-grep -qF "[server] left the world in cut" "$out/host-a-leave.log" ||
-    fail "host-a's log has no leave-cut line ($out/host-a-leave.log)"
-grep -qF "left without a cut" "$out/host-a-leave.log" && fail "host-a left without a cut ($out/host-a-leave.log)"
-say "$(grep -F '[server] left the world in cut' "$out/host-a-leave.log" | tail -1)"
-k scale deploy/host-a --replicas=1 > /dev/null
-wait_until 120 "a new host-a pod Ready" host_replaced_and_ready a "$uid0"
+grep -qF "[server] left the world in cut" "$out/host-$ha-leave.log" ||
+    fail "host $ha's log has no leave-cut line ($out/host-$ha-leave.log)"
+grep -qF "left without a cut" "$out/host-$ha-leave.log" && fail "host $ha left without a cut ($out/host-$ha-leave.log)"
+say "$(grep -F '[server] left the world in cut' "$out/host-$ha-leave.log" | tail -1)"
+# The reconciler left the Deployment at 0 alone (same object, still at 0: it never scales, and its
+# template is current); the wait above spans several of its passes.
+[ "$(k get "deploy/host-$ha" -o jsonpath='{.metadata.uid} {.spec.replicas}')" = "$dep_uid 0" ] ||
+    fail "the reconciler touched deploy/host-$ha at 0 replicas: $(k get "deploy/host-$ha" -o jsonpath='{.metadata.uid} {.spec.replicas}' || true) (was $dep_uid 0)"
+k scale "deploy/host-$ha" --replicas=1 > /dev/null
+wait_until 120 "a new host $ha pod Ready" host_replaced_and_ready "$ha" "$uid0"
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed after a clean leave"
 [ "$(coord_sum mmo_successions_declared_total)" = "$d0" ] || fail "a clean leave declared a succession"
 say "generation $gen unchanged, no succession"
-wait_until 30 "host a has a live row under a new id" has_new_live_id a "$id_a" "$id_b" "$id_b2"
-id_a2=$(live_id a)
+wait_until 30 "host $ha has a live row under a new id" has_new_live_id "$ha" "$id_a" "$id_b" "$id_b2"
+id_a2=$(live_id "$ha")
 listing=$(rows)
 printf '%s\n' "$listing" | sed 's/^/   hosts: /'
 # Not vacuous: an empty listing (a failed read) proves nothing.
-[ -n "$listing" ] || fail "the hosts listing is empty: cannot check that host b's old id $id_b is gone"
+[ -n "$listing" ] || fail "the hosts listing is empty: cannot check that host $hb's old id $id_b is gone"
 if printf '%s\n' "$listing" | awk -v i="$id_b" '$1 == i { f = 1 } END { exit !f }'; then
-    fail "host b's old id $id_b (dead, landless) is still a row after host a's registration: $(printf '%s' "$listing" | tr '\n' ';')"
+    fail "host $hb's old id $id_b (dead, landless) is still a row after host $ha's registration: $(printf '%s' "$listing" | tr '\n' ';')"
 fi
-say "host a is now id $id_a2; host b's old id $id_b is gone (pruned at this registration); host a's old id $id_a: '$(row_state "$id_a")' (record)"
+say "host $ha is now id $id_a2; host $hb's old id $id_b is gone (pruned at this registration); host $ha's old id $id_a: '$(row_state "$id_a")' (record)"
 
 # ---------------------------------------------------------------------------------
 step "7. one coordinator replica killed mid-play (the ticker's pod)"
-pa=$(host_pod a)
-pb=$(host_pod b)
+pa=$(host_pod "$ha")
+pb=$(host_pod "$hb")
 ua=$(pod_uid "$pa") ra=$(pod_restarts "$pa")
 ub=$(pod_uid "$pb") rb=$(pod_restarts "$pb")
 # link_ip <host pod>: the coordinator replica IP the host's link is up to, from its last svc-link line
@@ -637,7 +769,7 @@ survivors=$(coordinator_pods | grep -vxF "$victim" | tr '\n' ' ' || true)
 [ -n "$survivors" ] || fail "no coordinator replica beside the ticker $victim"
 ip_a=$(link_ip "$pa" || true)
 ip_b=$(link_ip "$pb" || true)
-say "the ticker is $victim ($victim_ip); the others: $survivors; host-a's link is on ${ip_a:-?}, host-b's on ${ip_b:-?}"
+say "the ticker is $victim ($victim_ip); the others: $survivors; host $ha's link is on ${ip_a:-?}, host $hb's on ${ip_b:-?}"
 # Every replica's whole log until it ends (its `[coordinator] window=` lines: step 11).
 followed=''
 follow_coordinators() {
@@ -689,24 +821,27 @@ links_on_live() {
 }
 wait_until "$(left_of 90)" "both hosts' coordinator links up on a live replica" links_on_live
 join_or_fail "$(left_of 90)" "a join answers 200 after the kill (within 90 s of it)"
-say "host-a's link is on $(link_ip "$pa" || echo '?'), host-b's on $(link_ip "$pb" || echo '?')"
+say "host $ha's link is on $(link_ip "$pa" || echo '?'), host $hb's on $(link_ip "$pb" || echo '?')"
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed after a replica's death: $gen -> $(coord_gen)"
-[ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host-a's pod changed or restarted when a coordinator replica died"
-[ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host-b's pod changed or restarted when a coordinator replica died"
+[ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host $ha's pod changed or restarted when a coordinator replica died"
+[ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host $hb's pod changed or restarted when a coordinator replica died"
 wait_until 120 "the coordinator back at $coordinators replicas, every one Ready" coords_ready
 wait_until 60 "every replica counts $coordinators live replicas" every_replica_counts_all
 say "replicas $(coordinator_pods | tr '\n' ' '), generation $gen, hosts untouched"
 
 # ---------------------------------------------------------------------------------
 step "7b. every coordinator replica killed, then restarted"
-pa=$(host_pod a)
-pb=$(host_pod b)
+pa=$(host_pod "$ha")
+pb=$(host_pod "$hb")
 ua=$(pod_uid "$pa") ra=$(pod_restarts "$pa")
 ub=$(pod_uid "$pb") rb=$(pod_restarts "$pb")
 follow_coordinators
 sleep 1
 k scale deploy/coordinator --replicas=0 > /dev/null
 wait_until 90 "no coordinator pod left" no_pods app.kubernetes.io/component=coordinator
+# The reconciler sees the coordinator Deployment at 0 within a pass: it creates nothing now.
+fleet_stopped() { [ "$(readyz "$(fleet_pod)")" = stopped ]; }
+wait_until 20 "the fleet reconciler's /readyz says stopped" fleet_stopped
 restarted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 t0=$SECONDS
 k scale deploy/coordinator --replicas="$coordinators" > /dev/null
@@ -715,13 +850,13 @@ links_up() {
     log_has_since "$pa" "$restarted_at" "world coordinator link up" && log_has_since "$pb" "$restarted_at" "world coordinator link up"
 }
 wait_until "$(left_of 120)" "both hosts log 'world coordinator link up' after the start" links_up
-both_hosts_ready() { host_ready a && host_ready b; }
+both_hosts_ready() { host_ready "$ha" && host_ready "$hb"; }
 wait_until "$(left_of 120)" "both hosts Ready (attached)" both_hosts_ready
 wait_until "$(left_of 120)" "a cut commits after the restart" committed_above 0
 wait_until 30 "exactly one ticker" one_ticker
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed after every replica restarted: $gen -> $(coord_gen)"
-[ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host-a's pod changed or restarted when the coordinator restarted"
-[ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host-b's pod changed or restarted when the coordinator restarted"
+[ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host $ha's pod changed or restarted when the coordinator restarted"
+[ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host $hb's pod changed or restarted when the coordinator restarted"
 say "replicas $(coordinator_pods | tr '\n' ' '), ticker $(ticker_pod), generation $gen, hosts untouched"
 
 # ---------------------------------------------------------------------------------
@@ -796,7 +931,7 @@ succ1=$(sql "select count(*) from successions") || fail "cannot read the success
 [ "$succ1" = "$succ0" ] || fail "a succession row was added while land was assigned, released and re-assigned ($succ0 -> $succ1)"
 assigned1=$(coord_sum mmo_land_assigned_total) || fail "no coordinator replica answers mmo_land_assigned_total"
 [ "$assigned1" -ge $((assigned0 + 2)) ] || fail "the coordinators' mmo_land_assigned_total grew by less than 2 ($assigned0 -> $assigned1)"
-say "generation $gen unchanged, successions rows $succ1 (unchanged), land assigned $assigned0 -> $assigned1; hosts' land: $(for h in a b; do printf '%s=%s ' "$h" "$(metric "$(host_pod "$h")" mmo_host_land || echo '?')"; done)"
+say "generation $gen unchanged, successions rows $succ1 (unchanged), land assigned $assigned0 -> $assigned1; hosts' land: $(for h in $ha $hb; do printf '%s=%s ' "$h" "$(metric "$(host_pod "$h")" mmo_host_land || echo '?')"; done)"
 
 # ---------------------------------------------------------------------------------
 step "8. the web Ingress and its /login proxy (only what login's own Ingress publishes)"
@@ -823,96 +958,148 @@ for path in /login/metrics /login/healthz; do
 done
 
 # ---------------------------------------------------------------------------------
-step "9. drain host b (world-drain b 5): drained, not restarted, no new row; then back as a new host"
-pa=$(host_pod a)
-pb=$(host_pod b)
+step "9. drain host $hb (world-drain $hb 5): drained, its row and objects removed by themselves, a new name on its slot"
+pa=$(host_pod "$ha")
+pb=$(host_pod "$hb")
 ua=$(pod_uid "$pa") ra=$(pod_restarts "$pa")
-ub=$(pod_uid "$pb") rb=$(pod_restarts "$pb")
-id_b2=$(live_id b)
-[ -n "$id_b2" ] || fail "host b has no live row before the drain: $(rows | tr '\n' ';')"
-ids_before=$(all_ids)
-say "host b is id $id_b2 (pod $pb); rows before: $ids_before"
+id_b2=$(live_id "$hb")
+[ -n "$id_b2" ] || fail "host $hb has no live row before the drain: $(rows | tr '\n' ';')"
+slot_b=$(desired_slot "$hb")
+[ -n "$slot_b" ] && [ "$(desired_state "$hb")" = wanted ] || fail "host $hb has no wanted desired row before the drain: $(desired | tr '\n' ';')"
+names_before=$(desired | awk '{ print $1 }' | tr '\n' ' ')
+drained0=$(coord_sum mmo_fleet_drained_total) || fail "no coordinator replica answers mmo_fleet_drained_total"
+removed0=$(coord_sum mmo_fleet_removed_total) || fail "no coordinator replica answers mmo_fleet_removed_total"
+added0=$(coord_sum mmo_fleet_added_total) || fail "no coordinator replica answers mmo_fleet_added_total"
+say "host $hb is id $id_b2 (pod $pb, slot $slot_b); desired: $names_before; fleet drained $drained0, removed $removed0, added $added0"
 t0=$SECONDS
-wjust world-drain b 5 > "$out/world-drain.txt" 2>&1 || { sed 's/^/   /' "$out/world-drain.txt"; fail "world-drain b 5 failed"; }
+wjust world-drain "$hb" 5 > "$out/world-drain.txt" 2>&1 || { sed 's/^/   /' "$out/world-drain.txt"; fail "world-drain $hb 5 failed"; }
 sed 's/^/   /' "$out/world-drain.txt"
-grep -qF "host b (id $id_b2) is drained" "$out/world-drain.txt" || fail "world-drain did not report host b drained"
+grep -qF "host $hb (id $id_b2) is drained" "$out/world-drain.txt" || fail "world-drain did not report host $hb drained"
 say "world-drain returned after $((SECONDS - t0))s"
-is_drained() { [ "$(readyz "$pb")" = drained ]; }
-wait_until 60 "host-b's /readyz says drained" is_drained
-# The kubelet marks the pod unready after the probe's failure threshold (3 × 5 s).
-pod_unready() { ! pod_ready "$1"; }
-wait_until 30 "the drained host-b pod not Ready" pod_unready "$pb"
-say "waiting 20 s: the drained pod must stay up, unrestarted"
-sleep 20
-[ "$(host_pod b)" = "$pb" ] || fail "host-b's pod changed after the drain ($pb -> $(host_pod b))"
-[ "$(pod_uid "$pb")" = "$ub" ] || fail "host-b's pod was replaced after the drain"
-[ "$(pod_restarts "$pb")" = "$rb" ] || fail "host-b restarted after the drain ($rb -> $(pod_restarts "$pb"))"
-is_drained || fail "host-b's /readyz no longer says drained: $(readyz "$pb")"
-proxy "$pb" livez > /dev/null 2>&1 || fail "the drained host-b's /livez does not answer 200"
-say "host-b: /readyz drained, /livez 200, same pod, $rb restart(s)"
-listing=$(rows)
-# Not vacuous: an empty listing (a failed read) proves nothing.
-[ -n "$listing" ] || fail "the hosts listing is empty after the drain: cannot check that no new row appeared"
-for id in $(printf '%s\n' "$listing" | awk '{ print $1 }'); do
-    case " $ids_before " in *" $id "*) ;; *) fail "a new hosts row $id appeared after the drain: $(printf '%s' "$listing" | tr '\n' ';')" ;; esac
-done
-printf '%s\n' "$listing" | sed 's/^/   hosts: /'
-say "no new hosts row"
-[ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host-a's pod changed or restarted during host-b's drain"
-c1=$(committed)
-wait_until 60 "committed cuts grow with host-b drained (above $c1)" committed_above "$c1"
-[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed after the drain"
-wjust world-status > "$out/world-status-drained.txt" 2>&1 || { sed 's/^/   /' "$out/world-status-drained.txt"; fail "world-status failed"; }
-grep -qF 'drained: host b left the world' "$out/world-status-drained.txt" || fail "world-status does not name the drained host b ($out/world-status-drained.txt)"
-say "world-status: $(grep -F 'drained: host b' "$out/world-status-drained.txt" | head -1)"
-t0=$SECONDS
-WORLD_START_TIMEOUT=90 wjust world-start > "$out/world-start-drained.txt" 2>&1 ||
-    { sed 's/^/   /' "$out/world-start-drained.txt"; fail "world-start with a drained host failed (it must not wait for it)"; }
-sed 's/^/   /' "$out/world-start-drained.txt"
-grep -qF "host b is DRAINED" "$out/world-start-drained.txt" || fail "world-start did not name the drained host b"
-say "world-start returned in $((SECONDS - t0))s without waiting for the drained host"
-k rollout restart deployment/host-b > /dev/null
-wait_until 120 "host-b back: a new pod Ready" host_replaced_and_ready b "$ub"
-# shellcheck disable=SC2086 # one word per id
-wait_until 30 "host b registered under a new id" has_new_live_id b $ids_before
-say "host b is back as id $(live_id b)"
+# Record: the drained pod says drained until the reconciler deletes it (which may already have happened).
+say "record: host $hb's pod $pb /readyz: '$(readyz "$pb")'"
+# The row follows the operator's mark (rule 2: DrainHost of the row), then, once the host left and
+# owns nothing, the coordinator removes it (rule 3: RemoveHost) — one decision per 10 s at most —
+# and the reconciler deletes the Deployment, the PDB and the Service within a pass.
+drained_more() { local v; v=$(coord_sum mmo_fleet_drained_total) || return 1; [ "$v" -gt "$drained0" ]; }
+wait_until 60 "the coordinators' mmo_fleet_drained_total above $drained0 (host $hb's desired row draining)" drained_more
+say "host $hb's desired row: '$(desired_state "$hb")' (draining, or already removed)"
+wait_until 120 "host $hb's desired row removed and its Deployment, Service and PDB deleted (no apply, no rollout restart)" host_gone "$hb"
+removed=$(coord_sum mmo_fleet_removed_total) || fail "no coordinator replica answers mmo_fleet_removed_total"
+[ "$removed" -gt "$removed0" ] || fail "host $hb is gone but the coordinators' mmo_fleet_removed_total did not grow ($removed0 -> $removed)"
+say "host $hb removed $((SECONDS - t0))s after the drain began; fleet removed $removed0 -> $removed"
+# Below the minimum again: the coordinator adds a NEW name (names are never reused) on the freed slot.
+hc=''
+third_name() {
+    local n
+    for n in $(desired | awk '$3 == "wanted" { print $1 }'); do
+        case " $names_before " in *" $n "*) continue ;; esac
+        hc=$n
+        return 0
+    done
+    return 1
+}
+wait_until 120 "a third desired host name, wanted (the coordinator's minimum, $fleet_hosts)" third_name
+[ "$(desired_slot "$hc")" = "$slot_b" ] || fail "the new host $hc got slot '$(desired_slot "$hc")', not the freed slot $slot_b: $(desired | tr '\n' ';')"
+wait_until 120 "host $hc's pod Ready (its Deployment created by the reconciler)" host_ready "$hc"
+[ "$(host_image "$hc")" = "$(coordinator_image)" ] || fail "host $hc runs image '$(host_image "$hc")', not the coordinator's '$(coordinator_image)'"
+[ "$(node_ports "$hc")" = "$((port_base + 2 * slot_b)) $((port_base + 2 * slot_b + 1))" ] ||
+    fail "host $hc has node ports '$(node_ports "$hc")', not slot $slot_b's $((port_base + 2 * slot_b)) $((port_base + 2 * slot_b + 1))"
+added=$(coord_sum mmo_fleet_added_total) || fail "no coordinator replica answers mmo_fleet_added_total"
+[ "$added" -gt "$added0" ] || fail "host $hc exists but the coordinators' mmo_fleet_added_total did not grow ($added0 -> $added)"
+say "host $hc on slot $slot_b (node ports $(node_ports "$hc")), Ready $((SECONDS - t0))s after the drain began; fleet added $added0 -> $added"
+desired | sed 's/^/   desired: /'
 rows | sed 's/^/   hosts: /'
-[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed when host b came back"
+[ "$(host_names | tr '\n' ' ')" = "$ha $hc " ] || fail "the host Deployments are '$(host_names | tr '\n' ' ')', not '$ha $hc '"
+[ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host $ha's pod changed or restarted during host $hb's drain"
+c1=$(committed)
+wait_until 60 "committed cuts grow (above $c1)" committed_above "$c1"
+[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed across the drain and the new host"
+hostdeps="host-$ha host-$hc"
 
 # ---------------------------------------------------------------------------------
 step "10. world-stop, then world-start"
-pa=$(host_pod a)
-pb=$(host_pod b)
-follow "$pa" "$out/host-a-stop.log"
-follow "$pb" "$out/host-b-stop.log"
+pa=$(host_pod "$ha")
+pc=$(host_pod "$hc")
+follow "$pa" "$out/host-$ha-stop.log"
+follow "$pc" "$out/host-$hc-stop.log"
 follow_coordinators
 sleep 2
 wjust world-stop > "$out/world-stop.txt" 2>&1 || { sed 's/^/   /' "$out/world-stop.txt"; fail "world-stop failed"; }
 sed 's/^/   /' "$out/world-stop.txt"
 sleep 1
-for h in host-a host-b; do
-    grep -qF "[server] left the world in cut" "$out/$h-stop.log" || fail "$h's log has no leave-cut line ($out/$h-stop.log)"
-    grep -qF "left without a cut" "$out/$h-stop.log" && fail "$h left without a cut ($out/$h-stop.log)"
-    say "$h: $(grep -F '[server] left the world in cut' "$out/$h-stop.log" | tail -1)"
+for h in "$ha" "$hc"; do
+    grep -qF "[server] left the world in cut" "$out/host-$h-stop.log" || fail "host $h's log has no leave-cut line ($out/host-$h-stop.log)"
+    grep -qF "left without a cut" "$out/host-$h-stop.log" && fail "host $h left without a cut ($out/host-$h-stop.log)"
+    say "host $h: $(grep -F '[server] left the world in cut' "$out/host-$h-stop.log" | tail -1)"
 done
+[ "$(k get deploy/fleet -o jsonpath='{.spec.replicas}')" = 0 ] || fail "world-stop did not scale the fleet reconciler to 0"
 [ "$(k get deploy/coordinator -o jsonpath='{.spec.replicas}')" = 0 ] || fail "the coordinator was not scaled to 0"
 recorded=$(k get deploy/coordinator -o jsonpath='{.metadata.annotations.errantry/replicas}')
 [ "$recorded" = "$coordinators" ] || fail "world-stop recorded '$recorded' coordinator replicas (annotation errantry/replicas), not $coordinators"
-say "world-stop recorded $recorded coordinator replicas"
+say "world-stop recorded $recorded coordinator replicas; the fleet reconciler at 0"
 for d in $hostdeps; do
     [ "$(k get "deploy/$d" -o jsonpath='{.spec.replicas}')" = 0 ] || fail "$d was not scaled to 0"
 done
-no_pods 'app.kubernetes.io/component in (coordinator,host)' || fail "world pods left after world-stop"
+no_pods 'app.kubernetes.io/component in (coordinator,host,fleet)' || fail "world pods left after world-stop"
 wjust world-start > "$out/world-start.txt" 2>&1 || { sed 's/^/   /' "$out/world-start.txt"; fail "world-start failed"; }
 sed 's/^/   /' "$out/world-start.txt"
 world_started=$SECONDS
 [ "$(k get deploy/coordinator -o jsonpath='{.spec.replicas}')" = "$coordinators" ] ||
     fail "world-start did not bring the coordinator back at $coordinators replicas: $(k get deploy/coordinator -o jsonpath='{.spec.replicas}')"
-wait_until 30 "$coordinators coordinator replicas, host-a and host-b Ready" all_ready
+[ "$(k get deploy/fleet -o jsonpath='{.spec.replicas}')" = 1 ] || fail "world-start did not bring the fleet reconciler back to 1"
+wait_until 30 "$coordinators coordinator replicas, the fleet reconciler and $fleet_hosts hosts Ready" all_ready
+[ "$(host_names | tr '\n' ' ')" = "$ha $hc " ] || fail "the host Deployments after the start are '$(host_names | tr '\n' ' ')', not '$ha $hc '"
 wait_until 60 "the coordinator commits a cut after the start" committed_above 0
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed across stop and start"
 say "world back, generation $gen"
 rows | sed 's/^/   hosts: /'
+# A stray: a Deployment labelled for this world under a name no desired row holds (not a host by
+# the recipes' label, so world-start would not scale it). The reconciler deletes it within a pass
+# or two; nothing else moves.
+pa=$(host_pod "$ha") pc=$(host_pod "$hc")
+ua=$(pod_uid "$pa") uc=$(pod_uid "$pc")
+deleted0=$(metric "$(fleet_pod)" mmo_fleet_deleted_total) || fail "the fleet pod does not answer mmo_fleet_deleted_total"
+stray=$(printf '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"host-zz","labels":{"errantry/fleet":"%s","errantry/host":"zz"}},"spec":{"replicas":0,"selector":{"matchLabels":{"twin-check":"stray"}},"template":{"metadata":{"labels":{"twin-check":"stray"}},"spec":{"containers":[{"name":"host","image":"%s"}]}}}}' "$world_id" "$(coordinator_image)")
+printf '%s' "$stray" | k create -f - > /dev/null || fail "could not create the stray Deployment host-zz"
+say "created a stray Deployment host-zz (errantry/fleet=$world_id, errantry/host=zz, replicas 0)"
+stray_gone() { [ -z "$(k get deploy --ignore-not-found host-zz -o name 2>/dev/null || echo failed)" ]; }
+wait_until 15 "the reconciler deleted the stray host-zz (a pass every 2 s)" stray_gone
+deleted=$(metric "$(fleet_pod)" mmo_fleet_deleted_total) || fail "the fleet pod does not answer mmo_fleet_deleted_total"
+[ "$deleted" -gt "$deleted0" ] || fail "host-zz is gone but the fleet's mmo_fleet_deleted_total did not grow ($deleted0 -> $deleted)"
+[ "$(pod_uid "$(host_pod "$ha")")" = "$ua" ] && [ "$(pod_uid "$(host_pod "$hc")")" = "$uc" ] || fail "a host pod changed while the stray was deleted"
+[ "$(host_names | tr '\n' ' ')" = "$ha $hc " ] || fail "the host Deployments changed with the stray: '$(host_names | tr '\n' ' ')'"
+say "stray deleted (fleet deleted $deleted0 -> $deleted); the hosts untouched"
+
+# ---------------------------------------------------------------------------------
+step "10b. the fleet reconciler's pod deleted mid-play: nothing running changes; it returns Ready"
+pa=$(host_pod "$ha") pc=$(host_pod "$hc")
+ua=$(pod_uid "$pa") ra=$(pod_restarts "$pa")
+uc=$(pod_uid "$pc") rc=$(pod_restarts "$pc")
+deps0=$(k get deploy -l app.kubernetes.io/component=host -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.uid}/{.spec.replicas} {end}')
+pf=$(fleet_pod)
+uf=$(pod_uid "$pf")
+c1=$(committed)
+follow "$pf" "$out/fleet-delete.log"
+sleep 1
+k delete pod "$pf" --wait=false > /dev/null
+wait_until 40 "the fleet pod $pf gone (its grace period is 30 s)" gone "$pf" "$uf"
+grep -qF "[fleet] stop signal: exiting" "$out/fleet-delete.log" || say "record: no '[fleet] stop signal: exiting' line in its log ($out/fleet-delete.log)"
+new_fleet_ready() { local p; p=$(fleet_pod); [ -n "$p" ] && [ "$p" != "$pf" ] && fleet_ready; }
+wait_until 120 "a new fleet pod Ready (/readyz 200)" new_fleet_ready
+wait_until 60 "committed cuts grow meanwhile (above $c1)" committed_above "$c1"
+say "waiting 10 s: several passes of the new reconciler"
+sleep 10
+pf=$(fleet_pod)
+created=$(metric "$pf" mmo_fleet_created_total) || fail "the new fleet pod does not answer mmo_fleet_created_total"
+deleted=$(metric "$pf" mmo_fleet_deleted_total) || fail "the new fleet pod does not answer mmo_fleet_deleted_total"
+[ "$created" = 0 ] && [ "$deleted" = 0 ] || fail "the new reconciler created $created and deleted $deleted object(s) in a world that needed nothing"
+deps1=$(k get deploy -l app.kubernetes.io/component=host -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.uid}/{.spec.replicas} {end}')
+[ "$deps1" = "$deps0" ] || fail "the host Deployments changed across the reconciler's restart: '$deps0' -> '$deps1'"
+[ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host $ha's pod changed or restarted when the reconciler restarted"
+[ "$(pod_uid "$pc")" = "$uc" ] && [ "$(pod_restarts "$pc")" = "$rc" ] || fail "host $hc's pod changed or restarted when the reconciler restarted"
+[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed when the reconciler restarted"
+say "new fleet pod $pf Ready, created 0, deleted 0, errors $(metric "$pf" mmo_fleet_errors_total || echo '?'); hosts untouched"
 
 # ---------------------------------------------------------------------------------
 step "11. records: memory five minutes after the world-start; write failures in pod logs"
