@@ -203,7 +203,7 @@ Then, exactly once:
   - `just test-one <crate> "<args>"`, filters after `--`. Server targets `roles`, `coordinator_rt`, `hosts`, `takeover` need `--features test-hooks` (`just test-r2|r3|r4` pass it).
   - Postgres suites need `just pg-up` and run one at a time; world-store at `--test-threads=4`.
   - Tests slower than 100 ms get `#[ignore = "slow: >100ms — run via just test-full"]`.
-  - `just smoke` and `just test-threads` after every Rust task. `just web-check` when a crate the client compiles for wasm32 changes (`game` does).
+  - **Never a whole crate suite as a per-task check** (CLAUDE.md, Testing; Dawid, 2026-11-19). A task's "Step 4" lists whole suites: read it as "the tests this task added or changed, the test modules of the files it touched (filtered), and `just smoke`". Add `just test-threads` only when the task touches `WorldManager`, hand-off or a seam, `just determinism-wasm` only for sim math or anything hashed, `just web-check` when a crate the client compiles for wasm32 changes (`game` does). Each touched crate's whole non-client suite runs ONCE, in Task 10.
   - Do not run server test binaries while Dawid has `just run` up (the shared `target/debug/server` is re-linked at region 64): ask if unsure.
 - **Known reds, not ours:** three `lod::tests`, `codec::golden_blobs_decode`, flaky SQLite `stud_refusal::…`, flaky svc-link `dialer_reconnects_after_listener_restart`.
 - **The ledger** is `.superpowers/sdd/2026-11-18-elastic-3-land-assignment/progress.md`. A decision this plan did not make goes there as `Ruling: what — why — cost if wrong`.
