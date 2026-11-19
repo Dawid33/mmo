@@ -82,8 +82,10 @@ pin_wait_secs=${DEV_R3_PIN_WAIT_SECS:-180}
 # game::WORLD_CUT_DEADLINE_MS (30 s) + server::EXIT_SAVE_TIMEOUT (30 s) after it began:
 # 90 s at worst, + 5 s margin. KILLing a host before that leaves its row dirty (the world
 # rolls back at its return); the usual leave takes ~3 s, and a second signal kills at once.
-# (A leaver's land is given away at once, not after a wait; a crash's HOST_LEASE_MS 10 s and
-# SUCCESSION_DEADLINE_MS 30 s run on the survivors, not on the stopping host.)
+# (A leaver's land is free with its leave cut's commit — Elastic 3; one that left carrying
+# in-flight rows keeps it for a Leave succession, declared after the next committed cut — never
+# after a wait on the stopping host; a crash's HOST_LEASE_MS 10 s and SUCCESSION_DEADLINE_MS
+# 30 s run on the survivors, not on the stopping host.)
 host_stop_secs=${DEV_R3_HOST_STOP_SECS:-95}
 stop_secs=${DEV_R3_STOP_SECS:-60}
 restart_max=${DEV_R3_RESTART_MAX:-3}
