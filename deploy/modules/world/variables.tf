@@ -44,7 +44,9 @@ variable "fleet" {
     defaults), and the reconciler (fleet.tf) runs one Deployment host-<name> per row. A row's
     slot s gives its NodePort Service the UDP node ports port_base + 2s (QUIC) and
     port_base + 2s + 1 (WebTransport): the range port_base .. port_base + 2·max - 1 (output
-    client_ports) must be open to clients. min 0 lets the last host go when the world is idle.
+    client_ports) must be open to clients. min 0 lets the last host go when the world is idle,
+    and needs max >= 2 (a last host that left holding in-flight rows keeps its slot until the
+    next host inherits them).
     A coordinator-only change: an apply restarts the coordinator's replicas, no host.
   EOT
   type = object({
@@ -64,6 +66,10 @@ variable "fleet" {
   validation {
     condition     = var.fleet.min >= 0 && var.fleet.min <= var.fleet.max && var.fleet.max >= 1
     error_message = "fleet: 0 <= min <= max, and max >= 1 (the coordinator refuses to start on min > max)."
+  }
+  validation {
+    condition     = var.fleet.min != 0 || var.fleet.max >= 2
+    error_message = "fleet: min 0 needs max >= 2: a last host that left still holding in-flight rows keeps its slot until the next host inherits them, so with one slot the world could never start again (the coordinator refuses to start too)."
   }
   validation {
     condition     = var.fleet.port_base >= 30000 && var.fleet.port_base + 2 * var.fleet.max - 1 <= 32767

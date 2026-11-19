@@ -459,6 +459,14 @@ projection! {
             fleet_down_since = None,
             // Elastic 4 Task 8: rule 7's timer, as the two above.
             fleet_zero_since = None,
+            // Elastic 4 Task 8: the pacing of `Input::StartWanted` (per replica). Kept across a
+            // refresh (a NOTIFY: nothing of this replica's was in flight, so every ask it made is
+            // in the row or was never made); cleared by `rebase` only when a write of this
+            // replica was in flight or decisions were queued (a conflict: the ask may be in the
+            // dropped transition), so the replayed `StartWanted` asks again, once — the store
+            // answers `NotNeeded` if a wanted row exists by then. Never cleared there, the replay
+            // would be paced out and the world would start only at a later login's ask.
+            start_asked_ms = None,
         }
         reset {
             out = Vec::new(),
@@ -484,13 +492,6 @@ projection! {
             fleet_pending = false,
             // Goes with `fleet_pending`: the rule of a decision that never reached the store.
             fleet_why = None,
-            // Elastic 4 Task 8: the pacing of `Input::StartWanted` is set when the ask is ISSUED
-            // (any replica, no answer awaited), so an ask a rebase dropped (the transition that
-            // met the conflict, or `decisions`, reset above) must not pace its own replay out:
-            // reset, the replayed `StartWanted` asks again, once — the store answers `NotNeeded`
-            // if a wanted row exists by then. Kept, the replayed ask would be paced out and the
-            // world would start only at the client's next retry after the pacing.
-            start_asked_ms = None,
         }
     }
 }

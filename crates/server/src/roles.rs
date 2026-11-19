@@ -680,7 +680,8 @@ pub fn run_fleet() -> ServerExit {
 
 /// The most desired hosts (Elastic 4; unset or empty: no fleet decision at all).
 pub const FLEET_MAX_ENV: &str = "VOXEL_FLEET_MAX";
-/// The fewest desired hosts (unset or empty: 1; 0 lets the last host go when idle).
+/// The fewest desired hosts (unset or empty: 1; 0 lets the last host go when idle, and needs
+/// [`FLEET_MAX_ENV`] ≥ 2).
 pub const FLEET_MIN_ENV: &str = "VOXEL_FLEET_MIN";
 /// The pace dials of the load rules, ms (unset or empty: [`game::coordinator::SCALE_UP_AFTER_MS`],
 /// [`game::coordinator::SCALE_DOWN_AFTER_MS`], [`game::coordinator::HOST_MIN_LIFETIME_MS`]).
@@ -690,8 +691,11 @@ pub const HOST_MIN_LIFETIME_MS_ENV: &str = "VOXEL_HOST_MIN_LIFETIME_MS";
 
 /// The fleet's dials from the environment (`var` reads one variable; Elastic 4, plan decision 8):
 /// `None` while [`FLEET_MAX_ENV`] is unset or empty. A dial that is not a number, a maximum or a
-/// pace dial of 0, or a minimum above the maximum refuses the start; the minimum alone may be 0.
-/// The pace dials are read (and refused) only with a maximum set.
+/// pace dial of 0, or a minimum above the maximum refuses the start; the minimum alone may be 0,
+/// and only with a maximum of 2 or more: a last host that left still holding in-flight rows keeps
+/// its desired row (and slot) until its `Leave` succession gives them to the next host, so scale
+/// to zero needs a second slot for that host (Elastic 4 Task 8, fix round 1). The pace dials are
+/// read (and refused) only with a maximum set.
 pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<game::coordinator::FleetDials>, String> {
     let read = |name: &str| var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let number = |name: &str, value: &str, zero_ok: bool| -> Result<u64, String> {
@@ -715,6 +719,12 @@ pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<g
     };
     if min > max {
         return Err(format!("{FLEET_MIN_ENV} ({min}) is above {FLEET_MAX_ENV} ({max})"));
+    }
+    if min == 0 && max < 2 {
+        return Err(format!(
+            "{FLEET_MIN_ENV}=0 needs {FLEET_MAX_ENV} of 2 or more (it is {max}): a last host that left still holding \
+             in-flight rows keeps its slot until the next host inherits them, so the world could never start again"
+        ));
     }
     let pace = |name: &str, default: u64| -> Result<u64, String> {
         match read(name) {

@@ -1104,11 +1104,13 @@ impl LoginSession {
         self.rejoin.is_some()
     }
 
-    /// The starting screen's line for the rejoin in progress, if it has one
-    /// to say beyond [`REJOIN_STATUS`]: [`WORLD_STARTING_STATUS`] while it
-    /// waits for its ticket and the world is starting.
+    /// The starting screen's line for the rejoin in progress while it waits
+    /// for its ticket: [`WORLD_STARTING_STATUS`] while the last answer said the
+    /// world is starting, else [`REJOIN_STATUS`]. `None`: no rejoin, or its
+    /// ticket's session connects (that sets its own line).
     pub fn rejoin_status(&self) -> Option<&'static str> {
-        self.rejoin.as_ref().filter(|r| r.starting_now && !r.connecting).map(|_| WORLD_STARTING_STATUS)
+        let rejoin = self.rejoin.as_ref().filter(|r| !r.connecting)?;
+        Some(if rejoin.starting_now { WORLD_STARTING_STATUS } else { REJOIN_STATUS })
     }
 
     /// An online session ended (`reason`: why, `None` = the player left) on
@@ -1509,10 +1511,12 @@ pub fn poll_login(
     perform_step(step, &mut login, &mut commands, &mut next);
     let step = login.tick_first_join(now, *state.get(), store::load_refresh);
     perform_step(step, &mut login, &mut commands, &mut next);
-    // A rejoin waiting for its world to start says so on the starting screen
-    // (its ticket's connect sets the screen's line again, `session::begin_join`).
+    // A rejoin waiting for its world to start says so on the starting screen,
+    // and its usual line comes back once an answer says otherwise (only that
+    // line is replaced: its ticket's connect sets its own, `session::begin_join`).
     if let (Some(line), Some(mut status)) = (login.rejoin_status(), starting_status) {
-        if status.0 != line {
+        let ours = status.0 == WORLD_STARTING_STATUS || status.0 == REJOIN_STATUS;
+        if ours && status.0 != line {
             status.0 = line.into();
         }
     }

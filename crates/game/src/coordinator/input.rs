@@ -269,6 +269,12 @@ impl Coordinator {
         };
         p.cuts.carry_process_fields(&mut self.cuts);
         p.successions.carry_process_fields(&self.successions);
+        // An ask for the world's first host (`StartWanted`) may be in the transition that met the
+        // conflict, or still queued: its pacing goes, so its replay asks again (Elastic 4 Task 8).
+        // A refresh (nothing in flight, nothing queued) keeps it.
+        if self.writing || !self.decisions.is_empty() {
+            self.start_asked_ms = None;
+        }
         self.replace_projection(p, history);
         self.committed_raw = raw_core(&self.projection());
         self.history.clear_content_dirty();

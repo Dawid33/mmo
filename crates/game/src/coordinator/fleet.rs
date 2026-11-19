@@ -394,8 +394,9 @@ impl Coordinator {
     /// [`super::Input::StartWanted`]: a login found [`Gate::Nobody`] — the world's first host is
     /// asked for, `AddHost { max, expect_wanted: 0 }`, at most once per
     /// [`WORLD_START_ASK_EVERY_MS`] on this replica (any replica; logged and replayed: a replay
-    /// whose ask a rebase dropped asks again — the pacing is a reset field — and the store
-    /// answers `NotNeeded` once a wanted row exists). Nothing without fleet dials, or once a
+    /// whose ask a conflict's rebase dropped asks again — `rebase` clears the pacing when a write
+    /// was in flight or decisions queued, a refresh keeps it — and the store answers
+    /// `NotNeeded` once a wanted row exists). Nothing without fleet dials, or once a
     /// host serves again (a replay after the first host attached).
     pub(super) fn on_start_wanted(&mut self, now_ms: u64) {
         let Some(dials) = self.fleet_dials else { return };
