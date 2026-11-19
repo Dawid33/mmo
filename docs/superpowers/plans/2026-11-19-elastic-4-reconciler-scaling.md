@@ -608,3 +608,58 @@ pub const WORLD_STARTING_STATUS: &str = "The world is starting…";
 - Design §6 rows: reconciler down / API down → Task 4 S7, known limits; "new host registers, nothing to give it" → Decision 4; "login for a world with zero hosts" → Task 8.
 - Types: `DesiredHost`, `AddHost { max, expect_wanted }`, `DrainHost { name, host, in_ms }`, `RemoveHost { name }`, `FleetDials`, `Gate` are used with these shapes in Tasks 2, 3, 7, 8.
 - No task commits a test; every task names its scenarios; Tasks 6 and 8 run the twin.
+
+## As built (2026-11-19)
+
+Executed subagent-driven on `develop` in one day: one implementer and one reviewer per task, a whole-branch review in three areas on the most capable model, one fix wave, one scoped re-review. **Task 9 (the world panel) was NOT done:** its gate stayed closed (`crates/panel` is still untracked). Everything else is built and reviewed. Nothing was applied to orion.
+
+### Commits (base `bd49b08c`)
+
+- `2520c3ee` Elastic 3's two open findings (before Task 1); `5f29b60f` this plan.
+- Task 1: `b27b2e47`, `f117d1ca`.
+- Task 2: `ee28414c`.
+- Task 3: `abdd5a68`, `0d390b7c` (takes back another session's hunks swept into the first), `6474251f` (rig).
+- Task 4: `d41afe1f`.
+- Task 5: `a02bc0a8`.
+- Task 6: `ab57b1b5`, `a37e1bb9` (the twin's image-GC thresholds, asked for by Dawid).
+- Task 7: `230b6093`.
+- Task 8: `4c2bf915`, `f3a3d97c`, `2c8cb7ac`.
+- Task 10: `e492ec7b`, `28248390`, `a4f82f0b`.
+- Fix wave: `7c9d0e84`, `45e3675c`, `5a08a8dd`, `6c3c9e93`, `4eb43c43`.
+
+### Where the build departs from this plan's text (each a ruling in the ledger; the code and `CLAUDE.md` are right, the text above is not)
+
+1. **Decision 4, rule 3:** a draining name is removed once none of its `hosts` rows is live-and-dirty. `landed` no longer holds the row (final review A-I1): a leaver that kept land held its slot for ever, so no heir could be added. The drained pod takes no part in its `Leave` succession.
+2. **Decision 4, a rule 2b was added:** a wanted name with no live host whose newest row is clean AND marked → `DrainHost { name, None, 0 }`. An operator's drain that finished before the ticker looked matched no rule.
+3. **Decision 8:** `min 0` needs `max ≥ 2` (refused at the coordinator's start and by the module). With rule 3 as built this may be liftable; it was kept.
+4. **Departure 8 and Task 6:** the recipes DO pause the reconciler. `world-stop` and `world_update.sh` scale `deploy/fleet` to 0 first; `world-start` restores it after the coordinator is Ready. The reconciler's own guard does not cover the window between scaling the hosts and the coordinator to 0. A start or release waits for the reconciler for a bounded time (300 s), then warns and goes on (final review B-I1).
+5. **Task 3:** `fleet_pending` is a RESET process field (kept, a decision dropped by a rebase was never issued again). Task 8's `start_asked_ms` is kept and cleared only when a decision can be lost.
+6. **Task 4:** the reconciler creates nothing for a DRAINING row; it reads the desired rows LAST in a pass (after the object lists); a re-template is a PUT carrying the `resourceVersion` it read.
+7. **Task 7:** a failed read clears the scale timers; the scale gates are part of the timed condition; rule 5 also needs no draining row and no open run.
+8. **Task 8:** inside a first join's wait a `world_unavailable` is retried until the same bound (final review C-I3); as the first answer it still shows at once.
+9. **Task 10:** there is no `WorldFleetFull`. Rule 5 never asks at the maximum, so `Full` cannot mean "at max under load". The alerts are `WorldFleetDown`, `WorldFleetBehind`, `WorldFleetSaturated` (the least-loaded host ≥ 600 ‰ for 15 min), `WorldFleetNoFreeSlot`, `WorldFleetHostNotLive`; `WorldNoCommittedCut` is silent at zero hosts.
+10. **Task 1:** `departed_denied` also matches the order's `origin`; `SPAWN_RELAY_MAX_HOPS` is 32 (a chain of three or more stale pointers never passed four hops); Decision 7's condition is `cuts_joined_max != Some(K)` plus `PeerJournal::undecided_through`, not `<`.
+11. **Global Constraints:** there is no `just test-pg`; Postgres store checks ran as temporary in-crate tests against the dev Postgres.
+12. Under `static` with fleet dials set the coordinator reads `hosts`, so its login gate follows a drain mark a static host itself ignores.
+
+### Plan defects found during execution
+
+Five rules of this plan were wrong and were found by reviews: the stop window (4 above), the finished operator drain (2), `min 0 / max 1` (3), the alert on a counter that cannot move (9), the leaver that kept land (1). Four of the five are states a world could reach and never leave.
+
+### Verification
+
+- **Per task:** scenarios driven by temporary tests (seeded rig, in-crate Postgres), deleted before each commit; every task review passed, four after one fix round (Tasks 1, 8, 10; the final wave).
+- **Twin run 2** (`f3a3d97c`, before the fix wave): `twin-check` **PASS in 932 s**, every phase, transcript `target/twin/check-20261119T182013Z/`. Two hosts appear by themselves; an operator drain → the row and the objects go → `h3` on the freed slot; `MIN=0`: `h3` drains at 62 s, `h1` at 102 s, zero hosts at 114 s, generation 0, no succession; the first join answers 503 `world_starting`, `h4` is wanted in the same second, the first 200 comes after 4 s (images already on the node: not a cold pull).
+- **Twin run 3** (`4eb43c43`, after the fix wave): `twin-check` **PASS in 909 s**, every phase, on a fresh cluster with images rebuilt from the fixed code, transcript `target/twin/check-20261119T192821Z/`. `MIN=0`: `h1` drains at 60 s, `h3` at 102 s, zero hosts at 113 s; the first join answers `world_starting`, `h4` is wanted 1 s later, the first 200 comes after 4 s.
+- **`just test-full`** at `28248390`: PASS test-audit, physics-next-upstream, slotmapd, takeover, quest, quest-wasm, site-test; FAIL workspace (`scene_hash_native`, `scene_hash_golden::canonical_scene_state_hash`, two `tree_fall` tests) and determinism-wasm. The failing tests pin sim state this plan did not touch; another session had uncommitted edits in `movement.rs`, `trees.rs`, `state.rs`, `mining.rs` and a chunk-hashing commit landed that day. Not confirmed on a clean tree.
+- **Whole-branch review:** 0 Critical, 6 Important (all fixed in the wave and confirmed by the re-review), 29 Minor.
+- **Not exercised anywhere:** a connected player; load-driven scale-up or scale-down with real load; a host dying while it owns land during a scale event; two logins on two replicas at zero hosts; the client's waiting join in a real client or the browser (type-checked only, native and wasm); the release script and `world-start`'s bounded wait against a failing reconciler; anything on orion; the first-apply runbook.
+
+### Left open
+
+- **Task 9:** `crates/panel/src/ops.rs` is not level with the recipes (it predates per-host Deployments, and lacks the `fleet` pause and the bounded wait). Gated on `crates/panel` being committed.
+- **Stale comments** (the wave was told not to touch the module): `deploy/modules/world/variables.tf` gives the old reason for "`min 0` needs `max ≥ 2`"; `fleet.tf`'s header on overlapping reconcilers, "nothing waits on its readiness" and the Role's reach; `scripts/world_update.sh`'s header and `world-stop`'s leave summary line.
+- **Minors from the re-review:** with a drained leaver's row removed at once, rules 6–7 could drain the would-be heir before its `Leave` is declared (needs cuts failing for 5 min; a delay, never a loss); `WorldNoCommittedCut` may page if the first cut after waking from zero takes over 2 min (unmeasured); `world-start` prints "the world is up" right after the reconciler warning on a world with no host Deployments.
+- **Known limits:** in `TODO.md`'s Elastic 4 block (this plan's list, plus: rule 2b's pruned-row residual; the same spawn order reaching the same gate twice while a hand-off is live — needs a nonce on the wire; a 0 s drain notice on a stale 0-player count; the S5 window).
+- **Hand checks for Dawid:** in `TODO.md`. The first apply on the existing orion world is a NOT RUN runbook whose database-wipe step is not written.
+- `WORLD_START_WAIT_MS` stays 180 s until a cold start with an image pull is measured.
