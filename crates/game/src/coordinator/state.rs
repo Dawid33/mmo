@@ -65,6 +65,23 @@ pub struct Transition {
     pub core_changed: bool,
 }
 
+/// How much of each mailbox part a transition carried ([`Transition::shape`]): what a write
+/// recognised as committed after its answer was lost removes from the core
+/// ([`super::Coordinator::outbox_committed`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WriteShape {
+    pub rows: usize,
+    pub drops: usize,
+    pub logins: usize,
+}
+
+impl Transition {
+    /// Its mailbox rows, drops and login answers, counted.
+    pub fn shape(&self) -> WriteShape {
+        WriteShape { rows: self.outbox.len(), drops: self.outbox_drop.len(), logins: self.login_outbox.len() }
+    }
+}
+
 /// A message a transition decided for host `host` at its boot `boot` (as its attachment names
 /// it): a row of that host's mailbox, the store's `outbox` ([`super::Delivery::Mailbox`],
 /// [`super::Coordinator::route_out`]).

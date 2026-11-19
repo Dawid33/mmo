@@ -284,8 +284,11 @@ pub struct Coordinator {
     outbox: Vec<OutboxMsg>,
     /// The hosts whose older mailbox rows the next transition deletes before it inserts its own:
     /// an `Attach` applied (its rows decided before it are reconciled by it), a detach, a host's
-    /// end.
-    outbox_drop: BTreeSet<HostId>,
+    /// end. In order, a host possibly more than once ([`Self::drop_mailbox`]): a transition handed
+    /// back puts its drops at the head, so a write recognised as committed after all removes
+    /// exactly its own and a drop decided after it stays ([`Self::outbox_committed`]); the store
+    /// deletes a host's rows once however often it is named.
+    outbox_drop: Vec<HostId>,
     /// Hosts' messages about a world cut this cache cannot know yet — an id above its last one
     /// ([`Self::take_refresh_wanted`]): the row moved past this cache (a host got the `BeginCut`
     /// of a transition another replica committed). Never looked up while the cache may be stale
@@ -360,6 +363,12 @@ pub enum Delivery {
 /// host ([`Input::HostStalled`], derived from [`Input::HostsRead`]'s `mailbox_oldest`): the time
 /// a dead link took to be noticed (svc-link's idle timeout). It re-attaches once it reads again.
 pub const MAILBOX_STALL_MS: u64 = 15_000;
+
+/// How far (store ms) a mailbox row's `at_ms` may lie before the store-clock time its host's
+/// `Attach` was applied at and still count as the current attachment's (the core's store clock is
+/// extrapolated: it may run a little ahead of the database clock that stamps the rows). A row older
+/// than that is an earlier attachment's, which the `Attach`'s transition deleted.
+pub const ATTACH_CLOCK_SLACK_MS: u64 = 1_000;
 
 /// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
 /// then, and how many outputs and logged inputs it covers (those decided before it was asked).
@@ -506,7 +515,7 @@ projection! {
             writing_stamp = None,
             version_check = None,
             outbox = Vec::new(),
-            outbox_drop = BTreeSet::new(),
+            outbox_drop = Vec::new(),
             // What the replayed `HostMsg::Login`s push again (they are logged inputs).
             login_outbox = Vec::new(),
             stale_cuts = Vec::new(),
@@ -591,7 +600,7 @@ impl Coordinator {
             joined: false,
             version_check: None,
             outbox: Vec::new(),
-            outbox_drop: BTreeSet::new(),
+            outbox_drop: Vec::new(),
             stale_cuts: Vec::new(),
             stale_seen: false,
             refresh_covers: None,
@@ -833,7 +842,7 @@ impl Coordinator {
                 self.succession_attach(host, successions);
                 // Its mailbox rows, decided before this `Attach` (which reconciles them), are
                 // deleted by the transition holding it, before its `Attached` row.
-                self.outbox_drop.insert(host);
+                self.drop_mailbox(host);
             }
             HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
@@ -1361,7 +1370,7 @@ impl Coordinator {
             out: std::mem::take(&mut self.out),
             decisions: std::mem::take(&mut self.decisions),
             outbox: std::mem::take(&mut self.outbox),
-            outbox_drop: std::mem::take(&mut self.outbox_drop).into_iter().collect(),
+            outbox_drop: std::mem::take(&mut self.outbox_drop),
             login_outbox: std::mem::take(&mut self.login_outbox),
             core_changed,
         })
@@ -1427,17 +1436,35 @@ impl Coordinator {
     }
 
     /// A write this replica handed back as failed proves to have committed after all (the
-    /// runtime's lost-commit recognition, final review S-I3): the first `n` messages of the outbox
-    /// waiting now are the ones that write carried — the store holds them already. Dropped, so the
-    /// next transition does not insert them twice (call it right after
-    /// [`Self::transition_refused`] of the transition that met the conflict: a write handed back
-    /// puts its outbox ahead of anything routed since, so the committed write's are the head).
-    pub fn outbox_committed(&mut self, n: usize) {
-        let n = n.min(self.outbox.len());
-        if n > 0 {
-            log::info!("coordinator: {n} outbox message(s) of a write whose commit's answer was lost are in the row already: not written again");
-            self.outbox.drain(..n);
+    /// runtime's lost-commit recognition, final review S-I3), of `shape` ([`Transition::shape`]):
+    /// the head of the mailbox rows, of the mailbox drops and of the login answers waiting now are
+    /// that write's — the store applied them already. Removed, so the next transition neither
+    /// inserts its rows twice nor deletes again the rows it inserted (its drops: a re-applied drop
+    /// of a host would delete that write's own `Attached` row); a drop decided AFTER it is a later
+    /// entry and stays. Call it right after [`Self::transition_refused`] of the transition that met
+    /// the conflict (a write handed back puts all three ahead of anything decided since). Returns
+    /// its login answers: committed, the caller's to deliver (`Delivery::Direct` sends them; under
+    /// `Mailbox` they are rows already).
+    pub fn outbox_committed(&mut self, shape: WriteShape) -> Vec<crate::LoginOut> {
+        let rows = shape.rows.min(self.outbox.len());
+        let drops = shape.drops.min(self.outbox_drop.len());
+        let logins = shape.logins.min(self.login_outbox.len());
+        if rows + drops + logins > 0 {
+            log::info!(
+                "coordinator: a write whose commit's answer was lost is in the row already: its {rows} mailbox row(s), \
+                 {drops} drop(s) and {logins} login answer(s) are not written again"
+            );
         }
+        self.outbox.drain(..rows);
+        self.outbox_drop.drain(..drops);
+        self.login_outbox.drain(..logins).collect()
+    }
+
+    /// `host`'s mailbox rows are deleted by the next transition, before its rows are inserted
+    /// (an `Attach`, a detach, a host's end). Never deduplicated: each entry is one decision's
+    /// (positional, for [`Self::outbox_committed`]).
+    pub(super) fn drop_mailbox(&mut self, host: HostId) {
+        self.outbox_drop.push(host);
     }
 
     /// `t` back in the core (not committed as far as this replica knows): its messages ahead of
@@ -1457,7 +1484,9 @@ impl Coordinator {
         // Routed already (an `Every` fanned out): back as they were, ahead of anything routed since.
         let later = std::mem::replace(&mut self.outbox, t.outbox);
         self.outbox.extend(later);
-        self.outbox_drop.extend(t.outbox_drop);
+        // Ahead of the drops decided since, as they were (positional: never merged).
+        let later = std::mem::replace(&mut self.outbox_drop, t.outbox_drop);
+        self.outbox_drop.extend(later);
         let later = std::mem::replace(&mut self.login_outbox, t.login_outbox);
         self.login_outbox.extend(later);
         t.decisions

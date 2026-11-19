@@ -498,7 +498,7 @@ impl RigCluster {
     }
 
     /// Host `host`'s link moves to replica `to` (Elastic 2b Task 5): its link to the replica it
-    /// reached goes down there ([`Input::HostStalled`] of the boot it attached as there, at
+    /// reached goes down there ([`Input::HostStalled`] of the attachment it made there, at
     /// `now_ms`, written with that replica's next transition), what that link carried and had not
     /// been read is lost, and the host is linked to `to` (its next `Attach` goes there). The
     /// replica it left.
@@ -510,8 +510,9 @@ impl RigCluster {
         if let Some(b) = self.boxes.get_mut(&host) {
             b.clear();
         }
-        if let Some(boot) = boot {
-            self.replicas[from].core.apply(Input::HostStalled { host, boot }, now_ms);
+        let epoch = self.replicas[from].core.newest_attach(host).filter(|(b, _)| Some(*b) == boot).map(|(_, e)| e);
+        if let (Some(boot), Some(epoch)) = (boot, epoch) {
+            self.replicas[from].core.apply(Input::HostStalled { host, boot, epoch }, now_ms);
         }
         self.route(from);
         from

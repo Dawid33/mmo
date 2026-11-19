@@ -29,9 +29,12 @@
 //!
 //! **A stalled host** ([`Input::HostStalled`], coordinator HTTP API): derived by the ticker from
 //! its `hosts` read's `mailbox_oldest` (a host's oldest unread mailbox row older than
-//! [`super::MAILBOX_STALL_MS`] on the store's clock), and applied by a svc-link runtime when a
-//! host's link drops — logged and replayed, guarded by the boot (it detaches only the attachment
-//! of that boot: a replay after the host attached again as a newer one changes nothing).
+//! [`super::MAILBOX_STALL_MS`] on the store's clock, and not older than the store time its current
+//! `Attach` was applied at — a read issued before a re-`Attach` committed still shows the previous
+//! attachment's rows), and applied by a svc-link runtime when a host's link drops — logged and
+//! replayed, guarded by the attachment it observed, `(boot, epoch)`: it detaches only while the
+//! host's newest applied `Attach` is exactly that one (a re-`Attach` keeps the boot and raises the
+//! epoch, so a stale or replayed stall after it changes nothing).
 //!
 //! **Any replica's logged inputs** besides the hosts' and the decisions' answers: a replica's
 //! own lifecycle ([`Input::ReplicaJoined`], [`Input::ReplicaLapsed`]) and the ask for the
@@ -66,9 +69,10 @@ pub enum Input {
     /// oldest mailbox row waited past [`super::MAILBOX_STALL_MS`] (the ticker's derivation from a
     /// `hosts` read), or its link to a svc-link runtime dropped. It is detached (a cut it takes
     /// part in aborts, its mailbox rows go) — only while attached as `boot`; it attaches again
-    /// once it reaches a replica. Logged and replayed; ANY replica (a svc-link runtime applies it
-    /// for its own links).
-    HostStalled { host: HostId, boot: u64 },
+    /// once it reaches a replica. Only while its newest applied `Attach` is `(boot, epoch)` — the
+    /// attachment the stall was observed on (a re-`Attach` raises the epoch). Logged and replayed;
+    /// ANY replica (a svc-link runtime applies it for its own links).
+    HostStalled { host: HostId, boot: u64, epoch: u64 },
     /// The upkeep: the calendar, the history's directives and notices, the cuts' and the
     /// successions' timers ([`Coordinator::apply`]). The ticker's only (refused elsewhere, not
     /// logged); a rebase drops it from the log once this replica is not the ticker of the
@@ -176,9 +180,9 @@ impl Coordinator {
                 Some((*boot, *epoch))
             }
             Input::Host { host, .. } => self.link_attach.get(host).copied(),
-            Input::HostStalled { host, boot } => {
-                // A link of that boot carries nothing more (a new one opens with its `Attach`).
-                if self.link_attach.get(host).is_some_and(|(b, _)| b == boot) {
+            Input::HostStalled { host, boot, epoch } => {
+                // That link carries nothing more (a new one opens with its `Attach`).
+                if self.link_attach.get(host) == Some(&(*boot, *epoch)) {
                     self.link_attach.remove(host);
                 }
                 None
@@ -235,15 +239,20 @@ impl Coordinator {
         let now = now_ms.max(self.clock_floor());
         match input {
             Input::Host { host, msg } => self.on_host(host, msg, now),
-            Input::HostStalled { host, boot } => match self.attachment(host) {
-                Some(b) if b == boot => {
-                    log::warn!("coordinator: host {host} (boot {boot:#x}) stalled (its mailbox unread, or its link down): detached");
+            Input::HostStalled { host, boot, epoch } => {
+                if self.attachment(host) == Some(boot) && self.newest_attach(host) == Some((boot, epoch)) {
+                    log::warn!(
+                        "coordinator: host {host} (boot {boot:#x}, attach {epoch}) stalled (its mailbox unread, or its link down): detached"
+                    );
                     self.detach_host(host);
+                } else {
+                    log::debug!(
+                        "coordinator: host {host} (boot {boot:#x}, attach {epoch}) stalled, but its attachment is {:?} / {:?}: nothing to detach",
+                        self.attachment(host),
+                        self.newest_attach(host)
+                    );
                 }
-                other => log::debug!(
-                    "coordinator: host {host} (boot {boot:#x}) stalled, but it is attached as {other:?}: nothing to detach"
-                ),
-            },
+            }
             Input::Maintain => self.on_maintain(now),
             Input::Decision(answer) => self.on_decision(answer, now),
             Input::ReplicaJoined { me, alone } => self.on_replica_joined(me, alone),
@@ -262,16 +271,20 @@ impl Coordinator {
 
     /// The ticker's read of the hosts' oldest unread mailbox rows (part of [`Input::HostsRead`]):
     /// each attached boot whose oldest row was inserted more than [`super::MAILBOX_STALL_MS`]
-    /// before `now_ms` (store ms) is stalled — applied as a logged [`Input::HostStalled`].
+    /// before `now_ms` (store ms) — and belongs to the current attachment: not older than the
+    /// store time its `Attach` was applied at (less [`super::ATTACH_CLOCK_SLACK_MS`]) — is stalled,
+    /// applied as a logged [`Input::HostStalled`] of that attachment's `(boot, epoch)`.
     fn stalled_mailboxes(&mut self, oldest: &[(HostId, u64, u64)], now_ms: u64) {
         for &(host, boot, at_ms) in oldest {
-            if self.attachment(host) == Some(boot) && now_ms.saturating_sub(at_ms) > super::MAILBOX_STALL_MS {
+            let Some((b, epoch)) = self.newest_attach(host).filter(|(b, _)| *b == boot) else { continue };
+            let current = self.attached_at_ms(host).is_some_and(|since| at_ms + super::ATTACH_CLOCK_SLACK_MS >= since);
+            if self.attachment(host) == Some(b) && current && now_ms.saturating_sub(at_ms) > super::MAILBOX_STALL_MS {
                 log::warn!(
                     "coordinator: host {host}'s mailbox has a row unread for {} ms (over {} ms): it is stalled",
                     now_ms.saturating_sub(at_ms),
                     super::MAILBOX_STALL_MS
                 );
-                self.apply(Input::HostStalled { host, boot }, now_ms);
+                self.apply(Input::HostStalled { host, boot, epoch }, now_ms);
             }
         }
     }

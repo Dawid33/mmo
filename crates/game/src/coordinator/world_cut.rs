@@ -205,6 +205,10 @@ pub(super) struct WorldCuts {
     /// Detached by a stalled mailbox or a dropped link ([`super::Input::HostStalled`]), a newer
     /// generation's first `Attach`, a rollback; never by a replica's lapse.
     attached: BTreeMap<HostId, u64>,
+    /// Per attached host, the store ms its `Attach` was applied at: a mailbox row older than it
+    /// (beyond [`super::ATTACH_CLOCK_SLACK_MS`]) belongs to an earlier attachment — a `hosts` read
+    /// issued before the `Attach` committed may still show it — and never stalls this one.
+    attached_ms: BTreeMap<HostId, u64>,
     /// The world tick as the runtime last set it.
     #[serde(skip)]
     world_tick: Tick,
@@ -250,6 +254,7 @@ impl Default for WorldCuts {
             expected: BTreeSet::new(),
             expected_known: false,
             attached: BTreeMap::new(),
+            attached_ms: BTreeMap::new(),
             world_tick: 0,
             lead: WORLD_CUT_LEAD_TICKS,
             last_ms: 0,
@@ -280,6 +285,7 @@ impl WorldCuts {
             expected,
             expected_known,
             attached: _,
+            attached_ms: _,
             world_tick,
             lead: _,
             last_ms: _,
@@ -403,8 +409,9 @@ impl Coordinator {
     /// (it sends it again with its `Attach`); its mailbox rows are deleted with the transition
     /// holding this (`outbox_drop`).
     pub(super) fn detach_host(&mut self, host: HostId) {
+        self.cuts.attached_ms.remove(&host);
         if self.cuts.attached.remove(&host).is_some() {
-            self.outbox_drop.insert(host);
+            self.drop_mailbox(host);
         }
         self.cuts.leave_requests.remove(&host);
         self.abort_for(host, "detached");
@@ -461,6 +468,7 @@ impl Coordinator {
         self.cuts.boots.retain(|h, _| keep(h));
         self.cuts.attach_epochs.retain(|h, _| keep(h));
         self.cuts.attached.retain(|h, _| keep(h));
+        self.cuts.attached_ms.retain(|h, _| keep(h));
         self.boots_seen.retain(|h, _| keep(h));
     }
 
@@ -741,6 +749,7 @@ impl Coordinator {
     /// (`world_store` `record_cut_begin`). It is in the next cut.
     pub(super) fn cut_attach(&mut self, host: HostId, pending: Option<CutId>, boot: u64) {
         self.cuts.attached.insert(host, boot);
+        self.cuts.attached_ms.insert(host, self.clock_ms);
         self.cuts.boots.insert(host, boot);
         if self.cuts.left.get(&host).is_some_and(|left_as| *left_as != Some(boot)) {
             log::info!("coordinator: host {host} is back (boot {boot}): expected again");
@@ -968,6 +977,11 @@ impl Coordinator {
         boot.or_else(|| self.cuts.boots.get(&host).copied()) == Some(dead)
     }
 
+    /// The store ms host `host`'s current attachment was applied at (`None`: not attached).
+    pub(super) fn attached_at_ms(&self, host: HostId) -> Option<u64> {
+        self.cuts.attached_ms.get(&host).copied()
+    }
+
     /// Whether `host` is attached.
     pub(super) fn is_attached(&self, host: HostId) -> bool {
         self.cuts.attached.contains_key(&host)
@@ -1006,7 +1020,7 @@ impl Coordinator {
         self.cuts.succeeded.insert(host, boot);
         self.cuts.leave_requests.remove(&host);
         // Its mailbox goes with it (a zombie of it reads nothing it could act on).
-        self.outbox_drop.insert(host);
+        self.drop_mailbox(host);
     }
 
     /// A running cut `host` takes part in, not decided yet, is aborted (`why`, for the log).

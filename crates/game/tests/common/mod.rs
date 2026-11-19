@@ -225,8 +225,8 @@ impl CoreInputs for game::Coordinator {
     }
 
     fn host_detached(&mut self, host: game::HostId) {
-        if let Some(boot) = self.attachment(host) {
-            self.apply(game::coordinator::Input::HostStalled { host, boot }, 0);
+        if let Some((boot, epoch)) = self.newest_attach(host).filter(|(b, _)| self.attachment(host) == Some(*b)) {
+            self.apply(game::coordinator::Input::HostStalled { host, boot, epoch }, 0);
         }
     }
 }

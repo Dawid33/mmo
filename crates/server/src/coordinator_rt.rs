@@ -159,8 +159,9 @@ pub struct HostEnd {
     gone: bool,
     /// The host's ordinal, as its `Attach` names it (0 before one).
     ordinal: HostId,
-    /// The boot its latest `Attach` named (what its link's end detaches: `Input::HostStalled`).
-    boot: Option<u64>,
+    /// The `(boot, epoch)` its latest `Attach` named (what its link's end detaches:
+    /// `Input::HostStalled`).
+    attach: Option<(u64, u64)>,
 }
 
 /// A connected pair: the host's [`ChannelWorldLink`] (up) and the coordinator's [`HostEnd`].
@@ -171,7 +172,7 @@ pub fn channel_link() -> (ChannelWorldLink, HostEnd) {
     let up = Arc::new(AtomicBool::new(true));
     (
         ChannelWorldLink { tx: host_tx, rx: coord_rx, up: up.clone(), wake: wake_rx },
-        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false, ordinal: HostId::SOLO, boot: None },
+        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false, ordinal: HostId::SOLO, attach: None },
     )
 }
 
@@ -492,6 +493,9 @@ struct Routes {
     /// The process boot each host peer's hello named: its `Attach` names the same one
     /// (a mismatch is only logged).
     boots: BTreeMap<PeerId, u64>,
+    /// The `(boot, epoch)` of the latest `Attach` each host peer sent (what its link's end
+    /// detaches, `Input::HostStalled`).
+    attached: BTreeMap<PeerId, (u64, u64)>,
 }
 
 /// What [`Routes::admit`] decided.
@@ -558,6 +562,7 @@ impl Routes {
     fn gone(&mut self, peer: PeerId) -> Option<HostId> {
         self.refused.remove(&peer);
         self.boots.remove(&peer);
+        self.attached.remove(&peer);
         let ordinal = self.hosts.remove(&peer)?;
         if self.live.get(&ordinal).is_some_and(|(p, _)| *p == peer) {
             self.live.remove(&ordinal);
@@ -567,11 +572,12 @@ impl Routes {
 
     /// Note what routes later messages from `msg`, sent by host `ordinal` on `peer`.
     fn note(&mut self, peer: PeerId, ordinal: HostId, msg: &HostMsg) {
-        if let HostMsg::Attach { host, epoch, .. } = msg {
+        if let HostMsg::Attach { host, epoch, boot, .. } = msg {
             if *host != ordinal {
                 log::warn!("[coordinator] host {ordinal}'s Attach names host {host}; routed by its link");
             }
             self.attaches.push_back((peer, *epoch));
+            self.attached.insert(peer, (*boot, *epoch));
         }
     }
 
@@ -594,6 +600,16 @@ impl Routes {
     fn peer_of(&self, ordinal: HostId) -> Option<PeerId> {
         self.hosts.iter().rev().find(|(_, o)| **o == ordinal).map(|(p, _)| *p)
     }
+}
+
+/// The attachment link `peer` of host `ordinal` made, as `(boot, epoch)`: its latest `Attach`
+/// passed to the core; with none noted on it (an `Attach` refused before it was applied), the
+/// core's newest attachment of the link's boot, if any — what that link's end detaches.
+fn link_attachment(routes: &Routes, core: &Coordinator, peer: PeerId, ordinal: HostId) -> Option<(u64, u64)> {
+    routes.attached.get(&peer).copied().or_else(|| {
+        let boot = routes.boots.get(&peer).copied()?;
+        core.newest_attach(ordinal).filter(|(b, _)| *b == boot)
+    })
 }
 
 /// `value`, after a beat of the split coordinator's loop ([`crate::health::Health::loop_beat`]).
@@ -1272,9 +1288,9 @@ const HOOK_REFUSED: &str = "test hook: coordinator writes fail (refused before t
 struct Unacked {
     /// [`core_hash`] of its core.
     hash: u64,
-    /// How many mailbox rows it carried: in the row already if it committed — the head of the
-    /// core's outbox then (a write handed back puts its outbox first), not written again.
-    outbox: usize,
+    /// Its mailbox rows, drops and login answers: in the store already if it committed — the head
+    /// of each in the core then (a write handed back puts them first), not applied again.
+    shape: game::coordinator::WriteShape,
 }
 
 /// A hash of a written core: what a re-read row is compared with ([`CoordinatorRuntime::unacked`]).
@@ -1590,9 +1606,9 @@ impl CoordinatorRuntime {
                     while !host.gone {
                         match host.rx.try_recv() {
                             Ok(msg) => {
-                                if let HostMsg::Attach { host: ordinal, boot, .. } = &msg {
+                                if let HostMsg::Attach { host: ordinal, boot, epoch, .. } = &msg {
                                     host.ordinal = *ordinal;
-                                    host.boot = Some(*boot);
+                                    host.attach = Some((*boot, *epoch));
                                 }
                                 self.core.apply(Input::Host { host: host.ordinal, msg }, now)
                             }
@@ -1600,8 +1616,8 @@ impl CoordinatorRuntime {
                             Err(TryRecvError::Disconnected) => {
                                 log::info!("[coordinator] a host closed its link");
                                 host.gone = true;
-                                if let Some(boot) = host.boot {
-                                    self.core.apply(Input::HostStalled { host: host.ordinal, boot }, now);
+                                if let Some((boot, epoch)) = host.attach {
+                                    self.core.apply(Input::HostStalled { host: host.ordinal, boot, epoch }, now);
                                 }
                             }
                         }
@@ -1625,9 +1641,9 @@ impl CoordinatorRuntime {
                                     );
                                     if let Some(old) = replaced {
                                         l.senders.close(old);
-                                        // The replaced link's boot (its hello's) is detached.
-                                        if let Some(old_boot) = l.routes.boots.get(&old).copied() {
-                                            self.core.apply(Input::HostStalled { host: ordinal, boot: old_boot }, now);
+                                        // The attachment the replaced link made is detached.
+                                        if let Some((boot, epoch)) = link_attachment(&l.routes, &self.core, old, ordinal) {
+                                            self.core.apply(Input::HostStalled { host: ordinal, boot, epoch }, now);
                                         }
                                     }
                                     l.routes.boots.insert(peer, boot);
@@ -1666,7 +1682,9 @@ impl CoordinatorRuntime {
                                                     l.senders.close(peer);
                                                 }
                                             }
-                                            self.core.apply(Input::HostStalled { host: ordinal, boot: *boot }, now);
+                                            if let Some((boot, epoch)) = link_attachment(&l.routes, &self.core, peer, ordinal) {
+                                                self.core.apply(Input::HostStalled { host: ordinal, boot, epoch }, now);
+                                            }
                                             continue;
                                         }
                                     }
@@ -1674,7 +1692,9 @@ impl CoordinatorRuntime {
                                         log::error!("[coordinator] host {ordinal}'s Attach is refused: {why}");
                                         l.routes.refuse(peer);
                                         l.senders.close(peer);
-                                        self.core.apply(Input::HostStalled { host: ordinal, boot: *boot }, now);
+                                        if let Some((boot, epoch)) = link_attachment(&l.routes, &self.core, peer, ordinal) {
+                                            self.core.apply(Input::HostStalled { host: ordinal, boot, epoch }, now);
+                                        }
                                         continue;
                                     }
                                 }
@@ -1687,13 +1707,14 @@ impl CoordinatorRuntime {
                             None => log::warn!("[coordinator] a message from non-host peer {} ignored", peer.0),
                         },
                         LinkEvent::Down(why) => {
-                            let boot = l.routes.boots.get(&peer).copied();
+                            let ordinal = l.routes.hosts.get(&peer).copied();
+                            let attachment = ordinal.and_then(|o| link_attachment(&l.routes, &self.core, peer, o));
                             if let Some(ordinal) = l.routes.gone(peer) {
                                 log::warn!("[coordinator] host {ordinal} (peer {}) left: {why}", peer.0);
-                                // Its link's boot detached (a newer boot attached since stands).
-                                match boot.or_else(|| self.core.attachment(ordinal)) {
-                                    Some(boot) => self.core.apply(Input::HostStalled { host: ordinal, boot }, now),
-                                    None => log::debug!("[coordinator] host {ordinal}'s link had no boot: nothing to detach"),
+                                // The attachment that link made detached (a newer one since stands).
+                                match attachment {
+                                    Some((boot, epoch)) => self.core.apply(Input::HostStalled { host: ordinal, boot, epoch }, now),
+                                    None => log::debug!("[coordinator] host {ordinal}'s link made no attachment: nothing to detach"),
                                 }
                             }
                         }
@@ -2759,13 +2780,16 @@ impl CoordinatorRuntime {
                         // Its entry stays remembered (as every failed write's, until a commit): the
                         // log still holds that write's inputs, so a rebase now would apply them twice.
                         let hash = core_hash(&row.core);
-                        let committed = self.unacked.iter_mut().find(|u| u.hash == hash).map(|u| std::mem::take(&mut u.outbox));
+                        let committed = self.unacked.iter_mut().find(|u| u.hash == hash).map(|u| std::mem::take(&mut u.shape));
                         self.core.set_version(row.version);
                         self.history_version = row.history_version;
                         self.core.transition_refused(t);
-                        if let Some(outbox) = committed {
-                            // Its mailbox rows are in the store already: not written twice.
-                            self.core.outbox_committed(outbox);
+                        if let Some(shape) = committed {
+                            // Its mailbox rows and drops are in the store already: not applied
+                            // twice. Its login answers committed: sent now (never written as rows
+                            // under `Delivery::Direct`).
+                            let answers = self.core.outbox_committed(shape);
+                            self.login_ready.extend(answers);
                         }
                         self.retry_at_ms = now;
                         Settled::Held { now: true }
@@ -2834,7 +2858,7 @@ impl CoordinatorRuntime {
         if self.unacked.len() == COORDINATOR_UNACKED_MAX {
             self.unacked.pop_front();
         }
-        self.unacked.push_back(Unacked { hash: core_hash(&t.core), outbox: t.outbox.len() });
+        self.unacked.push_back(Unacked { hash: core_hash(&t.core), shape: t.shape() });
         self.core.transition_failed(t);
         self.held_back(why, now)
     }
