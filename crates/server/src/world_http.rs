@@ -18,8 +18,11 @@
 //!
 //! **Down / up.** The link starts down. Down, it drops what it is given and probes with empty
 //! batches (stamped with the last `Attach`'s pair, `(0, 0)` before any) under the retry backoff
-//! [`svc_link::LINK_RETRY_MIN_MS`] … [`svc_link::LINK_RETRY_MAX_MS`]. A probe answered 200 —
-//! attached or not: after a drop the coordinator may have detached the host — makes it **up**:
+//! [`svc_link::LINK_RETRY_MIN_MS`] … [`svc_link::LINK_RETRY_MAX_MS`] — every down waits it
+//! (doubling), and it is back at its minimum only once an `Attach` is answered attached, so a
+//! coordinator that keeps refusing the host's `Attach` is not asked at round-trip speed. A probe
+//! answered 200 — attached or not: after a drop the coordinator may have detached the host —
+//! makes it **up**:
 //! a new [`WorldLink::generation`], and nothing but an `Attach` is carried until the manager
 //! sends its new one (it re-attaches on every new generation). Once that `Attach`'s batch is
 //! answered `attached: true` the link is **steady**. A failed POST, a non-200, an `Attach` batch
@@ -419,8 +422,9 @@ impl Thread {
         game::decode_packet::<MailboxPage>(&bytes).map_err(|e| Failure::Body(e.to_string()))
     }
 
-    /// The link goes down (if it was up): the gate closes, the main loop is told.
-    fn down(&self, why: &str) {
+    /// The link goes down (if it was up): the gate closes, the main loop is told, the line
+    /// logged as `flaps` allows.
+    fn down(&self, why: &str, flaps: &mut FlapLog) {
         let mut st = self.state.borrow_mut();
         st.steady = false;
         st.gate_epoch = None;
@@ -428,7 +432,7 @@ impl Thread {
         if st.up {
             st.up = false;
             drop(st);
-            log::warn!("[world-link] down: {why}");
+            flaps.down(why);
             self.emit(Event::Down);
         }
     }
@@ -486,6 +490,37 @@ impl FailureLog {
     }
 }
 
+/// The `down:` / `up to` lines of a flapping link: a down is logged at most every
+/// [`svc_link::LINK_DIAL_LOG_EVERY_SECS`] (with the count of the cycles not logged since), and
+/// an up only when the down before it was (the first up always is).
+struct FlapLog {
+    last_down: Option<Instant>,
+    unlogged: u64,
+    log_up: bool,
+}
+
+impl FlapLog {
+    fn down(&mut self, why: &str) {
+        if self.last_down.is_some_and(|t| t.elapsed() < Duration::from_secs(svc_link::LINK_DIAL_LOG_EVERY_SECS)) {
+            self.unlogged += 1;
+            self.log_up = false;
+            return;
+        }
+        self.last_down = Some(Instant::now());
+        self.log_up = true;
+        match std::mem::take(&mut self.unlogged) {
+            0 => log::warn!("[world-link] down: {why}"),
+            n => log::warn!("[world-link] down: {why} ({n} more down/up cycles since the last line)"),
+        }
+    }
+
+    fn up(&mut self, url: &str, ip: &str) {
+        if self.log_up {
+            log::info!("[world-link] up to {url} ({ip})");
+        }
+    }
+}
+
 fn next_backoff(ms: u64) -> u64 {
     (ms * 2).min(svc_link::LINK_RETRY_MAX_MS)
 }
@@ -533,6 +568,7 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
     let mut carry: Option<HostMsg> = None;
     let mut backoff = svc_link::LINK_RETRY_MIN_MS;
     let mut fails = FailureLog { last: None };
+    let mut flaps = FlapLog { last_down: None, unlogged: 0, log_up: true };
     loop {
         if !link.state.borrow().up {
             // Probing: nothing queued is carried.
@@ -551,9 +587,10 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
                         st.generation
                     };
                     let ip = remote.map_or_else(|| "?".to_string(), |a| a.ip().to_string());
-                    log::info!("[world-link] up to {url} ({ip})");
+                    flaps.up(&url, &ip);
                     link.emit(Event::Up(generation));
-                    backoff = svc_link::LINK_RETRY_MIN_MS;
+                    // The backoff stays: it is reset only once an `Attach` is answered attached
+                    // (a coordinator that keeps refusing it must not be asked at round-trip speed).
                     fails.reset();
                 }
                 Err(f) => {
@@ -601,20 +638,23 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
             Ok((BatchAck { attached: true }, _)) => {
                 if attach {
                     link.state.borrow_mut().steady = true;
+                    backoff = svc_link::LINK_RETRY_MIN_MS;
                 }
             }
             Ok((BatchAck { attached: false }, _)) => {
                 let steady = link.state.borrow().steady;
                 if attach || steady {
                     let n = drain(&mut out, &mut carry);
-                    link.down(&format!("the coordinator does not hold this host's attach {epoch} (boot {boot:#x}); {n} queued dropped"));
+                    link.down(&format!("the coordinator does not hold this host's attach {epoch} (boot {boot:#x}); {n} queued dropped"), &mut flaps);
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                    backoff = next_backoff(backoff);
                 }
                 // Before the manager's `Attach`: a probe of the old pair, as expected.
             }
             Err(f) => {
                 let n = drain(&mut out, &mut carry);
                 link.failed(&f, &url);
-                link.down(&format!("{}; {n} queued dropped", f.describe(&url)));
+                link.down(&format!("{}; {n} queued dropped", f.describe(&url)), &mut flaps);
                 fails.reset(); // the first probe failure of this down period is logged at once
                 tokio::time::sleep(Duration::from_millis(backoff)).await;
                 backoff = next_backoff(backoff);
@@ -652,3 +692,4 @@ async fn mailbox_loop(link: &Thread) {
         }
     }
 }
+
