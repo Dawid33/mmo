@@ -239,7 +239,8 @@ struct GpuNearCullView {
     /// caster wholly outside a half-space whose normal has a component
     /// toward the light can never shadow anything inside it.
     receivers: [[f32; 4]; super::RECEIVER_PLANES],
-    /// x = how many of `receivers` are set (0: no such cull).
+    /// x = how many of `receivers` are set (0: no such cull); y = 1 in a
+    /// shadow view, whose frustum test keeps casters before its near plane.
     receiver_count: [u32; 4],
 }
 
@@ -307,7 +308,7 @@ impl GpuNearCullView {
             cut: cull_cut(fortress),
             detail: detail.map_or([0.0; 4], super::NearDetail::cull_uniform),
             receivers: receivers.map_or([[0.0; 4]; super::RECEIVER_PLANES], |d| d.receivers.map(|p| p.to_array())),
-            receiver_count: [receivers.map_or(0, |d| d.receiver_count), 0, 0, 0],
+            receiver_count: [receivers.map_or(0, |d| d.receiver_count), u32::from(shadow), 0, 0],
         }
     }
 }

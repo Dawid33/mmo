@@ -87,23 +87,45 @@ fn spawn_region_roots(commands: &mut Commands, id: RegionId) -> (Entity, Entity)
 }
 
 /// Region roots released from the window but not yet despawned, oldest first.
-/// A window shift releases a whole row at once — five regions of ~20k chunk
-/// entities at the 5x5 window — and despawning all of them in the crossing
-/// frame cost up to 372 ms of command application (2026-09-23 `fly-probe`
-/// trace). [`despawn_retired_regions`] takes [`REGION_DESPAWNS_PER_FRAME`] a
-/// frame instead. A retired root is already out of every map, so nothing
-/// reads or updates it; it just stays drawn for those few frames.
+/// A window shift releases a whole row at once — three regions of ~50k
+/// entities each at the 3x3 window of 256 m regions (their bricks) — and
+/// despawning a whole tree in one frame cost 50-130 ms of command application
+/// per region, three frames in a row at every seam (2026-11-19 perf capture;
+/// 372 ms for the row in one frame before that, 2026-09-23 `fly-probe` trace).
+/// [`despawn_retired_regions`] takes [`REGION_ENTITY_DESPAWNS_PER_FRAME`]
+/// entities a frame instead. A retired root is already out of every map, so
+/// nothing reads or updates it; what is left of it stays drawn meanwhile.
 #[derive(Resource, Default)]
 pub struct RetiredRegionRoots(pub std::collections::VecDeque<(RegionId, Entity)>);
 
-/// Region trees despawned per frame by [`despawn_retired_regions`].
-pub const REGION_DESPAWNS_PER_FRAME: usize = 1;
+/// Entities of retired region trees despawned per frame (direct children of
+/// the root; a child's own children go with it). Doubled for every retired
+/// root waiting behind the first, so a fast flight cannot outrun it.
+pub const REGION_ENTITY_DESPAWNS_PER_FRAME: usize = 2_500;
 
-pub fn despawn_retired_regions(mut commands: Commands, mut retired: ResMut<RetiredRegionRoots>) {
-    for _ in 0..REGION_DESPAWNS_PER_FRAME {
-        let Some((_, root)) = retired.0.pop_front() else { break };
-        // despawn() removes descendants via ChildOf relationships.
-        commands.entity(root).despawn();
+pub fn despawn_retired_regions(
+    mut commands: Commands,
+    mut retired: ResMut<RetiredRegionRoots>,
+    children: Query<&Children>,
+) {
+    let Some(&(_, root)) = retired.0.front() else { return };
+    let budget = REGION_ENTITY_DESPAWNS_PER_FRAME << (retired.0.len() - 1).min(4);
+    match children.get(root) {
+        // From the END of the list, last first: a despawned child is taken
+        // out of its parent's `Children` by a search from the back
+        // (`Vec::rposition`), so this order finds each at once — any other is
+        // quadratic in a root's ~50k children.
+        Ok(list) if list.len() > budget => {
+            for child in list.iter().rev().take(budget) {
+                commands.entity(child).despawn();
+            }
+        }
+        // The rest (or a root already gone): despawn() removes descendants
+        // via ChildOf relationships.
+        _ => {
+            retired.0.pop_front();
+            commands.entity(root).try_despawn();
+        }
     }
 }
 
@@ -466,6 +488,9 @@ pub enum DeriveSource {
     Part(super::bricks::SnapshotPart),
     /// Chunks that came on their own (`AddTerrainChunk`): nothing across.
     Owned(Vec<game::Chunk>),
+    /// Chunks landed without bricks, now within the full detail distance:
+    /// derived from their mirrors (`bricks::MirrorItem`).
+    Mirrors(Vec<super::bricks::MirrorItem>),
 }
 
 impl DeriveBricksJob {
@@ -519,6 +544,7 @@ impl super::compute::ComputeJob for DeriveBricksJob {
             DeriveSource::Owned(chunks) => {
                 chunks.iter().map(|chunk| Some(zones(derive_chunk_bricks(chunk)))).collect()
             }
+            DeriveSource::Mirrors(items) => items.iter().map(|item| Some(zones(item.derive()))).collect(),
         }
     }
 }
@@ -533,6 +559,9 @@ pub struct SnapshotVoxelQueue {
     /// [`MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS`]).
     batches: VecDeque<PendingVoxelBatch>,
     ready: VecDeque<DerivedChunk>,
+    /// Chunks beyond the full detail distance, to land without bricks
+    /// (`bricks::land_chunk_deferred`).
+    deferred: VecDeque<(Entity, game::Chunk)>,
     /// Bricks inserted since the queue was last empty (for the `[perf]` line).
     applied: u32,
 }
@@ -556,6 +585,49 @@ enum BatchChunks {
     Snapshot(Arc<GameData>, Vec<(Entity, EntityKey, game::ChunkCoords)>),
     /// Chunks of a cell activated after the snapshot (`AddTerrainChunk`).
     Owned(Vec<(Entity, game::Chunk)>),
+    /// Deferred chunks the camera came within reach of (`materialise_near`).
+    Mirrors(Vec<(Entity, super::bricks::MirrorItem)>),
+}
+
+/// How far past the full detail distance chunks get their bricks, in sim
+/// chunks: the bricks are derived and meshed while the chunk still draws its
+/// coarse twin, so the switch at the distance itself finds them ready.
+pub const DETAIL_REACH_MARGIN_CHUNKS: f32 = 2.0;
+/// Chunks landed without bricks per frame (a mirror, an index entry and a
+/// twin request each).
+pub const DEFERRED_LANDS_PER_FRAME: usize = 256;
+/// Deferred chunks handed to brick derivation per frame, nearest first.
+pub const MATERIALISE_PER_FRAME: usize = 32;
+
+/// The eye and the reach (world units, horizontal) inside which sim chunks
+/// get their full-detail bricks; `None` = every chunk does (twins off, a
+/// backend without distance bands, a harness). Beyond it a chunk lands with
+/// its mirror only and draws its coarse twin (`bricks::FineDeferred`): at the
+/// 3x3 window that was ~400k bricks derived, meshed and merged for terrain
+/// the GPU cull never drew at full detail (2026-11-19 capture: a 65-90 s
+/// join at a 32 m detail distance). No eye yet (reach 0): everything waits.
+pub fn detail_reach(
+    detail: Option<&super::voxel_pull::NearDetail>,
+    config: Option<&super::config::TerrainRenderConfig>,
+) -> Option<(Vec3, f32)> {
+    let gpu = config.is_some_and(|c| c.near == super::config::NearRenderBackend::GpuDriven);
+    if !gpu || !super::meshing::coarse::coarse_twins_enabled() {
+        return None;
+    }
+    let detail = detail?;
+    if detail.distance <= 0.0 {
+        return Some((Vec3::ZERO, 0.0));
+    }
+    Some((detail.eye, detail.distance + DETAIL_REACH_MARGIN_CHUNKS * game::CHUNK_UNITS as f32))
+}
+
+/// Whether the sim chunk centred at `centre` is within `reach` of `eye`:
+/// horizontal distance to its xz rect, the cull compute's own band test.
+fn within_reach(centre: Vec3, (eye, reach): (Vec3, f32)) -> bool {
+    let half = game::CHUNK_UNITS as f32 / 2.0;
+    let dx = ((centre.x - eye.x).abs() - half).max(0.0);
+    let dz = ((centre.z - eye.z).abs() - half).max(0.0);
+    reach > 0.0 && dx * dx + dz * dz <= reach * reach
 }
 
 /// Index of the batch to dispatch next: the one nearest the camera, or simply
@@ -584,8 +656,44 @@ pub fn apply_snapshot_voxels(
     cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     roots: Res<RegionRoots>,
     mut queue: ResMut<SnapshotVoxelQueue>,
+    deferred: Query<(Entity, &GlobalTransform, &ChildOf), (With<super::bricks::FineDeferred>, Without<PendingSnapshotVoxels>)>,
+    detail: Option<Res<super::voxel_pull::NearDetail>>,
+    render_config: Option<Res<super::config::TerrainRenderConfig>>,
 ) {
     super::bricks::poll_brick_edits(&mut commands, &mut brick_edits);
+    let reach = detail_reach(detail.as_deref(), render_config.as_deref());
+    if let Some(reach) = reach {
+        // Batches beyond the reach land without bricks (a batch is one sim
+        // chunk at 16-block chunks; a larger one goes by its centroid).
+        if !queue.batches.is_empty() {
+            for batch in std::mem::take(&mut queue.batches) {
+                if matches!(batch.chunks, BatchChunks::Mirrors(_)) || within_reach(batch.center, reach) {
+                    queue.batches.push_back(batch);
+                    continue;
+                }
+                match batch.chunks {
+                    BatchChunks::Snapshot(data, items) => queue.deferred.extend(
+                        items
+                            .into_iter()
+                            .filter_map(|(e, key, _)| Some((e, data.ecs.chunk.try_get(key).as_ref()?.clone()))),
+                    ),
+                    BatchChunks::Owned(items) => queue.deferred.extend(items),
+                    BatchChunks::Mirrors(_) => unreachable!("kept above"),
+                }
+            }
+        }
+        materialise_near(&mut commands, &deferred, &roots, reach);
+    }
+    for _ in 0..DEFERRED_LANDS_PER_FRAME {
+        let Some((entity, chunk)) = queue.deferred.pop_front() else { break };
+        if pending.contains(entity) {
+            commands.queue(move |world: &mut World| {
+                if world.get::<PendingSnapshotVoxels>(entity).is_some() {
+                    super::bricks::land_chunk_deferred(world, entity, chunk);
+                }
+            });
+        }
+    }
     let mut outstanding = 0usize;
     for (task_entity, mut task) in &mut tasks {
         if let Some(batch) = block_on(future::poll_once(&mut task.0)) {
@@ -631,6 +739,21 @@ pub fn apply_snapshot_voxels(
                             let chunk = data.ecs.chunk.try_get(key).as_ref()?;
                             Some((entity, chunk.clone(), derived?))
                         })
+                        .collect()
+                })
+            }
+            BatchChunks::Mirrors(items) => {
+                let sources: Vec<(Entity, game::Chunk)> = items.iter().map(|(e, item)| (*e, item.chunk.clone())).collect();
+                let job = DeriveBricksJob {
+                    shared: None,
+                    items: Vec::new(),
+                    source: DeriveSource::Mirrors(items.into_iter().map(|(_, item)| item).collect()),
+                };
+                super::compute::spawn(job, move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
+                    sources
+                        .into_iter()
+                        .zip(derived)
+                        .filter_map(|((entity, chunk), derived)| Some((entity, chunk, derived?)))
                         .collect()
                 })
             }
@@ -686,9 +809,51 @@ pub fn apply_snapshot_voxels(
         // bricks behind the pending marker instead of here.
         budget = budget.saturating_sub(count.max(1));
     }
-    if queue.applied > 0 && queue.ready.is_empty() && queue.batches.is_empty() && outstanding == 0 {
+    if queue.applied > 0
+        && queue.ready.is_empty()
+        && queue.batches.is_empty()
+        && queue.deferred.is_empty()
+        && outstanding == 0
+    {
         game::perf_event!("snapshot_voxels_applied", "bricks={}", queue.applied);
         queue.applied = 0;
+    }
+}
+
+/// Hand the deferred chunks within `reach` to brick derivation, nearest first,
+/// [`MATERIALISE_PER_FRAME`] a frame. The swap to a pending chunk and the read
+/// of its mirror happen together in one command (`bricks::materialise_chunk`).
+fn materialise_near(
+    commands: &mut Commands,
+    deferred: &Query<(Entity, &GlobalTransform, &ChildOf), (With<super::bricks::FineDeferred>, Without<PendingSnapshotVoxels>)>,
+    roots: &RegionRoots,
+    reach: (Vec3, f32),
+) {
+    let half = Vec3::splat(game::CHUNK_UNITS as f32 / 2.0);
+    let mut near: Vec<(f32, Entity, Vec3, Entity)> = deferred
+        .iter()
+        .filter_map(|(e, tf, parent)| {
+            let centre = tf.translation() + half;
+            within_reach(centre, reach).then(|| (centre.distance_squared(reach.0), e, centre, parent.parent()))
+        })
+        .collect();
+    if near.len() > MATERIALISE_PER_FRAME {
+        near.select_nth_unstable_by(MATERIALISE_PER_FRAME, |a, b| a.0.total_cmp(&b.0));
+        near.truncate(MATERIALISE_PER_FRAME);
+    }
+    for (_, entity, center, root) in near {
+        let Some((&region, _)) = roots.0.iter().find(|(_, r)| **r == root) else { continue };
+        commands.queue(move |world: &mut World| {
+            let Some(item) = super::bricks::materialise_chunk(world, entity) else { return };
+            if let Some(mut queue) = world.get_resource_mut::<SnapshotVoxelQueue>() {
+                queue.batches.push_back(PendingVoxelBatch {
+                    region,
+                    root,
+                    center,
+                    chunks: BatchChunks::Mirrors(vec![(entity, item)]),
+                });
+            }
+        });
     }
 }
 
@@ -1134,13 +1299,14 @@ pub fn drain_region_updates(
                         target.rot = tf.rotation;
                         // `interpolate_transforms` skips terrain chunks (they
                         // never move, and there are ~64k of them), so one
-                        // that does get a new pose snaps to it here, and its
-                        // bricks follow.
+                        // that does get a new pose snaps to it here. Its
+                        // bricks carry no transform (`bricks::brick_bundle`)
+                        // and keep the grid key they were stamped with, as
+                        // they always did.
                         if terrain_chunk {
                             let goal = target.goal();
                             let rot = target.rot;
                             transform.set_if_neq(Transform { translation: goal, rotation: rot, ..*transform });
-                            commands.queue(move |world: &mut World| super::bricks::move_chunk_bricks(world, e, goal));
                         }
                     } else {
                         // Entity spawned via Commands earlier this same drain —

@@ -6,9 +6,10 @@
 //! Shape: the sim chunk entity keeps `SimEntity` (and its pose) and gets a
 //! [`ChunkBricks`] list plus a [`SimChunk`] mirror of its blocks; it holds no
 //! `VoxelData` / `ChunkKey` and is never interpolated. Each brick is a
-//! `ChildOf(region root)` sibling at the region-local chunk origin plus
-//! `local * BRICK_VOXELS`, with [`BrickOf`], `VoxelData` and (stamped by
-//! `mark_remesh_dirty`) a `ChunkKey`. The commander's height grid and tile
+//! `ChildOf(region root)` sibling with [`BrickOf`], `VoxelData` and a
+//! `ChunkKey` (the region-local chunk origin plus `local * BRICK_VOXELS`, in
+//! bricks) — and NO `Transform` or `Visibility`: it is meshed, never drawn
+//! (`brick_bundle`). The commander's height grid and tile
 //! mirror key by the sim chunk entity and read [`SimChunk`], never bricks.
 //!
 //! All-air bricks and buried bricks are never spawned ([`spawn_chunk_bricks`]).
@@ -29,7 +30,7 @@ use game::{BlockDelta, BlockId, BlockIndex, Chunk, Voxel, BRICKS_PER_CHUNK_EDGE,
 
 use super::bridge::{PendingBlockDeltas, PendingSnapshotVoxels, VoxelData};
 use super::meshing::binary::CutoutTable;
-use super::meshing::queue::presents_opaque_face;
+use super::meshing::queue::{presents_opaque_face, ChunkKey};
 
 /// The render bricks of a sim chunk entity. Present (maybe empty) on every
 /// terrain chunk entity from the moment it is spawned: it is also how the
@@ -50,6 +51,56 @@ pub struct BrickOf {
 /// bricks materialised from it when an edit exposes them.
 #[derive(Component, Debug)]
 pub struct SimChunk(pub Chunk);
+
+/// On a sim chunk that landed WITHOUT its bricks: it lies beyond the full
+/// detail distance (`bridge::detail_reach`), where only its coarse twin
+/// (`meshing::coarse`) is ever drawn, so nothing derives or meshes its ~60
+/// bricks. It has its [`SimChunk`] mirror, sits in the [`SimChunkIndex`] and
+/// takes edits (mirror only). When the camera comes within reach
+/// [`materialise_chunk`] derives its bricks from the mirror and it lands
+/// again like a snapshot chunk; it does not go back.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct FineDeferred;
+
+/// A chunk and its six face neighbours' blocks (in [`FACES`] order; `None`:
+/// no landed chunk there): what deriving a [`FineDeferred`] chunk's bricks
+/// reads, taken from the mirrors — its snapshot is long gone.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct MirrorItem {
+    pub chunk: Chunk,
+    pub neighbours: [Option<Chunk>; 6],
+}
+
+impl MirrorItem {
+    fn gather(world: &World, chunk: Entity) -> Option<Self> {
+        let source = world.get::<SimChunk>(chunk)?.0.clone();
+        let key = chunk_world_key(world, chunk)?;
+        let index = world.get_resource::<SimChunkIndex>();
+        let neighbours = FACES.map(|off| {
+            let next = [0, 1, 2].map(|a| key[a] + off[a]);
+            let e = *index?.0.get(&next)?;
+            Some(world.get::<SimChunk>(e)?.0.clone())
+        });
+        Some(Self { chunk: source, neighbours })
+    }
+
+    /// The chunk's bricks, face bricks buried against a landed neighbour whose
+    /// facing blocks are opaque. No chunk below is the implied ground under
+    /// the column's band (solid, as the coarse twin and the near mesher take
+    /// it) — or one that has not landed yet, which un-buries what it shows
+    /// when it does ([`expose_across_mirror`]). No chunk elsewhere never
+    /// buries (a snapshot knows the ground there; the mirrors do not).
+    pub fn derive(&self) -> DerivedBricks {
+        let cutout = CutoutTable::installed();
+        derive_chunk_bricks_across(&self.chunk, |b, off| {
+            let face = FACES.iter().position(|f| *f == off).expect("a face offset");
+            match &self.neighbours[face] {
+                Some(next) => chunk_blocks_opaque(next, plane_blocks(b, off, face_layer(off, false)), cutout),
+                None => off == [0, -1, 0],
+            }
+        })
+    }
+}
 
 /// What changed in a chunk's [`SimChunk`] since the commander's tile mirror
 /// last looked: `full` for a fresh/replaced mirror, else the edited blocks.
@@ -517,7 +568,16 @@ fn clear_skipped(world: &mut World, chunk: Entity) {
 pub fn prune_region_skipped(world: &mut World, region: game::RegionId) {
     let per = game::REGION_SIZE as i32 / BRICK_VOXELS as i32;
     if let Some(mut skipped) = world.get_resource_mut::<SkippedBricks>() {
-        skipped.0.retain(|k, _| (k[0].div_euclid(per), k[2].div_euclid(per)) != (region.x, region.z));
+        // Keys sort by x first: only the region's own x band is walked, and
+        // the ~40k voxel payloads it drops are freed off the main thread
+        // (walking the whole map and freeing them here was a third of a
+        // seam crossing's long frames, 2026-11-19 perf capture).
+        let band = [region.x * per, i32::MIN, i32::MIN]..[(region.x + 1) * per, i32::MIN, i32::MIN];
+        let gone: Vec<_> = skipped.0.extract_if(band, |k, _| k[2].div_euclid(per) == region.z).collect();
+        if !gone.is_empty() {
+            #[cfg(not(target_arch = "wasm32"))]
+            bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { drop(gone) }).detach();
+        }
     }
     let per = game::REGION_CHUNKS as i32;
     if let Some(mut index) = world.get_resource_mut::<SimChunkIndex>() {
@@ -534,6 +594,25 @@ pub fn brick_translation(chunk_origin: Vec3, local: [u8; 3]) -> Vec3 {
 fn find_brick(world: &World, chunk: Entity, local: [u8; 3]) -> Option<Entity> {
     let bricks = world.get::<ChunkBricks>(chunk)?;
     bricks.0.iter().copied().find(|&e| world.get::<BrickOf>(e).is_some_and(|o| o.local == local))
+}
+
+/// What a brick entity is made of. No `Transform` and no `Visibility` on
+/// purpose: a brick is never drawn (its sim chunk draws the merged quads,
+/// `meshing/chunk_mesh.rs`) and the mesher finds it by its [`ChunkKey`], set
+/// here from the same arithmetic `mark_remesh_dirty` used to derive from the
+/// transform. With them, the ~400k bricks of a 3x3 window were walked by
+/// Bevy's transform propagation (any moving entity dirties its region's tree)
+/// and by `check_visibility` EVERY frame — about half of each compute-pool
+/// thread at 60 fps (2026-11-19 perf capture). It stays a child of the region
+/// root, so it still goes when the region does.
+fn brick_bundle(
+    chunk: Entity,
+    local: [u8; 3],
+    key: [i32; 3],
+    root: Entity,
+    voxels: VoxelData,
+) -> (BrickOf, ChunkKey, ChildOf, VoxelData) {
+    (BrickOf { chunk, local }, ChunkKey(key), ChildOf(root), voxels)
 }
 
 /// Write brick `local` of `chunk`: replace its voxels, or spawn it (unless
@@ -556,15 +635,8 @@ pub fn write_brick(world: &mut World, chunk: Entity, local: [u8; 3], voxels: Vox
     }
     let Ok(entity) = world.get_entity(chunk) else { return };
     let Some(root) = entity.get::<ChildOf>().map(ChildOf::parent) else { return };
-    let origin = entity.get::<Transform>().map_or(Vec3::ZERO, |t| t.translation);
-    let brick = world.spawn((
-        BrickOf { chunk, local },
-        Transform::from_translation(brick_translation(origin, local)),
-        Visibility::default(),
-        ChildOf(root),
-        voxels,
-    ));
-    let brick = brick.id();
+    let Some(key) = brick_grid_key(world, chunk, local) else { return };
+    let brick = world.spawn(brick_bundle(chunk, local, key, root, voxels)).id();
     let mut entity = world.entity_mut(chunk);
     match entity.get_mut::<ChunkBricks>() {
         Some(mut bricks) => bricks.0.push(brick),
@@ -609,15 +681,83 @@ pub fn despawn_sim_entity(world: &mut World, e: Entity) {
     }
 }
 
-/// A keyed chunk got a new pose: its bricks follow.
-pub fn move_chunk_bricks(world: &mut World, chunk: Entity, origin: Vec3) {
-    let Some(bricks) = world.get::<ChunkBricks>(chunk).map(|b| b.0.clone()) else { return };
-    for e in bricks {
-        let Some(local) = world.get::<BrickOf>(e).map(|o| o.local) else { continue };
-        if let Some(mut tf) = world.get_mut::<Transform>(e) {
-            tf.translation = brick_translation(origin, local);
+/// Mark the coarse twins of `chunk`'s face neighbours out of date: a twin is
+/// padded with its neighbours' boundary blocks (`coarse::boundary_slab`).
+/// `deferred_only`: just the [`FineDeferred`] ones — a neighbour with bricks
+/// re-meshes its border bricks, which rebuilds its twin anyway.
+fn dirty_neighbour_twins(world: &mut World, chunk: Entity, deferred_only: bool) {
+    use super::meshing::coarse::{coarse_twins_enabled, CoarseDirty};
+    if !coarse_twins_enabled() {
+        return;
+    }
+    let Some(key) = chunk_world_key(world, chunk) else { return };
+    for off in FACES {
+        let next = [0, 1, 2].map(|a| key[a] + off[a]);
+        let Some(&e) = world.get_resource::<SimChunkIndex>().and_then(|i| i.0.get(&next)) else { continue };
+        let Ok(mut entity) = world.get_entity_mut(e) else { continue };
+        if entity.contains::<SimChunk>()
+            && !entity.contains::<CoarseDirty>()
+            && (!deferred_only || entity.contains::<FineDeferred>())
+        {
+            entity.insert(CoarseDirty);
         }
     }
+}
+
+/// A chunk beyond the full detail distance landed: it takes its mirror (with
+/// any block edits that arrived meanwhile) and asks for its coarse twin, and
+/// that is all — see [`FineDeferred`]. The caller checked it is still pending.
+pub fn land_chunk_deferred(world: &mut World, chunk: Entity, mut source: Chunk) {
+    use super::meshing::coarse::{CoarseDirty, CoarseTwin};
+    despawn_chunk_bricks(world, chunk);
+    clear_skipped(world, chunk);
+    if let Some(key) = chunk_world_key(world, chunk) {
+        if let Some(mut index) = world.get_resource_mut::<SimChunkIndex>() {
+            index.0.insert(key, chunk);
+        }
+    }
+    let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
+    if let Some(PendingBlockDeltas(deltas)) = entity.take::<PendingBlockDeltas>() {
+        for delta in &deltas {
+            apply_delta_to_chunk(&mut source, delta);
+        }
+    }
+    // Whatever full-detail mesh it had (a chunk landing a second time) goes;
+    // its twin, if any, then draws at every distance until rebuilt.
+    let twin = entity.get::<CoarseTwin>().map(|t| t.0);
+    entity
+        .remove::<(
+            PendingSnapshotVoxels,
+            BrickEdits,
+            super::meshing::chunk_mesh::ChunkMeshDirty,
+            super::voxel_pull::ChunkQuads,
+            super::meshing::TerrainQuadCount,
+            super::meshing::InteriorFaces,
+        )>()
+        .insert((SimChunk(source), ChunkEdits { full: true, ..default() }, FineDeferred, CoarseDirty));
+    if !entity.contains::<ChunkBricks>() {
+        entity.insert(ChunkBricks::default());
+    }
+    if let Some(mut twin) = twin.and_then(|t| world.get_entity_mut(t).ok()) {
+        twin.insert(super::voxel_pull::DetailBand::Always);
+    }
+    // Neighbours buried against this chunk's faces see its real blocks now.
+    expose_across_mirror(world, chunk);
+    dirty_neighbour_twins(world, chunk, false);
+}
+
+/// The camera came within reach of a [`FineDeferred`] chunk: read its mirror
+/// and its neighbours' NOW (one step with the marker swap, so an edit lands
+/// either in the mirror before or in `PendingBlockDeltas` after) and make it
+/// a pending chunk again. Returns what `apply_snapshot_voxels` derives its
+/// bricks from; `None` if it is no longer deferred.
+pub fn materialise_chunk(world: &mut World, chunk: Entity) -> Option<MirrorItem> {
+    if world.get::<FineDeferred>(chunk).is_none() || world.get::<PendingSnapshotVoxels>(chunk).is_some() {
+        return None;
+    }
+    let item = MirrorItem::gather(world, chunk)?;
+    world.entity_mut(chunk).remove::<FineDeferred>().insert(PendingSnapshotVoxels);
+    Some(item)
 }
 
 /// A chunk's derived bricks landed (snapshot or cell activation, off-thread):
@@ -639,13 +779,67 @@ pub fn land_chunk_bricks(world: &mut World, chunk: Entity, source: Chunk, mut br
     }
     let pending = entity.take::<PendingBlockDeltas>();
     record_skipped(world, chunk, bricks.buried);
-    for (local, voxels) in bricks.spawn {
-        write_brick(world, chunk, local, voxels);
-    }
+    spawn_landed_bricks(world, chunk, bricks.spawn);
     // Neighbours buried against this chunk's faces see its real blocks now.
     expose_across_mirror(world, chunk);
+    dirty_neighbour_twins(world, chunk, true);
     if let Some(PendingBlockDeltas(deltas)) = pending.filter(|p| !p.0.is_empty()) {
         apply_block_deltas(world, chunk, deltas);
+    }
+}
+
+/// [`write_brick`] for every brick of a chunk that was just emptied
+/// (`land_chunk_bricks`): the chunk's root, origin and grid base are looked
+/// up once, no brick needs finding (there are none yet — `write_brick`'s
+/// linear `find_brick` made a 300-brick landing quadratic), and the bricks
+/// spawn in one batch. A local given twice falls back to `write_brick`.
+fn spawn_landed_bricks(world: &mut World, chunk: Entity, spawn: Vec<([u8; 3], VoxelData)>) {
+    let Ok(entity) = world.get_entity(chunk) else { return };
+    let Some(root) = entity.get::<ChildOf>().map(ChildOf::parent) else { return };
+    let origin = entity.get::<Transform>().map_or(Vec3::ZERO, |t| t.translation);
+    let root_t = world.get::<Transform>(root).map_or(Vec3::ZERO, |t| t.translation);
+    // Same arithmetic as `brick_grid_key`, bit for bit.
+    let grid_key = |local: [u8; 3]| {
+        let k = (root_t + brick_translation(origin, local)) / BRICK_VOXELS as f32;
+        [k.x.round() as i32, k.y.round() as i32, k.z.round() as i32]
+    };
+    let cutout = CutoutTable::installed();
+    let n = BRICKS_PER_CHUNK_EDGE;
+    let mut seen = vec![false; n * n * n];
+    let mut again = Vec::new();
+    let mut fresh = Vec::with_capacity(spawn.len());
+    {
+        let mut skipped = world.get_resource_mut::<SkippedBricks>();
+        for (local, voxels) in spawn {
+            let slot = &mut seen[local[0] as usize + n * (local[1] as usize + n * local[2] as usize)];
+            if std::mem::replace(slot, true) {
+                again.push((local, voxels));
+                continue;
+            }
+            if let Some(skipped) = skipped.as_mut() {
+                let k = grid_key(local);
+                if skipped.0.get(&k).is_some_and(|(owner, _)| *owner == chunk) {
+                    skipped.0.remove(&k);
+                }
+            }
+            if voxels.is_all_empty(cutout) {
+                continue;
+            }
+            fresh.push(brick_bundle(chunk, local, grid_key(local), root, voxels));
+        }
+    }
+    let ids: Vec<Entity> = world.spawn_batch(fresh).collect();
+    if !ids.is_empty() {
+        let mut entity = world.entity_mut(chunk);
+        match entity.get_mut::<ChunkBricks>() {
+            Some(mut bricks) => bricks.0.extend(ids),
+            None => {
+                entity.insert(ChunkBricks(ids));
+            }
+        }
+    }
+    for (local, voxels) in again {
+        write_brick(world, chunk, local, voxels);
     }
 }
 
@@ -701,6 +895,26 @@ pub fn apply_block_deltas(world: &mut World, chunk: Entity, deltas: Vec<BlockDel
         }
         return;
     }
+    if entity.contains::<FineDeferred>() && entity.contains::<SimChunk>() {
+        // No bricks to re-derive: the mirror takes the edit, the twin (and
+        // the neighbours' twins, padded with these blocks) is rebuilt, and a
+        // neighbour's brick this chunk buried may show now.
+        let mut source = entity.get_mut::<SimChunk>().expect("checked above");
+        for delta in &deltas {
+            apply_delta_to_chunk(&mut source.0, delta);
+        }
+        let indices = deltas.iter().map(|d| d.index);
+        match entity.get_mut::<ChunkEdits>() {
+            Some(mut edits) => edits.blocks.extend(indices),
+            None => {
+                entity.insert(ChunkEdits { full: false, blocks: indices.collect() });
+            }
+        }
+        entity.insert(super::meshing::coarse::CoarseDirty);
+        expose_edited_faces(world, chunk, &deltas);
+        dirty_neighbour_twins(world, chunk, false);
+        return;
+    }
     let Some(mut source) = entity.get_mut::<SimChunk>() else {
         edit_bricks_without_mirror(world, chunk, &deltas);
         expose_edited_faces(world, chunk, &deltas);
@@ -737,6 +951,7 @@ pub fn apply_block_deltas(world: &mut World, chunk: Entity, deltas: Vec<BlockDel
     touched.extend(exposed);
     rederive_bricks(world, chunk, touched);
     expose_edited_faces(world, chunk, &deltas);
+    dirty_neighbour_twins(world, chunk, true);
 }
 
 /// Edited blocks on `chunk`'s own faces that no longer hide what is next to

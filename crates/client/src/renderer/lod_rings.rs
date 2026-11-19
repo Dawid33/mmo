@@ -512,6 +512,7 @@ type UnmeshedNearChunkFilter = Or<(
     With<PendingSnapshotVoxels>,
     (With<VoxelData>, Without<ChunkConnectivity>),
     With<super::meshing::chunk_mesh::ChunkMeshDirty>,
+    super::meshing::coarse::AwaitingTwinFilter,
 )>;
 
 /// Near regions whose every chunk has meshed, stably for

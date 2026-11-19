@@ -781,6 +781,12 @@ fn frustum_planes(frustum: &Frustum) -> [[f32; 4]; 6] {
 pub fn cull_plugin(app: &mut App) {
     use bevy::camera::visibility::VisibilitySystems;
     use crate::session::{world_systems_enabled, SessionResetExt};
+    app.add_systems(
+        Update,
+        super::queue::requeue_for_culling
+            .before(super::queue::spawn_mesh_tasks)
+            .run_if(world_systems_enabled()),
+    );
     app.add_session_reset::<CullingStats>().add_systems(
         PostUpdate,
         cull_chunks

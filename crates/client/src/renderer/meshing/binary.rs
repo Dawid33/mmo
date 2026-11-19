@@ -53,9 +53,17 @@ impl CutoutTable {
         Self::from_ids(props.cutout_ids()).with_liquids(props.liquid_ids())
     }
 
-    /// From the process-global props (`game::block_props`).
-    pub fn installed() -> Self {
-        Self::from_props(game::block_props())
+    /// From the process-global props (`game::block_props`). Built once after
+    /// they are installed (they never change after): callers ask per brick,
+    /// and rebuilding the two 8 KiB sets from the props' `BTreeSet`s each time
+    /// was a visible share of landing a chunk on the main thread.
+    pub fn installed() -> &'static Self {
+        static INSTALLED: std::sync::OnceLock<CutoutTable> = std::sync::OnceLock::new();
+        match game::installed_block_props() {
+            Some(props) => INSTALLED.get_or_init(|| Self::from_props(props)),
+            // Nothing installed: the default props have no cutout or liquid ids.
+            None => &Self::NONE,
+        }
     }
 
     #[inline]

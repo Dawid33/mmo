@@ -63,6 +63,44 @@ pub struct CoarseTwin(pub Entity);
 #[derive(Component)]
 pub struct CoarseTask(Task<Vec<QuadRecord>>);
 
+/// On a sim chunk whose own quads and whose twin both exist but one of them
+/// only just arrived: both draw at every distance for this many more frames,
+/// THEN the chunk turns [`DetailBand::Fine`] and the twin
+/// [`DetailBand::Coarse`] ([`finish_band_handovers`]). Quads are extracted
+/// and uploaded on the render sub-app a frame or two after they land; handing
+/// the band over on the landing frame left the chunk drawing nothing
+/// meanwhile — patches of sky flashing through the terrain as full detail
+/// arrived around a walking player (seen in play, 2026-11-19).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct BandHandover(pub u32);
+
+/// Frames a [`BandHandover`] lasts.
+pub const BAND_HANDOVER_FRAMES: u32 = 6;
+
+/// Count the handovers down and switch the bands at the end.
+pub fn finish_band_handovers(
+    mut commands: Commands,
+    mut chunks: Query<(Entity, &mut BandHandover, Option<&CoarseTwin>, Has<ChunkQuads>)>,
+) {
+    for (chunk, mut left, twin, has_quads) in &mut chunks {
+        if left.0 > 0 {
+            left.0 -= 1;
+            continue;
+        }
+        let mut ec = commands.entity(chunk);
+        ec.remove::<BandHandover>();
+        if let (Some(&CoarseTwin(t)), true) = (twin, has_quads) {
+            ec.insert(DetailBand::Fine);
+            commands.entity(t).insert(DetailBand::Coarse);
+        }
+    }
+}
+
+/// A chunk landed without bricks (`bricks::FineDeferred`) whose twin — all it
+/// draws — is not built yet: it counts as unmeshed wherever a region's
+/// terrain is waited for (the loading cover, the LOD hand-over).
+pub type AwaitingTwinFilter = (With<super::super::bricks::FineDeferred>, Or<(With<CoarseDirty>, With<CoarseTask>)>);
+
 /// Whether coarse twins are built at all (`VOXEL_NEAR_DETAIL_M` > 0).
 pub fn coarse_twins_enabled() -> bool {
     near_detail_distance_m() > 0.0
@@ -214,11 +252,15 @@ pub fn twin_aabb() -> Aabb {
     Aabb { center: Vec3A::new(half, half + 0.5, half), half_extents: Vec3A::new(half, half + 0.5, half) }
 }
 
-/// Start twin builds for dirty chunks, farthest from the camera first (they
-/// are the ones that draw coarse).
+/// Start twin builds for dirty chunks, nearest to the camera first: a chunk
+/// that landed without bricks (`bricks::FineDeferred`) draws nothing until
+/// its twin is built, and the near ones are the ones in view.
 pub fn spawn_coarse_tasks(
     mut commands: Commands,
-    dirty: Query<(Entity, &SimChunk, &GlobalTransform), (With<CoarseDirty>, Without<CoarseTask>)>,
+    dirty: Query<(Entity, &SimChunk, &Transform, &ChildOf, Option<&CoarseTwin>), (With<CoarseDirty>, Without<CoarseTask>)>,
+    // A chunk may ask for its twin on the frame it lands, before its
+    // `GlobalTransform` is propagated: its origin is root + own translation.
+    roots: Query<&Transform, Without<SimChunk>>,
     all: Query<&SimChunk>,
     index: Option<Res<super::super::bricks::SimChunkIndex>>,
     layers: Res<BlockTextureLayers>,
@@ -228,14 +270,25 @@ pub fn spawn_coarse_tasks(
         return;
     }
     let eye = camera.iter().next().map(|t| t.translation());
+    let origin = |tf: &Transform, parent: &ChildOf| roots.get(parent.parent()).map_or(Vec3::ZERO, |r| r.translation) + tf.translation;
     let mut order: Vec<(f32, Entity)> = dirty
         .iter()
-        .map(|(e, _, tf)| (eye.map_or(0.0, |eye| eye.distance_squared(tf.translation())), e))
+        .map(|(e, _, tf, parent, _)| (eye.map_or(0.0, |eye| eye.distance_squared(origin(tf, parent))), e))
         .collect();
-    order.sort_by(|a, b| b.0.total_cmp(&a.0));
-    for (_, e) in order.into_iter().take(COARSE_SPAWNS_PER_FRAME) {
-        let Ok((_, sim, tf)) = dirty.get(e) else { continue };
-        let key = chunk_key(tf.translation());
+    if order.len() > COARSE_SPAWNS_PER_FRAME {
+        order.select_nth_unstable_by(COARSE_SPAWNS_PER_FRAME, |a, b| a.0.total_cmp(&b.0));
+        order.truncate(COARSE_SPAWNS_PER_FRAME);
+    }
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, e) in order {
+        let Ok((_, sim, tf, parent, twin)) = dirty.get(e) else { continue };
+        // All air (most of the sky's chunks): no twin, and no job to find out.
+        if sim.0.chisel.is_empty() && sim.0.blocks.uniform().is_some_and(|b| b.id == game::BlockId::AIR) {
+            commands.entity(e).remove::<CoarseDirty>();
+            drop_twin(&mut commands, e, twin);
+            continue;
+        }
+        let key = chunk_key(origin(tf, parent));
         let slabs: [Slab; 6] = FACE_DIRS.map(|d| {
             let n = [key[0] + d[0], key[1] + d[1], key[2] + d[2]];
             let neighbour = index.as_deref().and_then(|i| i.0.get(&n)).and_then(|&ne| all.get(ne).ok())?;
@@ -248,59 +301,55 @@ pub fn spawn_coarse_tasks(
 }
 
 /// Land finished twin builds: create / update / drop the twin and set the
-/// chunk's band.
+/// bands. A twin stands on its own — it is what a chunk without bricks
+/// (`bricks::FineDeferred`) draws, and what a chunk still meshing its bricks
+/// keeps drawing meanwhile: with the chunk's own quads it is
+/// [`DetailBand::Coarse`] and the chunk [`DetailBand::Fine`]; without, it is
+/// drawn at every distance. A twin that is new beside existing quads takes
+/// its band through a [`BandHandover`].
 pub fn apply_coarse_tasks(
     mut commands: Commands,
-    mut tasks: Query<(Entity, &mut CoarseTask, Option<&CoarseTwin>)>,
-    alive: Query<(), With<ChunkQuads>>,
+    mut tasks: Query<(Entity, &mut CoarseTask, Option<&CoarseTwin>, Has<ChunkQuads>, Has<BandHandover>)>,
 ) {
-    for (chunk, mut task, twin) in &mut tasks {
+    for (chunk, mut task, twin, has_quads, handing_over) in &mut tasks {
         let Some(records) = block_on(future::poll_once(&mut task.0)) else {
             continue;
         };
         commands.entity(chunk).remove::<CoarseTask>();
-        // The chunk lost its quads meanwhile (`drop_coarse_twin` ran): no twin.
-        if records.is_empty() || !alive.contains(chunk) {
+        if records.is_empty() {
             drop_twin(&mut commands, chunk, twin);
             continue;
         }
         let quads = ChunkQuads(Arc::new(records));
         match twin {
+            // Rebuilt: it keeps the band it has (a handover in progress, or
+            // the one `rebuild_chunk_meshes` / a finished handover gave it).
             Some(&CoarseTwin(t)) => {
                 commands.entity(t).insert(quads);
+                if !has_quads && !handing_over {
+                    commands.entity(t).insert(DetailBand::Always);
+                }
             }
             None => {
                 let t = commands
-                    .spawn((
-                        twin_transform(),
-                        twin_aabb(),
-                        NoAutoAabb,
-                        quads,
-                        DetailBand::Coarse,
-                        ChildOf(chunk),
-                    ))
+                    .spawn((twin_transform(), twin_aabb(), NoAutoAabb, quads, DetailBand::Always, ChildOf(chunk)))
                     .id();
-                commands.entity(chunk).insert(CoarseTwin(t));
+                let mut ec = commands.entity(chunk);
+                ec.insert(CoarseTwin(t));
+                if has_quads {
+                    ec.insert((DetailBand::Always, BandHandover(BAND_HANDOVER_FRAMES)));
+                }
             }
         }
-        commands.entity(chunk).insert(DetailBand::Fine);
     }
 }
+
 
 fn drop_twin(commands: &mut Commands, chunk: Entity, twin: Option<&CoarseTwin>) {
     if let Some(&CoarseTwin(t)) = twin {
-        commands.entity(t).despawn();
+        commands.entity(t).try_despawn();
     }
     if let Ok(mut ec) = commands.get_entity(chunk) {
-        ec.remove::<CoarseTwin>().insert(DetailBand::Always);
+        ec.remove::<(CoarseTwin, BandHandover)>().insert(DetailBand::Always);
     }
 }
-
-/// A chunk whose merged mesh just went empty: drop its twin (and any build).
-pub fn drop_coarse_twin(commands: &mut Commands, chunk: Entity, twin: Option<&CoarseTwin>) {
-    if let Ok(mut ec) = commands.get_entity(chunk) {
-        ec.remove::<(CoarseDirty, CoarseTask)>();
-    }
-    drop_twin(commands, chunk, twin);
-}
-

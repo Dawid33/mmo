@@ -100,15 +100,22 @@ pub fn mesh_chunk_classified(
     pull: bool,
     interior: Option<&interior::InteriorGround>,
 ) -> MeshOutput {
-    mesh_chunk_classified_wire(padded, layers, pull, interior).into_output()
+    mesh_chunk_classified_wire(padded, layers, pull, interior, true).into_output()
 }
 
 /// [`mesh_chunk_classified`] with the mesh still as data (compute jobs).
+/// `connectivity`: whether to flood-fill the brick's open space for its
+/// cave-culling mask ([`visibility::face_connectivity`]). Only `cull_chunks`
+/// reads the mask and it is off unless asked for (`CullingConfig`), while the
+/// flood was 44 % of a join's mesh-thread time (2026-11-19 perf capture);
+/// without it the brick reports [`visibility::ALL_CONNECTED`], which is what
+/// the culler assumes of a brick it knows nothing about.
 pub fn mesh_chunk_classified_wire(
     padded: &PaddedVoxels,
     layers: &BlockTextureLayers,
     pull: bool,
     interior: Option<&interior::InteriorGround>,
+    connectivity: bool,
 ) -> MeshWire {
     let cutout = binary::CutoutTable::installed();
     let quads = binary::mesh_quads_classified(padded, &cutout, interior.filter(|_| pull));
@@ -123,7 +130,11 @@ pub fn mesh_chunk_classified_wire(
     MeshWire {
         mesh,
         records,
-        connectivity: visibility::face_connectivity(padded, &cutout),
+        connectivity: if connectivity {
+            visibility::face_connectivity(padded, cutout)
+        } else {
+            visibility::ALL_CONNECTED
+        },
         quad_count,
         has_interior,
     }

@@ -201,10 +201,16 @@ impl RankCache {
 /// Does not remove them from the queue. Entries failing `alive` are stale and
 /// purged — every frame for a short queue, on each re-rank for a long one
 /// (a stale entry picked in between is skipped by the caller's lookup).
+/// `lane` is the whole in-flight budget: a long queue's cached slice is sized
+/// from it, not from `capacity` — the slots free this instant, a handful
+/// while the lane is busy, which made a slice of a few dozen that ran out
+/// the next frame and re-ranked ~200k entries every frame (30 % of a thread
+/// mid-join, 2026-11-19 perf capture).
 fn pick_nearest(
     queue: &mut RemeshQueue,
     cache: &mut RankCache,
     capacity: usize,
+    lane: usize,
     alive: impl Fn(Entity) -> bool,
     rank: impl Fn([i32; 3]) -> u64,
 ) -> Vec<(Entity, Option<[i32; 3]>)> {
@@ -223,7 +229,7 @@ fn pick_nearest(
     }
     if cache.frames_left == 0 || cache.next >= cache.order.len() {
         queue.dirty.retain(|e, _| alive(*e));
-        let keep = capacity.saturating_mul(RANK_CACHE_FRAMES as usize * 2).max(1);
+        let keep = lane.max(capacity).saturating_mul(RANK_CACHE_FRAMES as usize * 2).max(1);
         let mut ranked: Vec<(u64, Entity)> = queue.dirty.iter().map(|(&e, &key)| (rank_of(key), e)).collect();
         if ranked.len() > keep {
             ranked.select_nth_unstable(keep);
@@ -264,8 +270,12 @@ pub fn spawn_mesh_tasks(
     skipped: Option<Res<super::super::bricks::SkippedBricks>>,
     loaded: Option<Res<super::super::commander::height::HeightGrid>>,
     ground: Option<Res<super::super::commander::tiles::TileMirror>>,
+    culling: Option<Res<super::visibility::CullingConfig>>,
     mut rank_cache: crate::session::SessionLocal<RankCache>,
 ) {
+    // The culling masks are only worth their flood fill while the culler runs
+    // (`requeue_for_culling` re-meshes the bricks when it is switched on).
+    let connectivity = culling.is_some_and(|c| c.graph_enabled);
     let rank_cache = rank_cache.get();
     if queue.dirty.is_empty() {
         rank_cache.clear();
@@ -285,7 +295,7 @@ pub fn spawn_mesh_tasks(
         return;
     }
     let cam = camera.iter().next();
-    let picked = pick_nearest(&mut queue, rank_cache, capacity, |e| chunks.contains(e), |key| {
+    let picked = pick_nearest(&mut queue, rank_cache, capacity, budgets.max_in_flight, |e| chunks.contains(e), |key| {
         chunk_rank(key, cam)
     });
 
@@ -326,7 +336,8 @@ pub fn spawn_mesh_tasks(
                 commands.entity(e).insert(AwaitingGround(k));
             }
         }
-        let job = NearMeshJob { center, neighbors: owned_neighbors, layers: layers.clone(), pull, interior };
+        let job =
+            NearMeshJob { center, neighbors: owned_neighbors, layers: layers.clone(), pull, interior, connectivity };
         let task = super::super::compute::spawn(job, MeshWire::into_output);
         commands.entity(e).insert(MeshingTask(task));
     }
@@ -341,6 +352,8 @@ pub struct NearMeshJob {
     pub layers: BlockTextureLayers,
     pub pull: bool,
     pub interior: Option<InteriorGround>,
+    /// Compute the cave-culling mask (`mesh_chunk_classified_wire`).
+    pub connectivity: bool,
 }
 
 impl super::super::compute::ComputeJob for NearMeshJob {
@@ -353,7 +366,21 @@ impl super::super::compute::ComputeJob for NearMeshJob {
         }
         let neighbors = self.neighbors.iter().map(|(off, data)| (*off, data)).collect();
         let padded = gather_padded_rle(&self.center, &neighbors);
-        mesh_chunk_classified_wire(&padded, &self.layers, self.pull, self.interior.as_ref())
+        mesh_chunk_classified_wire(&padded, &self.layers, self.pull, self.interior.as_ref(), self.connectivity)
+    }
+}
+
+/// Cave culling was switched on: every keyed brick was meshed without its
+/// connectivity mask (`spawn_mesh_tasks`), so queue them all again.
+pub fn requeue_for_culling(
+    config: Res<super::visibility::CullingConfig>,
+    grid: Res<ChunkGrid>,
+    mut queue: ResMut<RemeshQueue>,
+) {
+    if config.is_changed() && !config.is_added() && config.graph_enabled {
+        for (&key, &e) in &grid.0 {
+            queue.dirty.entry(e).or_insert(Some(key));
+        }
     }
 }
 

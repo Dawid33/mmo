@@ -25,11 +25,20 @@ impl BlockTextureLayers {
     /// grass slope far away reads as grass, not as moiré bands of dirt sides.
     /// A side texture shared by blocks with different tops maps to the last
     /// such block in id order; harmless for a sub-pixel fade.
+    ///
+    /// Only ground-cover blocks are remapped — a top unlike the bottom
+    /// (grass, dry grass, podzol: their top over dirt). A block with the
+    /// same top and bottom is a pillar seen from the side: a log's bark
+    /// faded to its rings, and since the fade is in pixels per block it began
+    /// ~10 blocks away at the body camera's wide field of view (seen in play,
+    /// 2026-11-19: every trunk past that wrapped in the ring texture).
     pub fn side_to_top(&self) -> Vec<u32> {
         let len = self.0.values().flatten().max().map_or(1, |&max| max as usize + 1);
         let mut lut: Vec<u32> = (0..len as u32).collect();
-        for &[top, side, _] in self.0.values() {
-            lut[side as usize] = top;
+        for &[top, side, bottom] in self.0.values() {
+            if top != bottom {
+                lut[side as usize] = top;
+            }
         }
         lut
     }

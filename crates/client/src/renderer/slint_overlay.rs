@@ -922,7 +922,7 @@ fn key_text(key: &Key) -> Option<SharedString> {
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 fn slint_input<C: ComponentHandle + 'static>(
     slint: Option<NonSendMut<SlintLayer<C>>>,
-    window: Query<&Window, With<PrimaryWindow>>,
+    window: Query<(&Window, &bevy::window::CursorOptions), With<PrimaryWindow>>,
     mut buttons: MessageReader<MouseButtonInput>,
     mut wheel: MessageReader<MouseWheel>,
     mut keys: MessageReader<KeyboardInput>,
@@ -936,7 +936,7 @@ fn slint_input<C: ComponentHandle + 'static>(
 ) {
     let pointer = pointer.get();
     let Some(mut slint) = slint else { return };
-    let Ok(window) = window.single() else { return };
+    let Ok((window, cursor_options)) = window.single() else { return };
     let scale = window.scale_factor() * slint.ui_scale;
     slint.overlay.resize(window.physical_width(), window.physical_height(), scale);
     if frontend_hides(slint.hidden_by_frontend, state.as_deref(), in_play.as_deref(), world_map.as_deref()) {
@@ -969,7 +969,13 @@ fn slint_input<C: ComponentHandle + 'static>(
     let overlay = &slint.overlay;
 
     // Window logical → UI logical pixels; physical for the hit test.
-    let cursor = window.cursor_position();
+    // A grabbed cursor (mouse look) is the game's: the UI has no pointer.
+    // The hidden cursor still moves under the grab, and forwarding it sent
+    // every layer a `PointerMoved` per frame — each a walk of its whole item
+    // tree; turning the camera in a debug build fell from ~160 to 11-70 fps
+    // with 84 % of the main thread in Slint (2026-11-19 perf capture).
+    let grabbed = cursor_options.grab_mode != bevy::window::CursorGrabMode::None;
+    let cursor = if grabbed { None } else { window.cursor_position() };
     let ui_pos = cursor.map(|c| c / slint.ui_scale);
     if ui_pos != pointer.last {
         overlay.dispatch(match ui_pos {
@@ -1019,7 +1025,20 @@ fn slint_input<C: ComponentHandle + 'static>(
             delta_y: event.y * px,
         });
     }
+    // Keys reach the UI only while it has the keyboard: a menu, an overlay or
+    // the loading screen is up, a text field is typed in, or the frontend
+    // has the screen. Otherwise they are the game's. Every dispatched key
+    // event makes Slint walk the layer's whole item tree, in every layer —
+    // and a held movement key repeats ~30 times a second: walking around in a
+    // debug build stuttered in 40-200 ms frames with the main thread in
+    // `ensure_instantiated` (2026-11-19 perf capture). No `.slint` file
+    // handles a key itself; they matter to text fields and focused widgets.
+    let ui_has_keys = policy.as_deref().is_none_or(CursorPolicy::blocks_game)
+        || crate::session::frontend_has_screen(state.as_deref(), in_play.as_deref());
     for event in keys.read() {
+        if !ui_has_keys {
+            continue;
+        }
         let Some(text) = key_text(&event.logical_key) else { continue };
         overlay.dispatch(match (event.state, event.repeat) {
             (ButtonState::Pressed, false) => WindowEvent::KeyPressed { text },

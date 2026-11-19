@@ -42,6 +42,7 @@ struct CullView {
     // camera's view volume out to the shadow distance, as inward half-spaces
     // (xyz = unit normal, dot(n, p) + w >= 0 inside); receiver_count.x of
     // them are set — in the sun's shadow views only (0: off).
+    // receiver_count.y: 1 in every shadow view (frustum_visible).
     receivers: array<vec4<f32>, 6>,
     receiver_count: vec4<u32>,
 };
@@ -191,6 +192,12 @@ fn frustum_visible(chunk: ChunkMeta) -> bool {
         all_top = all_top && clip.y > clip.w;
         all_near = all_near && clip.z > clip.w;
     }
+    // A shadow view (receiver_count.y) keeps what lies before its near
+    // plane: a cascade is fitted to the slice of the world the camera sees,
+    // and a caster between it and the sun — a tree behind or above the view
+    // — still shadows into it (its depth is clamped, not clipped). Culling
+    // those made a shadow vanish as soon as its caster left the view.
+    all_near = all_near && view.receiver_count.y == 0u;
     return !(all_left || all_right || all_bottom || all_top || all_near);
 }
 

@@ -139,6 +139,12 @@ pub fn install_block_props(p: BlockProps) {
     assert_eq!(*installed, p, "conflicting block properties installed in one process");
 }
 
+/// The installed props, `None` before [`install_block_props`] ran. Once
+/// installed they never change, so anything derived from them may be cached.
+pub fn installed_block_props() -> Option<&'static BlockProps> {
+    PROPS.get()
+}
+
 /// The installed props, or the all-solid, all-opaque default when none were.
 pub fn block_props() -> &'static BlockProps {
     static DEFAULT: BlockProps = BlockProps {

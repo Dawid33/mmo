@@ -241,7 +241,7 @@ impl Plugin for SimBridgePlugin {
                 (voxel_bodies::spawn_voxel_body_meshes, voxel_bodies::apply_voxel_body_meshes).chain(),
                 // Coarse twins of sim chunks (distance LOD in the simulated
                 // neighbourhood): dirtied by `rebuild_chunk_meshes`.
-                (meshing::coarse::apply_coarse_tasks, meshing::coarse::spawn_coarse_tasks)
+                (meshing::coarse::finish_band_handovers, meshing::coarse::apply_coarse_tasks, meshing::coarse::spawn_coarse_tasks)
                     .chain()
                     .after(meshing::chunk_mesh::rebuild_chunk_meshes),
                 world_map::apply_world_map_msgs,

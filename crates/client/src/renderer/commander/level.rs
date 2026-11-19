@@ -244,9 +244,15 @@ pub fn level_input(
     let fast = keys.any_pressed(LEVEL_FAST_KEYS);
     if level.cut {
         let Some(current) = level.level else { return };
-        let range = grid.surface_range().map_or((current, current), level_range);
         let steps = up as i32 - down as i32;
-        let mut next = if steps != 0 { step_level(current, steps, fast, range) } else { current };
+        // Only on a step: `surface_range` walks every loaded column (~590k at
+        // the 3x3 window), which every frame was a tenth of a compute thread.
+        let mut next = if steps != 0 {
+            let range = grid.surface_range().map_or((current, current), level_range);
+            step_level(current, steps, fast, range)
+        } else {
+            current
+        };
         if keys.just_pressed(SURFACE_KEY) {
             if let Some(y) = focus_surface(&grid, cam.focus) {
                 next = surface_level(y);

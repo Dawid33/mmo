@@ -79,14 +79,13 @@ pub enum CameraMode {
 impl CameraMode {
     /// `VOXEL_CAMERA=first-person` brings back the walking body's view (a dev
     /// tool until the body leaves the sim); anything else is the commander.
-    /// The render benchmark and the autopilot probes (`just fly-probe` /
-    /// `shuttle-probe`) fly the body's camera, so they keep first person.
+    /// The render benchmark flies the body's camera, so it keeps first person.
+    /// The autopilot probes (`just fly-probe` / `shuttle-probe`) need the
+    /// commander: they ask for the overview (`ClientPlayMode`,
+    /// `ToggleModeRequest`, both registered by [`CommanderPlugin`]).
     pub fn from_env() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         if super::render_bench::enabled() {
-            return Self::FirstPerson;
-        }
-        if std::env::var("VOXEL_AUTOPILOT").is_ok_and(|v| !v.is_empty() && v != "0") {
             return Self::FirstPerson;
         }
         match std::env::var("VOXEL_CAMERA").as_deref() {

@@ -31,6 +31,10 @@ pub const LOADING_TIMEOUT_SECS: f32 = 90.0;
 /// Bar position once the home region's terrain has arrived and meshing begins;
 /// the meshing fills the rest.
 pub const LOADING_TERRAIN_ARRIVED: f32 = 0.15;
+/// Below this much outstanding meshing work the cover counts it every frame;
+/// above, every [`OUTSTANDING_RECOUNT_SECS`] (`update_loading_cover`).
+pub const OUTSTANDING_EXACT_BELOW: usize = 2_000;
+pub const OUTSTANDING_RECOUNT_SECS: f32 = 0.1;
 
 pub const STEP_JOINING: &str = "Joining the world\u{2026}";
 pub const STEP_RECEIVING: &str = "Receiving terrain\u{2026}";
@@ -163,8 +167,16 @@ pub fn update_loading_cover(
     parents: Query<&ChildOf>,
     in_flight: Query<
         &ChildOf,
-        Or<(With<MeshingTask>, With<PendingSnapshotVoxels>, With<SnapshotVoxelTask>, With<ChunkMeshDirty>)>,
+        Or<(
+            With<MeshingTask>,
+            With<PendingSnapshotVoxels>,
+            With<SnapshotVoxelTask>,
+            With<ChunkMeshDirty>,
+            crate::renderer::meshing::coarse::AwaitingTwinFilter,
+        )>,
     >,
+    // (when the home region's outstanding work was last counted, the count)
+    mut recount: Local<(f32, usize)>,
 ) {
     let eligible = state.is_some_and(|s| *s.get() == AppState::InWorld)
         && in_play.is_some_and(|e| e.0)
@@ -174,14 +186,31 @@ pub fn update_loading_cover(
     let root = home.and_then(|rc| roots.as_ref().and_then(|r| r.0.get(&rc).copied()));
     // Counted only while a load is on: steady play pays nothing here.
     let loading = matches!(cover.phase, CoverPhase::Covering { .. }) || cam.as_ref().is_some_and(|c| !c.placed);
+    let now = time.elapsed_secs();
     let outstanding = match root {
         Some(root) if eligible && loading => {
-            let queued = queue.as_ref().map_or(0, |q| {
-                q.dirty.keys().filter(|e| parents.get(**e).is_ok_and(|p| p.parent() == root)).count()
-            });
-            queued + in_flight.iter().filter(|p| p.parent() == root).count()
+            // The remesh queue holds up to ~200k bricks mid-join, and counting
+            // the home region's share walked all of them every frame. A large
+            // count only moves the bar, so it is refreshed every
+            // OUTSTANDING_RECOUNT_SECS; near zero (what lifting the cover
+            // waits on) it is exact every frame. A stale nonzero count can only
+            // delay the lift, never hasten it.
+            let (counted_at, last) = *recount;
+            if last < OUTSTANDING_EXACT_BELOW || now - counted_at >= OUTSTANDING_RECOUNT_SECS || now < counted_at {
+                let queued = queue.as_ref().map_or(0, |q| {
+                    q.dirty.keys().filter(|e| parents.get(**e).is_ok_and(|p| p.parent() == root)).count()
+                });
+                let count = queued + in_flight.iter().filter(|p| p.parent() == root).count();
+                *recount = (now, count);
+                count
+            } else {
+                last
+            }
         }
-        _ => 0,
+        _ => {
+            *recount = (now, 0);
+            0
+        }
     };
     let signals = LoadSignals {
         eligible,
