@@ -160,6 +160,7 @@ pub fn unix_ms_now() -> u64 {
 pub fn start_clock(
     role: Role,
     store: Option<&world_store::StoreHandle>,
+    postgres: bool,
     world_tick: game::Tick,
 ) -> Result<(game::WorldClock, u64), String> {
     match (role, store) {
@@ -189,6 +190,7 @@ pub fn start_clock(
 pub fn check_before_registration(
     role: Role,
     store: Option<&world_store::StoreHandle>,
+    postgres: bool,
     ownership_word: &str,
     claim_on_demand: bool,
     super_region_regions: u32,
@@ -199,7 +201,7 @@ pub fn check_before_registration(
         crate::claims::HostClaims::check_side(store, super_region_regions)?;
     }
     if role == Role::Host {
-        start_clock(role, store, world_tick)?;
+        start_clock(role, store, postgres, world_tick)?;
     }
     Ok(())
 }
@@ -566,7 +568,7 @@ pub fn run_coordinator() -> ServerExit {
     check_two_phase(policy, &store).unwrap_or_else(|e| fatal(e));
     // Before it claims the coordinator row: the world cut parts a crash left staged.
     recover_staged_cuts(&store).unwrap_or_else(|e| fatal(e));
-    let (clock, phase) = start_clock(Role::Coordinator, Some(&store), opened.world_tick).unwrap_or_else(|e| fatal(e));
+    let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
     let clock = CoordinatorClock::new(clock, phase);
     log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
     let bind = coordinator_addr_from(COORDINATOR_BIND_ENV, std::env::var(COORDINATOR_BIND_ENV).ok().as_deref())
