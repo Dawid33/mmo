@@ -31,7 +31,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -105,6 +105,19 @@ pub enum ApiRefusal {
 }
 
 impl ApiRefusal {
+    fn code(self) -> u8 {
+        match self {
+            ApiRefusal::NotReady => 1,
+            ApiRefusal::Fenced => 2,
+            ApiRefusal::NoGate => 3,
+            ApiRefusal::Starting => 4,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<ApiRefusal> {
+        [ApiRefusal::NotReady, ApiRefusal::Fenced, ApiRefusal::NoGate, ApiRefusal::Starting].into_iter().find(|r| r.code() == code)
+    }
+
     /// The 503 body.
     pub fn body(self) -> &'static str {
         match self {
@@ -131,7 +144,7 @@ pub struct ApiConfig {
 pub struct ApiListener {
     addr: SocketAddr,
     pin: String,
-    serving: Arc<AtomicBool>,
+    refusal: Arc<AtomicU8>,
     _stop: watch::Sender<bool>,
 }
 
@@ -146,10 +159,12 @@ impl ApiListener {
         &self.pin
     }
 
-    /// While false every authenticated request is answered 503 `not_ready` (a replica not yet
-    /// Ready, or fenced). True from the start.
-    pub fn set_serving(&self, serving: bool) {
-        self.serving.store(serving, Ordering::SeqCst);
+    /// `Some(r)`: every authenticated request, on every route, is answered 503 with `r`'s body
+    /// (`NotReady` until the replica's `ReplicaJoined` committed, `Fenced` once fenced); `None`:
+    /// serving. The listener STARTS as `Some(ApiRefusal::NotReady)`: the runtime calls
+    /// `set_refusal(None)` once it is Ready.
+    pub fn set_refusal(&self, refusal: Option<ApiRefusal>) {
+        self.refusal.store(refusal.map_or(0, ApiRefusal::code), Ordering::SeqCst);
     }
 }
 
@@ -159,11 +174,14 @@ struct Shared {
     store: StoreHandle,
     calls: crossbeam::channel::Sender<ApiCall>,
     row_version: watch::Receiver<u64>,
-    serving: Arc<AtomicBool>,
+    refusal: Arc<AtomicU8>,
 }
 
-/// Binds the listener and serves on its own thread. `calls` reaches the coordinator's thread;
-/// `row_version` carries the versions of the replica's `coordinator_row` notices.
+/// Binds the listener and serves on its own thread, refusing everything `NotReady` until
+/// [`ApiListener::set_refusal`]`(None)`. `calls` reaches the coordinator's thread (sent with
+/// `try_send`: a bounded channel that is full answers 503 `not_ready`); `row_version` carries
+/// the versions of the replica's `coordinator_row` notices — if its sender is dropped, waiting
+/// polls degrade to re-reading every [`MAILBOX_RECHECK_MS`].
 pub fn serve(
     cfg: ApiConfig,
     store: StoreHandle,
@@ -178,8 +196,8 @@ pub fn serve(
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let serving = Arc::new(AtomicBool::new(true));
-    let shared = Arc::new(Shared { token: cfg.token, world: cfg.world, store, calls, row_version, serving: serving.clone() });
+    let refusal = Arc::new(AtomicU8::new(ApiRefusal::NotReady.code()));
+    let shared = Arc::new(Shared { token: cfg.token, world: cfg.world, store, calls, row_version, refusal: refusal.clone() });
     let router = router(shared);
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
     let (stop_tx, mut stop_rx) = watch::channel(false);
@@ -227,7 +245,7 @@ pub fn serve(
         })
     })?;
     log::info!("[coordinator-api] listening on {addr} (cert sha256 {pin})");
-    Ok(ApiListener { addr, pin, serving, _stop: stop_tx })
+    Ok(ApiListener { addr, pin, refusal, _stop: stop_tx })
 }
 
 fn router(shared: Arc<Shared>) -> Router {
@@ -277,8 +295,8 @@ async fn guard(State(s): State<Arc<Shared>>, req: Request, next: Next) -> Respon
     if version != Some(svc_link::LINK_PROTOCOL_VERSION) {
         return text(StatusCode::PRECONDITION_FAILED, REFUSED_VERSION);
     }
-    if !s.serving.load(Ordering::SeqCst) {
-        return refusal(ApiRefusal::NotReady);
+    if let Some(r) = ApiRefusal::from_code(s.refusal.load(Ordering::SeqCst)) {
+        return refusal(r);
     }
     next.run(req).await
 }
@@ -289,7 +307,9 @@ fn host_id(raw: &str) -> Option<HostId> {
 
 /// Sends `call` to the coordinator's thread; false when it is gone.
 fn send_call(s: &Shared, call: ApiCall) -> bool {
-    s.calls.send(call).is_ok()
+    // `try_send`: a bounded channel that is full answers 503 `not_ready` instead of blocking
+    // the listener's single-threaded runtime.
+    s.calls.try_send(call).is_ok()
 }
 
 async fn host_messages(State(s): State<Arc<Shared>>, Path(host): Path<String>, body: Bytes) -> Response {
@@ -351,7 +371,11 @@ where
             return Ok(rows);
         }
         let nap = (deadline - now).min(Duration::from_millis(MAILBOX_RECHECK_MS));
-        let _ = tokio::time::timeout(nap, versions.changed()).await;
+        if let Ok(Err(_)) = tokio::time::timeout(nap, versions.changed()).await {
+            // The sender is gone: `changed()` would now return at once, every time. Degrade
+            // to the recheck interval.
+            tokio::time::sleep(nap).await;
+        }
     }
 }
 
