@@ -11,8 +11,9 @@
 //!   (delivered: the host acknowledges them by asking past them) and the next ones returned, in
 //!   one statement — delivery at least once, the host drops `seq <= ` its cursor: exactly
 //!   once, in order. The delete touches only `(host, seq <= after)`.
-//! - [`mailbox_oldest_pg`]: per host with unread rows, the boot and `at_ms` of its oldest (a
-//!   gauge of how long a host has not polled).
+//! - [`mailbox_oldest_pg`]: per host with unread rows, the boot and `at_ms` of its oldest and
+//!   how many it has (how long a host has not polled — the ticker's stall rule — and the
+//!   mailbox gauges).
 //! - [`login_answers_read_pg`]: the login answers past `after` (from the start when `after` is
 //!   past the newest row: another incarnation's cursor); never deleted by a read (a transition
 //!   prunes them by age).
@@ -46,13 +47,23 @@ pub(crate) async fn mailbox_read_pg(pool: &PgPool, host: HostId, boot: u64, afte
     rows.into_iter().map(|r| Ok((r.try_get::<i64, _>(0)? as u64, r.try_get(1)?))).collect()
 }
 
-/// One row per host with unread rows: `(host, boot, at_ms)` of its oldest (lowest `seq`).
-pub(crate) async fn mailbox_oldest_pg(pool: &PgPool) -> Result<Vec<(HostId, u64, u64)>, StoreError> {
-    let rows = sqlx::query("SELECT DISTINCT ON (host) host, boot, at_ms FROM outbox ORDER BY host, seq")
-        .fetch_all(pool)
-        .await?;
+/// One row per host with unread rows: `(host, boot, at_ms, rows)` — the boot and `at_ms` of its
+/// oldest (lowest `seq`) and how many rows it has (every boot's). One plain read, no lock.
+pub(crate) async fn mailbox_oldest_pg(pool: &PgPool) -> Result<Vec<(HostId, u64, u64, u64)>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT ON (host) host, boot, at_ms, COUNT(*) OVER (PARTITION BY host) FROM outbox ORDER BY host, seq",
+    )
+    .fetch_all(pool)
+    .await?;
     rows.into_iter()
-        .map(|r| Ok((HostId(r.try_get::<i64, _>(0)? as u64), r.try_get::<i64, _>(1)? as u64, r.try_get::<i64, _>(2)? as u64)))
+        .map(|r| {
+            Ok((
+                HostId(r.try_get::<i64, _>(0)? as u64),
+                r.try_get::<i64, _>(1)? as u64,
+                r.try_get::<i64, _>(2)? as u64,
+                r.try_get::<i64, _>(3)? as u64,
+            ))
+        })
         .collect()
 }
 

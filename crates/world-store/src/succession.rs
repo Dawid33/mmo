@@ -363,7 +363,7 @@
 //!   stay — or the transition — a failed write, retried). The rows it returns are committed ones
 //!   (`seq` is commit order: every insert runs under the `coordinator` row), so a later poll past
 //!   them misses none.
-//! - `mailbox_oldest` (`SELECT DISTINCT ON (host) … FROM outbox`) and `login_answers_read`
+//! - `mailbox_oldest` (`SELECT DISTINCT ON (host) …, COUNT(*) OVER (PARTITION BY host) FROM outbox`) and `login_answers_read`
 //!   (`SELECT … FROM login_outbox WHERE seq > $after`): plain reads, no locks.
 //! - `login_outbox` rows are written and deleted only by transitions (under `coordinator`): no
 //!   statement waits for another's row there.

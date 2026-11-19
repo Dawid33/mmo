@@ -1,6 +1,8 @@
 {{- if .Values.metrics }}
 # The coordinator, every host and the fleet reconciler serve /metrics on their port
-# `health` (9100). Services coordinator, hosts and fleet are headless, so each pod is its own target.
+# `health` (9100). Each pod is its own target (the ServiceMonitor scrapes the endpoints behind each
+# Service, headless or not: hosts and fleet are headless; coordinator is a ClusterIP Service since
+# the coordinator HTTP API, still headless in a world created before it until replaced).
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

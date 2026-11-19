@@ -854,8 +854,9 @@ pub struct CoordinatorRuntime {
     hosts_rx: Option<(u64, Answer<world_store::HostsRead>)>,
     /// With the `hosts` read in flight (`Delivery::Mailbox`): each host's oldest unread mailbox
     /// row ([`Input::HostsRead`]'s `mailbox_oldest`), on its way, then as answered.
-    mailbox_rx: Option<Answer<Vec<(HostId, u64, u64)>>>,
-    mailbox_read: Option<Result<Vec<(HostId, u64, u64)>, String>>,
+    /// Each element `(host, boot, at_ms, rows)` (`rows`: the host's unread rows, for the gauges).
+    mailbox_rx: Option<Answer<Vec<(HostId, u64, u64, u64)>>>,
+    mailbox_read: Option<Result<Vec<(HostId, u64, u64, u64)>, String>>,
     /// Post-commit effects of committed transitions, in flight or waiting to be tried again.
     after: Vec<AfterJob>,
     /// Lookups of cut outcomes in flight or waiting to be tried again.
@@ -946,6 +947,13 @@ struct WriteTally {
     /// The load rules' decisions that wrote, in answer order (Elastic 4 Task 7): `up` (rule 5,
     /// a host added) or `down` (rule 6, one drained) — the window line's `scale=`.
     scale: Vec<&'static str>,
+    /// Coordinator HTTP API: hosts the ticker detached as stalled (`stalled=`); mailbox and login
+    /// answer rows the committed transitions inserted (`mailbox_rows=`, `login_rows=`), and how
+    /// many of those transitions wrote no core (`core_less=`).
+    stalled: u64,
+    mailbox_rows: u64,
+    login_rows: u64,
+    core_less: u64,
 }
 
 impl WriteTally {
@@ -962,6 +970,10 @@ impl WriteTally {
             drained: 0,
             removed: 0,
             scale: Vec::new(),
+            stalled: 0,
+            mailbox_rows: 0,
+            login_rows: 0,
+            core_less: 0,
         }
     }
 }
@@ -1637,6 +1649,9 @@ impl CoordinatorRuntime {
                 // Only the ticker reads the table: another replica's gauges say nothing.
                 crate::health::Health::global().fleet_rows(0, 0);
             }
+            if mailbox {
+                crate::health::Health::global().mailbox_seen(0, 0);
+            }
             return;
         }
         #[cfg(feature = "test-hooks")]
@@ -1702,14 +1717,24 @@ impl CoordinatorRuntime {
                         crate::health::Health::global().fleet_rows(desired.len() as u64 - draining, draining);
                     }
                     // Under `Delivery::Direct` there is no mailbox (none read).
-                    let mailbox_oldest = match self.mailbox_read.take() {
-                        Some(Ok(oldest)) => oldest,
+                    let mailbox_oldest: Vec<(HostId, u64, u64)> = match self.mailbox_read.take() {
+                        Some(Ok(oldest)) => {
+                            let rows = oldest.iter().map(|&(_, _, _, n)| n).sum();
+                            let first = oldest.iter().map(|&(_, _, at, _)| at).min();
+                            crate::health::Health::global().mailbox_seen(rows, first.map_or(0, |at| now.saturating_sub(at)));
+                            oldest.into_iter().map(|(h, b, at, _)| (h, b, at)).collect()
+                        }
                         Some(Err(e)) => {
                             self.warn_cuts(now, &format!("the hosts' mailboxes could not be read ({e}); no stalled host seen this time"));
                             Vec::new()
                         }
                         None => Vec::new(),
                     };
+                    // The hosts the read may find stalled: attached as the boot of a waiting row.
+                    // Only the stall rule detaches while a `hosts` read is applied, so those of
+                    // them detached after it are the stalled ones (`stalled=`, the counter).
+                    let stall_candidates: Vec<(HostId, u64)> =
+                        mailbox_oldest.iter().filter(|&&(h, b, _)| self.core.attachment(h) == Some(b)).map(|&(h, b, _)| (h, b)).collect();
                     let read = Input::HostsRead {
                         rows: seen,
                         desired,
@@ -1720,6 +1745,11 @@ impl CoordinatorRuntime {
                         world_tick,
                     };
                     self.core.apply(read, now);
+                    let stalled = stall_candidates.iter().filter(|&&(h, b)| self.core.attachment(h) != Some(b)).count() as u64;
+                    if stalled > 0 {
+                        self.tally.stalled += stalled;
+                        crate::health::Health::global().hosts_stalled(stalled);
+                    }
                 }
                 Ok(Err(e)) => {
                     self.core.expected_hosts_unknown();
@@ -2679,6 +2709,11 @@ impl CoordinatorRuntime {
                 self.tally.transitions += 1;
                 self.tally.core_bytes += core;
                 self.tally.history_bytes += history;
+                if self.delivery == Delivery::Mailbox {
+                    self.tally.mailbox_rows += t.outbox.len() as u64;
+                    self.tally.login_rows += t.login_outbox.len() as u64;
+                    self.tally.core_less += u64::from(core_less);
+                }
                 crate::health::Health::global().coordinator_written(core, history);
                 #[cfg(feature = "test-hooks")]
                 if std::mem::take(&mut self.kill_at_commit) {
@@ -2867,19 +2902,28 @@ impl CoordinatorRuntime {
     /// and history bytes, the conflicts and failed writes (Elastic 2a, decision 8: E2b's measure),
     /// the land assignments applied (`assigned=`, Elastic 3) and the fleet's decisions that wrote
     /// (`added=`, `drained=`, `removed=`, Elastic 4) — and of those, the load rules' (`scale=`,
-    /// `up` / `down` in answer order, `-` for none).
+    /// `up` / `down` in answer order, `-` for none); under the HTTP API's mailbox delivery also the
+    /// hosts detached as stalled (`stalled=`), the mailbox and login-answer rows the committed
+    /// transitions inserted (`mailbox_rows=`, `login_rows=`) and how many transitions wrote no
+    /// core (`core_less=`) — the write volume of the coordinator HTTP API plan's Review Focus 5.
     fn report_writes(&mut self) {
         let window = self.tally.since.elapsed();
         if window < game::METRICS_REPORT_INTERVAL {
             return;
         }
         let t = std::mem::replace(&mut self.tally, WriteTally::new());
-        if t.transitions == 0 && t.conflicts == 0 && t.failures == 0 && t.assigned == 0 && t.added + t.drained + t.removed == 0 {
+        if t.transitions == 0
+            && t.conflicts == 0
+            && t.failures == 0
+            && t.assigned == 0
+            && t.added + t.drained + t.removed == 0
+            && t.stalled == 0
+        {
             return;
         }
         log::info!(
             "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={} \
-             assigned={} added={} drained={} removed={} scale={}",
+             assigned={} added={} drained={} removed={} scale={} stalled={} mailbox_rows={} login_rows={} core_less={}",
             window.as_secs_f32(),
             t.transitions,
             t.core_bytes,
@@ -2891,7 +2935,11 @@ impl CoordinatorRuntime {
             t.added,
             t.drained,
             t.removed,
-            if t.scale.is_empty() { "-".to_string() } else { t.scale.join(",") }
+            if t.scale.is_empty() { "-".to_string() } else { t.scale.join(",") },
+            t.stalled,
+            t.mailbox_rows,
+            t.login_rows,
+            t.core_less
         );
     }
 

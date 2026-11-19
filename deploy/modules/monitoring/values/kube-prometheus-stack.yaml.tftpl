@@ -167,6 +167,42 @@ additionalPrometheusRulesMap:
               summary: "World {{ $labels.namespace }} has no coordinator ticker"
               description: "No coordinator replica of {{ $labels.namespace }} has called itself the ticker for 2 minutes: no world cuts start, no dead host is declared, the calendar stands. A dead ticker is replaced within a replica lease (10 s); longer means the replicas disagree about who is live — see their logs."
 
+          - alert: WorldMailboxStalled
+            # Every coordinator -> host message is a row of the host's mailbox (table outbox), read by
+            # the host's long poll and deleted when it asks past it. The ticker detaches a host whose
+            # oldest row waited MAILBOX_STALL_MS (15 s) and that deletes its rows, so the ticker's
+            # gauge stays under ~16 s while the rule works (0 on the other replicas: max by namespace).
+            # Over 30 s for 2 minutes: rows nobody reads and nobody deletes — the stall rule is not
+            # acting (no ticker, failing hosts reads), or rows wait for a boot no attachment holds.
+            expr: |
+              max by (namespace) (mmo_coordinator_mailbox_oldest_ms{role="coordinator"}) > 30000
+            for: 2m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "A host mailbox of {{ $labels.namespace }} is not being read"
+              description: "The oldest unread host mailbox row of {{ $labels.namespace }} has been older than 30 s for 2 minutes ({{ $value }} ms now): the ticker should have detached its host after 15 s and deleted its rows. See the coordinator replicas' logs (`stalled`, `the hosts' mailboxes could not be read`) and `mmo_coordinator_mailbox_rows`; WorldCoordinatorNoTicker may fire beside it."
+
+          - alert: WorldCoordinatorApiErrors
+            # The share of the coordinator HTTP API's answers that are 5xx, over the routes hosts
+            # call (their batches and mailbox polls). The login orders route is left out: its 503
+            # `world_starting` / `no_gate` are answers (a world at zero hosts), not failures. A 503
+            # `not_ready` while a replica starts or `fenced` when it ends is normal and short.
+            expr: |
+              (
+                sum by (namespace) (rate(mmo_coordinator_api_requests_total{role="coordinator", route!="login_orders", code=~"5.."}[5m]))
+                /
+                sum by (namespace) (rate(mmo_coordinator_api_requests_total{role="coordinator", route!="login_orders"}[5m]))
+              ) > 0.05
+            for: 10m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "The coordinator API of {{ $labels.namespace }} keeps failing"
+              description: "{{ humanizePercentage $value }} of the coordinator HTTP API's answers to hosts in {{ $labels.namespace }} have been 5xx for 10 minutes (503 `not_ready` / `fenced` / `store`, or 500 `row` / `encode`). Hosts see each as a link drop and re-attach. Look at `mmo_coordinator_api_requests_total` by route and code and the replicas' `[coordinator-api]` log lines."
+
           - alert: WorldSuccessionDeclared
             expr: |
               increase(mmo_successions_declared_total{role="coordinator"}[10m]) > 0

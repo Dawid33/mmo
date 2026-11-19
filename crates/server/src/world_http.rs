@@ -439,6 +439,7 @@ impl Thread {
         if st.up {
             st.up = false;
             drop(st);
+            crate::health::Health::global().world_link_up(false);
             flaps.down(why);
             self.emit(Event::Down);
         }
@@ -557,6 +558,8 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
     let mut backoff = svc_link::LINK_RETRY_MIN_MS;
     let mut fails = FailureLog { last: None };
     let mut flaps = FlapLog { last_down: None, unlogged: 0, log_up: true };
+    // An `Attach` was posted already: each later one is a re-attach (`mmo_world_link_reattach_total`).
+    let mut attached_once = false;
     loop {
         if !link.state.borrow().up {
             // Probing: nothing queued is carried.
@@ -576,6 +579,7 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
                     };
                     let ip = remote.map_or_else(|| "?".to_string(), |a| a.ip().to_string());
                     flaps.up(&url, &ip);
+                    crate::health::Health::global().world_link_up(true);
                     link.emit(Event::Up(generation));
                     // The backoff stays: it is reset only once an `Attach` is answered attached
                     // (a coordinator that keeps refusing it must not be asked at round-trip speed).
@@ -619,6 +623,9 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
         };
         if attach {
             link.mailbox_go.notify_one();
+            if std::mem::replace(&mut attached_once, true) {
+                crate::health::Health::global().world_link_reattached();
+            }
         }
         let (boot, epoch) = link.state.borrow().stamp.unwrap_or((0, 0));
         let url = link.url();

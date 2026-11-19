@@ -60,6 +60,14 @@ pub const ATTACH_GRACE_MS: i64 = 10_000;
 /// `last_beat_ms` before the first [`Health::loop_beat`].
 const NEVER: i64 = i64::MIN;
 
+/// The coordinator HTTP API's routes, the `route` label of `mmo_coordinator_api_requests_total`
+/// ([`Health::api_request`]); a path that is none of the four is `other`.
+pub const API_ROUTES: [&str; 5] = ["host_messages", "host_mailbox", "login_orders", "login_answers", "other"];
+
+/// The status codes the coordinator HTTP API answers, the `code` label of
+/// `mmo_coordinator_api_requests_total`; any other code is counted as `other` (the last slot).
+pub const API_CODES: [u16; 9] = [200, 202, 400, 401, 404, 412, 413, 500, 503];
+
 /// The process's health, as its loops report it. One per process ([`Health::global`]).
 pub struct Health {
     /// What `last_beat_ms` counts from.
@@ -103,6 +111,18 @@ pub struct Health {
     coordinator_history_bytes: AtomicU64,
     coordinator_conflicts: AtomicU64,
     coordinator_replicas_live: AtomicU64,
+    /// The ticker's last mailbox read (coordinator HTTP API): unread rows of every host, and the
+    /// age (store ms) of the oldest; 0 and 0 on a replica that is not the ticker.
+    coordinator_mailbox_rows: AtomicU64,
+    coordinator_mailbox_oldest_ms: AtomicU64,
+    /// Hosts the ticker detached as stalled (a mailbox row unread past `MAILBOX_STALL_MS`).
+    coordinator_stalled: AtomicU64,
+    /// Per [`API_ROUTES`] × ([`API_CODES`] + `other`): requests the coordinator's API answered.
+    api_requests: [[AtomicU64; API_CODES.len() + 1]; API_ROUTES.len()],
+    /// A host's link to the coordinator (`world_http.rs`): up now.
+    world_link_up: AtomicBool,
+    /// `Attach` batches the host's link posted after its first (each a re-attach).
+    world_link_reattach: AtomicU64,
     coordinator_is_ticker: AtomicBool,
     /// The fleet reconciler (`VOXEL_ROLE=fleet`): `/readyz` follows its passes
     /// ([`Health::require_fleet_passes`]).
@@ -152,6 +172,12 @@ impl Health {
             coordinator_history_bytes: AtomicU64::new(0),
             coordinator_conflicts: AtomicU64::new(0),
             coordinator_replicas_live: AtomicU64::new(0),
+            coordinator_mailbox_rows: AtomicU64::new(0),
+            coordinator_mailbox_oldest_ms: AtomicU64::new(0),
+            coordinator_stalled: AtomicU64::new(0),
+            api_requests: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            world_link_up: AtomicBool::new(false),
+            world_link_reattach: AtomicU64::new(0),
             coordinator_is_ticker: AtomicBool::new(false),
             fleet_role: AtomicBool::new(false),
             fleet_ok_ms: AtomicI64::new(NEVER),
@@ -349,6 +375,37 @@ impl Health {
         self.coordinator_is_ticker.store(ticker, Ordering::Relaxed);
     }
 
+    /// The ticker's last read of the hosts' mailboxes (coordinator HTTP API): unread rows of every
+    /// host, and the age in store ms of the oldest (0 with none). A replica that is not the ticker
+    /// sets 0 and 0 (it reads nothing).
+    pub fn mailbox_seen(&self, rows: u64, oldest_ms: u64) {
+        self.coordinator_mailbox_rows.store(rows, Ordering::Relaxed);
+        self.coordinator_mailbox_oldest_ms.store(oldest_ms, Ordering::Relaxed);
+    }
+
+    /// The ticker detached `n` hosts as stalled (their mailbox unread past `MAILBOX_STALL_MS`).
+    pub fn hosts_stalled(&self, n: u64) {
+        self.coordinator_stalled.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// The coordinator's API answered a request on route `route` (an index of [`API_ROUTES`];
+    /// out of range: `other`) with `status`. One atomic add, no allocation.
+    pub fn api_request(&self, route: usize, status: u16) {
+        let route = route.min(API_ROUTES.len() - 1);
+        let code = API_CODES.iter().position(|&c| c == status).unwrap_or(API_CODES.len());
+        self.api_requests[route][code].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A host's link to the coordinator went up (`true`) or down.
+    pub fn world_link_up(&self, up: bool) {
+        self.world_link_up.store(up, Ordering::Relaxed);
+    }
+
+    /// A host's link posted an `Attach` after its first one (a re-attach).
+    pub fn world_link_reattached(&self) {
+        self.world_link_reattach.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The fleet reconciler (`VOXEL_ROLE=fleet`): Ready only while registered, not waiting, and its
     /// last pass without a failed action is at most [`crate::fleet::FLEET_READY_MS`] old.
     pub fn require_fleet_passes(&self) {
@@ -516,6 +573,41 @@ impl Health {
             "mmo_coordinator_is_ticker",
             "1 while this coordinator replica is the ticker (the lowest live replica).",
             u64::from(self.coordinator_is_ticker.load(Ordering::Relaxed)),
+        );
+        // The coordinator HTTP API's (constant 0 on the other roles).
+        gauge(
+            "mmo_coordinator_mailbox_rows",
+            "Unread host mailbox rows at the ticker's last read (0 on a replica that is not the ticker).",
+            load(&self.coordinator_mailbox_rows),
+        );
+        gauge(
+            "mmo_coordinator_mailbox_oldest_ms",
+            "Age (store ms) of the oldest unread host mailbox row at the ticker's last read (0 with none, and on a replica that is not the ticker).",
+            load(&self.coordinator_mailbox_oldest_ms),
+        );
+        counter(
+            "mmo_coordinator_stalled_total",
+            "Hosts this coordinator replica, as the ticker, detached as stalled (a mailbox row unread past MAILBOX_STALL_MS).",
+            load(&self.coordinator_stalled),
+        );
+        let requests = IntCounterVec::new(
+            opts("mmo_coordinator_api_requests_total", "Requests the coordinator's HTTP API answered, by route and status code."),
+            &["route", "code"],
+        )
+        .expect("valid metric");
+        for (r, route) in API_ROUTES.iter().enumerate() {
+            for (c, n) in self.api_requests[r].iter().enumerate() {
+                let code = API_CODES.get(c).map_or_else(|| "other".to_string(), u16::to_string);
+                requests.with_label_values(&[route, code.as_str()]).inc_by(load(n));
+            }
+        }
+        register(Box::new(requests));
+        // A host's link to the coordinator (constant 0 on the other roles, and on role `all`).
+        gauge("mmo_world_link_up", "1 while this host's link to the world coordinator is up.", u64::from(self.world_link_up.load(Ordering::Relaxed)));
+        counter(
+            "mmo_world_link_reattach_total",
+            "Attach batches this host's link to the coordinator posted after its first (re-attaches).",
+            load(&self.world_link_reattach),
         );
         // The fleet reconciler's (constant 0 on the other roles).
         gauge("mmo_fleet_desired", "desired_hosts rows the fleet reconciler's last successful read showed.", load(&self.fleet_desired));

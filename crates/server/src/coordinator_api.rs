@@ -185,7 +185,8 @@ struct Shared {
 
 /// Binds the listener and serves on its own thread, refusing everything `NotReady` until
 /// [`ApiListener::set_refusal`]`(None)`. `calls` reaches the coordinator's thread (sent with
-/// `try_send`: a bounded channel that is full answers 503 `not_ready`); `row_version` carries
+/// `try_send`; a closed or full channel answers 503 `not_ready` — the runtime's is unbounded,
+/// so a handler never waits); `row_version` carries
 /// the versions of the replica's `coordinator_row` notices — if its sender is dropped, waiting
 /// polls degrade to re-reading every [`MAILBOX_RECHECK_MS`].
 pub fn serve(
@@ -318,15 +319,38 @@ pub(crate) fn check_auth(auth: &Auth, headers: &axum::http::HeaderMap) -> Result
     Ok(())
 }
 
-/// The one auth layer: [`check_auth`], then whether this replica serves at all (503).
+/// The one auth layer: [`check_auth`], then whether this replica serves at all (503). Every
+/// answer is counted in `mmo_coordinator_api_requests_total` by [`route_of`] and status.
 async fn guard(State(s): State<Arc<Shared>>, req: Request, next: Next) -> Response {
-    if let Err(refused) = check_auth(&s.auth, req.headers()) {
-        return refused;
+    let route = route_of(req.uri().path());
+    let response = if let Err(refused) = check_auth(&s.auth, req.headers()) {
+        refused
+    } else if let Some(r) = ApiRefusal::from_code(s.refusal.load(Ordering::SeqCst)) {
+        refusal(r)
+    } else {
+        next.run(req).await
+    };
+    crate::health::Health::global().api_request(route, response.status().as_u16());
+    response
+}
+
+/// The index in [`crate::health::API_ROUTES`] of a request path: one of the four routes, else
+/// `other`. A fixed set (never the path itself: `{host}` would make a label per host).
+fn route_of(path: &str) -> usize {
+    let host_route = |suffix: &str| {
+        path.strip_prefix("/v1/hosts/").and_then(|rest| rest.strip_suffix(suffix)).is_some_and(|id| !id.is_empty() && !id.contains('/'))
+    };
+    if host_route("/messages") {
+        0
+    } else if host_route("/mailbox") {
+        1
+    } else if path == login_api::PATH_COORD_LOGIN_ORDERS {
+        2
+    } else if path == login_api::PATH_COORD_LOGIN_ANSWERS {
+        3
+    } else {
+        4
     }
-    if let Some(r) = ApiRefusal::from_code(s.refusal.load(Ordering::SeqCst)) {
-        return refusal(r);
-    }
-    next.run(req).await
 }
 
 fn host_id(raw: &str) -> Option<HostId> {
@@ -335,8 +359,8 @@ fn host_id(raw: &str) -> Option<HostId> {
 
 /// Sends `call` to the coordinator's thread; false when it is gone.
 fn send_call(s: &Shared, call: ApiCall) -> bool {
-    // `try_send`: a bounded channel that is full answers 503 `not_ready` instead of blocking
-    // the listener's single-threaded runtime.
+    // The runtime's channel is unbounded (a handler never waits to send); `try_send` fails only
+    // when the coordinator's thread is gone (503 `not_ready`).
     s.calls.try_send(call).is_ok()
 }
 

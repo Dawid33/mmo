@@ -498,9 +498,10 @@ impl StoreHandle {
         rx.await.map_err(|_| stopped())?
     }
 
-    /// One row per host with unread mailbox rows: `(host, boot, at_ms)` of its oldest — `at_ms`
-    /// the database clock (ms since the epoch) at its insert. SQLite: `Unsupported`.
-    pub async fn mailbox_oldest(&self) -> Result<Vec<(HostId, u64, u64)>, StoreError> {
+    /// One row per host with unread mailbox rows: `(host, boot, at_ms, rows)` — the boot and
+    /// `at_ms` of its oldest (`at_ms` the database clock, ms since the epoch, at its insert) and
+    /// how many rows the host has. SQLite: `Unsupported`.
+    pub async fn mailbox_oldest(&self) -> Result<Vec<(HostId, u64, u64, u64)>, StoreError> {
         let (tx, rx) = oneshot::channel();
         self.send(Request::MailboxOldest(Reply::asynch(tx))).map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
@@ -508,7 +509,7 @@ impl StoreHandle {
 
     /// [`Self::mailbox_oldest`], answered on the receiver (the coordinator's ticker reads it with
     /// its `hosts` read).
-    pub fn mailbox_oldest_later(&self) -> crossbeam::channel::Receiver<Result<Vec<(HostId, u64, u64)>, StoreError>> {
+    pub fn mailbox_oldest_later(&self) -> crossbeam::channel::Receiver<Result<Vec<(HostId, u64, u64, u64)>, StoreError>> {
         self.ask_later(Request::MailboxOldest)
     }
 
