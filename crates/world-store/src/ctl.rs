@@ -29,6 +29,10 @@
 //!   `<id> <name> <live|dead> <clean|dirty> land=<super-regions owned> seen=<ms since its last
 //!   beat, or vouched> drain=<ms until it leaves, or ->` (a name-less row shows `-`). The id is
 //!   the bare number `retire-host` takes. Read-only (opened beside a running world).
+//! - `desired <url>` (Elastic 4): one line per `desired_hosts` row, by slot —
+//!   `<name> slot=<n> <wanted|draining> age=<ms since its add>` — the hosts the coordinator
+//!   wants (only its decisions write them); none prints nothing, as `hosts`. Read-only; a SQLite
+//!   store has none.
 //! - `drain <url> <host id> [--in <secs>]` (Elastic 1): marks a dirty live host draining —
 //!   it is to leave within `<secs>` (default [`game::DRAIN_WARNING_SECS`]) — and prints its
 //!   `hosts` line. One statement over that one row ([`StoreHandle::drain_host`]); a mark only
@@ -73,7 +77,7 @@ use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
 pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
-[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl hosts <url>\n       worldctl drain <url> <host id> [--in <secs>]\n       worldctl retire-host <url> <host id>\n       worldctl rollback <url> --yes";
+[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl hosts <url>\n       worldctl desired <url>\n       worldctl drain <url> <host id> [--in <secs>]\n       worldctl retire-host <url> <host id>\n       worldctl rollback <url> --yes";
 
 /// Runs one `worldctl` command (`args` without the program name); `Ok` is what it
 /// prints. Neither that nor an error ever shows a Postgres URL's credentials.
@@ -111,6 +115,11 @@ pub fn run(args: &[String]) -> Result<String, String> {
             let [url] = &args[1..] else { return Err(USAGE.to_string()) };
             let db = StoreUrl::parse(url).map_err(|e| format!("hosts: the world store URL: {e}"))?;
             list_hosts(&db)
+        }
+        Some("desired") => {
+            let [url] = &args[1..] else { return Err(USAGE.to_string()) };
+            let db = StoreUrl::parse(url).map_err(|e| format!("desired: the world store URL: {e}"))?;
+            list_desired(&db)
         }
         Some("drain") => {
             let (db, id, in_ms) = parse_drain(&args[1..])?;
@@ -419,6 +428,26 @@ pub fn list_hosts(db: &StoreUrl) -> Result<String, String> {
             })
             .collect();
         Ok(lines.join("\n"))
+    })();
+    store.shutdown();
+    result
+}
+
+/// One `worldctl desired` line: `<name> slot=<n> <wanted|draining> age=<ms>`.
+pub fn desired_line(row: &game::coordinator::DesiredHost, now_ms: u64) -> String {
+    let state = if row.draining { "draining" } else { "wanted" };
+    format!("{} slot={} {state} age={}", row.name, row.slot, now_ms.saturating_sub(row.created_ms))
+}
+
+/// `worldctl desired <url>`: every `desired_hosts` row of `db`, one [`desired_line`] each, by
+/// slot. Opened read-only (beside a running world). Errors never echo the URL.
+pub fn list_desired(db: &StoreUrl) -> Result<String, String> {
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::ReadOnly).map_err(|e| format!("desired: the world store: {e}"))?;
+    let result = (|| {
+        let fail = |e: crate::StoreError| format!("desired: {e}");
+        let rows = store.desired_hosts().map_err(fail)?;
+        let now = store.db_now_ms().map_err(fail)?;
+        Ok(rows.iter().map(|r| desired_line(r, now)).collect::<Vec<_>>().join("\n"))
     })();
     store.shutdown();
     result

@@ -816,8 +816,19 @@ macro_rules! engine_rows {
                         })
                     })
                     .collect::<Result<Vec<HostRow>, StoreError>>()?;
+                // Elastic 4: the hosts the world wants, after the rows (a plain read, no lock).
+                let desired = desired_hosts(pool).await?;
                 let store_ms = db_now_ms(pool).await?;
-                Ok(crate::HostsRead { rows, store_ms, next_host_id: u(next) })
+                Ok(crate::HostsRead { rows, store_ms, next_host_id: u(next), desired })
+            }
+
+            /// Every `desired_hosts` row (Elastic 4), by slot: a plain read, no lock. Only the
+            /// coordinator's decisions write the table (`fleet.rs`); SQLite's stays empty.
+            pub(crate) async fn desired_hosts(pool: &Pool) -> Result<Vec<game::coordinator::DesiredHost>, StoreError> {
+                let rows = sqlx::query("SELECT name, slot, state, created_ms FROM desired_hosts ORDER BY slot").fetch_all(pool).await?;
+                rows.into_iter()
+                    .map(|r| crate::fleet::desired_of(r.try_get(0)?, r.try_get(1)?, r.try_get(2)?, r.try_get(3)?))
+                    .collect()
             }
 
             /// One lease beat. UNFENCED on purpose: one statement over the caller's own `hosts` row.

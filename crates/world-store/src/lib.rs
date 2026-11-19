@@ -10,6 +10,7 @@ mod codec;
 mod coordinator_tx;
 mod counters;
 mod fence;
+mod fleet;
 mod forged;
 mod handle;
 mod listen;

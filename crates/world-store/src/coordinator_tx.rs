@@ -1,7 +1,8 @@
 //! The coordinator's transition (Elastic 2b Task 3): ONE transaction holding the
 //! compare-and-set of its row and every store decision the transition carries — deciding a
 //! world cut, recording a cut's begin, declaring a succession, ending a landless host, rolling
-//! the world back, assigning a free super-region (Elastic 3). The core and its decisions commit or fail together: the store never holds a
+//! the world back, assigning a free super-region (Elastic 3), adding, draining and removing a
+//! desired host (Elastic 4, `fleet.rs`). The core and its decisions commit or fail together: the store never holds a
 //! decision no committed core knows, and a replica whose cache is stale issues nothing (its
 //! compare-and-set fails first — issuing IS committing). The row's `version` is the
 //! coordinator's only fence; its `epoch` column is read by nothing but the bootstrap.
@@ -29,7 +30,10 @@
 //! same effect, never beside it — a committed cut announced to the terrain listeners. A replica that dies first leaves them to the existing
 //! lookups (a host's `cut_decided`, a start's `resolve_prepared`, the listeners' poll).
 
-use game::coordinator::{AssignLand, Assigned, CallStamp, DecisionAnswer, ReplicaId, StoreDecision};
+use game::coordinator::{
+    AddHost, AssignLand, Assigned, CallStamp, DecisionAnswer, DrainHost, HostAdded, HostDrained, HostRemoved, RemoveHost, ReplicaId,
+    StoreDecision,
+};
 use game::{CutId, Declared, HostId, LandlessEnd, Tick};
 use sqlx::{PgPool, Row};
 
@@ -121,6 +125,9 @@ pub(crate) enum Decided {
     RolledBack(Result<u64, StoreError>),
     ReplicaEnded { replica: ReplicaId, #[allow(dead_code)] outcome: Result<(), StoreError> },
     Assigned { assign: AssignLand, outcome: Result<Assigned, StoreError> },
+    HostAdded { add: AddHost, outcome: Result<HostAdded, StoreError> },
+    HostDrained { drain: DrainHost, outcome: Result<HostDrained, StoreError> },
+    HostRemoved { remove: RemoveHost, outcome: Result<HostRemoved, StoreError> },
 }
 
 /// The dials a decision runs with (the store thread's).
@@ -275,6 +282,9 @@ fn refused(d: &StoreDecision, e: StoreError) -> Decided {
         StoreDecision::Rollback { .. } => Decided::RolledBack(Err(e)),
         StoreDecision::EndReplica(replica) => Decided::ReplicaEnded { replica: *replica, outcome: Err(e) },
         StoreDecision::AssignLand(a) => Decided::Assigned { assign: *a, outcome: Err(e) },
+        StoreDecision::AddHost(a) => Decided::HostAdded { add: *a, outcome: Err(e) },
+        StoreDecision::DrainHost(d) => Decided::HostDrained { drain: d.clone(), outcome: Err(e) },
+        StoreDecision::RemoveHost(r) => Decided::HostRemoved { remove: r.clone(), outcome: Err(e) },
     }
 }
 
@@ -350,6 +360,22 @@ async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: Decision
             let keep = matches!(outcome, Ok(Assigned::Done { .. }));
             (Decided::Assigned { assign: *a, outcome }, keep)
         }
+        // Elastic 4 (`fleet.rs`): kept only when it wrote something.
+        StoreDecision::AddHost(a) => {
+            let outcome = crate::fleet::add_host_in(&mut *tx, a).await;
+            let keep = matches!(outcome, Ok(HostAdded::Done { .. }));
+            (Decided::HostAdded { add: *a, outcome }, keep)
+        }
+        StoreDecision::DrainHost(d) => {
+            let outcome = crate::fleet::drain_host_in(&mut *tx, d).await;
+            let keep = matches!(outcome, Ok(HostDrained::Marked | HostDrained::RowOnly));
+            (Decided::HostDrained { drain: d.clone(), outcome }, keep)
+        }
+        StoreDecision::RemoveHost(r) => {
+            let outcome = crate::fleet::remove_host_in(&mut *tx, r).await;
+            let keep = matches!(outcome, Ok(HostRemoved::Done));
+            (Decided::HostRemoved { remove: r.clone(), outcome }, keep)
+        }
     }
 }
 
@@ -375,6 +401,9 @@ pub(crate) fn answers(w: &TransitionWrite, version: u64, decided: Vec<Decided>) 
             Decided::RolledBack(outcome) => DecisionAnswer::RolledBack { stamp, outcome: outcome.map_err(text) },
             Decided::ReplicaEnded { replica, .. } => DecisionAnswer::ReplicaEnded { replica },
             Decided::Assigned { assign, outcome } => DecisionAnswer::Assigned { stamp, assign, outcome: outcome.map_err(text) },
+            Decided::HostAdded { add, outcome } => DecisionAnswer::HostAdded { stamp, add, outcome: outcome.map_err(text) },
+            Decided::HostDrained { drain, outcome } => DecisionAnswer::HostDrained { stamp, drain, outcome: outcome.map_err(text) },
+            Decided::HostRemoved { remove, outcome } => DecisionAnswer::HostRemoved { stamp, remove, outcome: outcome.map_err(text) },
         });
     }
     (answers, after)

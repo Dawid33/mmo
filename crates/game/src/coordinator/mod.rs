@@ -35,6 +35,7 @@
 mod assign;
 mod clock;
 mod decisions;
+mod fleet;
 mod input;
 mod link;
 mod msg;
@@ -46,6 +47,7 @@ mod world_cut;
 pub use assign::*;
 pub use clock::*;
 pub use decisions::*;
+pub use fleet::*;
 pub use input::*;
 pub use link::*;
 pub use msg::*;
@@ -1377,7 +1379,7 @@ impl Coordinator {
     /// Whether `answer` is the one a mark here awaits — what applying it ([`Input::Decision`])
     /// would act on; any other changes nothing. The runtime takes an answer's side effects
     /// (counters, closing a succeeded host's connection, retry pacing) only for these. A cut's
-    /// begin, a replica's end and an assignment carry no mark: always.
+    /// begin, a replica's end, an assignment and a fleet decision (Elastic 4) carry no mark: always.
     pub fn answer_awaited(&self, answer: &DecisionAnswer) -> bool {
         match answer {
             DecisionAnswer::Cut { stamp, cut, .. } => self.cut_mark_is(*cut, *stamp),
@@ -1389,6 +1391,9 @@ impl Coordinator {
             // decision for the same row (`Owned`), and applying an answer twice (a replay) only
             // sends its messages again — which the host tolerates.
             DecisionAnswer::Assigned { .. } => true,
+            // No mark either (Elastic 4): each fleet decision is idempotent; a lost answer is
+            // repaired by the next `hosts` read, which carries the table.
+            DecisionAnswer::HostAdded { .. } | DecisionAnswer::HostDrained { .. } | DecisionAnswer::HostRemoved { .. } => true,
         }
     }
 
@@ -1416,6 +1421,10 @@ impl Coordinator {
             DecisionAnswer::RolledBack { stamp, outcome } => self.rollback_answered(stamp, outcome, now_ms),
             DecisionAnswer::ReplicaEnded { replica } => log::info!("coordinator: replica {replica}'s row is ended"),
             DecisionAnswer::Assigned { assign, outcome, .. } => self.assign_answered(assign, outcome, now_ms),
+            // Elastic 4 Task 2: nothing durable yet (Task 3 acts on them).
+            DecisionAnswer::HostAdded { add, outcome, .. } => log::debug!("coordinator: add host {add:?}: {outcome:?}"),
+            DecisionAnswer::HostDrained { drain, outcome, .. } => log::debug!("coordinator: drain host {drain:?}: {outcome:?}"),
+            DecisionAnswer::HostRemoved { remove, outcome, .. } => log::debug!("coordinator: remove host {remove:?}: {outcome:?}"),
         }
     }
 

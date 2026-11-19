@@ -189,6 +189,52 @@
 //! Cost: at most `ASSIGN_PER_PASS_MAX` (64) assignments per transition; each is at most four
 //! single-row statements.
 //!
+//! **The fleet decisions** (`fleet.rs`, Elastic 4: `AddHost`, `DrainHost`, `RemoveHost`): in the
+//! coordinator's transition, each in its savepoint, under `lock_timeout` = the cut lock timeout,
+//! the `coordinator` row already held (the compare-and-set) — so none runs beside a
+//! declaration, an assignment, an end or another fleet decision of another transition: those wait
+//! for the row. Every writer of `desired_hosts` holds `coordinator`, so no statement on it ever
+//! waits for another writer's uncommitted row (the Elastic 3 lesson: an `INSERT` meeting a row an
+//! uncommitted transaction wrote waits for it — here there is no such transaction).
+//! - **`AddHost`**, in this order:
+//!   1. `SELECT next_desired_host FROM world WHERE id = 1 FOR NO KEY UPDATE`;
+//!   2. a PLAIN `SELECT slot, state FROM desired_hosts ORDER BY slot` (wanted ≠ `expect_wanted`
+//!      → `NotNeeded`; rows ≥ `max` → `Full`; nothing written);
+//!   3. `INSERT INTO desired_hosts (name, slot, state, created_ms) VALUES ($name, $slot, 0,
+//!      <PG_NOW_MS>)`;
+//!   4. `UPDATE world SET next_desired_host = $n + 1 WHERE id = 1`.
+//!
+//!   Its walk is `coordinator` → `world` → `desired_hosts`. The declaration's is `coordinator` →
+//!   `world` → `hosts` → `super_regions`: the same prefix. A registration holds `world` and
+//!   never `coordinator` or `desired_hosts`: `AddHost` waits for it under the decision's
+//!   `lock_timeout` (then succeeds, or its refusal is the answer and the next pass decides again),
+//!   and the registration waits for nothing of ours. Inside ONE transition an `AddHost` after a
+//!   `Declare` / `EndLandless` / a committing `DecideCut` / a rollback takes the `world` lock the
+//!   transaction already holds (no wait); one before them leaves `world` held for them — the order
+//!   they take it in anyway. It holds no `hosts` row, so the A-S3 cycle (below `AssignLand`) gains
+//!   no new member from it: it is the `world`-locking X of that cycle at most, as a declaration is.
+//! - **`DrainHost`**, in this order:
+//!   1. `UPDATE desired_hosts SET state = 1 WHERE name = $1` (no row → `Unknown`, nothing more);
+//!   2. only with a host: `UPDATE hosts SET drain_at_ms = LEAST(drain_at_ms, <PG_NOW_MS> + $3)
+//!      WHERE id = $1 AND boot = $2 AND clean = 0 AND state = LIVE` (one row → `Marked`, else
+//!      `RowOnly`).
+//!
+//!   Its walk is `coordinator` → `desired_hosts` (one row) → `hosts` (one row, `FOR NO KEY
+//!   UPDATE` by the `UPDATE`). It holds a `hosts` row without `world`, exactly as `AssignLand`
+//!   holds its share lock: the one known safe cycle above (A-S3 — a later decision X of the same
+//!   transition wants `world` while a registration holds `world` and lapses that name's rows)
+//!   applies unchanged, with `DrainHost` in `AssignLand`'s place: `40P01` or a timeout, X's
+//!   refusal (or the whole transition's failure, decided again), retried; nothing stays written on
+//!   the aborted side. The host's beat (`UPDATE hosts SET seen_ms …` of its own row, 1 s
+//!   `lock_timeout`) and the operator's `worldctl drain` (one `UPDATE` of that row) update the
+//!   same one row and want nothing after it: they wait for the transition's commit, or it for
+//!   theirs. A total-crash registration that marks the row dead waits likewise and then sees the
+//!   mark (a dead row's mark means nothing).
+//! - **`RemoveHost`**: `DELETE FROM desired_hosts WHERE name = $1` (one row → `Done`, else
+//!   `Gone`). Its walk is `coordinator` → `desired_hosts` (one row): it joins no cycle.
+//! - **The reads** of `desired_hosts` (the ticker's `hosts` read, after its rows; the
+//!   reconciler's and `worldctl desired`'s `desired_hosts`): plain, no locks.
+//!
 //! **A part's release** (`rows.rs` `cut_rows`, Elastic 3 Task 5): a host's world-cut part
 //! gives super-regions back (`WorldCut::releases`) inside its own transaction, before `PREPARE
 //! TRANSACTION`. Refused with `Unsupported` before any statement: a release its fence does not
@@ -246,7 +292,8 @@
 //!
 //! **The coordinator's `hosts` read** (`rows::hosts`, the ticker's, Elastic 2b Task 6): a PLAIN
 //! read of `world.next_host_id`, then a PLAIN `SELECT` over `hosts` (its `EXISTS` subqueries on
-//! `super_regions`, `in_flight`, `successions`), then the database clock — no transaction, no
+//! `super_regions`, `in_flight`, `successions`), then a PLAIN `SELECT` over `desired_hosts`
+//! (Elastic 4), then the database clock — no transaction, no
 //! lock: it joins no cycle. An id below the first read's value was issued before the rows were
 //! read; one at or above it may register after.
 //!

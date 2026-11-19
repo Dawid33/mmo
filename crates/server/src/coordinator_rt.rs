@@ -1779,7 +1779,8 @@ impl CoordinatorRuntime {
             let issued_mono = *issued_mono;
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                Ok(Ok(world_store::HostsRead { rows, store_ms, next_host_id })) => {
+                // `desired` (Elastic 4): not the core's input yet.
+                Ok(Ok(world_store::HostsRead { rows, store_ms, next_host_id, desired: _ })) => {
                     // The lease watch's receipt stamp: the monotonic clock, taken before the
                     // sample below (a forward step of the store's clock never reaches the watch).
                     let received_mono = self.mono_ms();
@@ -2133,6 +2134,8 @@ impl CoordinatorRuntime {
                     self.tally.assigned += 1;
                 }
                 DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } | DecisionAnswer::Assigned { .. } => {}
+                // Elastic 4: no side effect of the runtime's yet.
+                DecisionAnswer::HostAdded { .. } | DecisionAnswer::HostDrained { .. } | DecisionAnswer::HostRemoved { .. } => {}
                 DecisionAnswer::Declared { outcome, .. } => {
                     let Some(p) = self.successions.as_mut() else { continue };
                     match outcome {

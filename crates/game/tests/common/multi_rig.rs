@@ -386,6 +386,11 @@ pub struct MultiRig {
     /// it). A host at or above it registered after the cut began and may be absent from its
     /// decision ([`Self::decide_settling`]).
     pub begins: BTreeMap<CutId, u64>,
+    /// The rig store's `desired_hosts` (Elastic 4): name → `(slot, draining, created_ms)`, as the
+    /// coordinator's fleet decisions left it ([`Self::add_host_in_store`]).
+    pub desired: BTreeMap<String, (u32, bool, u64)>,
+    /// The rig store's `world.next_desired_host`.
+    pub next_desired_host: u64,
     /// Rows the rig store ended (Elastic 2a, [`Self::end_landless_in_store`]): `(host, boot)`,
     /// dead with no succession.
     pub ended: BTreeSet<(HostId, u64)>,
@@ -540,6 +545,8 @@ impl MultiRig {
                 cut_answer_dropped: None,
                 land_declared: Vec::new(),
                 begins: BTreeMap::new(),
+                desired: BTreeMap::new(),
+                next_desired_host: 1,
                 ended: BTreeSet::new(),
                 coordinator_starts: 0,
                 decide_executions: BTreeMap::new(),
@@ -895,6 +902,18 @@ impl MultiRig {
                 StoreDecision::AssignLand(assign) => {
                     let outcome = self.assign_in_store(assign);
                     DecisionAnswer::Assigned { stamp, assign, outcome: Ok(outcome) }
+                }
+                StoreDecision::AddHost(add) => {
+                    let outcome = self.add_host_in_store(add);
+                    DecisionAnswer::HostAdded { stamp, add, outcome: Ok(outcome) }
+                }
+                StoreDecision::DrainHost(drain) => {
+                    let outcome = self.drain_host_in_store(&drain);
+                    DecisionAnswer::HostDrained { stamp, drain, outcome: Ok(outcome) }
+                }
+                StoreDecision::RemoveHost(remove) => {
+                    let outcome = self.remove_host_in_store(&remove);
+                    DecisionAnswer::HostRemoved { stamp, remove, outcome: Ok(outcome) }
                 }
             });
         }
@@ -1506,6 +1525,48 @@ impl MultiRig {
         };
         store.insert(a.sr, (Some(h), epoch));
         Assigned::Done { epoch }
+    }
+
+    /// `fleet::add_host_in` against the rig's `desired_hosts` (Elastic 4): `NotNeeded` unless
+    /// exactly `expect_wanted` rows are wanted, `Full` at `max` rows, else `h<next>` at the lowest
+    /// free slot.
+    pub fn add_host_in_store(&mut self, a: game::coordinator::AddHost) -> game::coordinator::HostAdded {
+        use game::coordinator::HostAdded;
+        let wanted = self.desired.values().filter(|(_, draining, _)| !draining).count();
+        if wanted != a.expect_wanted as usize {
+            return HostAdded::NotNeeded;
+        }
+        if self.desired.len() >= a.max as usize {
+            return HostAdded::Full;
+        }
+        let used: BTreeSet<u32> = self.desired.values().map(|(slot, _, _)| *slot).collect();
+        let slot = (0..).find(|s| !used.contains(s)).expect("a free slot");
+        let name = format!("h{}", self.next_desired_host);
+        self.next_desired_host += 1;
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        self.desired.insert(name.clone(), (slot, false, now));
+        HostAdded::Done { name, slot }
+    }
+
+    /// `fleet::drain_host_in` against the rig's `desired_hosts` (Elastic 4): `Unknown` for no
+    /// row; else the row draining and, with `host` that live dirty boot's row, it marked
+    /// draining (`Marked`), or not (`RowOnly`).
+    pub fn drain_host_in_store(&mut self, d: &game::coordinator::DrainHost) -> game::coordinator::HostDrained {
+        use game::coordinator::HostDrained;
+        let Some(row) = self.desired.get_mut(&d.name) else { return HostDrained::Unknown };
+        row.1 = true;
+        let Some((h, boot)) = d.host else { return HostDrained::RowOnly };
+        if self.boots.get(h.0 as usize) != Some(&boot) || self.row_dead(h) || self.left.get(&h) == Some(&boot) {
+            return HostDrained::RowOnly;
+        }
+        self.draining.insert(h);
+        HostDrained::Marked
+    }
+
+    /// `fleet::remove_host_in` against the rig's `desired_hosts` (Elastic 4).
+    pub fn remove_host_in_store(&mut self, r: &game::coordinator::RemoveHost) -> game::coordinator::HostRemoved {
+        use game::coordinator::HostRemoved;
+        if self.desired.remove(&r.name).is_some() { HostRemoved::Done } else { HostRemoved::Gone }
     }
 
     /// The rig store's `end_landless_host` (Elastic 2a): `Gone` unless `(host, boot)` is the

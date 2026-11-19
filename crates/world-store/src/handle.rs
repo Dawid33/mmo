@@ -93,6 +93,8 @@ pub struct HostsRead {
     /// it was issued before the rows were read, so one absent from them was pruned; an id at or
     /// above it may have registered after.
     pub next_host_id: u64,
+    /// Every `desired_hosts` row (Elastic 4), by slot, read right after the rows (SQLite: none).
+    pub desired: Vec<game::coordinator::DesiredHost>,
 }
 
 /// The world coordinator's row as stored ([`StoreHandle::load_coordinator`], Elastic 2a): its
@@ -832,6 +834,37 @@ impl StoreHandle {
         }
     }
 
+    /// Elastic 4: one more `desired_hosts` row ([`StoreDecision::AddHost`]) — test support: the
+    /// coordinator adds one only inside its transition; here in a transition of its own over the
+    /// row as it stands. Only `Done` writes. The lock walk is in `succession.rs`. Postgres only.
+    #[doc(hidden)]
+    pub fn add_desired_host(&self, a: game::coordinator::AddHost) -> Result<game::coordinator::HostAdded, StoreError> {
+        match self.decide_alone(StoreDecision::AddHost(a))? {
+            Decided::HostAdded { outcome, .. } => outcome,
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Elastic 4: a `desired_hosts` row marked draining, and its host's `hosts` row
+    /// ([`StoreDecision::DrainHost`]) — test support, as [`Self::add_desired_host`].
+    #[doc(hidden)]
+    pub fn drain_desired_host(&self, d: game::coordinator::DrainHost) -> Result<game::coordinator::HostDrained, StoreError> {
+        match self.decide_alone(StoreDecision::DrainHost(d))? {
+            Decided::HostDrained { outcome, .. } => outcome,
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Elastic 4: a `desired_hosts` row deleted ([`StoreDecision::RemoveHost`]) — test support,
+    /// as [`Self::add_desired_host`].
+    #[doc(hidden)]
+    pub fn remove_desired_host(&self, r: game::coordinator::RemoveHost) -> Result<game::coordinator::HostRemoved, StoreError> {
+        match self.decide_alone(StoreDecision::RemoveHost(r))? {
+            Decided::HostRemoved { outcome, .. } => outcome,
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// R4, `worldctl retire-host` while other hosts live: host `ordinal`'s dirty live row gets
     /// `seen_ms = 0` (vouched dead, as a boot of its ordinal would), unless it beat within the
     /// lease ([`crate::Vouched::Running`]) — one statement under the row's lock, so a beat
@@ -1106,6 +1139,12 @@ impl StoreHandle {
     /// Every registered host, by id.
     pub fn hosts(&self) -> Result<Vec<HostRow>, StoreError> {
         self.ask(Request::Hosts).map(|read: HostsRead| read.rows)
+    }
+
+    /// Every `desired_hosts` row (Elastic 4), by slot: a plain read — also on a
+    /// [`crate::OpenMode::ReadOnly`] handle (the reconciler's, `worldctl desired`). SQLite: none.
+    pub fn desired_hosts(&self) -> Result<Vec<game::coordinator::DesiredHost>, StoreError> {
+        self.ask(Request::DesiredHosts)
     }
 
     /// [`Self::hosts`] with the database clock, answered on the receiver.

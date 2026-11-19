@@ -137,6 +137,7 @@ pub(crate) enum Request {
     SetSuperRegionRegions(u32, Reply<bool>),
     RegisterHost(crate::NewHost, game::CrashPolicy, Reply<crate::Registered>),
     Hosts(Reply<crate::HostsRead>),
+    DesiredHosts(Reply<Vec<game::coordinator::DesiredHost>>),
     WorldGeneration(Reply<u64>),
     Heartbeat(HostId, u64, game::HostLoad, Reply<crate::Beat>),
     DrainHost(HostId, u64, Reply<()>),
@@ -656,6 +657,7 @@ async fn serve(
                 })
             }
             Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
+            Request::DesiredHosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, desired_hosts())) }),
             Request::WorldGeneration(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_generation())) }),
             // Postgres: no writer lock (it is in-process and a claim can hold it for a minute; a
             // late beat would lapse the lease) — the statement writes only the caller's own row.
