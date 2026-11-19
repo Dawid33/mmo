@@ -398,3 +398,20 @@ pre-existing hits in `macros`, `block-mesh`, `bbmodel` (untouched since `62d8ccc
 runtime's `TransitionWrite` (every field set), `large_enum_variant` on `world_http.rs`'s `Event`.
 
 **Known limits** — as the plan's "Known limits" above, carried into `TODO.md` with the deferred minors (grouped).
+
+### Final review (2026-11-19)
+
+The whole-branch review of `eecc6ad7..f86005f6` (ledger: `final-review.md`): ready to rely on WITH FIXES — 0 Critical, 3 Important, 6 Minor; no objection to any ruling.
+
+- **A dead or cut-off host stays attached until its mailbox stalls** (the risk named before the review): bounded, not broken. A row always waits within `DAY_MS` (the ticker's `Calendar` broadcast), so the bound is about 10 + 15 + 1–2 ≈ 27 s; cuts and the settle cut are not blocked (`left` / `succeeded` are filtered); the gate, an assignee or an heir may name such a host for that long (a dead one: for the lease, as before).
+- **Important 3 is not code:** nothing has run as processes with two replicas, a login service and a client. Hand checks (a), (c), (d) in `TODO.md` are this plan's acceptance, before the orion runbook.
+
+The ONE fix wave (ledger: `fix-wave-report.md`), confirmed by its scoped re-review (`fix-wave-rereview.md`: all addressed, nothing Critical or Important new):
+
+| Commit | What |
+|---|---|
+| `3f3ca2e6` | Mailbox rows of a boot no attachment holds are dropped once their head is older than `MAILBOX_STALL_MS` (by `(host, boot)`, inside the transition; before, a rollback's `Generation` row for a dead host stayed for ever and `WorldMailboxStalled` never cleared). An empty batch is answered `attached: false` only from a cache known current. `pump_clean_batches` skips an evicted core. `check_core_less` names the decisions that may ride without a core (`AssignLand`, `AddHost`, `DrainHost`, `RemoveHost`: idempotent). The dead hook `crash_before_claim_reply` is gone. |
+| `f49fd893` | The shared pinned HTTP/2 client has a connect timeout and keep-alive (5 s each, also idle); login rebuilds a world's client after a transport failure; a link going down (or a new `Attach`) cancels the host's in-flight mailbox GET; a dead link thread turns `is_up()` false. |
+| `16bf4008` | Docs: the ≈ 27 s bound, sticky HTTP/2 connections, hand check (e) records refreshes and conflicts (`refreshes=` on the window line), the acceptance checks named. |
+
+Left open after the re-review (optional): a `hosts` read issued just before a refused `Attach` can drop that host's fresh `Generation` row (≤ ~1 s window; the next refused `Attach` tells it again); the mailbox loop's backoff stays at 250 ms while the coordinator is unreachable (a few cheap failed GETs per probe). Parked: `admit_attach`'s synchronous store reads on the coordinator's thread. The other deferred minors: `final-review.md`, "Triage".
