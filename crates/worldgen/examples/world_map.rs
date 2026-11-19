@@ -432,12 +432,17 @@ fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<
     use worldgen::tile_map::{drainage_color, precipitation_color, region_color, temperature_color, OCEAN_DIM};
     let path = a.world.as_ref().expect("--layer biome|temperature|precipitation|drainage|regions needs --world <file>");
     let world = worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let n = a.size;
-    let step = a.span_m / n as f64;
-    let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - a.span_m * 0.5);
-    let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(n as u32, n as u32);
-    for iz in 0..n {
-        for ix in 0..n {
+    // The window keeps the world's own proportions: `--size` columns over
+    // `--span` meters, and as many rows as the world is tall for its width
+    // (a 2:1 world gives a 2:1 picture), at the same meters per pixel.
+    let nx = a.size;
+    let (min, max) = world.artifact_bounds_engine_m();
+    let nz = ((nx as f64 * (max[1] - min[1]) / (max[0] - min[0])).round() as usize).max(1);
+    let step = a.span_m / nx as f64;
+    let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - step * nz as f64 * 0.5);
+    let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(nx as u32, nz as u32);
+    for iz in 0..nz {
+        for ix in 0..nx {
             let (x, z) = (x0 + (ix as f64 + 0.5) * step, z0 + (iz as f64 + 0.5) * step);
             let c = world.cell_climate(x, z);
             let dim = |rgb: [f64; 3]| {
