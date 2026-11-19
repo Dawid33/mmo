@@ -4,7 +4,14 @@ Status: APPROVED by Dawid 2026-11-14, with four changes folded in below: single-
 the old layouts, presets and options are REMOVED, not kept as a legacy path ("this plan supersedes all
 aspects of current world gen"); worlds come in several sizes ("200x100km is quite large, add options to
 scale it down"); and forge time is NOT capped yet ("for now we just take measurements, I will judge
-whether it takes too long for the result achieved"). Nothing is built yet.
+whether it takes too long for the result achieved").
+
+**Amended 2026-11-19** (the program `docs/superpowers/plans/2026-11-19-earth-like-world-program.md` drives the
+build and wins where the two disagree): Phase 1a Tasks 1–2 are built (`8d6b29a2`, `77f8e8a3`: the forge grid,
+the world file, the tiles, the sampler and `world.json` are width × height); the work was paused 2026-11-15 and
+resumed 2026-11-19. Changed below: the test rule (Constraints), the multi-host seam row (hosts are by id now),
+the day length and the "fortress view" reasoning (Decision 6, Non-goals, Phase 6 — the game is one first-person
+character since 2026-11-16), and what a phase's "gate" is (an evidence run, not a committed test).
 
 Research behind it: `docs/research/reports/Earth like world generation overhaul.md` (the report) and the
 seven note files in `docs/research/research_notes/Earth like world generation overhaul/`. The report's
@@ -51,7 +58,9 @@ earth".
 - A real climate model (a GCM) or anything that needs a GPU in the forge.
 - A playable deep ocean. Kilometre-deep sea floor is data on the planet grid; the playable sea floor stays
   clamped. Abyssal plain and trench are labels on the map, not diggable depth.
-- A visible day–night cycle. The calendar keeps its 10-second day (see Decisions).
+- Deciding the day length. The calendar's day stays whatever the one existing constant says (10 s on
+  2026-11-19); whether a first-person game keeps it is the owner's decision, made outside this program
+  (see Decision 6).
 - The flowing-water engine. Seasonal river levels, tides and floating ice are STORED by the forge but not
   played until that engine exists (its two open decisions stay in `TODO.md`).
 - Ground plants, and creatures tied to biomes. A biome stays a ground cover, a tree mix, a map colour and
@@ -83,6 +92,12 @@ earth".
 - A new store table must never be writable by two hosts' cut parts.
 - Any new per-world client resource is registered for session reset.
 - New build/run/test commands get a `just` recipe in the same change.
+- **Tests (owner's rule, 2026-11-19).** Only regression tests (a bug actually seen) and the existing gates
+  are committed. The overhaul adds NO new gate: `forge_quality_matches_baseline` stays the one worldgen gate
+  and is re-recorded on purpose at the end of Phases 1a, 2, 3 and 4. What this document calls a phase's
+  "gate" is an EVIDENCE RUN — `forge_proto --report`, `just forge-bench`, `just world-map`, or a temporary
+  test deleted before the commit — whose numbers are recorded in the program's Evidence section. Where a
+  sentence below says a test "covers" or "pins" something, read it as such a run.
 
 ## Approaches
 
@@ -171,10 +186,11 @@ Claude's calls (each is a proposal until this document is approved):
    that forges an island moves to a small Planet world. All existing worlds are re-forged (debug worlds,
    `worlds/default.world`, the public web world, dev Postgres worlds).
 5. **Ocean depth is data only** (see Non-goals).
-6. **Calendar unchanged**: 336 days, 10 s per day, 56 minutes per year. Seasons are the unit that
-   matters; weather is specified in calendar days so a later change of day length rescales it. The sim
-   derives the date from the world tick (today only the coordinator knows it). Season names are local to
-   the hemisphere.
+6. **Calendar: 336 days; the day length is NOT decided here.** (Amended 2026-11-19: the 10-second day was
+   argued from the fortress view, which is gone; in first person a 10-second day is a strobe. The owner
+   decides the day length.) Everything is specified in calendar days and reads the day length from the one
+   existing constant, so a later change rescales the weather. The sim derives the date from the world tick
+   (today only the coordinator knows it). Season names are local to the hemisphere.
 7. **Monthly climate is stored coarse**: twelve monthly normals per CLIMATE cell (about 256 m) of
    sea-level temperature, diurnal range, precipitation and wet-day fraction; the lapse rate is re-applied
    from the fine height at read time; the fine annual precipitation raster stays as the rain-shadow
@@ -234,12 +250,12 @@ artifact carries a second, coarser raster family and the knobs.
 |---|---|---|
 | 0. Baseline | Time, memory and file size of today's forge at the size table's cell counts | Numbers recorded under "Measurements" |
 | 1. Planet frame | 1a: `width × height` worlds in four sizes, east–west wrap (one process), explicit polar edges, both poles, the Planet as the ONLY layout on TODAY's plates and climate, old layouts / presets / knobs deleted, knobs stored in the artifact. 1b: the coarse monthly-climate family with a placeholder seasonal curve | A 2:1 wrapped world of each size forges and plays in one process; hot middle, ice top and bottom; walking off the east edge arrives in the west; the re-recorded quality gate passes; every size measured |
-| 1c (later). Multi-host seam | The wrap across peer links, ownership, placement and observer sessions | After the R3 go/no-go; `peer_schedule` and `test-r3` cover the seam |
+| 1c (later; the program's Phase 7). Multi-host seam | The wrap between the hosts of a `claim` world: canonical regions in `halo::neighbours`, the peer links, `super_region_of` and land assignment (Elastic 3: hosts are by id, land is assigned by the coordinator) across the seam, placement, observer sessions | Only once the owner has accepted the Elastic 3 build; until then the seam is open under `VOXEL_ROLE=all` and closed under every other role |
 | 2. Plates and aged relief | The plate simulation on the planet grid; sea level by land fraction; belt age and kind feeding erosion (rebound, incision threshold, residual uplift); geology that varies in space | Seed score: continent count, belts per continent by age class; slope histograms differ between young and old belts |
 | 3. Monthly climate | The twelve-month model; monthly normals stored; derived fields (snow, sea ice, growing degree days, evapotranspiration, aridity) | Köppen shares inside their ranges; three synthetic worlds; real-Earth topography regression |
 | 4. Water and ice | Sea as a result (low stand, then flood); water-balance lakes; monthly discharge; sediment deposition; deltas; valley glaciers and ice sheets; coast classes and stamps; water table; feature detection and naming | Lake counts by climate; every river mouth classified; glaciated terrain checks |
 | 5. Biomes | The pass classifier; the new `CellClimate`; soil fields; all consumers, map colours, covers, tree lists | Köppen, dryland, wetland and desert-sand shares inside their ranges |
-| 6. Runtime | Date from the world tick; the weather function; snow and ice overlays; client sky follows the season | `just determinism-wasm`; seam and parked-region tests in the seeded layer |
+| 6. Runtime | Date from the world tick; the weather function; snow and ice overlays; the first-person client's sun and sky follow the date and latitude | `just determinism-wasm`; a temporary seam and parked-region check; a year's printed summary for five places |
 
 Phase 6's first slice depends only on the SHAPE of the monthly normals, so it may start after Phase 1 on
 a simple seasonal curve. Stored-format changes are batched per phase so worlds are re-forged once per
@@ -263,8 +279,10 @@ phase, not once per commit.
 
 Scope calls for Phase 1 (Claude's, from the builder check):
 
-- **One process only.** The wrap seam is built and tested for `VOXEL_ROLE=all`. A wrapped world is REFUSED
-  at start under split roles or `VOXEL_HOSTS > 1`, with a message that says why. The wrap plan predates R3
+- **One process only.** The wrap seam is built for `VOXEL_ROLE=all`. Under any other role the same world runs
+  with the seam CLOSED (amended 2026-11-19: the server installs the map with `wrap_x = false`, so east and west
+  hold like the old outer edges — a refusal would leave split-role worlds, the twin and orion with nothing they
+  can run once the Planet is the only world; `VOXEL_HOSTS` no longer exists — hosts are by id since Elastic 1). The wrap plan predates R3
   and has no task for peer links, ownership, placement or observer sessions; host code still takes
   neighbours by plain arithmetic (`halo::neighbours`, `foreign_host`, `super_region_of`), and the R3
   go/no-go is still pending, so seam code between hosts is not touched now. The multi-host seam is its own
@@ -333,6 +351,6 @@ worlds; Task 17 of the Phase 1a plan refits it.
 - What happens to crust at the polar edges of the plate simulation (no source covers it; the research
   proposes destroying it there). Needs a prototype in Phase 2.
 - Ocean currents by rule or by a stream-function solve (Phase 3).
-- Whether the day should be lengthened once weather is on screen (Phase 6).
+- The day length (the owner's decision; Phase 6 builds in calendar days and does not make it).
 - The water engine's two open decisions in `TODO.md`, which decide whether stored seasonal water can ever
   be played.
