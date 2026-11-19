@@ -454,15 +454,17 @@ Verify with:
     inside a transition, after its compare-and-set locked the row — so `seq` is commit order and a reader past `seq >
     after` never misses a lower one committing later. **Never insert an `outbox` or `login_outbox` row outside a
     transition.** An applied `Attach` deletes the host's older rows (`outbox_drop`) before its `CoordMsg::Attached {
-    epoch }` row; a detach or a host's end deletes its rows. A host long-polls `GET /v1/hosts/{host}/mailbox?boot=&after=`
+    epoch }` row; a detach or a host's end deletes its rows (`MailboxDrop { boot: None }`: every row of the host). A
+    host long-polls `GET /v1/hosts/{host}/mailbox?boot=&after=`
     on any replica — a store read in the HTTP handler, no core, woken by the replica's `coordinator_row` NOTIFY,
     re-read every `MAILBOX_RECHECK_MS` (1 s), at most `MAILBOX_WAIT_MS` (20 s), `MAILBOX_PAGE_MAX` (256) rows — and
     acknowledges by cursor: the read deletes its rows `seq <= after` in the same statement (delivery at least once,
     the host drops `seq <=` its cursor: exactly once, in order). A transition that changed nothing durable but carries
     rows (a memo `Reply`, `LandIs`, a relayed login order) is written WITHOUT a core (`TransitionWrite.core = None`:
-    the CAS bumps `version` only) — only `core_less_kind` messages may (`check_core_less` logs and debug-asserts any
-    other), because a failed core-less write is never remembered as ours: a conflict after it rebases and its rows may
-    go twice (each kind harmless twice). A write recognised as our own lost commit: its rows, drops and login answers
+    the CAS bumps `version` only) — only `core_less_kind` messages and `core_less_decision` store decisions
+    (`AssignLand`, `AddHost`, `DrainHost`, `RemoveHost`: no mark, no durable field, each idempotent in the store) may
+    (`check_core_less` logs and debug-asserts any other), because a failed core-less write is never remembered as
+    ours: a conflict after it rebases and its rows may go twice, its decisions run twice (each kind harmless twice). A write recognised as our own lost commit: its rows, drops and login answers
     are not applied again (`Coordinator::outbox_committed`). A replica's cache also follows the row by NOTIFY
     (`load_coordinator_since`, forward only).
   - **Attachments** (`WorldCuts::attached`: host → boot, `attached_ms` = the store time its `Attach` was applied):
@@ -477,19 +479,30 @@ Verify with:
     `ATTACH_CLOCK_SLACK_MS`, 1 s: the `Attach` deleted the earlier ones) unread past `MAILBOX_STALL_MS` (15 s, store
     clock) → logged `Input::HostStalled { host, boot, epoch }`, applied only while the host's newest `Attach` is
     exactly that pair: detached, its rows deleted, its next POST answered `attached: false`, and it re-attaches. A
-    host that beats its lease but cannot reach the coordinator is noticed only once a row waits for it (a quiet
-    world: the next row + 15 s). `ReplicaLapsed` detaches nobody; `forget_absent_hosts` forgets only ids below the
+    host that beats its lease but cannot reach the coordinator is noticed only once a row waits for it — there always
+    is one: the ticker's upkeep broadcasts `CoordMsg::Calendar` to every attachment at each day turn (`DAY_MS`, 10 s),
+    so a host that stops reading is detached within about 10 + 15 + 1–2 ≈ 27 s (meanwhile it may still be gate, heir
+    or assignee: joins 503, a run may wait for it up to `SUCCESSION_DEADLINE_MS`). **Orphan rows**: a head row
+    unread past `MAILBOX_STALL_MS` whose boot is NOT the one its host is attached as (a rollback's `Generation` rows,
+    pushed to every attached host right before `detach_all`, of a host dead then; a `Generation` told a refused
+    `Attach` whose process is gone) → the ticker drops that boot's rows with its next transition
+    (`Coordinator::drop_orphan_mailbox`, `MailboxDrop { boot: Some }`: one `DELETE … USING UNNEST` by `(host, boot)`,
+    never another boot's — never a current attachment's); not logged (a ticker read's effect: a rebase drops it, the
+    next read decides it again); a younger head is left (a refused host may yet read its `Generation`). `ReplicaLapsed` detaches nobody; `forget_absent_hosts` forgets only ids below the
     read's `next_host_id` that are not attached. The gate is world-wide: `Coordinator::gate_host()` = the lowest
     attached host that is live, not leaving, not draining (`Gate::Host` / `Gate::Nobody`; "Many hosts", login).
     Replicas still share ONLY the row (and its tables): each keeps its own input log, held login orders and batch
     answers, observation timers and, as the ticker, its reads.
   - **Version check**: with > 1 live replica, outputs leaving with nothing durable changed (`take_out`) wait for a
     `SELECT version` — under `Mailbox` the runtime's, before it answers batches that changed nothing durable
-    (`pump_clean_batches`); a moved row → refresh and replay first.
+    (`pump_clean_batches`; an EMPTY batch too, unless the cache holds the host attached as its pair — `attached: true`
+    leaves at once, `false` only from a confirmed cache, else a healthy host re-attaches and aborts a cut); a moved
+    row → refresh and replay first. An evicted core answers no batch.
   - Metrics `mmo_coordinator_replicas_live`, `mmo_coordinator_is_ticker`, `mmo_coordinator_api_requests_total{route,code}`
     (routes `host_messages`, `host_mailbox`, `login_orders`, `login_answers`, `other`), `mmo_coordinator_mailbox_rows` /
     `mmo_coordinator_mailbox_oldest_ms` (the ticker's read; 0 on the others), `mmo_coordinator_stalled_total`, a host's
     `mmo_world_link_up` / `mmo_world_link_reattach_total`; `stalled=` / `mailbox_rows=` / `login_rows=` / `core_less=`
+    / `refreshes=` (rebased onto another replica's row: each version bump makes every other replica reload the core)
     on the window line; alerts `WorldCoordinatorReplicasDown`, `WorldCoordinatorConflicts` (measure before splitting
     the row), `WorldCoordinatorNoTicker`, `WorldMailboxStalled` (the oldest unread row > 30 s for 2 min),
     `WorldCoordinatorApiErrors` (5xx share of the hosts' routes > 5 % for 10 min; the login orders' 503s are answers).
@@ -803,8 +816,15 @@ Verify with:
   manager re-attaches before anything else is carried. **The mailbox gate**: the mailbox loop hands rows to the
   manager only from the row `CoordMsg::Attached { epoch }` of the current `Attach` on (earlier rows are acknowledged,
   never delivered: no row decided for an older attach reaches the manager), except `CoordMsg::Generation` (the
-  answer to an `Attach` refused for a stale world generation has no `Attached` row). Several URLs: a failed request
-  moves to the next, under ONE pin (every replica shares one identity, `svc_link::pinned_http2_client`). Role `all`
+  answer to an `Attach` refused for a stale world generation has no `Attached` row). A down, and each `Attach` sent,
+  cancel the mailbox GET in flight (and its backoff wait); it polls again at once, on a new client after a transport
+  failure. If the link's thread ends (a panic, no runtime) `pump` logs an error once and the link reads down for good
+  (`is_up()` false; nothing respawns it). Several URLs: a failed request moves to the next, under ONE pin (every
+  replica shares one identity, `svc_link::pinned_http2_client`: `HTTP_CONNECT_TIMEOUT_MS` 5 s, an HTTP/2 PING every
+  `HTTP_KEEP_ALIVE_INTERVAL_MS` 5 s, idle too, closed after `HTTP_KEEP_ALIVE_TIMEOUT_MS` 5 s unanswered — a silently
+  dead connection fails within 10 s, under the 15 s stall). The login service replaces a world's client after a
+  transport failure (not after an HTTP status). Behind one Service a host's (or a login pod's) requests ride ONE
+  HTTP/2 connection to ONE replica until it breaks (kube-proxy balances connections, not requests). Role `all`
   (`jwt` + a service token) serves the two login routes itself on `VOXEL_HOST_LINK_BIND` (an in-memory answer queue,
   `LOGIN_ANSWERS_HELD_MAX` 4096): the login service has one transport; kicks are durable in its store until acked
   (login migration 0003). `svc-link` carries host↔host peer links only. `LINK_PROTOCOL_VERSION` is 12 (the

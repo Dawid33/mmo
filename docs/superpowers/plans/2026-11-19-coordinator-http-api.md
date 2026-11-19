@@ -338,7 +338,7 @@ pub const PATH_COORD_LOGIN_ANSWERS: &str = "/v1/login/answers";
 
 ## Known limits (to carry into `TODO.md`)
 
-- A host cut off from the coordinator but beating its lease is noticed only when a row waits for it, 15 s after (confirm 3).
+- A host cut off from the coordinator but beating its lease is noticed only when a row waits for it, 15 s after (confirm 3). Corrected by the whole-branch review: a row always comes — the ticker broadcasts `Calendar` to every attachment at each day turn (`DAY_MS`, 10 s) — so the bound is about 10 + 15 + 1–2 ≈ 27 s, not "a quiet world: at its next row".
 - Every coordinator → host message costs a row insert and delete; one with nothing durable behind it costs a version bump too.
 - A login pod that restarts re-reads up to `LOGIN_ANSWER_TTL_MS` of answers (idempotent, but a burst).
 - With every replica down hosts run on, as today; their links are down and they re-attach when one is back.
