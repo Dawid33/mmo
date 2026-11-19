@@ -76,11 +76,15 @@ additionalPrometheusRulesMap:
           - alert: WorldNoCommittedCut
             # Needs a first commit (> 0): the series is 0 until then, see WorldNoFirstCut.
             # `max by (namespace)`: with several coordinator replicas each pod counts only the
-            # decisions it wrote, so the newest commit of any replica is the world's.
+            # decisions it wrote, so the newest commit of any replica is the world's. Silent while
+            # the world has no live host (the ticker's mmo_hosts_live is 0): with zero hosts no cut
+            # begins — a world scaled to zero by its fleet (min 0) rests there by design.
             expr: |
               max by (namespace) (mmo_cut_last_committed_timestamp_seconds{role="coordinator"}) > 0
               and on (namespace)
               time() - max by (namespace) (mmo_cut_last_committed_timestamp_seconds{role="coordinator"}) > 300
+              and on (namespace)
+              max by (namespace) (mmo_hosts_live{role="coordinator"} and on (namespace, pod) (mmo_coordinator_is_ticker{role="coordinator"} == 1)) > 0
             for: 2m
             labels:
               severity: critical
@@ -211,10 +215,9 @@ additionalPrometheusRulesMap:
             # only while world cuts run — never under `static`, but a lone `claim` host sets it: hence
             # the `> 1`, on the count — written in parentheses, since comparisons bind left to right) and while the world is stopped
             # (every host Deployment at 0). A drained host keeps its Deployment at 1 but is no live
-            # host: the coordinator removes its desired row once it owns nothing and the reconciler
-            # deletes the Deployment, so this fires only when that takes longer than 5 minutes (a last
-            # leaver that kept in-flight rows waits for the next host to inherit them; the reconciler
-            # down is WorldFleetDown). The ticker replica's count only (it alone reads the hosts;
+            # host: the coordinator removes its desired row once nothing of its name runs (land kept
+            # or not) and the reconciler deletes the Deployment, so this fires only when that takes
+            # longer than 5 minutes (the reconciler down is WorldFleetDown). The ticker replica's count only (it alone reads the hosts;
             # another replica's value is stale).
             expr: |
               max by (namespace) (mmo_hosts_live{role="coordinator"} and on (namespace, pod) (mmo_coordinator_is_ticker{role="coordinator"} == 1))
@@ -226,7 +229,7 @@ additionalPrometheusRulesMap:
               cluster: ${cluster}
             annotations:
               summary: "World {{ $labels.namespace }} has fewer live hosts than its host Deployments want"
-              description: "The coordinator of {{ $labels.namespace }} has counted {{ $value }} live host(s) for 5 minutes, fewer than its host Deployments that want a pod (a host down, hung or crash-looping at its start, or drained and not removed yet: the coordinator removes a drained host's desired row once it owns nothing and the fleet reconciler deletes its Deployment — nothing to apply; a last leaver holding in-flight rows stays until the next host inherits them; see `just world-status` and WorldFleetDown; one-host worlds never fire)."
+              description: "The coordinator of {{ $labels.namespace }} has counted {{ $value }} live host(s) for 5 minutes, fewer than its host Deployments that want a pod (a host down, hung or crash-looping at its start, or drained and not removed yet: the coordinator removes a drained host's desired row once nothing of its name runs and the fleet reconciler deletes its Deployment — nothing to apply; see `just world-status` and WorldFleetDown; one-host worlds never fire)."
 
           - alert: WorldFleetDown
             # The fleet reconciler (Deployment fleet, VOXEL_ROLE=fleet) is wanted and not Ready. It is
@@ -304,7 +307,33 @@ additionalPrometheusRulesMap:
               cluster: ${cluster}
             annotations:
               summary: "World {{ $labels.namespace }} wants a host and has no free slot"
-              description: "The coordinator of {{ $labels.namespace }} has kept wanting a host for 20 minutes (below the fleet's minimum, or for a login while no host takes logins) while every slot of fleet.max was held, draining hosts included. Find the draining host that holds a slot (`just world-hosts`: a last leaver keeps its slot until the next host inherits its in-flight rows), or raise fleet.max. Expected during a long drain on a world whose min equals max."
+              description: "The coordinator of {{ $labels.namespace }} has kept wanting a host for 20 minutes (below the fleet's minimum, or for a login while no host takes logins) while every slot of fleet.max was held, draining hosts included. Find the draining host that holds a slot (`just world-hosts`: a draining host keeps its slot until it has left — while its leave cut is pending — and the coordinator removed its row), or raise fleet.max. Expected during a long drain on a world whose min equals max."
+
+          - alert: WorldFleetHostNotLive
+            # The coordinator wants more hosts than are live: a desired row whose host never became
+            # a live host — its pod Pending (no room on the node), its image not pulled
+            # (ImagePullBackOff: an untagged digest expired in ECR), crash-looping before it
+            # registers, or the reconciler not creating its Deployment. The other host alerts miss
+            # it in a one-host or zero-host world (WorldHostsBelowReplicas has its `> 1`, a pod that
+            # never ran exports no mmo_registered), and every login there answers world_starting
+            # until the client gives up. Both series are the ticker's (it alone reads the hosts and
+            # the desired rows; another replica reports fleet_wanted 0 and a stale hosts_live).
+            # A draining row is not wanted (a drain lowers the left side at once) and a leaving host
+            # stays live until its leave commits, so a drain, a scale-down or the way to zero never
+            # fire; a normal start registers within a minute or two (an image pull included); a stop
+            # removes the coordinator's series, and a release keeps the hosts at 0 beside an up
+            # coordinator for minutes at most — hence 15 minutes.
+            expr: |
+              max by (namespace) (mmo_fleet_wanted{role="coordinator"} and on (namespace, pod) (mmo_coordinator_is_ticker{role="coordinator"} == 1))
+              > on (namespace)
+              max by (namespace) (mmo_hosts_live{role="coordinator"} and on (namespace, pod) (mmo_coordinator_is_ticker{role="coordinator"} == 1))
+            for: 15m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} wants more hosts than are live"
+              description: "For 15 minutes the coordinator of {{ $labels.namespace }} has wanted {{ $value }} host(s) (desired_hosts rows not draining) and counted fewer live hosts: a wanted host never came up. Look at its pod: `just world-status` (host Deployments, pods), `kubectl -n {{ $labels.namespace }} describe pod -l errantry/host=<name>` (Pending: no room on the node; ImagePullBackOff: the coordinator's image digest gone from ECR), `just world-logs host-<name>` (a crash before it registers), or the reconciler (WorldFleetDown, `just world-logs fleet`). Logins to this world answer world_starting until it is up."
 
           - alert: WorldHostNotReady
             # A drained host (mmo_waiting{why="drained"}) is unregistered on purpose until it is
