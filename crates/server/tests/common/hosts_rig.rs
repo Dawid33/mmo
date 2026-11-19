@@ -490,36 +490,30 @@ fn prepared(db: &PgDb) -> i64 {
     query_i64s(db, "SELECT COUNT(*) FROM pg_prepared_xacts WHERE database = current_database()")[0]
 }
 
-/// The world id of the rig's service links (`VOXEL_WORLD_ID`): the coordinator's listeners,
-/// the hosts' coordinator hellos and the login service's (its registry row's `world_id`) all
+/// The world id of the rig's links (`VOXEL_WORLD_ID`): the coordinator's API and login
+/// listener, the hosts' batches and the login service's hello (its registry row's `world_id`) all
 /// name it, so a real login service's hello is admitted.
 const RIG_WORLD: &str = "hosts";
 
-/// Host `ordinal`'s link to the coordinator at `addr` (its pin in `cert_file`), its hello
-/// carrying the host's registration number `reg`.
-fn quic_world_link(addr: std::net::SocketAddr, cert_file: PathBuf, ordinal: HostId, boot: u64, reg: u64) -> server::roles::QuicWorldLink {
-    quic_world_link_to(svc_link::LinkTarget::from(addr), cert_file, ordinal, boot, reg)
-}
-
-/// [`quic_world_link`] to a target that may name several replicas (`a,b`).
-fn quic_world_link_to(
-    addr: svc_link::LinkTarget,
-    cert_file: PathBuf,
-    ordinal: HostId,
-    boot: u64,
-    reg: u64,
-) -> server::roles::QuicWorldLink {
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { id: ordinal, boot, reg }, RIG_WORLD);
-    server::roles::QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_HOSTS_TEST_UNSET_PIN", &cert_file), hello)
+/// Host `ordinal`'s link to the coordinator's HTTP API at `urls` (one per replica; its pin in
+/// `cert_file`).
+fn http_world_link(urls: Vec<String>, cert_file: PathBuf, ordinal: HostId) -> server::world_http::HttpWorldLink {
+    server::world_http::HttpWorldLink::connect(
+        urls,
+        move || svc_link::read_cert_hash("MMO_HOSTS_TEST_UNSET_PIN", &cert_file),
+        ordinal,
+        TOKEN.into(),
+        RIG_WORLD.into(),
+    )
 }
 
 /// A host's coordinator link a test can drop and make again (a manager installs its link
 /// once): `None` = down, its connection closed; each new link is a new generation.
 #[derive(Clone, Default)]
-struct SwitchLink(Arc<std::sync::Mutex<(Option<server::roles::QuicWorldLink>, u64)>>);
+struct SwitchLink(Arc<std::sync::Mutex<(Option<server::world_http::HttpWorldLink>, u64)>>);
 
 impl SwitchLink {
-    fn lock(&self) -> std::sync::MutexGuard<'_, (Option<server::roles::QuicWorldLink>, u64)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (Option<server::world_http::HttpWorldLink>, u64)> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -529,7 +523,7 @@ impl SwitchLink {
     }
 
     /// A new connection.
-    fn replace(&self, link: server::roles::QuicWorldLink) {
+    fn replace(&self, link: server::world_http::HttpWorldLink) {
         let mut g = self.lock();
         g.0 = Some(link);
         g.1 += 1;
@@ -591,8 +585,8 @@ impl World {
     }
 }
 
-/// A coordinator process as `run_coordinator` starts it: listening for hosts (its pin in
-/// `cert`) and for the login service (Elastic 1 Task 6: its pin beside, `login-link.cert-sha256`;
+/// A coordinator process as `run_coordinator` starts it: serving its HTTP API to hosts (its pin
+/// in `cert`) and listening for the login service (Elastic 1 Task 6: its pin beside, `login-link.cert-sha256`;
 /// `ListeningCoordinator::login` names where to dial), world cuts `cuts`, crash policy `policy`.
 fn listening_coordinator(
     store: StoreHandle,
@@ -612,7 +606,7 @@ fn listening_coordinator(
         start,
         "127.0.0.1:0".parse().unwrap(),
         TOKEN.into(),
-        Some(cert.to_path_buf()),
+        cert.to_path_buf(),
         fenced,
         Some(cuts),
         policy,

@@ -31,7 +31,8 @@
 //! its `hosts` read's `mailbox_oldest` (a host's oldest unread mailbox row older than
 //! [`super::MAILBOX_STALL_MS`] on the store's clock, and not older than the store time its current
 //! `Attach` was applied at — a read issued before a re-`Attach` committed still shows the previous
-//! attachment's rows), and applied by a svc-link runtime when a host's link drops — logged and
+//! attachment's rows), applied by role `all`'s runtime when its host's channel closes, and by
+//! the HTTP runtime when it refuses an `Attach` of a boot it holds attached — logged and
 //! replayed, guarded by the attachment it observed, `(boot, epoch)`: it detaches only while the
 //! host's newest applied `Attach` is exactly that one (a re-`Attach` keeps the boot and raises the
 //! epoch, so a stale or replayed stall after it changes nothing).
@@ -67,11 +68,12 @@ pub enum Input {
     Host { host: HostId, msg: HostMsg },
     /// Host `host`, attached as boot `boot`, is not reading what the coordinator tells it: its
     /// oldest mailbox row waited past [`super::MAILBOX_STALL_MS`] (the ticker's derivation from a
-    /// `hosts` read), or its link to a svc-link runtime dropped. It is detached (a cut it takes
-    /// part in aborts, its mailbox rows go) — only while attached as `boot`; it attaches again
-    /// once it reaches a replica. Only while its newest applied `Attach` is `(boot, epoch)` — the
-    /// attachment the stall was observed on (a re-`Attach` raises the epoch). Logged and replayed;
-    /// ANY replica (a svc-link runtime applies it for its own links).
+    /// `hosts` read), its channel link closed (role `all`), or its re-`Attach` was refused. It is
+    /// detached (a cut it takes part in aborts, its mailbox rows go) — only while attached as
+    /// `boot`; it attaches again once it reaches a replica. Only while its newest applied
+    /// `Attach` is `(boot, epoch)` — the attachment the stall was observed on (a re-`Attach`
+    /// raises the epoch). Logged and replayed; ANY replica (the runtime applies the last two
+    /// itself).
     HostStalled { host: HostId, boot: u64, epoch: u64 },
     /// The upkeep: the calendar, the history's directives and notices, the cuts' and the
     /// successions' timers ([`Coordinator::apply`]). The ticker's only (refused elsewhere, not

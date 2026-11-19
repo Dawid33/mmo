@@ -13,8 +13,9 @@
 //! - **The mailbox loop** long-polls `GET …/mailbox` from a cursor kept for the process's life.
 //!   A row reaches [`WorldLink::recv`] only from the row `CoordMsg::Attached { epoch }` of the
 //!   link's current `Attach` on; every row before it is acknowledged (the cursor moves past it)
-//!   and never delivered — a row decided for an older attach never reaches the manager. Each
-//!   row is delivered once, in `seq` order.
+//!   and never delivered — a row decided for an older attach never reaches the manager — but a
+//!   `CoordMsg::Generation` (an `Attach` refused for a stale world generation has no `Attached`
+//!   row). Each row is delivered once, in `seq` order.
 //!
 //! **Down / up.** The link starts down. Down, it drops what it is given and probes with empty
 //! batches (stamped with the last `Attach`'s pair, `(0, 0)` before any) under the retry backoff
@@ -277,6 +278,11 @@ impl State {
                 }
             }
             if self.gate_open {
+                deliver.push(msg);
+            } else if matches!(msg, CoordMsg::Generation(_)) {
+                // The one row for no attachment: the answer to an `Attach` the coordinator refused
+                // for its world generation (or a rollback's), which no `Attached` row precedes. The
+                // manager acts only on a generation above its own (it restarts for the rollback).
                 deliver.push(msg);
             } else {
                 log::debug!("[world-link] mailbox row {seq} from before the attach dropped");

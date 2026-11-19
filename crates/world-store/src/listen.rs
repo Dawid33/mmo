@@ -13,8 +13,8 @@
 //! - **The coordinator's row** (Elastic 2b Task 5): every committed transition says
 //!   `pg_notify('coordinator_row', '<version>')` in its own transaction
 //!   ([`COORDINATOR_ROW_CHANNEL`]); each coordinator replica refreshes its cache on a version
-//!   newer than its own (a `Resync` every [`COORDINATOR_POLL_MS`]). (The Elastic 2b relay of
-//!   other replicas' outbox rows is gone: hosts read their own mailboxes.)
+//!   newer than its own (a `Resync` every [`COORDINATOR_POLL_MS`]), and its HTTP API's waiting
+//!   mailbox polls read again (the hosts read their own mailboxes from any replica).
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};

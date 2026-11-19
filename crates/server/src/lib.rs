@@ -1244,7 +1244,7 @@ pub fn run() -> claims::ServerExit {
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
             let config = world_link_config.take().expect("a host's world link was configured before its registration");
-            let link = host_world_link(config, host_id, boot, host_id.0);
+            let link = host_world_link(config, host_id);
             world_wake = link.wake();
             manager.set_world_link(Box::new(link), boot, 0);
         } else if let Some(store) = &store {
@@ -1743,38 +1743,40 @@ mod tests {
     }
 }
 
-/// A host's link to the world coordinator process (`VOXEL_ROLE=host`): it dials
-/// `VOXEL_COORDINATOR_ADDR` with the service token, pinning the coordinator's
-/// certificate (`VOXEL_COORDINATOR_CERT_SHA256`, else the cert-hash file — waited for
-/// if the coordinator has not written it yet).
-/// `reg`: the host's registration number (`hosts.reg`), in its hello: the coordinator admits
-/// only its `hosts` row's, while that row is live.
-fn host_world_link(config: WorldLinkConfig, ordinal: HostId, boot: u64, reg: u64) -> roles::QuicWorldLink {
-    let WorldLinkConfig { addr, token, cert_file, world } = config;
-    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { id: ordinal, boot, reg }, world);
-    info!("[server] the world coordinator is a separate process at {addr} (pin from {})", cert_file.display());
-    roles::QuicWorldLink::connect(addr, move || svc_link::read_cert_hash(roles::COORDINATOR_CERT_SHA256_ENV, &cert_file), hello)
+/// A host's link to the world coordinator process (`VOXEL_ROLE=host`): it calls the
+/// coordinator's HTTPS API at `VOXEL_COORDINATOR_ADDR` (one URL per replica, tried in turn) with
+/// the service token, pinning the coordinator's certificate (`VOXEL_COORDINATOR_CERT_SHA256`,
+/// else the cert-hash file — waited for if the coordinator has not written it yet). Every batch
+/// names host `ordinal`; the coordinator admits its `Attach` only while its `hosts` row is live.
+fn host_world_link(config: WorldLinkConfig, ordinal: HostId) -> world_http::HttpWorldLink {
+    let WorldLinkConfig { urls, token, cert_file, world } = config;
+    info!("[server] the world coordinator is a separate process at {} (pin from {})", urls.join(","), cert_file.display());
+    world_http::HttpWorldLink::connect(
+        urls,
+        move || svc_link::read_cert_hash(roles::COORDINATOR_CERT_SHA256_ENV, &cert_file),
+        ordinal,
+        token,
+        world,
+    )
 }
 
 /// What a host's link to its coordinator needs that no host id is part of, read before the
 /// registration (a bad setting fails the start without a `hosts` row): the coordinator's
-/// address (`VOXEL_COORDINATOR_ADDR`), the service token, the pin file and the world id.
+/// URLs (`VOXEL_COORDINATOR_ADDR`), the service token, the pin file and the world id.
 struct WorldLinkConfig {
-    addr: svc_link::LinkTarget,
+    urls: Vec<String>,
     token: String,
     cert_file: std::path::PathBuf,
     world: String,
 }
 
 fn world_link_config() -> Result<WorldLinkConfig, String> {
-    let addr = roles::coordinator_dial_target_from(
-        roles::COORDINATOR_ADDR_ENV,
-        std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref(),
-    )?;
-    let token = svc_link::service_token_from_env().map_err(|e| format!("the service link's token: {e}"))?;
+    let urls =
+        roles::coordinator_urls_from(roles::COORDINATOR_ADDR_ENV, std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref())?;
+    let token = svc_link::service_token_from_env().map_err(|e| format!("the service token: {e}"))?;
     let cert_file = roles::cert_hash_file_from(std::env::var(roles::COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
     let world = login_link::link_world_from(std::env::var(auth_edge::WORLD_ID_ENV).ok().as_deref());
-    Ok(WorldLinkConfig { addr, token, cert_file, world })
+    Ok(WorldLinkConfig { urls, token, cert_file, world })
 }
 
 /// This host's observer nonces: each one fresh from the OS's randomness (ring's

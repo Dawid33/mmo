@@ -506,6 +506,12 @@ impl StoreHandle {
         rx.await.map_err(|_| stopped())?
     }
 
+    /// [`Self::mailbox_oldest`], answered on the receiver (the coordinator's ticker reads it with
+    /// its `hosts` read).
+    pub fn mailbox_oldest_later(&self) -> crossbeam::channel::Receiver<Result<Vec<(HostId, u64, u64)>, StoreError>> {
+        self.ask_later(Request::MailboxOldest)
+    }
+
     /// At most `limit` of the coordinator's login answers after `after`, as `(seq,
     /// game::encode_packet bytes)` in `seq` (commit) order; a read deletes nothing (transitions
     /// prune them by age, `TransitionWrite::login_prune_before_ms`). SQLite: `Unsupported`.

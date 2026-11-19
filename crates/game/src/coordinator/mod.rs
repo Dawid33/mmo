@@ -24,7 +24,7 @@
 //! reads its mailbox from any replica.
 //!
 //! **Delivery** ([`Delivery`], [`Coordinator::set_delivery`]): `Direct` — the runtime sends the
-//! messages on its own links (role `all`, the svc-link listener, the inline link); `Mailbox` —
+//! messages on its own links (role `all`'s channel, the inline link); `Mailbox` (role `coordinator`) —
 //! every message for a host is a row of its mailbox (the store's `outbox`), written with the
 //! transition that decided it, at the boot the host is attached as. ONE replica, the ticker
 //! ([`Coordinator::is_ticker`]: the lowest live id), runs the timed and lease work — the upkeep,
@@ -349,7 +349,7 @@ pub struct Coordinator {
 /// the runtime's configuration, the same for every replica of a world.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Delivery {
-    /// The runtime sends them on its own links (role `all`, the svc-link listener, the inline
+    /// The runtime sends them on its own links (role `all`'s channel, the inline
     /// link): [`Transition::out`], or [`Coordinator::take_out`] when nothing durable changed.
     #[default]
     Direct,
@@ -460,7 +460,8 @@ projection! {
             memo_warned_ms = None,
             clock_ms = now_ms,
             leases = LeaseWatch::default(),
-            // The runtime's configuration (set again after a load: `set_delivery`).
+            // The runtime's configuration: a rebase and a refresh keep it; only a fresh load
+            // starts at `Direct` — the runtime sets it on the core it loaded (`set_delivery`).
             delivery = Delivery::Direct,
             replica = replica,
             log = Vec::new(),
@@ -1300,6 +1301,29 @@ impl Coordinator {
     pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<(HostId, CoordMsg)> {
         let fleet::Gate::Host(gate) = self.login_gate() else { return None };
         Some((gate, CoordMsg::Login(order)))
+    }
+
+    /// [`Self::login_order`] under [`Delivery::Mailbox`]: the order for the world's gate host of
+    /// this moment is queued as its output, so it becomes a row of the gate's mailbox with the next
+    /// transition (written without a core when nothing durable changed) — never logged: a rebase
+    /// before that transition commits drops it, and the login service's retry (or its kick
+    /// sweeper) sends it again. The gate host, or `None` (no gate host anywhere,
+    /// [`fleet::Gate::Nobody`]).
+    pub fn relay_login_order(&mut self, order: crate::LoginOrder) -> Option<HostId> {
+        let fleet::Gate::Host(gate) = self.login_gate() else { return None };
+        self.clean_checked = false;
+        self.push(Target::Host(gate), CoordMsg::Login(order));
+        Some(gate)
+    }
+
+    /// The runtime refused host `host`'s `Attach` of boot `boot` before the core saw it (a stale
+    /// process: the store holds a newer world generation): `msg` (its [`CoordMsg::Generation`])
+    /// for that boot, which no attachment routes — a mailbox row at that boot under
+    /// [`Delivery::Mailbox`], with the next transition. Not logged: a rebase drops it, and the
+    /// host's next `Attach` is refused and told again.
+    pub fn tell_refused_attach(&mut self, host: HostId, boot: u64, msg: CoordMsg) {
+        self.clean_checked = false;
+        self.push_to_boot(host, boot, msg);
     }
 
     /// Whether the projection differs from the one last handed out (or loaded), or the

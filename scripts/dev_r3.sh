@@ -51,7 +51,8 @@
 #   DEV_R3_HOST_STOP_SECS (95: a host's own bound on its exit, see below), DEV_R3_STOP_SECS (60),
 #   DEV_R3_RESTART_MAX (3), DEV_R3_RESTART_WINDOW_SECS (60), DEV_R3_RESTART_BACKOFF_SECS (1).
 # Coordinator replicas (Elastic 2b; `just coordinators=2 dev-r3`): DEV_R3_REPLICAS is a `|`-separated
-# list of env-word lists, one more coordinator each (its own VOXEL_COORDINATOR_BIND / VOXEL_LOGIN_LINK_BIND;
+# list of env-word lists, one more coordinator each (its own VOXEL_COORDINATOR_BIND — the HTTPS API
+# the hosts call, every replica's URL in their VOXEL_COORDINATOR_ADDR — and VOXEL_LOGIN_LINK_BIND;
 # the same certificate files as the first, which has written them by then), started once the first
 # coordinator's pin exists, restarted and stopped as the first is (above); the stack stays up while
 # any coordinator replica's loop runs.
@@ -347,7 +348,7 @@ rpid=$!
 read -ra coord_words <<<"$coord_env"
 coord_loop 0 "${coord_words[@]}" &
 cloops[0]=$!
-say "login on http://127.0.0.1:8790 ($login_log), coordinator on 127.0.0.1:6480 ($dir/coordinator.log)"
+say "login on http://127.0.0.1:8790 ($login_log), coordinator on https://127.0.0.1:6480 ($dir/coordinator.log)"
 deadline=$((SECONDS + pin_wait_secs))
 until [ -s "$pin" ]; do
     if [ "$interrupted" = 1 ]; then exit 0; fi

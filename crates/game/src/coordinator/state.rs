@@ -34,8 +34,10 @@ use crate::history::persist::HistoryLoadError;
 /// cut ids' high half out of the projection (Elastic 2b: a [`super::ReplicaId`], and
 /// `WorldCuts.epoch` durable); 5 kept the land lookups as a set of super-regions (Elastic 3:
 /// each with the hosts that asked); 6 stamped each attachment with the replica it attached to
-/// (the coordinator HTTP API: an attachment is a host's boot only).
-pub const COORDINATOR_STATE_VERSION: u8 = 7;
+/// (the coordinator HTTP API: an attachment is a host's boot only); 7 had no store time per
+/// attachment (`WorldCuts::attached_ms`, which tells a stalled mailbox's row of the current
+/// attachment from an earlier one's). Nothing was released at 7.
+pub const COORDINATOR_STATE_VERSION: u8 = 8;
 
 /// One transition of the core ([`super::Coordinator::take_transition`]): the projection as
 /// bytes — `core`, and `history` when it changed — the messages it released, and the store

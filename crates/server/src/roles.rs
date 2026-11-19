@@ -2,20 +2,16 @@
 //! edge, the regions and the world coordinator on its own thread, joined by a channel
 //! link — single-player, `just run`, `just server`), or the world split into processes:
 //! a **coordinator** (the history, claims and world requests, saved under its own fence;
-//! no client edge, no regions) listening on the service link, and **hosts** (today's
-//! server without the coordinator thread) dialing it through a [`QuicWorldLink`]. The
-//! split roles need a Postgres world store: several processes write it.
+//! no client edge, no regions) serving its HTTP API ([`crate::coordinator_api`]), and **hosts**
+//! (today's server without the coordinator thread) calling it through a
+//! [`crate::world_http::HttpWorldLink`]. The split roles need a Postgres world store: several
+//! processes write it.
 
 use game::HostId;
-use std::collections::VecDeque;
-use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossbeam::channel::{Receiver, RecvTimeoutError, Sender};
-use game::{CoordMsg, HostMsg, WorldLink};
-use svc_link::{LinkDialer, LinkEvent, LinkHello, LinkTarget};
 use world_store::StoreUrl;
 
 use crate::claims::{Fenced, ServerExit};
@@ -23,12 +19,15 @@ use crate::world_file::{self, WorldSource};
 
 /// Environment: the process's role, `all` (default), `host`, `coordinator` or `fleet`.
 pub const ROLE_ENV: &str = "VOXEL_ROLE";
-/// Environment: where a coordinator listens for hosts.
+/// Environment: where a coordinator's HTTPS API listens (TCP `ip:port`).
 pub const COORDINATOR_BIND_ENV: &str = "VOXEL_COORDINATOR_BIND";
-/// Environment: where a host dials its coordinator.
+/// Environment: where a host reaches its coordinator: a URL or a comma list of URLs
+/// (`https://host:port`, one per replica), tried in turn.
 pub const COORDINATOR_ADDR_ENV: &str = "VOXEL_COORDINATOR_ADDR";
-/// The coordinator's service-link address when neither variable names one.
+/// The coordinator's API bind when [`COORDINATOR_BIND_ENV`] names none.
 pub const DEFAULT_COORDINATOR_ADDR: &str = "127.0.0.1:6480";
+/// The coordinator's URL when [`COORDINATOR_ADDR_ENV`] names none.
+pub const DEFAULT_COORDINATOR_URL: &str = "https://127.0.0.1:6480";
 /// Environment: the file the coordinator writes its certificate's SHA-256 pin to, and a
 /// host reads it from (the certificate and its private key are kept beside it:
 /// `<file>.cert`, `<file>.key`). Keep it out of version control.
@@ -40,9 +39,6 @@ pub const DEFAULT_COORDINATOR_CERT_HASH_FILE: &str = "target/dev-r2/coordinator.
 pub const COORDINATOR_CERT_SHA256_ENV: &str = "VOXEL_COORDINATOR_CERT_SHA256";
 /// Why a split role refuses a store that is not Postgres.
 pub const SPLIT_ROLES_NEED_POSTGRES: &str = "split roles need a Postgres world (VOXEL_WORLD_DB=postgres://…)";
-/// How often a host looks for the coordinator's pin while it has none yet (the
-/// coordinator has never started).
-pub const PIN_POLL: Duration = Duration::from_millis(500);
 /// How often the coordinator process checks for a stop signal or a stopped thread.
 const COORDINATOR_PROCESS_POLL: Duration = Duration::from_millis(100);
 
@@ -250,171 +246,41 @@ impl CoordinatorClock {
     }
 }
 
-/// A service-link address from an env value; unset or empty is
+/// The coordinator's API bind from an env value (`ip:port`); unset or empty is
 /// [`DEFAULT_COORDINATOR_ADDR`].
 pub fn coordinator_addr_from(var: &str, value: Option<&str>) -> Result<SocketAddr, String> {
     let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_COORDINATOR_ADDR);
     value.parse().map_err(|_| format!("{var}={value:?} is not an address (ip:port)"))
 }
 
-/// The coordinator's address as a host dials it: `host:port`, an IP or a DNS name (resolved at
-/// every dial); unset or empty is [`DEFAULT_COORDINATOR_ADDR`]. The coordinator's BIND stays
-/// `ip:port` ([`coordinator_addr_from`]).
-pub fn coordinator_dial_target_from(var: &str, value: Option<&str>) -> Result<LinkTarget, String> {
-    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_COORDINATOR_ADDR);
-    LinkTarget::parse(value).map_err(|e| format!("{var}={value:?} is not an address (host:port): {e}"))
+/// The coordinator's URLs as a host reaches them: a URL or a comma list of URLs, each
+/// `https://host:port` (an IP or a DNS name, resolved at each connect), tried in turn; unset or
+/// empty is [`DEFAULT_COORDINATOR_URL`]. A bare `host:port` (the service link's form before the
+/// coordinator's HTTP API) is refused, naming the variable and the form expected.
+pub fn coordinator_urls_from(var: &str, value: Option<&str>) -> Result<Vec<String>, String> {
+    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_COORDINATOR_URL);
+    let mut urls = Vec::new();
+    for item in value.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+        let rest = item.strip_prefix("https://").ok_or_else(|| {
+            format!("{var}={value:?}: {item:?} is not a URL — the coordinator is an HTTPS service: https://host:port (a comma list for several replicas)")
+        })?;
+        let authority = rest.trim_end_matches('/');
+        let port_ok = authority.rsplit_once(':').is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+        if !port_ok || authority.contains('/') {
+            return Err(format!("{var}={value:?}: {item:?} is not https://host:port"));
+        }
+        urls.push(format!("https://{authority}"));
+    }
+    if urls.is_empty() {
+        return Err(format!("{var}={value:?} names no URL (https://host:port)"));
+    }
+    Ok(urls)
 }
 
 /// The coordinator's cert-hash file from an env value; unset or empty is
 /// [`DEFAULT_COORDINATOR_CERT_HASH_FILE`].
 pub fn cert_hash_file_from(value: Option<&str>) -> PathBuf {
     PathBuf::from(value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_COORDINATOR_CERT_HASH_FILE))
-}
-
-/// The host's end of the world link over the service link: a [`LinkDialer`] to the
-/// coordinator that reconnects forever. Until the coordinator's pin is readable (it has
-/// never started), the link waits for it, down.
-///
-/// The link's state moves only in [`WorldLink::pump`]: the dialer's events are taken in
-/// order, and a message received before a `Down` / `Up` is read before that change shows
-/// (a pump stops at a change while messages wait). Every `Up` is a new connection
-/// ([`WorldLink::generation`]), so a reconnect between two pumps is still seen. Sends
-/// while down are dropped (the manager's outbox and `Attach` cover them); delivery is
-/// at-least-once around a reconnect (`svc_link`), which the coordinator's request memo
-/// and the host's reply dedupe absorb.
-pub struct QuicWorldLink {
-    out: Sender<HostMsg>,
-    events: Receiver<LinkEvent<CoordMsg>>,
-    /// A `Up` / `Down` taken while messages before it were still unread.
-    held: Option<LinkEvent<CoordMsg>>,
-    inbox: VecDeque<CoordMsg>,
-    up: bool,
-    generation: u64,
-    wake: Receiver<()>,
-}
-
-impl QuicWorldLink {
-    /// Dial the coordinator at `addr` with `hello`; `pin` reads its certificate's
-    /// SHA-256, retried every [`PIN_POLL`] until it answers.
-    pub fn connect(
-        addr: impl Into<LinkTarget>,
-        mut pin: impl FnMut() -> io::Result<String> + Send + 'static,
-        hello: LinkHello,
-    ) -> QuicWorldLink {
-        let addr: LinkTarget = addr.into();
-        let (out, out_rx) = crossbeam::channel::unbounded::<HostMsg>();
-        let (events_tx, events) = crossbeam::channel::unbounded();
-        let (wake_tx, wake) = crossbeam::channel::bounded(1);
-        std::thread::Builder::new()
-            .name("coordinator-link".into())
-            .spawn(move || {
-                let mut said = false;
-                let pin = loop {
-                    match pin() {
-                        Ok(pin) => break pin,
-                        Err(e) => {
-                            if !said {
-                                log::info!("[server] waiting for the world coordinator's certificate pin: {e}");
-                                said = true;
-                            }
-                        }
-                    }
-                    // Nothing is sent while down; this only notices the link dropped.
-                    if let Err(RecvTimeoutError::Disconnected) = out_rx.recv_timeout(PIN_POLL) {
-                        return;
-                    }
-                };
-                log::info!("[server] dialing the world coordinator at {addr}");
-                let (dial, dial_events) = LinkDialer::connect::<CoordMsg, HostMsg>(addr, pin, hello);
-                loop {
-                    crossbeam::channel::select! {
-                        recv(out_rx) -> msg => match msg {
-                            Ok(msg) => {
-                                let _ = dial.send(msg);
-                            }
-                            // The link was dropped: dropping `dial` ends the dialer.
-                            Err(_) => return,
-                        },
-                        recv(dial_events) -> ev => match ev {
-                            Ok(ev) => {
-                                if events_tx.send(ev).is_err() {
-                                    return;
-                                }
-                                let _ = wake_tx.try_send(());
-                            }
-                            Err(_) => return,
-                        },
-                    }
-                }
-            })
-            .expect("spawn the coordinator link thread");
-        QuicWorldLink::over(out, events, wake)
-    }
-
-    /// The link's state machine over a dialer's `events` (and its outgoing queue `out`).
-    fn over(out: Sender<HostMsg>, events: Receiver<LinkEvent<CoordMsg>>, wake: Receiver<()>) -> QuicWorldLink {
-        QuicWorldLink { out, events, held: None, inbox: VecDeque::new(), up: false, generation: 0, wake }
-    }
-
-    /// Ready when the coordinator link has something (a message, up or down): a host
-    /// loop that blocks on its other channels selects on it too. Its messages carry
-    /// nothing; the manager pumps the link.
-    pub fn wake(&self) -> Receiver<()> {
-        self.wake.clone()
-    }
-}
-
-impl WorldLink for QuicWorldLink {
-    fn send(&mut self, msg: HostMsg) {
-        if !self.up {
-            log::debug!("coordinator link down: {} lost", crate::coordinator_rt::describe_host(&msg));
-            return;
-        }
-        let _ = self.out.send(msg);
-    }
-
-    fn recv(&mut self) -> Option<CoordMsg> {
-        self.inbox.pop_front()
-    }
-
-    fn is_up(&self) -> bool {
-        self.up
-    }
-
-    fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    fn pump(&mut self, _now_ms: u64) {
-        loop {
-            let event = match self.held.take() {
-                Some(event) => event,
-                None => match self.events.try_recv() {
-                    Ok(event) => event,
-                    Err(_) => return,
-                },
-            };
-            match event {
-                LinkEvent::Msg(msg) => self.inbox.push_back(msg),
-                change if !self.inbox.is_empty() => {
-                    // Read what came before the change first, as the link stood.
-                    self.held = Some(change);
-                    return;
-                }
-                LinkEvent::Up(_) => {
-                    self.up = true;
-                    self.generation += 1;
-                    log::info!("[server] world coordinator link up (connection {})", self.generation);
-                }
-                LinkEvent::Down(why) => {
-                    if self.up {
-                        log::warn!("[server] world coordinator link down: {why}");
-                    }
-                    self.up = false;
-                }
-            }
-        }
-    }
 }
 
 /// Why a `claim` host refuses a Postgres without two-phase commit (however many hosts run:
@@ -539,8 +405,8 @@ pub fn check_all_role_beside_hosts(role: Role, store: &world_store::StoreHandle,
 
 /// `VOXEL_ROLE=coordinator`: the world coordinator alone. Opens the Postgres world
 /// store, claims the coordinator row, loads (or migrates, or bootstraps) its state and
-/// serves hosts on [`COORDINATOR_BIND_ENV`] until a stop signal (an orderly stop saves
-/// once more) or a fence.
+/// serves hosts its HTTPS API on [`COORDINATOR_BIND_ENV`] until a stop signal (an orderly stop
+/// saves once more) or a fence.
 pub fn run_coordinator() -> ServerExit {
     let fatal = |e: String| -> ! { crate::fatal(&e) };
     crate::health::start_from_env("coordinator").unwrap_or_else(|e| fatal(e));
@@ -596,11 +462,8 @@ pub fn run_coordinator() -> ServerExit {
         None => log::info!("[coordinator] fleet: {FLEET_MAX_ENV} is unset: the coordinator adds, drains and removes no host"),
     }
     start.coordinator.set_fleet(fleet);
-    let token = svc_link::service_token_from_env().unwrap_or_else(|e| fatal(format!("the service link's token: {e}")));
+    let token = svc_link::service_token_from_env().unwrap_or_else(|e| fatal(format!("the service token: {e}")));
     let cert_file = cert_hash_file_from(std::env::var(COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
-    if let Some(dir) = cert_file.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).unwrap_or_else(|e| fatal(format!("{}: {e}", dir.display())));
-    }
     let fenced = Fenced::default();
     let claim_world = policy == game::CrashPolicy::Succession;
     let cuts = claim_world.then(|| crate::coordinator_rt::WorldCuts {
@@ -610,10 +473,10 @@ pub fn run_coordinator() -> ServerExit {
     if claim_world {
         log::info!("[coordinator] ownership `claim`: world cuts of any number of hosts; a crashed host's land goes to an heir (successions)");
     }
-    // Its links name the world (`VOXEL_WORLD_ID`, empty when unset: then only peers that name
-    // none are admitted — hosts and the login service must agree). The login service links to
-    // the coordinator (Elastic 1 Task 6), never to a host: the coordinator relays its orders to a
-    // live host and the answers back.
+    // Its API and its login link name the world (`VOXEL_WORLD_ID`, empty when unset: then only
+    // callers that name none are served — hosts and the login service must agree). The login
+    // service links to the coordinator (Elastic 1 Task 6), never to a host: the coordinator
+    // relays its orders to the gate host and the answers back.
     let world = crate::login_link::link_world_from(std::env::var(crate::auth_edge::WORLD_ID_ENV).ok().as_deref());
     let login = crate::coordinator_rt::LoginListen {
         bind: crate::login_link::login_bind_from(std::env::var(crate::login_link::LOGIN_LINK_BIND_ENV).ok().as_deref())
@@ -628,7 +491,7 @@ pub fn run_coordinator() -> ServerExit {
         start,
         bind,
         token,
-        Some(cert_file),
+        cert_file,
         fenced.clone(),
         cuts,
         policy,

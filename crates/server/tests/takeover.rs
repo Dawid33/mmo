@@ -66,7 +66,6 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     let store = claims.store().clone();
     let s = store.super_region_regions();
     let generation = store.world_generation().unwrap();
-    let reg = ordinal.0;
     let c = claims.clone();
     let read: game::RegionStoreRead = Arc::new(move |rc| c.load_region(rc).map_err(|e| e.to_string()));
     // The drop set reaches the claims, whose `load_region` filters it: the server's filter.
@@ -95,7 +94,7 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     sim.fenced = claims.fenced().clone();
     let switch = SwitchLink(Arc::new(std::sync::Mutex::new((None, 0))));
     if let Some(c) = &t.w.coordinator {
-        switch.replace(quic_world_link(c.addr, t.w.cert.clone(), ordinal, boot, reg));
+        switch.replace(http_world_link(vec![c.url()], t.w.cert.clone(), ordinal));
     }
     sim.manager.set_world_link(Box::new(switch.clone()), boot, 0);
     sim.manager.set_world_map(land_map());

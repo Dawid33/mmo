@@ -89,11 +89,12 @@ play_blocks := if region_blocks == "" { "256" } else { region_blocks }
 export VOXEL_REGION_BLOCKS := test_blocks
 
 # Coordinator replicas of the dev split worlds (Elastic 2b): `just coordinators=2 dev-r3` runs
-# two (1..4), replica n on 127.0.0.1:6480+n (login link 6490+n), ALL sharing one certificate
-# (`coordinator.cert-sha256` and its `.cert`/`.key`, `login-link.cert-sha256`: a host's pin is
-# fixed per dialer), and every host dials `127.0.0.1:6480,127.0.0.1:6481` — it tries them in
-# turn. `just coordinators=2 host N` must be given the same number; `just coordinator
-# claim <n>` starts replica n by hand.
+# two (1..4), replica n serving its HTTPS API on 127.0.0.1:6480+n (login link 6490+n), ALL sharing
+# one certificate (`coordinator.cert-sha256` and its `.cert`/`.key`, `login-link.cert-sha256`: a
+# host's pin is fixed per caller), and every host calls
+# `VOXEL_COORDINATOR_ADDR=https://127.0.0.1:6480,https://127.0.0.1:6481` — it tries them in turn.
+# `just coordinators=2 host N` must be given the same number; `just coordinator claim <n>` starts
+# replica n by hand.
 coordinators := "1"
 
 # Sim-chunk edge in BLOCKS — a BUILD-time constant (`game::CHUNK_BLOCKS`,
@@ -1210,7 +1211,7 @@ run-online: _dev-login-setup
 
 # The world as two processes on the dev Postgres world: `coordinator` (history, claims,
 # world requests; no client edge, no regions) and `host` (regions, the client edge, save
-# cuts) dialing it over the service link. Dev secrets live under the git-ignored
+# cuts) calling its HTTPS API. Dev secrets live under the git-ignored
 # target/dev-r2/: the shared service token (`service-token`) and the coordinator's
 # certificate pin (`coordinator.cert-sha256`, its cert and private key beside it).
 dev_r2_dir := "target/dev-r2"
@@ -1235,7 +1236,8 @@ _dev-token dir:
 _dev-r2-token: (_dev-token dev_r2_dir)
 
 # The world coordinator alone (VOXEL_ROLE=coordinator) for the dev Postgres world
-# (`just pg-up` first): serves hosts on 127.0.0.1:6480 (pin target/dev-r2|r3/coordinator.cert-sha256) and
+# (`just pg-up` first): serves its HTTPS API to hosts on https://127.0.0.1:6480 (pin
+# target/dev-r2|r3/coordinator.cert-sha256) and
 # the login service on 127.0.0.1:6490 (pin login-link.cert-sha256 beside it; login dials it, never a
 # host). World id `dev`, as every dev host and the login registration. Play region size.
 # `ownership` is `claim` (default: any number of hosts, secrets and pins under target/dev-r3/) or
@@ -1243,9 +1245,9 @@ _dev-r2-token: (_dev-token dev_r2_dir)
 # coordinator declares a dead host's succession only under `claim` and refuses a host whose
 # VOXEL_OWNERSHIP says otherwise. It reads no host count.
 # `replica` (0..3, a whole number, positional: `just coordinator claim 1`) starts ANOTHER coordinator replica
-# of the same world (Elastic 2b): replica n listens for hosts on 127.0.0.1:6480+n and for login on 6490+n, and
+# of the same world (Elastic 2b): replica n serves hosts on https://127.0.0.1:6480+n and login on 6490+n, and
 # shares replica 0's certificate files (start replica 0 first: it makes them), so one pin fits every replica;
-# hosts started with `just coordinators=<count> host …` dial all of them in turn.
+# hosts started with `just coordinators=<count> host …` call all of them in turn.
 coordinator ownership="claim" replica="0": (_dev-token (if ownership == "static" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1296,11 +1298,12 @@ printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=$own VOXEL_HOST_NAME=h$i VOXEL_WORL
     VOXEL_SERVER_PORT=$((6466 + 10 * i)) VOXEL_WT_PORT=$((6467 + 10 * i)) VOXEL_PEER_BIND=127.0.0.1:$((6500 + i)) \
     VOXEL_PEER_CERT_HASH_FILE=$dir/h$i.peer.cert-sha256 VOXEL_ADVERTISE_WT=https://127.0.0.1:$((6467 + 10 * i))/ \
     VOXEL_PEER_LINK_DELAY_MS=$2
-# $6 = coordinator replicas (default 1): the host dials all of them, one target naming each.
+# $6 = coordinator replicas (default 1): the host calls all of them, one URL each (one replica:
+# the default, https://127.0.0.1:6480).
 c=${6:-1}
 if [ "$c" -gt 1 ]; then
-    t=127.0.0.1:6480 k=1
-    while [ "$k" -lt "$c" ]; do t=$t,127.0.0.1:$((6480 + k)); k=$((k + 1)); done
+    t=https://127.0.0.1:6480 k=1
+    while [ "$k" -lt "$c" ]; do t=$t,https://127.0.0.1:$((6480 + k)); k=$((k + 1)); done
     printf '%s ' VOXEL_COORDINATOR_ADDR=$t
 fi
 if [ "$own" = claim ]; then
@@ -1328,8 +1331,8 @@ _dev-hosts-check index hosts delay min_hosts:
         echo "host index {{index}} is not below {{hosts}}" >&2; exit 1
     fi
 
-# A region host (VOXEL_ROLE=host) of the dev Postgres world, dialing the coordinator at
-# 127.0.0.1:6480 (started first or later — it waits for the pin). `index` (0..5) picks the
+# A region host (VOXEL_ROLE=host) of the dev Postgres world, calling the coordinator's HTTPS API at
+# https://127.0.0.1:6480 (started first or later — it waits for the pin). `index` (0..5) picks the
 # host's name `h<index>` and ports only: UDP 6466 + 10 x index for clients (WebTransport
 # 6467 + 10 x index) and 127.0.0.1:6500 + index for its peers; the host's id is issued by the
 # store when it registers. Start as many as you like under `claim` (the default: super-regions
@@ -1386,7 +1389,7 @@ dev-r2: kc-up pg-up _dev-login-setup _dev-r2-token
         VOXEL_LOGIN_LINK_BIND=127.0.0.1:6490 VOXEL_LOGIN_LINK_CERT_HASH_FILE="$login_pin" \
         ./target/debug/server >{{dev_r2_dir}}/coordinator.log 2>&1 </dev/null &
     cpid=$!
-    echo "dev-r2: login on http://127.0.0.1:8790 (target/dev-login/login.log), coordinator on 127.0.0.1:6480 ({{dev_r2_dir}}/coordinator.log)"
+    echo "dev-r2: login on http://127.0.0.1:8790 (target/dev-login/login.log), coordinator on https://127.0.0.1:6480 ({{dev_r2_dir}}/coordinator.log)"
     deadline=$(( SECONDS + {{online_wait_secs}} ))
     until [ -s "$pin" ]; do
         if ! kill -0 $cpid 2>/dev/null; then
@@ -1416,7 +1419,7 @@ done
 '''
 
 # The coordinator's env words of `dev-r3` / `go-nogo-r3` (dir $1, store $2): `claim` ownership, world `dev`,
-# hosts on 127.0.0.1:6480, the login service on 127.0.0.1:6490 (its pin: $1/login-link.cert-sha256).
+# hosts on https://127.0.0.1:6480, the login service on 127.0.0.1:6490 (its pin: $1/login-link.cert-sha256).
 dev_r3_coordinator_sh := '''
 printf '%s ' VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_WORLD_ID=dev VOXEL_WORLD_DB=$2 \
     VOXEL_SERVICE_TOKEN_FILE=$1/service-token VOXEL_COORDINATOR_CERT_HASH_FILE=$1/coordinator.cert-sha256 \
