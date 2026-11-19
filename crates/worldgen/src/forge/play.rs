@@ -84,10 +84,9 @@ impl ForgeEstimate {
 }
 
 /// One of the generator's world sizes: a name and the world's two sides. Every
-/// size is 2:1 (west–east twice north–south) and a multiple of 256 m (the play
-/// `REGION_BLOCKS`; all but Tiny's height also of 512 m, the largest) and of
-/// 128 m (the coarsest forge cell), so it is a whole number of regions and of
-/// cells with no snapping.
+/// size is 2:1 (west–east twice north–south) and a multiple of 512 m (the
+/// largest `REGION_BLOCKS`) and of 128 m (the coarsest forge cell), so it is a
+/// whole number of regions and of cells with no snapping.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldSize {
     pub name: &'static str,
@@ -99,7 +98,7 @@ pub struct WorldSize {
 /// [`DEFAULT_WORLD_SIZE`] (Medium); `ForgeParams::default()` (server
 /// auto-forge, tests) stays 16 km / 32 m.
 pub const WORLD_SIZES: [WorldSize; 4] = [
-    WorldSize { name: "Tiny", width_m: 25_088.0, height_m: 12_544.0 },
+    WorldSize { name: "Tiny", width_m: 25_600.0, height_m: 12_800.0 },
     WorldSize { name: "Small", width_m: 50_176.0, height_m: 25_088.0 },
     WorldSize { name: "Medium", width_m: 100_352.0, height_m: 50_176.0 },
     WorldSize { name: "Large", width_m: 200_704.0, height_m: 100_352.0 },
