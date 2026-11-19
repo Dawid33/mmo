@@ -829,6 +829,10 @@ Execution-wide:
   `deploy/modules/world/variables.tf`, `deploy/envs/local/world/main.tf`) staged by filtered patch.
 - Commit trailers name the session's model (`Claude Opus 5.5`), as the session's attribution reminder says, not the
   contract's.
+- No todo list was kept beside the ledger (`progress.md`): the ledger is the one record of what is done, pending and
+  ruled — cost if wrong: none (a second list would only have had to be kept in step).
+- Task 10's documentation was not reviewed on its own: its review was folded into the whole-branch review (area C, ops
+  + docs) — cost if wrong: a documentation error lives one review longer (area C found seven, all in the fix wave).
 
 T1: `TickLoad` is threaded through `ThreadRegionSpawner::with_tick_load` (not a global); the boot beat sends the
 default load and sets no gauge; `tests/schema.rs` `EXPECTED` is a column list (it gained the three columns).
@@ -1015,3 +1019,108 @@ suites it named hold no Elastic 3 test. `just test` / `just test-full` were NOT 
   Elastic 2b closed. The FLAGGED items above are its first input.
 - Dawid's hand checks (TODO.md, "Elastic 3"): the `go-nogo-r3` before / after, the live walk with a short idle dial, the
   scenarios no test exercises, the client tests.
+
+### Final review fix wave (2026-11-19)
+
+The whole-branch review ran in three areas at `aa13107e` (A: world store + server, B: `game`, C: ops + docs), by
+reading; its findings are `final-findings-{A,B,C}.md` in the ledger's folder, the controller's list and rulings
+`final-fix-wave.md`, the fixer's report `final-fix-wave-report.md`. ONE fix wave, one fixer:
+
+| Commit | What |
+|---|---|
+| `bd735340` | fix(host): inherited land is never healed, releases carry their epoch, one holder per parked record |
+| `f04919d8` | fix(coordinator): a landless leaver's in-flight rows get an heir; a Leave waits for a later cut; never an empty Leave |
+| its docs commit | docs: Elastic 3 final review fix wave (this section, CLAUDE.md, TODO.md, the stale docs in code, `twin_check.sh`) |
+
+No test was committed (the regression-only rule; none of these was seen in play or in a log). No migration, no new
+wire message, no new input, no durable core field: link protocol 10 and `COORDINATOR_STATE_VERSION` 6 stand, a dev
+world of `aa13107e` still loads.
+
+**Must fix**
+
+1. **The heal must not take an heir's inherited land** (A-F1 = B-I1). `DirectoryKeeper::pump`
+   (`server/src/claims.rs`): no heal while the read's `hosts` rows show an open run (any row `succeeding`); every row
+   this host owns in the store that its fence does not hold at that epoch (`unfenced`) and that was not healed is
+   WITHHELD from the rows handed to `directory_read` — the manager never sees an unfenced row as `Me`, which also
+   closes the older hazard of an heir's read before its order (FLAGGED T8 (a)). Beyond the list: the COORDINATOR's
+   heal (`on_land_read`, an asker that is the owner → `Assigned`) had the same shape for a `Leave` heir asking for
+   the leaver's land before its order: it now skips land an open run moved to the asker, and everything while a
+   declaration is in flight or the open successions are not known (`inherits_or_may`). The boot's blocking read is
+   unchanged (it runs after `reclaim_own`: a boot holds exactly what its fence holds).
+2. **The player-record double holder** (B-I2), closure (a) + (b): `released_parked` became `parked_written` (per
+   pending world cut, under a directory only). (a) `try_complete_cut` notes every record parked here on land that is
+   not plainly this host's (`parks_on_foreign_land`: another host's, free, masked for a release; inherited land
+   counts as own) that the part writes unchanged; (b) `park_handed` notes a record handed here wrapped in the cut
+   pending here (its sender's part writes it). `cut_committed` → `land_released` → `drop_stored_parked`: each noted
+   record still parked here unchanged, on land not this host's now, with no spawn order waiting on it
+   (`spawn_awaited`), is dropped — the store is its only holder. An abort drops the notes (`release_aborted`).
+3. **Pointers at a leaver that released its land** (B-I3): `reroute_held_for_landless_leavers` now runs for every
+   landless leaver (not only one with held messages): its `departed` entries are dropped, its `redirected` regions
+   answered again (`reanswer_redirected_to`) — not while a player-bearing message is held for it (nothing of that
+   host moves).
+4. **A landless clean leaver with in-flight rows** (A-F3 = B-I4), the coordinator fix (the controller's ruling):
+   (i) `note_clean_rows` (the ticker's `hosts` read): a clean, live, landed, undeclared, unattached row goes into
+   `land_wanted` without an ask; (ii) `leave_wanted` drops a wanted owner whose row shows `!landed`, and
+   `declare_in` refuses a `Leave` whose predecessor has no `super_regions` row left to move and no `in_flight` row
+   (`Declared::Gone`, nothing written); (iii) `LeaveGate` (the process's own, `kept` in `projection!`): a `Leave` is
+   declared only once this replica applied the commit of a cut later than the newest cut made when it first read the
+   row clean, to an heir among that last committed cut's staying participants. `leave_release` logs the
+   landless-with-rows case (WARN). No new input: `note_clean_rows` is part of the unlogged `HostsRead`;
+   `LeaveGate::committed` is set where the (logged, replayed) cut decision is applied.
+5. **Release epochs** (A-F2 = B-I5): `releasing` is `sr → (cut, epoch)`; `release_epochs_of`; `land_released` frees
+   at the released epoch + 1 and keeps a row the directory knows at a newer epoch (no `Released`, not in
+   `recently_released`); `HostClaims::shrink` takes `(sr, epoch)` and removes a key only at that epoch; the server's
+   settle passes the part's fence epochs (∪ `release_epochs_of` for a part it did not stage). `WorldCut::releases`
+   is unchanged. Beyond the list: the keeper's heal compares fence EPOCHS (`unfenced`), so the read path of the
+   same race (the row released at `e`, assigned back at `e + 2`, read before the settle) fences `e + 2` first instead
+   of handing the manager `Me@e+2` over a fence that then shrinks.
+6. **A committed `CutDone` with no part here** (A-S2): with masked releases for that cut it is queued
+   (`committed_untracked`) and settled through `cut_decided` as a part is; without, as before.
+
+**Should fix**: (7) wanted directory reads are spaced by `DIRECTORY_READ_RETRY_MS` (the want kept), and
+`directory_read` no longer clears `directory_wanted` (a want raised while the read was in flight asks for the next);
+(8) `Owns` / `Released` skip `left_peers`, and the re-route keeps everything of a host with a journalled `Received`
+entry (`log::error!`, `debug_assert!`); (9) lock notes: the empty-`Leave` read, the safe cycle of `AssignLand` +
+a `world`-locking decision in one transition against a registration lapsing its name's rows (A-S3); (10) the stale
+docs in code (`thread.rs`, `svc-link`, `placement.rs`, `coordinator/succession.rs`, `coordinator_rt.rs`); (11)
+CLAUDE.md ("Leave and drain" rewritten, the stale "claim" wordings, the heal and release sentences), TODO.md (hand
+checks 1, 2 and the new 7, the FLAGGED items struck), `twin_check.sh` `sql()` → `$out/sql.err`, the module
+variable's description, the two rulings above (C7).
+
+**Rulings (the fixer's; the list did not make them)**
+
+- Eager declaration for EVERY clean, landed, undeclared leaver, not only one holding in-flight rows alone —
+  `HostSeen.landed` is one `EXISTS` over both tables, and a leaver that kept `super_regions` rows kept them because
+  its part carried in-flight rows or a run was open on it, so nothing is gained by waiting for an ask — cost if
+  wrong: a leaver's land moves to an heir nobody needed yet (it is released again when idle); the split is one more
+  subquery in `rows.rs` `hosts`.
+- The store refuses an empty `Leave` as well as the core (the list asked only for the core's guard) — a `hosts` read
+  taken between a leave cut's decision (the row turns clean) and its parts' `COMMIT PREPARED` (the release becomes
+  visible) shows the leaver clean AND landed; the core cannot tell — cost if wrong: one refused declaration per stale
+  read (`Gone`, retried at the next read).
+- `LeaveGate` is process-local, not durable — no core format change after `COORDINATOR_STATE_VERSION` 6; a restart
+  or a new ticker waits for the next committed cut — cost if wrong: a `Leave` delayed by one save period after a
+  ticker change.
+- The heir of a `Leave` must have taken part in the LAST committed cut (stricter than the list's "after a later
+  cut"): a host that registered during that later cut has the same stale journal base — cost if wrong: no heir until
+  the next cut when every candidate is new.
+- A parked record is not dropped while a spawn order for its player is held, taken or pinned here — its session is
+  about to be placed from that record — cost if wrong: the record is written once more by this host and dropped at
+  the next commit.
+- Inherited (masked, not adopted) land counts as this host's for `parks_on_foreign_land` — a record a survivor
+  handed the heir is the heir's to place after adoption — cost if wrong: none seen (no cut begins before adoption).
+- An untracked committed cut is settled with tick 0 in its `WorldPart` — only an abort would record the tick, and
+  the cut is decided — cost if wrong: an abort row with tick 0 for a cut the coordinator called committed (already a
+  contradiction).
+
+**Verification**: `just smoke` still fails at `test-audit` on another session's untracked
+`crates/game/tests/tmp_dwarf_perf.rs`; its four other steps run by hand with the cap — `game --test it --
+rollback_restore:: region_runner::` 4 passed, `server --lib` 3 passed, `server --tests --features test-hooks` and
+`client --lib --bins --tests` checked clean. Also: the whole `game` `it` binary 20 passed / 2 ignored, `just test-r4`
+(the takeover regression, dev Postgres) 1/1, `world-store --tests` checked. `just web-check` / `determinism-wasm`:
+see the report (`final-fix-wave-report.md`). Nothing ran live, on the twin or on orion: every sequence is fixed by
+reading — TODO.md's hand check 7.
+
+**Still open**: the "Not in this wave" minors (provisional-load accounting, the load window, `forward_mailbox` hops,
+mail keyed by a foreign region, the new-ticker warning, `on_land_owner`'s log, the twin's transcript); a scoped
+re-review of this wave; Dawid's hand checks.

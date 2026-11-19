@@ -729,7 +729,8 @@ step "7c. land assigned, idle, released, re-assigned (the hosts' VOXEL_LAND_IDLE
 pg_primary=$(kc -n postgres get pods -l cnpg.io/cluster=pg,cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}' 2> /dev/null || true)
 [ -n "$pg_primary" ] || fail "no CloudNativePG primary pod of cluster pg (namespace postgres)"
 # sql <query>: its rows, columns separated by '|' (psql in the primary, as the postgres superuser).
-sql() { kc -n postgres exec "$pg_primary" -c postgres -- psql -d "$world_db" -v ON_ERROR_STOP=1 -Atc "$1" 2> /dev/null; }
+# psql's errors go to $out/sql.err (appended): a failing query is not read as "no row".
+sql() { kc -n postgres exec "$pg_primary" -c postgres -- psql -d "$world_db" -v ON_ERROR_STOP=1 -Atc "$1" 2>> "$out/sql.err"; }
 # owned_rows: the super_regions rows with an owner (not -1), `sx|sz|owner|epoch`, one per line.
 owned_rows() { sql "select sx, sz, owner, epoch from super_regions where owner <> -1 order by sx, sz"; }
 no_owned_land() {

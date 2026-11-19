@@ -108,7 +108,7 @@ variable "save_secs" {
 }
 
 variable "super_region_regions" {
-  description = "VOXEL_SUPER_REGION_REGIONS: checked against the world row (worldctl super-region before the first claim)."
+  description = "VOXEL_SUPER_REGION_REGIONS: checked against the world row (worldctl super-region before the first owned row)."
   type        = number
   default     = 16
 }

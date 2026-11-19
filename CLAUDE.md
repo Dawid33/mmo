@@ -384,7 +384,7 @@ Verify with:
   `static` is ONE host (a `static` registration beside a live row is refused, `StoreError::NotAlone`); a host under
   `allinone` or no `VOXEL_OWNERSHIP` is refused.
   - **Identity**: a host is a `game::HostId`, issued by `register_host` from `world.next_host_id` (migration
-    `0014_host_ids`) when the process registers — before it claims or links — and **never reused**; nothing may
+    `0014_host_ids`) when the process registers — before it is assigned land or links — and **never reused**; nothing may
     be derived from its number (ports, file names, counts; `HOST_ID_MAX` bounds it). `HostId::SOLO` (0) is role
     `all` / SQLite. A restarted process is a NEW host that owns nothing; its old id is ended by a succession if
     it owned land, else by `end_landless_host` (row dead, no succession, generation unchanged). The coordinator
@@ -426,8 +426,13 @@ Verify with:
     owned row; an assignee asking for its own row is told `Assigned` again); the assignee QUEUES the rows, the
     server's keeper grows the fence (`HostClaims::add`) and only then `claimed` (directory, `Reliable::Owns`,
     `flush_unowned`) — **fence before use**. A lost `Assigned` heals by the next ask, or by the directory read: a
-    row owned by this host, absent from the fence, newer than the manager's epoch is fenced first
-    (`DirectoryKeeper`; a failed read retries after `DIRECTORY_READ_RETRY_MS`, 1 s). With EVERY replica down
+    row owned by this host that the fence does not hold at that epoch, newer than the manager's epoch, is fenced
+    first (`DirectoryKeeper`; a failed read retries after `DIRECTORY_READ_RETRY_MS`, 1 s, which also spaces the reads
+    the manager wants) — **never while a succession is open** (a `hosts` row `succeeding`): a declaration's moved
+    rows look the same and are INHERITED, usable only behind the heir's mask after its order and adoption; and every
+    row of this host the fence lacks is WITHHELD from the read the manager gets (it never sees an unfenced row as
+    `Me`). The coordinator's own heal skips land an open run moved to the asker (or while one is being declared).
+    With EVERY replica down
     nothing is assigned: free land stays free, a need waits (never guessed); owned land runs on.
     **Idle land is released** in the host's OWN cut part: every `LAND_IDLE_SCAN_MS` (1 s) owned super-regions nothing
     holds (`busy_land`: running/stopping regions, arrivals, mailboxes, in-flight targets, homes, moves, held spawns
@@ -435,9 +440,14 @@ Verify with:
     `land_idle_ms` (`LAND_IDLE_MS` 5 min; server dial `VOXEL_LAND_IDLE_MS`, 0 or unparsable refuses the start) are
     MASKED (`releasing`: `owner_of` answers `Unknown`, as for `inheriting` — nothing loads, a need is noted without
     an ask, arrivals take the unowned path) and the part's `WorldCut::releases` frees them with its commit. Committed:
-    the server shrinks the fence (`HostClaims::shrink`) and then `cut_committed` → `land_released` (directory free at
-    `epoch + 1`, parked blobs and the unchanged parked player records that part wrote dropped — the store holds them —
-    `Reliable::Released` to every peer, mask lifted, waits ask); aborted (`cut_failed` → `release_aborted`): the mask
+    the server shrinks the fence (`HostClaims::shrink`, a row only at the epoch it was RELEASED at — `releasing`
+    keeps it) and then `cut_committed` → `land_released` (directory free at the released epoch + 1, parked blobs
+    dropped, `Reliable::Released` to every peer that has not left, mask lifted, waits ask; a row the directory
+    already knows at a newer epoch was assigned again before this host settled the cut — kept, nobody told) →
+    `drop_stored_parked`: **after every committed world cut the store is the only holder of a record parked on land
+    that is not `Me`** (those the part wrote unchanged, and those handed here wrapped in the cut — `parked_written`;
+    not one a spawn order waits on), else the land's next owner places the player from the store while this host
+    keeps writing its copy; aborted (`cut_failed` → `release_aborted`): the mask
     lifts, the land stays. Nothing is released under `static` / all-in-one or while any succession run is open on the
     host. A total crash's land drains back to free this way. A player record parked on released (or another host's)
     land is placed by its land's owner: the gate's `place_spawn` waits (`Placement::Wait`, the land asked for) or
@@ -472,11 +482,11 @@ Verify with:
     `in_flight` row, plus the heirs; heirs are tried landed ∧ takes logins → takes logins → attached live. A
     lapsed landless host that is neither heir nor survivor of an open run is ended by `end_landless_host` (one
     fenced transaction: row dead, no succession, generation untouched — even while a run is open). A host
-    refused a cut part for unsaved traffic with a host a directory read showed dead (land won after the
+    refused a cut part for unsaved traffic with a host a directory read showed dead (land assigned after the
     declaration, beside the dead host) stops for a rollback (`unaccounted_dead`, exit 5): a rollback, never a
     loss, never a stuck world.
   - **The world generation is the last resort**: `static` / `allinone`, a total crash (below), a second
-    LANDED (or recipient's) failure before the settle — the residual: a host that claims land during an open
+    LANDED (or recipient's) failure before the settle — the residual: a host that is assigned land during an open
     run and dies before its settle rolls the world back — / `SUCCESSION_DEADLINE_MS` (30 s) without every
     answer / a recipient's reboot in a declared run, `worldctl rollback <url> --yes` (the first process back then
     raises it once more). The coordinator's `rollback_world` is conditional on the generation it was decided
@@ -497,13 +507,22 @@ Verify with:
   - **Leave and drain**: a cleanly departed host never returns. **A clean leave releases its land** (Elastic 3):
     the leaver's part (`leave_release`, in `try_complete_cut`) carries every super-region its directory gives it in
     `releases` — unless the part carries an `in_flight` row or a succession run is open on it; then it releases
-    nothing (its `in_flight` rows are keyed to its host id, only a succession's adopting part moves them) and the
-    first `LandNeeded` for that land → the owners read names the departed owner → a `Leave` succession at once, ALL
-    its land to the asker. An aborted leave keeps the land, its retry decides again. Peers learn a released leave
-    from a directory read (`end_leaves` asks for one); what a peer held for the leaver goes on by the land's next
-    owner (`reroute_held_for_landless_leavers`, before `forget_landless_leavers`: transfers wait for an owner,
-    intents are refused back, replies go to the mailbox), and such a leaver is forgotten only when its row is
-    pruned. `worldctl drain <url> <host id> [--in <secs>]`
+    nothing (its `in_flight` rows are keyed to its host id, only a succession's adopting part moves them) and a
+    **`Leave` succession** gives ALL its land and rows to ONE heir — `heir_of` among `heir_candidates`, as for a
+    crash, never "the asker". The leaver is wanted (`land_wanted`) from the ticker's `hosts` read — a clean, live,
+    undeclared row that still `owns_land` (a `super_regions` OR an `in_flight` row: a leaver that released its last
+    land earlier and left carrying only in-flight rows is found this way, no ask needed) — or from an owners lookup
+    (a departed host's land is asked for only at the paced scan, once per `LAND_NEEDED_EVERY_MS`). `leave_wanted`
+    declares it between cuts, only once a world cut LATER than the leave cut committed and to an heir that took part
+    in the last committed cut (`LeaveGate`, the process's own observations: a host registered during a cut would
+    wait for a base cut it never takes part in), and **never for a leaver that owns nothing** (dropped when the
+    read shows it landless; the store's declaration refuses an empty `Leave` too, `Gone`). An aborted leave keeps
+    the land, its retry decides again. Peers learn a released leave from a directory read (`end_leaves` asks for
+    one); where a read first shows the leaver landless (`reroute_held_for_landless_leavers`, before
+    `forget_landless_leavers`) their `departed` / `redirected` pointers at it are dropped (its committed part wrote
+    every player it held: the store places them) and what they held for it goes on by the land's next owner
+    (transfers wait for an owner, intents are refused back, replies go to the mailbox); such a leaver is forgotten
+    only when its row is pruned. `worldctl drain <url> <host id> [--in <secs>]`
     (default `DRAIN_WARNING_SECS` 300, at most `DRAIN_MAX_SECS` 7 days; a mark only moves earlier, there is no
     un-drain) sets `hosts.drain_at_ms`, which a `claim` host reads at its heartbeat: it tells its home sessions
     the deadline (`ServerPacket::HostDraining { at_tick }`), stops being the gate, and at the deadline (its
@@ -534,7 +553,7 @@ Verify with:
     a changed version drops that region's cached LOD (`stored_terrain_changed` → `invalidate_region_lod`).
   - Env: `VOXEL_PEER_BIND` (127.0.0.1:6500), `VOXEL_PEER_CERT_HASH_FILE`,
     `VOXEL_ADVERTISE_QUIC`/`_WT` (what clients are told), `VOXEL_WT_PORT`, `VOXEL_PEER_LINK_DELAY_MS`
-    (measurement only); `worldctl super-region <url> <n>` (only before the first claim) + hosts run with
+    (measurement only); `worldctl super-region <url> <n>` (only before the first owned row) + hosts run with
     `VOXEL_SUPER_REGION_REGIONS=n`.
   - `just dev-r3 <hosts> [delay]`: login + coordinator + every host under `scripts/dev_r3.sh` (restarts a host as
     a NEW host on exit 5, 137, and 3 under `claim`, a coordinator replica as a new replica on 137, 3, 4; the stack
@@ -565,10 +584,12 @@ Verify with:
   holds those rows until its decision: a region load there WAITS (so the mask is up before the part reaches the
   store and lifts only after the shrink), a declaration of the releaser waits and then moves only what is left.
   **Fence before use; shrink before the next part**: `HostClaims::add` runs before the manager learns assigned
-  land, `HostClaims::shrink` (the part's releases ∪ `releases_of(cut)`) before `cut_committed`; a directory read
-  older than a release adds nothing back (the keeper's epoch guard). A new `hosts` / `super_regions` /
+  land, `HostClaims::shrink` (the part's releases at its fence's epochs ∪ `release_epochs_of(cut)`; a row leaves
+  only at its released epoch) before `cut_committed`; a directory read older than a release adds nothing back (the
+  keeper's epoch guard); a `CutDone` saying COMMITTED for a cut with masked releases and no part tracked here is
+  settled by the store's decision, never as a failure. A new `hosts` / `super_regions` /
   `successions` statement needs its lock walk
-  (lock order and the one safe deadlock cycle: the module notes of `world-store/src/succession.rs`; the
+  (lock order and the safe deadlock cycles: the module notes of `world-store/src/succession.rs`; the
   operator's in `operator.rs`; unfenced `successions` writers are the operator's rollback and a
   total-crash registration). The settles↔adopts pairing (a settled
   succession's heir part carried `adopts`) is a coordinator-side invariant the store does not enforce — it

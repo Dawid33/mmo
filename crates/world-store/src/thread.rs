@@ -106,7 +106,6 @@ pub(crate) enum Request {
     ResolvePlayer(String, Reply<(PlayerId, Option<PlayerRecord>)>),
     /// Claim the list; with a boot, only while that boot's `hosts` row is live.
     ClaimSuperRegions(HostId, Vec<SuperRegion>, Option<u64>, Reply<Fence>),
-    /// Free the fence's super-regions.
     /// Elastic 2b Task 3: the coordinator row's first write (first writer wins).
     BootstrapCoordinator(Vec<u8>, Vec<u8>, Reply<crate::Bootstrapped>),
     RaiseCoordinatorEpoch(Reply<Option<u64>>),

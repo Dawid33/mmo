@@ -44,7 +44,9 @@ pub use target::LinkTarget;
 /// hops, `LeaveRequest`), and the login relay between hosts (spawn orders, kicks, session ends;
 /// `SpawnAck` names the placing host's addresses).
 /// 5: R4 — a host's hello carries its registration number (`PeerRole::Host::reg`, not a claim
-/// epoch); peers tell each other their claims (`Reliable::Owns`, `Volatile::ClaimWanted`).
+/// epoch); peers tell each other their claims (`Reliable::Owns`; `Volatile::ClaimWanted` was
+/// the ask between hosts until Elastic 3 — the variant stays for the wire's order and is
+/// ignored: a host asks the coordinator, `HostMsg::LandNeeded`, version 10).
 /// 6: R4's fix wave — `HostMsg::Attach` carries the host's crash policy (`policy`): a
 /// coordinator of several hosts refuses one that is not its own.
 /// 7: Elastic 1 — host ids are issued at registration and 64 bits wide on the wire
