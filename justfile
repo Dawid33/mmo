@@ -2457,15 +2457,16 @@ orion-login-token-push:
     unset tok
 
 # Every test in the repository that is not tagged slow: both Rust workspaces (the root and
-# quest/), the vendored forks' upstream tests, the wasm32 determinism gates, the quest fuzz
-# regressions and the website's node test — after `test-audit`. Every committed test is a
+# quest/), the vendored forks' upstream tests, the quest fuzz regressions and the website's
+# node test — after `test-audit`. Every committed test is a
 # regression or a gate (CLAUDE.md, Testing); a test slower than 100 ms carries
 # `#[ignore = "slow: >100ms — run via just test-full"]` and runs only in `test-full`.
 # Keeps going after a failing stage and ends with one PASS/FAIL line per stage.
 test: (_test_all "fast")
 
-# `just test` plus every slow-tagged test (`--include-ignored`), the takeover rig against the
-# dev Postgres included (started first).
+# `just test` plus every slow-tagged test (`--include-ignored`), the wasm32 determinism runs
+# (`determinism-wasm`, `quest-wasm`) and the takeover rig against the dev Postgres (started
+# first).
 test-full: pg-up (_test_all "full")
 
 _test_all mode:
@@ -2487,9 +2488,12 @@ _test_all mode:
     stage physics-next-upstream just physics-next-upstream
     stage slotmapd {{cap}} {{cargo}} test -p slotmapd --no-fail-fast -- $ign
     if [ "{{mode}}" = full ]; then stage takeover just test-r4; fi
-    stage determinism-wasm just determinism-wasm
     stage quest just quest-test "--workspace -- $ign"
-    stage quest-wasm just quest-wasm
+    # The wasm32 determinism runs (a wasm build each, under node): test-full only.
+    if [ "{{mode}}" = full ]; then
+        stage determinism-wasm just determinism-wasm
+        stage quest-wasm just quest-wasm
+    fi
     for d in quest/fuzz/regressions/*/; do
         t=$(basename "$d")
         stage "quest-fuzz-replay $t" just quest-fuzz-replay "$t"

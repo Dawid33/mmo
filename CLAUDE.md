@@ -203,9 +203,9 @@ Verify with:
 - `just determinism-wasm` after touching sim math, the physics forks, or anything hashed/serialized.
   `physics_goldens::` pins physics behaviour (re-record only on purpose).
 - A test slower than 100 ms is tagged `#[ignore = "slow: >100ms — run via just test-full"]`. `just test` runs every
-  fast test everywhere (both workspaces, the vendored forks' upstream subset, the wasm32 gates, the quest fuzz
-  regressions, the website's node test), `just test-full` adds the slow ones (and the takeover rig against the dev
-  Postgres). Both keep going after a failing stage and end with a PASS/FAIL line per stage; run them when the user
+  fast test everywhere (both workspaces, the vendored forks' upstream subset, the quest fuzz regressions, the
+  website's node test), `just test-full` adds the slow ones, the wasm32 determinism runs (`determinism-wasm`,
+  `quest-wasm`) and the takeover rig against the dev Postgres. Both keep going after a failing stage and end with a PASS/FAIL line per stage; run them when the user
   asks or a change is wide — say so first.
 - Headless client harnesses must use a tiny world (`set_lod_table(&[])`, near radius 0) or they OOM.
 - A test whose outcome reads block props calls `common::install_real_block_props()` first.
