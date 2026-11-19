@@ -3,7 +3,7 @@
 //! WebTransport session per server host (R3): [`TAG_SERVER_FRAME`], the connection's
 //! key (`connections`: one per open, never reused) as a little-endian `u32`, then the
 //! frame as `game::encode_packet` made it. Pure bytes, compiled on every target so the
-//! codec is unit-tested natively too (and on wasm32: `tests/web_frame_wasm.rs`).
+//! codec is the same on both.
 
 /// First byte of a page → worker message: a bincode `ToSim` follows.
 pub const TAG_TO_SIM: u8 = 0;

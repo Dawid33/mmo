@@ -65,38 +65,53 @@ def find_tests(path):
 
 
 def find_tests_text(lines):
-    """find_tests over a file's lines."""
+    """(line, name, doc_lines, body_lines) for each test fn in a file's lines. A test attribute with no `fn` after it
+    (only attributes and comments between) yields the name `<no fn after a test attribute>`."""
     out = []
     i = 0
     while i < len(lines):
-        if TEST_ATTR.match(lines[i]):
-            j = i
-            name = None
-            while j < min(i + 8, len(lines)):
-                m = FN.match(lines[j])
-                if m:
-                    name = m.group(4)
-                    break
-                j += 1
-            if name is None:
-                i += 1
-                continue
-            # The comment/attribute block above the fn.
-            k = j - 1
-            while k >= 0 and re.match(r"^\s*(//|#\[|#!\[)", lines[k]):
-                k -= 1
-            doc = lines[k + 1 : j]
-            indent = len(lines[j]) - len(lines[j].lstrip())
+        if not TEST_ATTR.match(lines[i]):
+            i += 1
+            continue
+        # the fn this attribute belongs to: past further attributes (multi-line ones too) and comments
+        j, depth, name = i, 0, None
+        same = re.search(r"\]\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s+(\w+)", lines[i])
+        if same:
+            name = same.group(4)
+        while name is None and j < len(lines):
+            ln = lines[j]
+            m = FN.match(ln) if depth == 0 else None
+            if m:
+                name = m.group(4)
+                break
+            stripped = ln.strip()
+            if depth == 0 and not (stripped.startswith(("#[", "//")) or stripped == "" and j == i):
+                break
+            depth += ln.count("(") + ln.count("[") - ln.count(")") - ln.count("]")
+            j += 1
+        if name is None:
+            out.append((i + 1, "<no fn after a test attribute>", [], [lines[i]]))
+            i += 1
+            continue
+        # the comment/attribute block above the fn
+        k = j - 1
+        while k >= 0 and (k >= i or re.match(r"^\s*(//|#\[|#!\[)", lines[k])):
+            k -= 1
+        doc = lines[k + 1 : j]
+        # the body: a fn whose braces balance on its own line ends there; else the next `}` at its indent
+        fn_line = lines[j]
+        if "{" in fn_line and fn_line.count("{") == fn_line.count("}"):
+            end = j
+        else:
+            indent = len(fn_line) - len(fn_line.lstrip())
             end = j + 1
             while end < len(lines):
                 ln = lines[end]
                 if ln.strip() == "}" and len(ln) - len(ln.lstrip()) <= indent:
                     break
                 end += 1
-            out.append((j + 1, name, doc, lines[j : end + 1]))
-            i = end + 1
-        else:
-            i += 1
+        out.append((j + 1, name, doc, lines[j : end + 1]))
+        i = end + 1
     return out
 
 
@@ -238,6 +253,10 @@ def other_tests(paths):
 
 
 def check(paths):
+    missing = [p for p in paths if not os.path.exists(os.path.join(ROOT, p))]
+    if missing:
+        print(f"test-audit: no such path: {' '.join(missing)}", file=sys.stderr)
+        return 2
     bad = []
     counts = {"Regression": 0, "Gate": 0}
     for path, line, name, kind in other_tests(paths):

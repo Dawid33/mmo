@@ -3,7 +3,7 @@
 //! every link delay 0..=3, then `SEEDS` seeds of each schedule mode (`shuffled`, `late`,
 //! `jittery`, the link delay rolling through 0..=3 with the seed). Every round checks
 //! conservation across hosts ([`MultiRig::assert_conserved_world`]); a failure names a
-//! replayable `(mode, seed, delay)`. Run via `just test-threads`.
+//! replayable `(mode, seed, delay)`. Its tests are tagged slow: `just test-full`.
 use crate::common::h;
 use game::{HostId, InlineSchedule, RegionCoords, FLIP_HYSTERESIS, REGION_SIZE};
 

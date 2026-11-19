@@ -2885,7 +2885,7 @@ impl GameInstanceManager {
                 "[client] KEEP-UP WARNING: prediction log depth {} (samples {:?}) — \
                  reconcile is falling behind the server stream (death-spiral \
                  signature). Replay costs ~1 region tick per event; profile the \
-                 region tick / see crates/client/tests/keepup_budget.rs",
+                 region tick (`just perf-client`)",
                 log_depth, s,
             );
         }

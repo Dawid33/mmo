@@ -55,8 +55,6 @@ tokio = { workspace = true, features = ["macros", "time"] }
 pg-test-support = { path = "../pg-test-support" }
 # Raw SQL on the takeover rig's store.
 sqlx = { workspace = true }
-# The login service's own kick queue and host links, in the takeover rig.
-login = { workspace = true }
 
 [[test]]
 name = "takeover"
