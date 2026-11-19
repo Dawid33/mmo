@@ -258,7 +258,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The region a login with `record_region` is placed in: its record's (off the map: the
     /// spawn region), or [`SPAWN_REGION`] with no record.
     pub(super) fn spawn_region(&self, record_region: Option<RegionCoords>) -> RegionCoords {
-        record_region.filter(|rc| !crate::off_map(self.map_extent(), *rc)).unwrap_or(SPAWN_REGION)
+        record_region
+            .filter(|rc| !crate::off_map(self.map_extent(), *rc))
+            .map_or(SPAWN_REGION, |rc| crate::canonical(self.map_extent(), rc))
     }
 
     /// Whether every peer that may hold a player live finished its first sync of its current

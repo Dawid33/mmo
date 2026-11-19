@@ -126,11 +126,15 @@ impl PathPlan {
         map: Option<&RouteMap>,
         max_nodes: u32,
     ) -> Option<PathPlan> {
-        let goal = onto_map(goal, map.map(RouteMap::extent))?;
+        let extent = map.map(RouteMap::extent);
+        let goal = onto_map(goal, extent)?;
         let goal_region = goal.region()?;
-        let src = OnMap { src, here, map: map.map(RouteMap::extent) };
+        // The goal's image nearest `here` (on a wrapped map the short way
+        // round; else the goal itself): every frame computation below uses it.
+        let near = nearest_image(&goal, goal_region, here, extent);
+        let src = OnMap { src, here, map: extent };
         let n = REGION_BLOCKS as i32;
-        let gl = goal.local_column(here);
+        let gl = near.local_column(here);
         let world = |path: Vec<TilePos>| {
             path.into_iter()
                 .map(|p| WorldBlockPos::from_local(here, crate::BlockPos::new(p[0], p[1], p[2])))
@@ -151,17 +155,20 @@ impl PathPlan {
         // seams) cannot be reached (water, a cliff, a tree), into either
         // region beside it, x first: the walk re-plans from there.
         let next = next_region(here, goal_region, map);
-        let toward = hint(from, &goal, here);
-        let mut steps = vec![next];
-        if next.x != here.x && next.z != here.z {
-            for side in [RegionCoords::new(next.x, here.z), RegionCoords::new(here.x, next.z)] {
-                if map.is_none_or(|m| m.passable(side)) {
+        let toward = hint(from, &near, here);
+        // Steps as offsets from `here` (across a wrapped seam the short way).
+        let (sx, sz) = crate::region_delta(extent, here, next);
+        let mut steps = vec![(sx, sz)];
+        if sx != 0 && sz != 0 {
+            for side in [(sx, 0), (0, sz)] {
+                let rc = crate::canonical(extent, RegionCoords::new(here.x + side.0, here.z + side.1));
+                if map.is_none_or(|m| m.passable(rc)) {
                     steps.push(side);
                 }
             }
         }
         for step in steps {
-            let accept = |p: TilePos| past_seam(p, here, step);
+            let accept = |p: TilePos| past_seam(p, step);
             if let Some(path) = find_path_toward(&src, from, toward, accept, max_nodes).filter(|p| p.len() > 1) {
                 return Some(PathPlan { path: world(path), reaches_goal: false });
             }
@@ -179,9 +186,10 @@ impl PathPlan {
 /// route over `map` ([`route_step`]), or the straight line's next region
 /// ([`line_step`]) when there is no map (procedural) or no route around.
 /// `to` itself when `from == to`. Pure: every region and the client step
-/// the same way.
+/// the same way. Canonical in, canonical out: across a wrapped seam the
+/// route goes the short way round.
 pub fn next_region(from: RegionCoords, to: RegionCoords, map: Option<&RouteMap>) -> RegionCoords {
-    map.and_then(|m| route_step(from, to, m)).unwrap_or_else(|| line_step(from, to))
+    map.and_then(|m| route_step(from, to, m)).unwrap_or_else(|| line_step(from, to, map.map(RouteMap::extent)))
 }
 
 /// Cost of an orthogonal / diagonal step of the coarse route.
@@ -200,10 +208,12 @@ pub fn route_step(from: RegionCoords, to: RegionCoords, map: &RouteMap) -> Optio
     if from == to {
         return None;
     }
+    let extent = map.extent();
     let ok = |rc: RegionCoords| rc == from || rc == to || map.passable(rc);
+    // Distances by the map's delta (across a wrapped seam the short way).
     let h = |rc: RegionCoords| {
-        let dx = (i64::from(rc.x) - i64::from(to.x)).unsigned_abs();
-        let dz = (i64::from(rc.z) - i64::from(to.z)).unsigned_abs();
+        let (dx, dz) = extent.delta(to, rc);
+        let (dx, dz) = (i64::from(dx).unsigned_abs(), i64::from(dz).unsigned_abs());
         let (lo, hi) = (dx.min(dz), dx.max(dz));
         ROUTE_DIAG * lo + ROUTE_STEP * (hi - lo)
     };
@@ -235,13 +245,18 @@ pub fn route_step(from: RegionCoords, to: RegionCoords, map: &RouteMap) -> Optio
         }
         expanded += 1;
         for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
-            let (Some(x), Some(z)) = (p.x.checked_add(dx), p.z.checked_add(dz)) else { continue };
-            let q = RegionCoords::new(x, z);
+            // Neighbours canonical (a wrapped map's east of its last column
+            // is its first); off the map they stay plain, as `from` / `to` may.
+            let step = |dx: i32, dz: i32| {
+                let (x, z) = (p.x.checked_add(dx)?, p.z.checked_add(dz)?);
+                Some(extent.neighbour(p, dx, dz).unwrap_or(RegionCoords::new(x, z)))
+            };
+            let Some(q) = step(dx, dz) else { continue };
             if !ok(q) {
                 continue;
             }
             let diagonal = dx != 0 && dz != 0;
-            if diagonal && !ok(RegionCoords::new(x, p.z)) && !ok(RegionCoords::new(p.x, z)) {
+            if diagonal && !step(dx, 0).is_some_and(ok) && !step(0, dz).is_some_and(ok) {
                 continue;
             }
             let gq = gp + if diagonal { ROUTE_DIAG } else { ROUTE_STEP };
@@ -259,9 +274,17 @@ pub fn route_step(from: RegionCoords, to: RegionCoords, map: &RouteMap) -> Optio
 /// The straight line's step: the neighbour of `from` (8-connected) whose
 /// Chebyshev distance to `to` is one less, moving along each axis only
 /// toward `to`, nearest the straight line from `from` to `to` (ties: the
-/// lower `(x, z)`). `to` itself when `from == to`. Integer only.
-pub fn line_step(from: RegionCoords, to: RegionCoords) -> RegionCoords {
-    let (lx, lz) = (i128::from(to.x) - i128::from(from.x), i128::from(to.z) - i128::from(from.z));
+/// lower `(x, z)`). `to` itself when `from == to`. Integer only. On a
+/// wrapped `map` the line runs the short way round (`MapExtent::delta`) and
+/// the step is canonical.
+pub fn line_step(from: RegionCoords, to: RegionCoords, map: Option<MapExtent>) -> RegionCoords {
+    let (lx, lz) = match map {
+        Some(m) if m.wrap_x => {
+            let (dx, dz) = m.delta(from, to);
+            (i128::from(dx), i128::from(dz))
+        }
+        _ => (i128::from(to.x) - i128::from(from.x), i128::from(to.z) - i128::from(from.z)),
+    };
     if (lx, lz) == (0, 0) {
         return to;
     }
@@ -277,12 +300,13 @@ pub fn line_step(from: RegionCoords, to: RegionCoords) -> RegionCoords {
     }
     let off_line = |&(dx, dz): &(i128, i128)| ((lx * dz - lz * dx).abs(), dx, dz);
     let (dx, dz) = steps.into_iter().min_by_key(off_line).expect("a step toward a different region");
-    RegionCoords::new(from.x + dx as i32, from.z + dz as i32)
+    crate::canonical(map, RegionCoords::new(from.x + dx as i32, from.z + dz as i32))
 }
 
-/// Whether tile `p` (in `here`'s frame) lies in region `next` at least
-/// [`PORTAL_DEPTH_BLOCKS`] past each seam between `here` and `next`.
-fn past_seam(p: TilePos, here: RegionCoords, next: RegionCoords) -> bool {
+/// Whether tile `p` (in `here`'s frame) lies in the region `step` (an
+/// offset from `here`) at least [`PORTAL_DEPTH_BLOCKS`] past each seam
+/// between the two.
+fn past_seam(p: TilePos, step: (i32, i32)) -> bool {
     let n = REGION_BLOCKS as i32;
     let d = PORTAL_DEPTH_BLOCKS;
     let axis = |v: i32, step: i32| match step.signum() {
@@ -290,7 +314,7 @@ fn past_seam(p: TilePos, here: RegionCoords, next: RegionCoords) -> bool {
         -1 => v < -d,
         _ => (0..n).contains(&v),
     };
-    axis(p[0], next.x - here.x) && axis(p[2], next.z - here.z)
+    axis(p[0], step.0) && axis(p[2], step.1)
 }
 
 /// The A* heuristic's target for a walk from `from` toward `goal`: the
@@ -310,7 +334,8 @@ fn hint(from: TilePos, goal: &Goal, here: RegionCoords) -> TilePos {
 }
 
 /// `goal` moved onto its nearest block column inside `map` (unchanged when
-/// unbounded or already inside); `None` for an empty map.
+/// unbounded or already inside; on a wrapped map x is folded, canonical,
+/// and only z clamped); `None` for an empty map.
 fn onto_map(goal: &Goal, map: Option<MapExtent>) -> Option<Goal> {
     let Some(m) = map else { return Some(*goal) };
     if m.width == 0 || m.height == 0 {
@@ -319,7 +344,24 @@ fn onto_map(goal: &Goal, map: Option<MapExtent>) -> Option<Goal> {
     let n = REGION_BLOCKS as i64;
     let lo = [i64::from(m.origin.x) * n, i64::from(m.origin.z) * n];
     let hi = [lo[0] + i64::from(m.width) * n - 1, lo[1] + i64::from(m.height) * n - 1];
-    Some(Goal { column: [goal.column[0].clamp(lo[0], hi[0]), goal.column[1].clamp(lo[1], hi[1])], ..*goal })
+    let x = if m.wrap_x {
+        m.canonical_block(WorldBlockPos { x: goal.column[0], y: 0, z: 0 }).x
+    } else {
+        goal.column[0].clamp(lo[0], hi[0])
+    };
+    Some(Goal { column: [x, goal.column[1].clamp(lo[1], hi[1])], ..*goal })
+}
+
+/// `goal` (in `goal_region`, canonical) moved by whole map widths to the
+/// image nearest `here` ([`crate::region_delta`]); `goal` itself on a map
+/// that does not wrap, or with none.
+fn nearest_image(goal: &Goal, goal_region: RegionCoords, here: RegionCoords, map: Option<MapExtent>) -> Goal {
+    let (dx, _) = crate::region_delta(map, here, goal_region);
+    let shift = i64::from(here.x) + i64::from(dx) - i64::from(goal_region.x);
+    if shift == 0 {
+        return *goal;
+    }
+    Goal { column: [goal.column[0] + shift * REGION_BLOCKS as i64, goal.column[1]], ..*goal }
 }
 
 /// A [`TileSource`] with every tile in a region off `map` read as air
@@ -334,7 +376,7 @@ impl<S: TileSource> OnMap<'_, S> {
     fn on_map(&self, x: i32, z: i32) -> bool {
         let Some(m) = self.map else { return true };
         let n = REGION_BLOCKS as i32;
-        m.contains(RegionCoords::new(self.here.x + x.div_euclid(n), self.here.z + z.div_euclid(n)))
+        m.neighbour(self.here, x.div_euclid(n), z.div_euclid(n)).is_some()
     }
 }
 

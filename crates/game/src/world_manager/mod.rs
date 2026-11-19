@@ -1705,9 +1705,51 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_map.as_ref().map(WorldMap::extent)
     }
 
-    /// Play: move the client's player to the landing spot of `target`.
-    /// Refusals change no state.
+    /// `rc` in its canonical form on the world map ([`crate::canonical`]):
+    /// what every region coordinate a client sends becomes before use.
+    fn canonical(&self, rc: RegionCoords) -> RegionCoords {
+        crate::canonical(self.map_extent(), rc)
+    }
+
+    /// [`crate::halo::neighbours`] of `rc`, canonical, the ones off the map
+    /// dropped (across a wrapped seam a neighbour is the map's other end).
+    /// Equal to `halo::neighbours` with no map.
+    fn halo_neighbours(&self, rc: RegionCoords) -> Vec<RegionCoords> {
+        let map = self.map_extent();
+        let mut out: Vec<RegionCoords> = Vec::with_capacity(8);
+        for n in crate::halo::neighbours(rc) {
+            if crate::off_map(map, n) {
+                continue;
+            }
+            let n = crate::canonical(map, n);
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+        out
+    }
+
+    /// A client's input with every world position it names canonical: a
+    /// `MoveTo` goal's column and a `DevBreakBlock`'s block.
+    fn canonical_input(&self, kind: GameEventKind) -> GameEventKind {
+        let Some(map) = self.map_extent() else { return kind };
+        match kind {
+            GameEventKind::Order(c, crate::Order::MoveTo(goal)) => {
+                let at = map.canonical_block(crate::WorldBlockPos { x: goal.column[0], y: 0, z: goal.column[1] });
+                GameEventKind::Order(c, crate::Order::MoveTo(crate::Goal { column: [at.x, at.z], ..goal }))
+            }
+            GameEventKind::Order(c, crate::Order::DevBreakBlock(pos)) => {
+                GameEventKind::Order(c, crate::Order::DevBreakBlock(map.canonical_block(pos)))
+            }
+            kind => kind,
+        }
+    }
+
+    /// Play: move the client's player to the landing spot of `target`
+    /// (canonical: the dispatch folds what the client sent). Refusals change
+    /// no state.
     fn play_region(&mut self, id: ClientId, target: RegionCoords, now_ms: u64) {
+        debug_assert_eq!(target, self.canonical(target), "play_region takes a canonical region");
         let refuse = |this: &Self, r: PlayRefusal| {
             let _ = this.out.send((Some(id), ServerPacket::PlayRefused(target, r)));
         };
@@ -1872,9 +1914,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.refresh_keepalive(m.target, now_ms);
     }
 
-    /// Where a player lands in `rc`: the world map tile's dry landing, else the society
-    /// grid's, else the region's centre.
+    /// Where a player lands in `rc` (canonical): the world map tile's dry landing, else the
+    /// society grid's, else the region's centre.
     fn landing_in(&self, rc: RegionCoords) -> [u32; 2] {
+        debug_assert_eq!(rc, self.canonical(rc), "landing_in takes a canonical region");
         let edge = crate::REGION_BLOCKS as u32;
         let on_map = self.world_map.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing);
         let on_grid = self.society_grid.as_ref().and_then(|g| g.landing(rc));
@@ -1966,11 +2009,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let home = self.homes.get(&id).copied();
                     let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(home, id)));
                 }
-                ClientPacket::RequestRegionConnection(rc) => self.subscribe(id, rc),
-                ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
+                // Every region a client names is folded onto the map first (the
+                // regions, the host path and the store see only canonical ones).
+                ClientPacket::RequestRegionConnection(rc) => self.subscribe(id, self.canonical(rc)),
+                ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, self.canonical(rc), now_ms),
                 ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
-                ClientPacket::PlayRegion(rc) => self.play_region(id, rc, now_ms),
+                ClientPacket::PlayRegion(rc) => self.play_region(id, self.canonical(rc), now_ms),
                 ClientPacket::Leave => self.client_disconnected(id, now_ms),
                 ClientPacket::StartAdventure(site) => self.start_adventure(id, site, now_ms),
                 ClientPacket::EndAdventure => self.end_adventure(id, now_ms),
@@ -1989,6 +2034,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                         ClientPacket::GameEventAfterTick(event, tick) => (event, Some(tick)),
                         ClientPacket::GameEvent(event) => (event, None),
                         _ => unreachable!(),
+                    };
+                    let event = crate::GameEvent {
+                        region_id: self.canonical(event.region_id),
+                        kind: self.canonical_input(event.kind),
+                        ..event
                     };
                     match event.kind {
                     GameEventKind::Tick => {}
@@ -2196,7 +2246,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // out as deltas. Stream-borne, so their clients replay it.
                 // Stamped with its final tick, like those deltas: a lagging
                 // neighbour still holding one applies the reseed after it.
-                for n in crate::halo::neighbours(rc) {
+                for n in self.halo_neighbours(rc) {
                     if self.is_foreign(n) {
                         // Another host's: only when it runs it (`foreign_running`).
                         if let Some(seed) = crate::halo::halo_seed_from_snapshot(rc, n, &far) {
@@ -2256,6 +2306,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // still holds them (`save_cut.rs`).
                 let view = self.in_cut_view(rc);
                 for (mut bundle, target) in list {
+                    // Canonical (the region sends it so; folded again here).
+                    let target = self.canonical(target);
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
                     let off_map = crate::off_map(self.map_extent(), target);
                     // Bodies that would wake their target: a player, a person no
@@ -2294,7 +2346,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // Where it left, in `rc`'s frame (a person absorbed at the seam is
                     // listed there, bit-exact: a rebase there and back is not).
                     let left = bundle_at(&bundle);
-                    bundle.rebase(rc, target);
+                    // Across a wrapped seam the short way: the target's frame is one region on.
+                    bundle.rebase_by(crate::region_delta(self.map_extent(), rc, target));
                     if hand_off {
                         // A player: it and its session's home go to that host.
                         self.hand_off_to_peer(rc, target, stamp, bundle, view, now_ms);
@@ -2368,8 +2421,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // mirrors were ended (`halo_source_lost`); none comes back.
                 let list = if self.regions.contains_key(&rc) { list } else { Vec::new() };
                 for (mut msg, target) in list {
+                    let target = self.canonical(target);
+                    let delta = crate::region_delta(self.map_extent(), rc, target);
                     if self.is_foreign(target) {
-                        msg.rebase(rc, target);
+                        msg.rebase_by(delta);
                         self.halo_to_peer(target, crate::Volatile::HaloEntity { to: target, msg, stamp });
                         continue;
                     }
@@ -2379,7 +2434,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if !running {
                         continue;
                     }
-                    msg.rebase(rc, target);
+                    msg.rebase_by(delta);
                     self.send_to_region(target, RegionInput::Transfer(msg.into_event(), stamp));
                 }
             }
@@ -2709,7 +2764,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             if !foreign || live || !(changed || stale) {
                 continue;
             }
-            let running: Vec<RegionCoords> = crate::halo::neighbours(rc)
+            let running: Vec<RegionCoords> = self
+                .halo_neighbours(rc)
+                .into_iter()
                 .filter(|n| self.owns(*n) && self.regions.get(n).is_some_and(|l| !l.stopping))
                 .collect();
             for n in running {
@@ -3271,7 +3328,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if bundle.carried.drops.is_empty() {
             return;
         }
-        bundle.rebase(target, source);
+        bundle.rebase_by(crate::region_delta(self.map_extent(), target, source));
         let t = bundle.body.pose.translation;
         let b = crate::BLOCK_VOXELS as f32;
         let n = crate::REGION_BLOCKS as i32;
@@ -3789,6 +3846,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     ///
     /// `held_here`: the record was this host's parked one (not the store's, read by the edge).
     fn place_player(&mut self, id: ClientId, record: Option<PlayerRecord>, held_here: bool, now_ms: u64) {
+        // Its region canonical (a record is stored so; folded again here).
+        let record = record.map(|r| PlayerRecord { region: self.canonical(r.region), ..r });
         let target = match &record {
             Some(r) if !crate::off_map(self.map_extent(), r.region) => r.region,
             _ => SPAWN_REGION,
@@ -4289,10 +4348,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn seed_halo(&mut self, rc: RegionCoords, input: &Sender<RegionInput>) {
         let mut generate_there = Vec::new();
         let mut load_there = Vec::new();
-        for n in crate::halo::neighbours(rc) {
-            if crate::off_map(self.map_extent(), n) {
-                continue;
-            }
+        for n in self.halo_neighbours(rc) {
             // Another host runs it: asked of that host (`peers.rs`); one it does not run
             // is seeded like a parked region of this host.
             if self.is_foreign(n) && self.foreign_halo_request(rc, n) {
@@ -4434,7 +4490,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// terrain cache may be older than the deltas the neighbour applied).
     fn halo_source_lost(&mut self, rc: RegionCoords) {
         let stamp = self.spawner.world_tick();
-        for n in crate::halo::neighbours(rc) {
+        for n in self.halo_neighbours(rc) {
             if self.regions.get(&n).is_some_and(|l| !l.stopping) {
                 self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloSourceGone(rc), stamp));
             }

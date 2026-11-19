@@ -108,7 +108,9 @@ impl Rollback {
                     1 => n - 1,
                     _ => along,
                 };
-                let c = [axis(from.x - here.x, along), axis(from.z - here.z, along)];
+                // The side `from` lies on (across a wrapped seam the short way).
+                let (dx, dz) = crate::region_delta(map.map(RouteMap::extent), here, from);
+                let c = [axis(dx, along), axis(dz, along)];
                 nearest_standable(self, c, None).map(|t| [t[0], t[2]]).unwrap_or(c)
             }
         };
@@ -176,7 +178,9 @@ impl Rollback {
                 -1 => n - 1,
                 _ => own,
             };
-            let column = [across(toward.x - here.x, from[0]), across(toward.z - here.z, from[2])];
+            // The side `toward` lies on (across a wrapped seam the short way).
+            let (dx, dz) = crate::region_delta(map.map(RouteMap::extent), here, toward);
+            let column = [across(dx, from[0]), across(dz, from[2])];
             if self.walk_entity_safe(e, Goal::local(toward, column, None), here, map) {
                 return true;
             }

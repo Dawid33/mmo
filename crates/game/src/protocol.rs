@@ -287,15 +287,24 @@ pub fn halo_offsets(x: f32, z: f32) -> Vec<(i32, i32)> {
     out
 }
 
-/// Move an isometry from one region's local frame to another's. Offsets are
-/// exact multiples of 256 so the delta is exact in f32; both the server
-/// relay and the client's predicted synthesis MUST use this one function.
+/// Move an isometry from one region's local frame to another's, with no map
+/// (plain region difference): [`rebase_isometry_by`] of `to − from`. A caller
+/// holding a map passes `region_delta(map, from, to)` to
+/// [`rebase_isometry_by`] instead (the short way across a wrapped seam).
 pub fn rebase_isometry(iso: &Pose, from: RegionCoords, to: RegionCoords) -> Pose {
-    let f = from.world_offset();
-    let t = to.world_offset();
+    rebase_isometry_by(iso, (to.x - from.x, to.z - from.z))
+}
+
+/// Move an isometry into the frame of the region `delta` (regions, x and z)
+/// from its own: translation −= delta · `REGION_SIZE`. Offsets are exact
+/// multiples of 256 so the shift is exact in f32; both the server relay and
+/// the client's predicted synthesis MUST use this one function.
+pub fn rebase_isometry_by(iso: &Pose, delta: (i32, i32)) -> Pose {
+    // `+=` of the negated delta, not `-=`: bit-identical to the old
+    // `+= from − to` form, a −0.0 coordinate included.
     let mut out = *iso;
-    out.translation.x += f[0] - t[0];
-    out.translation.z += f[2] - t[2];
+    out.translation.x += -delta.0 as f32 * REGION_SIZE;
+    out.translation.z += -delta.1 as f32 * REGION_SIZE;
     out
 }
 
@@ -605,11 +614,18 @@ impl EntityBundle {
     /// body pose and a voxel body's region-local block `origin` (everything
     /// else carried is in world coordinates).
     pub fn rebase(&mut self, from: RegionCoords, to: RegionCoords) {
-        self.body.pose = rebase_isometry(&self.body.pose, from, to);
+        self.rebase_by((to.x - from.x, to.z - from.z));
+    }
+
+    /// [`Self::rebase`] into the region `delta` (regions) from the bundle's:
+    /// the pose and the voxel body's `origin` shift by the same delta (a
+    /// caller holding a map passes `region_delta(map, from, to)`).
+    pub fn rebase_by(&mut self, delta: (i32, i32)) {
+        self.body.pose = rebase_isometry_by(&self.body.pose, delta);
         if let Some(vb) = &mut self.carried.voxel_body {
             let n = crate::REGION_BLOCKS as i32;
-            vb.origin[0] += (from.x - to.x) * n;
-            vb.origin[2] += (from.z - to.z) * n;
+            vb.origin[0] -= delta.0 * n;
+            vb.origin[2] -= delta.1 * n;
         }
     }
 }
@@ -659,8 +675,13 @@ impl HaloEntityMsg {
 
     /// Into the receiver's frame (`from` -> `to`): only an update has a pose.
     pub fn rebase(&mut self, from: RegionCoords, to: RegionCoords) {
+        self.rebase_by((to.x - from.x, to.z - from.z));
+    }
+
+    /// [`Self::rebase`] into the region `delta` (regions) from the owner's.
+    pub fn rebase_by(&mut self, delta: (i32, i32)) {
         if let HaloEntityMsg::Update(d) = self {
-            d.isometry = rebase_isometry(&d.isometry, from, to);
+            d.isometry = rebase_isometry_by(&d.isometry, delta);
         }
     }
 

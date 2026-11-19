@@ -1874,8 +1874,9 @@ impl Rollback {
         let mut crossing: std::collections::BTreeMap<crate::EntityId, crate::RegionCoords> = Default::default();
         let mut held: Vec<(EntityKey, Pose)> = Vec::new();
         // Whether the neighbour at offset (dx, dz) is off the map: a body
-        // past that side is held on it.
-        let closed = |dx: i32, dz: i32| crate::off_map(map, crate::RegionCoords::new(region.x + dx, region.z + dz));
+        // past that side is held on it (a wrapped map's east and west
+        // neighbours are on it: the seam is crossed, not held).
+        let closed = |dx: i32, dz: i32| crate::region_neighbour(map, region, dx, dz).is_none();
         for (key, kind) in self.data.ecs.kind.iter() {
             let Some(kind) = kind else { continue };
             if mirror_keys.contains(&key) {
@@ -1902,16 +1903,15 @@ impl Rollback {
                 held.push((key, Pose::from_parts(t, body.position().rotation)));
             }
             if let Some((dx, dz)) = crate::departure_offset(t.x, t.z) {
-                let target = crate::RegionCoords::new(region.x + dx, region.z + dz);
+                // Canonical (across a wrapped seam, the map's other end); the
+                // hold above keeps a body off a side with no neighbour.
+                let Some(target) = crate::region_neighbour(map, region, dx, dz) else { continue };
                 leavers.push((key, target));
                 crossing.insert(id, target);
             } else {
                 let mut targets = Vec::new();
                 for (dx, dz) in crate::halo_offsets(t.x, t.z) {
-                    let target = crate::RegionCoords::new(region.x + dx, region.z + dz);
-                    if crate::off_map(map, target) {
-                        continue;
-                    }
+                    let Some(target) = crate::region_neighbour(map, region, dx, dz) else { continue };
                     updates.push((
                         HaloEntityMsg::Update(HaloEntityDelta {
                             id,
