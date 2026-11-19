@@ -250,7 +250,9 @@ additionalPrometheusRulesMap:
           - alert: WorldFleetBehind
             # The reconciler's last read showed a different number of desired_hosts rows than host
             # Deployments labelled for the world, or its reads / actions keep failing (each is retried
-            # by the next pass, every 2 s). A row is normally matched within a pass or two.
+            # by the next pass, every 2 s). A row is normally matched within a pass or two. A
+            # Deployment labelled errantry/fleet=<world> WITHOUT errantry/host (made by hand; the module
+            # makes none) is counted but never touched: it keeps this firing until it is deleted.
             expr: |
               (mmo_fleet_desired{role="fleet"} != mmo_fleet_deployments{role="fleet"})
               or
@@ -263,11 +265,37 @@ additionalPrometheusRulesMap:
               summary: "The fleet reconciler of {{ $labels.namespace }} does not match desired_hosts"
               description: "For 10 minutes pod {{ $labels.pod }} of {{ $labels.namespace }} has either seen a number of desired hosts different from its host Deployments, or kept failing reads or actions (mmo_fleet_errors_total rising): a template it cannot render, an API call refused (its Role), the database or the API server unreachable. Its log lines `[fleet] …` say which (`just world-logs fleet`); `just world-status` shows the desired rows and the Deployments."
 
-          - alert: WorldFleetFull
-            # The coordinator wanted one more host (below the minimum, under load, or for a login when
-            # no host takes logins) and the store answered Full: every one of fleet.max slots is held,
-            # draining hosts included. A drain holding the last slot answers Full for a few minutes
-            # (the ticker asks again every ~10 s): only a lasting run fires. Summed over the replicas.
+          - alert: WorldFleetSaturated
+            # Capacity, for the owner: even the LEAST-loaded registered host of the world has had its
+            # worst tick at or above 600 permille of the tick period (mmo_host_load_tick_permille, from
+            # its heartbeat) for 15 minutes. 600 is the coordinator's SCALE_UP_LOAD_PERMILLE (a rule file
+            # cannot read the const: keep the two equal). Scale-up (rule 5) adds a host after
+            # up_after_ms (default 1 minute) when it can, so this holding for 15 minutes means it could
+            # not: the fleet is at fleet.max (the coordinator does not ask at the maximum, and no metric
+            # says so), no slot is free, the scale gates do not hold (a host draining, a succession
+            # open), or the reconciler does not create hosts (WorldFleetDown / WorldFleetBehind).
+            # Drained hosts (unregistered) are left out; a world with no host reports nothing.
+            expr: |
+              min by (namespace) (
+                mmo_host_load_tick_permille{role="host"}
+                and on (namespace, pod)
+                (mmo_registered{role="host"} == 1)
+              ) >= 600
+            for: 15m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "Every host of {{ $labels.namespace }} has been busy for 15 minutes"
+              description: "The least-loaded host of {{ $labels.namespace }} has reported a worst tick of {{ $value }} permille (>= 600, the coordinator's SCALE_UP_LOAD_PERMILLE) for 15 minutes, while scale-up acts after about a minute: the fleet is at fleet.max, has no free slot, cannot scale (a drain or a succession in progress), or its hosts are not being created. Raise fleet.max in the world root (and open the larger UDP node port range, output client_ports), or see `just world-status` (the coordinator's fleet counters, the reconciler's)."
+
+          - alert: WorldFleetNoFreeSlot
+            # The coordinator wanted a host — below the minimum (rule 4), or for a login with no host
+            # taking logins anywhere (a world starting) — and the store answered Full: every one of
+            # fleet.max slots is held, draining hosts included (a draining host keeps its slot until its
+            # row is removed). Scale-up never gets Full: it asks only below the maximum and never while
+            # something drains. Expected for the whole notice of a long drain on a min = max world (the
+            # ticker asks again every ~10 s); only a run of 20 minutes fires. Summed over the replicas.
             expr: |
               sum by (namespace) (increase(mmo_fleet_full_total{role="coordinator"}[10m])) > 0
             for: 20m
@@ -275,8 +303,8 @@ additionalPrometheusRulesMap:
               severity: warning
               cluster: ${cluster}
             annotations:
-              summary: "World {{ $labels.namespace }} wants more hosts than fleet.max allows"
-              description: "The coordinator of {{ $labels.namespace }} has kept wanting another host for 20 minutes while every slot of its fleet (fleet.max) was held. Capacity, for the owner: raise fleet.max in the world root (and open the larger UDP node port range, output client_ports), or find the draining host that holds a slot (`just world-hosts`)."
+              summary: "World {{ $labels.namespace }} wants a host and has no free slot"
+              description: "The coordinator of {{ $labels.namespace }} has kept wanting a host for 20 minutes (below the fleet's minimum, or for a login while no host takes logins) while every slot of fleet.max was held, draining hosts included. Find the draining host that holds a slot (`just world-hosts`: a last leaver keeps its slot until the next host inherits its in-flight rows), or raise fleet.max. Expected during a long drain on a world whose min equals max."
 
           - alert: WorldHostNotReady
             # A drained host (mmo_waiting{why="drained"}) is unregistered on purpose until it is

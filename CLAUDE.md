@@ -141,20 +141,29 @@ a loss), a FAILED read deletes and creates nothing. Exactly ONE replica, `Recrea
 could each act on a view the other just changed (one deleting a host the other just created for a fresh row). Each
 host Deployment is 1 replica, `Recreate`; never `kubectl rollout status` a host — poll each Deployment's
 `status.readyReplicas` and skip a drained one (unready for good), as the recipes do. A host is removed ONLY by
-`world-drain <name>`, nothing to apply: the coordinator marks its desired row draining, removes the row once the name
+`world-drain <name>` is the operator's only way to remove a host, nothing to apply (the coordinator also drains hosts
+itself: rules 6 and 7, "The fleet"): the coordinator marks its desired row draining, removes the row once the name
 owns nothing, the reconciler deletes its objects (below the minimum a new name is added). The coordinator's replicas move together: never
 `kubectl rollout status` it either — `world-stop` records the count in the Deployment annotation `errantry/replicas`
 and scales it to 0, `world-start` restores it (absent: 2) and waits for every replica's `/readyz`, `world_update.sh`
 stops and starts every replica together (no two builds share the row). **Emptying a node**: a PodDisruptionBudget
 of 0 holds each host pod and the coordinator's keeps one replica (which cannot move on ONE node, so the drain cannot
 finish); toolbox, web, login and `fleet` have none and go at once — on ONE node `world-stop` first, then `kubectl drain`;
-with more nodes drain (`world-drain`) that node's hosts first. **An apply starts no host**: it restarts the
+with more nodes `kubectl cordon` the node, then `world-drain` its hosts (a replacement the coordinator adds below the
+minimum is scheduled elsewhere), then `kubectl drain`. **An apply starts no host**: it restarts the
 coordinator on a change of its own, and a change of the host template (env, resources, the secrets' checksum)
 reaches a running host only at its next stop and start (re-templated at 0 replicas). **An apply that changes
 anything the coordinator and the hosts share** (`database_url`, `service_token`, the coordinator certificate,
 `save_secs`, `super_region_regions`, `ownership`) is `world-stop` → apply → `world-start`. **The FIRST apply on a
-world deployed before Elastic 4** destroys its `var.hosts` Deployments (SIGTERM, leave cuts): `world-stop`, apply,
-re-forge (worlds are never migrated; `0019_desired_hosts`), `world-start`. A host pod that crash-loops AFTER registering no longer rolls the world back while it
+world deployed before Elastic 4** (NOT RUN; the steps with their reasons: `TODO.md`, Elastic 4, hand check 1): an
+apply never changes an image, so the Elastic 4 build reaches the existing workloads only by hand, and the world is
+re-forged into a NEW empty database (`worldctl forge` refuses a store that holds a world; worlds are never migrated):
+`orion-world-push` → `world-stop` (no `fleet` yet: skipped) → `orion-apply world` (destroys the stopped `var.hosts`
+Deployments, Services and budgets; creates `fleet`, its Role and `host-template`; scales the coordinator back up on
+its OLD image and `fleet` to 1 on `var.images.server`) → `world-stop` again → `kubectl set image` the pushed digests on
+`coordinator`, `toolbox`, `fleet` and `web` (not `world_update.sh`: it refuses a stopped world, and its start step
+waits for `/readyz` 200 that an unforged store never gives) → a new empty database (not written yet) → `world-ctl
+forge …` from the new toolbox → `world-start` (the coordinator adds the minimum, the reconciler creates `h1`). A host pod that crash-loops AFTER registering no longer rolls the world back while it
 holds no land (a landless incarnation is ended, not succeeded); one that is assigned land during an open run, or is
 made heir, and dies before the settle still does (the residual, Succession below); every check that needs no id still
 runs before the registration (`roles::check_before_registration`). A release is **stop → replace images → start, never a
@@ -438,7 +447,9 @@ Verify with:
     to forget (unsaved state traffic) is noted dead (`dead_seen`): the next cut stops the host for a rollback
     (`take_unaccounted_dead`), never a world whose every cut part is refused.
     `VOXEL_HOST_NAME` (default empty) labels a process (logs, dev files, `hosts.name`, the Deployment), never a
-    key: a registration lapses the other dirty live rows of its non-empty name at once (`seen_ms = 0`).
+    host's identity (no store row is keyed by it); under the fleet it is the `desired_hosts` name the pod was made for
+    (the template's `__NAME__`) and the coordinator finds a name's `hosts` rows by it (`HostSeen.name`). A
+    registration lapses the other dirty live rows of its non-empty name at once (`seen_ms = 0`).
     `VOXEL_HOST_ORDINAL`, `VOXEL_HOSTS`, `VOXEL_ENTRY_HOST` are gone (ignored if set).
   - Hosts talk directly over peer links (`game::peer`: one `PeerSession` per other host id, `Reliable` /
     `Volatile` messages; `server/src/peer_link.rs`, QUIC over `svc-link`): crossings, halo, intents,
@@ -752,7 +763,9 @@ Verify with:
   `/metrics` is Prometheus text with a `role` label (`host`, `coordinator` or `fleet`; each role's series are constant
   on the others — alerts select the role; the reconciler's: `mmo_fleet_desired`, `mmo_fleet_deployments`,
   `mmo_fleet_pass_age_ms`, `mmo_fleet_{created,deleted,errors}_total`; alerts `WorldFleetDown`, `WorldFleetBehind`,
-  `WorldFleetFull`). `VOXEL_CLIENT_CERT` / `VOXEL_CLIENT_KEY` (PEM chain + key; the old
+  `WorldFleetSaturated` (the least-loaded registered host ≥ 600 ‰ for 15 min: scale-up could not act — at `fleet.max`
+  the coordinator does not ask), `WorldFleetNoFreeSlot` (`Full` answers for 20 min: a host wanted for the minimum or a
+  starting world, every slot held, draining hosts included)). `VOXEL_CLIENT_CERT` / `VOXEL_CLIENT_KEY` (PEM chain + key; the old
   `VOXEL_WT_CERT` / `_KEY` are aliases): ONE certificate for the QUIC listener and WebTransport, files WAITED for at
   start (a WARN at most every 60 s) and re-read every 60 s (a cert-manager renewal needs no restart); unset = a
   self-signed P-256 certificate valid 14 days whose hash `HostEndpoint.cert_hash` carries (single-player too).
@@ -786,8 +799,8 @@ Verify with:
   `FENCED_REFUSAL` / `ROLLBACK_REFUSAL` / `LEAVING_REFUSAL` / `PLAYER_PARKED_ELSEWHERE`, rejoins by itself
   with its kept refresh token, re-read from the store before every join call (`login::flow::rejoinable`; one
   join call at a time, `REJOIN_RETRY_MS` apart; a 503 = not yet; a ticket's connect is bounded by
-  `REJOIN_CONNECT_MS` (15 s), then a new join; gives up after `REJOIN_MAX_MS`, or `WORLD_START_WAIT_MS` after the first
-  `world_starting`; revoked → the sign-in screen). Native QUIC keep-alive
+  `REJOIN_CONNECT_MS` (15 s), then a new join; gives up after `REJOIN_MAX_MS` — or, once a join was answered
+  `world_starting`, no earlier than `WORLD_START_WAIT_MS` after the first such answer; revoked → the sign-in screen). Native QUIC keep-alive
   3 s / idle 10 s (`netcode.rs`, as WebTransport).
 - **Native QUIC trust** (`quic_verify.rs`, `policy_for`): a host that advertises a `cert_hash` is pinned to it; with no
   hash a non-loopback address must present a certificate the public web PKI vouches for (a typed-in "Join server"
