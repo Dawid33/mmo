@@ -1215,6 +1215,9 @@ struct WriteTally {
     added: u64,
     drained: u64,
     removed: u64,
+    /// The load rules' decisions that wrote, in answer order (Elastic 4 Task 7): `up` (rule 5,
+    /// a host added) or `down` (rule 6, one drained) — the window line's `scale=`.
+    scale: Vec<&'static str>,
 }
 
 impl WriteTally {
@@ -1231,6 +1234,7 @@ impl WriteTally {
             added: 0,
             drained: 0,
             removed: 0,
+            scale: Vec::new(),
         }
     }
 }
@@ -2170,10 +2174,16 @@ impl CoordinatorRuntime {
                     self.tally.assigned += 1;
                 }
                 DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } | DecisionAnswer::Assigned { .. } => {}
-                // Elastic 4: the fleet's decisions that wrote, counted.
+                // Elastic 4: the fleet's decisions that wrote, counted (the core still awaits the
+                // answer here: `fleet_why` is the rule it came from).
                 DecisionAnswer::HostAdded { outcome: Ok(game::coordinator::HostAdded::Done { .. }), .. } => {
                     crate::health::Health::global().fleet_added();
                     self.tally.added += 1;
+                    self.tally.scale.extend(self.core.fleet_why().and_then(|w| w.scale_word()));
+                }
+                // Every slot held: expected under a sustained load at the maximum (an alert's).
+                DecisionAnswer::HostAdded { outcome: Ok(game::coordinator::HostAdded::Full), .. } => {
+                    crate::health::Health::global().fleet_full();
                 }
                 DecisionAnswer::HostDrained {
                     outcome: Ok(game::coordinator::HostDrained::Marked | game::coordinator::HostDrained::RowOnly),
@@ -2181,6 +2191,7 @@ impl CoordinatorRuntime {
                 } => {
                     crate::health::Health::global().fleet_drained();
                     self.tally.drained += 1;
+                    self.tally.scale.extend(self.core.fleet_why().and_then(|w| w.scale_word()));
                 }
                 DecisionAnswer::HostRemoved { outcome: Ok(game::coordinator::HostRemoved::Done), .. } => {
                     crate::health::Health::global().fleet_removed();
@@ -2995,7 +3006,8 @@ impl CoordinatorRuntime {
     /// when anything was written or failed): the transitions written in the window, their core
     /// and history bytes, the conflicts and failed writes (Elastic 2a, decision 8: E2b's measure),
     /// the land assignments applied (`assigned=`, Elastic 3) and the fleet's decisions that wrote
-    /// (`added=`, `drained=`, `removed=`, Elastic 4).
+    /// (`added=`, `drained=`, `removed=`, Elastic 4) — and of those, the load rules' (`scale=`,
+    /// `up` / `down` in answer order, `-` for none).
     fn report_writes(&mut self) {
         let window = self.tally.since.elapsed();
         if window < game::METRICS_REPORT_INTERVAL {
@@ -3007,7 +3019,7 @@ impl CoordinatorRuntime {
         }
         log::info!(
             "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={} \
-             lost_answer_relinks={} assigned={} added={} drained={} removed={}",
+             lost_answer_relinks={} assigned={} added={} drained={} removed={} scale={}",
             window.as_secs_f32(),
             t.transitions,
             t.core_bytes,
@@ -3019,7 +3031,8 @@ impl CoordinatorRuntime {
             t.assigned,
             t.added,
             t.drained,
-            t.removed
+            t.removed,
+            if t.scale.is_empty() { "-".to_string() } else { t.scale.join(",") }
         );
     }
 

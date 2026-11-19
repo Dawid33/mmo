@@ -21,14 +21,42 @@
 //!    drain leave that did not commit) → [`super::DrainHost`] of that host;
 //! 2. a wanted name whose live host carries a mark (the operator's `world-drain`) →
 //!    [`super::DrainHost`] of the row only: the row follows the mark;
+//! 2b. a wanted name with no live host whose NEWEST `hosts` row (the highest id of that name) is
+//!    clean and carries a mark (the operator's drain completed before the ticker saw the marked
+//!    host live: `worldctl drain … --in 0`; the host left and stays up drained) →
+//!    [`super::DrainHost`] of the row only — else nothing would ever remove that pod. A newest
+//!    row that is clean WITHOUT a mark (a SIGTERM leave: `world-stop`, a release) changes
+//!    nothing: its pod comes back as a new host of the same name. Residual: a marked row pruned
+//!    before the ticker read it looks like a pod that has not started yet (the name stays
+//!    wanted, its drained pod stays up until an operator removes it);
 //! 3. a draining name none of whose `hosts` rows is live-and-dirty or `landed` (pruned rows count
 //!    as none) → [`super::RemoveHost`] — a leaver that kept land (in-flight rows) holds its row
 //!    until its `Leave` succession moved it;
-//! 4. fewer wanted rows than the minimum → [`super::AddHost`].
+//! 4. fewer wanted rows than the minimum → [`super::AddHost`];
+//! 5. **scale up**: the scale gates hold (below), fewer wanted rows than the maximum, and for
+//!    `up_after_ms` without a break every read showed the least-loaded serving host's
+//!    `tick_permille` ≥ [`SCALE_UP_LOAD_PERMILLE`] → [`super::AddHost`];
+//! 6. **scale down**: the scale gates hold, more wanted rows than `max(min, 1)`, every serving
+//!    host known for ≥ `min_lifetime_ms`, and for `down_after_ms` without a break every read
+//!    showed `Σ tick_permille ≤ (n − 1) · (1000 − SCALE_DOWN_SPARE_PERMILLE)` over the `n`
+//!    serving hosts → [`super::DrainHost`] of the victim: fewest players, then fewest running
+//!    regions, then the highest host id (the youngest); notice 0 with no players, else
+//!    [`DRAIN_WARNING_SECS`].
+//!
+//! **The scale gates** (rules 5 and 6): no desired row draining, no succession run open (or being
+//! declared, a rollback in flight, or the open runs not known yet), and every wanted name has a
+//! **serving** host — its live host, attached to a live replica, taking logins (not leaving, not
+//! marked). **The timers** (`fleet_up_since`, `fleet_down_since`, on the lease watch's clock) move
+//! only on a NEW `hosts` read (a read is the evidence; an upkeep between two reads moves
+//! nothing): a read that shows a rule's condition starts its count if none runs, a read that
+//! breaks it (or a failed read) clears it, and so does every fleet decision's answer. A new
+//! ticker starts both at `None` (its watch counts from zero: delayed, never hastened). After a
+//! scale-down the remaining `n − 1` hosts sit at ≤ 300 ‰ on average, half the scale-up
+//! threshold: the two rules cannot chase each other.
 //!
 //! Rules 1–3 follow drains, which only `claim` hosts heed (a `static` host ignores a mark): they
 //! run only under [`crate::CrashPolicy::Succession`]; rule 4 runs under `static` too (min = max
-//! = 1). Scaling by load (rules 5–7) is a later task.
+//! = 1); rules 5 and 6 need `Succession` as well. Rule 7 (to zero) is a later task.
 
 use serde::{Deserialize, Serialize};
 
@@ -49,22 +77,97 @@ pub struct DesiredHost {
 }
 
 /// How long (ms) the least-loaded serving host must stay loaded before a host is added (scale
-/// up, a later task): the default of `VOXEL_SCALE_UP_AFTER_MS`.
+/// up, rule 5): the default of `VOXEL_SCALE_UP_AFTER_MS`.
 pub const SCALE_UP_AFTER_MS: u64 = 60_000;
-/// How long (ms) the hosts must stay idle enough before one is drained (scale down, a later
-/// task; also the quiet time before the last host goes): the default of
-/// `VOXEL_SCALE_DOWN_AFTER_MS`.
+/// How long (ms) the hosts must stay idle enough before one is drained (scale down, rule 6; also
+/// the quiet time before the last host goes): the default of `VOXEL_SCALE_DOWN_AFTER_MS`.
 pub const SCALE_DOWN_AFTER_MS: u64 = 300_000;
-/// How long (ms) a host must have been known before it may be drained by load (a later task):
-/// the default of `VOXEL_HOST_MIN_LIFETIME_MS`.
+/// How long (ms) a host must have been known before it may be drained by load (rule 6; the lease
+/// watch's [`super::LeaseWatch::known_for`]): the default of `VOXEL_HOST_MIN_LIFETIME_MS`.
 pub const HOST_MIN_LIFETIME_MS: u64 = 600_000;
 /// At most one fleet decision per this many store ms.
 pub const SCALE_DECISION_EVERY_MS: u64 = 10_000;
+
+/// Scale up (rule 5) when the LEAST-loaded serving host's worst tick stays at or above this, in
+/// permille of the tick period: every host is busy, not one crowded super-region. Assignment
+/// already avoids hosts above `1000 − ASSIGN_HEADROOM_MIN_PERMILLE` (800): a host is added
+/// before none qualifies.
+pub const SCALE_UP_LOAD_PERMILLE: u32 = 600;
+/// Scale down (rule 6) when the serving hosts' summed load fits in one host fewer with this much
+/// spare per host, in permille: `Σ ≤ (n − 1) · (1000 − SCALE_DOWN_SPARE_PERMILLE)` — after the
+/// removal the others average ≤ 300 ‰.
+pub const SCALE_DOWN_SPARE_PERMILLE: u32 = 700;
 
 // A host is never drained by load before assignment would prefer it, nor before its idle land
 // could have been released.
 const _: () = assert!(HOST_MIN_LIFETIME_MS > super::ASSIGN_MIN_ATTACHED_MS);
 const _: () = assert!(HOST_MIN_LIFETIME_MS > crate::LAND_IDLE_MS);
+// A host is added before assignment refuses every host for its load.
+const _: () = assert!(SCALE_UP_LOAD_PERMILLE < 1000 - super::ASSIGN_HEADROOM_MIN_PERMILLE);
+// After a scale-down the remaining hosts average below the scale-up threshold: the two rules
+// cannot chase each other (`(n − 1) · 300` over `n − 1` hosts is ≤ 300 < 600).
+const _: () = assert!(SCALE_DOWN_SPARE_PERMILLE < 1000);
+const _: () = assert!(1000 - SCALE_DOWN_SPARE_PERMILLE < SCALE_UP_LOAD_PERMILLE);
+
+/// Which rule a fleet decision came from (the module docs; the window line counts the load
+/// rules, `scale=`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FleetWhy {
+    /// Rule 1: a draining name's live host carries no mark.
+    MarkHost,
+    /// Rule 2: a wanted name's live host carries a mark.
+    FollowMark,
+    /// Rule 2b: a wanted name's newest row left clean with a mark.
+    LeftMarked,
+    /// Rule 3: a draining name nothing runs or holds land for.
+    Remove,
+    /// Rule 4: below the minimum.
+    Minimum,
+    /// Rule 5: scale up under load.
+    ScaleUp,
+    /// Rule 6: scale down, the load fits in fewer.
+    ScaleDown,
+}
+
+impl FleetWhy {
+    /// The word the window line's `scale=` uses for a load rule; `None` for the others.
+    pub fn scale_word(self) -> Option<&'static str> {
+        match self {
+            FleetWhy::ScaleUp => Some("up"),
+            FleetWhy::ScaleDown => Some("down"),
+            _ => None,
+        }
+    }
+}
+
+/// The scale gates' view of one `hosts` read (rules 5 and 6): the serving host of every wanted
+/// name, or `None` when a gate fails (the module docs).
+struct Serving<'a> {
+    /// One per wanted name, its live host (attached to a live replica, taking logins).
+    hosts: Vec<&'a HostSeen>,
+}
+
+impl Serving<'_> {
+    fn least(&self) -> u32 {
+        self.hosts.iter().map(|h| h.load.tick_permille).min().unwrap_or(0)
+    }
+    fn sum(&self) -> u64 {
+        self.hosts.iter().map(|h| u64::from(h.load.tick_permille)).sum()
+    }
+    /// `(n − 1) · (1000 − SCALE_DOWN_SPARE_PERMILLE)`: the summed load that fits in one host fewer.
+    fn fits_fewer(&self) -> u64 {
+        (self.hosts.len() as u64).saturating_sub(1) * u64::from(1000 - SCALE_DOWN_SPARE_PERMILLE)
+    }
+    /// The evidence of a log line: each serving host's name, id, load, players and regions.
+    fn describe(&self) -> String {
+        let parts: Vec<String> = self
+            .hosts
+            .iter()
+            .map(|h| format!("{} (host {}) {}‰ {}p {}r", h.name, h.ordinal, h.load.tick_permille, h.load.players, h.load.regions))
+            .collect();
+        parts.join(", ")
+    }
+}
 
 /// The fleet's dials (decision 8; parsed by the server from `VOXEL_FLEET_MIN`,
 /// `VOXEL_FLEET_MAX`, `VOXEL_SCALE_UP_AFTER_MS`, `VOXEL_SCALE_DOWN_AFTER_MS`,
@@ -111,44 +214,169 @@ impl Coordinator {
         if self.fleet_last_ms.is_some_and(|at| now_ms.saturating_sub(at) < SCALE_DECISION_EVERY_MS) {
             return;
         }
-        let Some(decision) = self.fleet_rule(dials, desired) else { return };
-        log::info!("coordinator: fleet: {decision:?}");
+        let Some((why, decision)) = self.fleet_rule(dials, desired) else { return };
+        // Rules 2b, 5 and 6 logged their evidence already, with the decision.
+        if !matches!(why, FleetWhy::LeftMarked | FleetWhy::ScaleUp | FleetWhy::ScaleDown) {
+            log::info!("coordinator: fleet: {why:?}: {decision:?}");
+        }
         self.fleet_pending = true;
+        self.fleet_why = Some(why);
         self.push_decision(decision);
     }
 
-    /// The first of rules 1–4 that applies to the latest read's `desired` rows and `hosts` rows
-    /// (the lease watch's), if any.
-    fn fleet_rule(&self, dials: FleetDials, desired: &[DesiredHost]) -> Option<StoreDecision> {
+    /// The first of rules 1–6 that applies to the latest read's `desired` rows and `hosts` rows
+    /// (the lease watch's), if any, with the rule it came from.
+    fn fleet_rule(&self, dials: FleetDials, desired: &[DesiredHost]) -> Option<(FleetWhy, StoreDecision)> {
         if self.crash_policy() == CrashPolicy::Succession {
             // 1. A draining name whose live host carries no mark: that host is marked.
             for d in desired.iter().filter(|d| d.draining) {
                 if let Some(live) = self.live_host_of(&d.name).filter(|r| !r.draining) {
-                    let in_ms = if live.load.players == 0 { 0 } else { DRAIN_WARNING_SECS * 1000 };
-                    return Some(StoreDecision::DrainHost(DrainHost {
-                        name: d.name.clone(),
-                        host: Some((live.ordinal, live.boot)),
-                        in_ms,
-                    }));
+                    let drain = DrainHost { name: d.name.clone(), host: Some((live.ordinal, live.boot)), in_ms: drain_notice_ms(live) };
+                    return Some((FleetWhy::MarkHost, StoreDecision::DrainHost(drain)));
                 }
             }
             // 2. A wanted name whose live host carries a mark: the row follows it.
             for d in desired.iter().filter(|d| !d.draining) {
                 if self.live_host_of(&d.name).is_some_and(|r| r.draining) {
-                    return Some(StoreDecision::DrainHost(DrainHost { name: d.name.clone(), host: None, in_ms: 0 }));
+                    return Some((FleetWhy::FollowMark, StoreDecision::DrainHost(DrainHost { name: d.name.clone(), host: None, in_ms: 0 })));
+                }
+            }
+            // 2b. A wanted name with no live host whose newest row left clean WITH a mark (a
+            // drain that completed before the ticker saw the marked host live): the row follows
+            // the mark too. A clean newest row without one (a SIGTERM leave) changes nothing.
+            // A clean row keeps `drain_at_ms` (nothing in the store clears it), so the read
+            // shows the mark. Residual: a row pruned before this read looks like a pod that has
+            // not started yet — the name stays wanted.
+            for d in desired.iter().filter(|d| !d.draining) {
+                if self.live_host_of(&d.name).is_some() {
+                    continue;
+                }
+                let newest = self.leases.rows().filter(|r| r.name == d.name).max_by_key(|r| r.ordinal);
+                if let Some(r) = newest.filter(|r| r.clean && r.draining) {
+                    log::info!(
+                        "[coordinator] fleet: host {} has no live host and its newest host {} left drained: its row drains too",
+                        d.name,
+                        r.ordinal
+                    );
+                    return Some((FleetWhy::LeftMarked, StoreDecision::DrainHost(DrainHost { name: d.name.clone(), host: None, in_ms: 0 })));
                 }
             }
             // 3. A draining name nothing of which runs or holds land any more: removed.
             for d in desired.iter().filter(|d| d.draining) {
                 let holds = self.leases.rows().any(|r| r.name == d.name && ((!r.clean && r.state == HOST_LIVE) || r.landed));
                 if !holds {
-                    return Some(StoreDecision::RemoveHost(RemoveHost { name: d.name.clone() }));
+                    return Some((FleetWhy::Remove, StoreDecision::RemoveHost(RemoveHost { name: d.name.clone() })));
                 }
             }
         }
         // 4. Below the minimum.
         let wanted = u32::try_from(desired.iter().filter(|d| !d.draining).count()).unwrap_or(u32::MAX);
-        (wanted < dials.min).then_some(StoreDecision::AddHost(AddHost { max: dials.max, expect_wanted: wanted }))
+        if wanted < dials.min {
+            return Some((FleetWhy::Minimum, StoreDecision::AddHost(AddHost { max: dials.max, expect_wanted: wanted })));
+        }
+        // 5 and 6 need the scale gates (and `Succession`, checked by `fleet_serving`), checked
+        // again here: the attachments and the succession runs may have moved since the read.
+        let serving = self.fleet_serving(desired)?;
+        let watch_now = self.leases.latest_received_ms();
+        // 5. Scale up: the least-loaded serving host stayed loaded for `up_after_ms`.
+        if let Some(since) = self.fleet_up_since {
+            let held = watch_now.saturating_sub(since);
+            if wanted < dials.max && serving.least() >= SCALE_UP_LOAD_PERMILLE && held >= dials.up_after_ms {
+                log::info!(
+                    "[coordinator] fleet: scale up: the least-loaded serving host stayed at ≥ {SCALE_UP_LOAD_PERMILLE}‰ for {held} ms \
+                     (now {}‰; wanted {wanted} < max {}): {}",
+                    serving.least(),
+                    dials.max,
+                    serving.describe()
+                );
+                return Some((FleetWhy::ScaleUp, StoreDecision::AddHost(AddHost { max: dials.max, expect_wanted: wanted })));
+            }
+        }
+        // 6. Scale down: the load fit in one host fewer for `down_after_ms`, every serving host
+        // older than the minimum lifetime.
+        if let Some(since) = self.fleet_down_since {
+            let held = watch_now.saturating_sub(since);
+            let floor = dials.min.max(1);
+            let old_enough = serving.hosts.iter().all(|h| self.leases.known_for(h.ordinal, watch_now) >= dials.min_lifetime_ms);
+            if wanted > floor && serving.sum() <= serving.fits_fewer() && held >= dials.down_after_ms && old_enough {
+                // The victim: fewest players, then fewest running regions, then the youngest.
+                let victim = serving
+                    .hosts
+                    .iter()
+                    .min_by_key(|h| (h.load.players, h.load.regions, std::cmp::Reverse(h.ordinal)))
+                    .copied()?;
+                let in_ms = drain_notice_ms(victim);
+                log::info!(
+                    "[coordinator] fleet: scale down: Σ {}‰ ≤ {}‰ over {} serving hosts for {held} ms (wanted {wanted} > {floor}); \
+                     victim {} (host {}): fewest players {}, then regions {}, then the youngest; notice {in_ms} ms: {}",
+                    serving.sum(),
+                    serving.fits_fewer(),
+                    serving.hosts.len(),
+                    victim.name,
+                    victim.ordinal,
+                    victim.load.players,
+                    victim.load.regions,
+                    serving.describe()
+                );
+                let drain = DrainHost { name: victim.name.clone(), host: Some((victim.ordinal, victim.boot)), in_ms };
+                return Some((FleetWhy::ScaleDown, StoreDecision::DrainHost(drain)));
+            }
+        }
+        None
+    }
+
+    /// The scale gates (rules 5 and 6; the module docs) over the latest read: the serving host
+    /// of every wanted name, or `None` — not `Succession`, a desired row draining, a succession
+    /// run open (or being declared, a rollback in flight, the open runs not known yet), no wanted
+    /// name, or a wanted name without a serving host (its pod starting or crash-looping).
+    fn fleet_serving<'a>(&'a self, desired: &[DesiredHost]) -> Option<Serving<'a>> {
+        if self.crash_policy() != CrashPolicy::Succession || desired.iter().any(|d| d.draining) {
+            return None;
+        }
+        if !self.successions_known()
+            || self.successions_declaring().is_some()
+            || self.successions_rolling().is_some()
+            || self.successions_open_count() > 0
+        {
+            return None;
+        }
+        let attached = self.attached_live();
+        let mut hosts = Vec::new();
+        for d in desired {
+            let live = self.live_host_of(&d.name)?;
+            if !attached.contains(&live.ordinal) || !self.takes_logins(live.ordinal) {
+                return None;
+            }
+            hosts.push(live);
+        }
+        (!hosts.is_empty()).then_some(Serving { hosts })
+    }
+
+    /// A new `hosts` read arrived (`on_hosts_read`, after it set `fleet_desired` and the watch's
+    /// rows): the load timers move — and only here, a read being the evidence. A read showing a
+    /// rule's condition starts its count (on the watch's clock, the read's receive stamp) if none
+    /// runs; a read that breaks it clears it.
+    pub(super) fn fleet_observe_load(&mut self) {
+        let Some(dials) = self.fleet_dials else { return };
+        let (up, down) = match self.fleet_desired.as_deref().and_then(|d| self.fleet_serving(d).map(|s| (d, s))) {
+            Some((desired, serving)) => {
+                let wanted = u32::try_from(desired.len()).unwrap_or(u32::MAX);
+                (
+                    wanted < dials.max && serving.least() >= SCALE_UP_LOAD_PERMILLE,
+                    wanted > dials.min.max(1) && serving.sum() <= serving.fits_fewer(),
+                )
+            }
+            None => (false, false),
+        };
+        let at = self.leases.latest_received_ms();
+        self.fleet_up_since = if up { Some(self.fleet_up_since.unwrap_or(at)) } else { None };
+        self.fleet_down_since = if down { Some(self.fleet_down_since.unwrap_or(at)) } else { None };
+    }
+
+    /// The rule of the fleet decision handed out and not answered yet (the runtime reads it
+    /// before it applies the answer: the window line's `scale=`).
+    pub fn fleet_why(&self) -> Option<FleetWhy> {
+        self.fleet_why
     }
 
     /// The live host of desired row `name`: its live dirty `hosts` row in the latest read — the
@@ -196,13 +424,25 @@ impl Coordinator {
     /// committed): see [`Self::fleet_answered`].
     pub(super) fn fleet_settled(&mut self, now_ms: u64) {
         self.fleet_pending = false;
+        self.fleet_why = None;
+        // Any fleet decision restarts the load counts: its effect comes with the next reads.
+        self.fleet_up_since = None;
+        self.fleet_down_since = None;
         self.fleet_last_ms = Some(self.fleet_last_ms.map_or(now_ms, |at| at.max(now_ms)));
         self.fleet_read_after = Some(self.leases.reads().saturating_add(1));
     }
 
     /// The `hosts` read this replica's rules stood on is gone (a failed read, a change of the
-    /// ticker's role): no rule until the next good one.
+    /// ticker's role): no rule until the next good one, and the load counts start again (a
+    /// new ticker counts from zero: delayed, never hastened; a failed read is no evidence).
     pub(super) fn fleet_unread(&mut self) {
         self.fleet_desired = None;
+        self.fleet_up_since = None;
+        self.fleet_down_since = None;
     }
+}
+
+/// A drain's notice for `host`: none when it reports no players, else [`DRAIN_WARNING_SECS`].
+fn drain_notice_ms(host: &HostSeen) -> u64 {
+    if host.load.players == 0 { 0 } else { DRAIN_WARNING_SECS * 1000 }
 }

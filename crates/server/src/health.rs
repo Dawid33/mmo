@@ -97,6 +97,7 @@ pub struct Health {
     fleet_added: AtomicU64,
     fleet_drained: AtomicU64,
     fleet_removed: AtomicU64,
+    fleet_full: AtomicU64,
     coordinator_transitions: AtomicU64,
     coordinator_core_bytes: AtomicU64,
     coordinator_history_bytes: AtomicU64,
@@ -145,6 +146,7 @@ impl Health {
             fleet_added: AtomicU64::new(0),
             fleet_drained: AtomicU64::new(0),
             fleet_removed: AtomicU64::new(0),
+            fleet_full: AtomicU64::new(0),
             coordinator_transitions: AtomicU64::new(0),
             coordinator_core_bytes: AtomicU64::new(0),
             coordinator_history_bytes: AtomicU64::new(0),
@@ -322,6 +324,11 @@ impl Health {
         self.fleet_removed.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A coordinator replica applied a fleet decision's `HostAdded::Full` answer (every slot held).
+    pub fn fleet_full(&self) {
+        self.fleet_full.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The coordinator committed a transition: its row's `core` and `history` (0: not written)
     /// bytes (Elastic 2a, decision 8).
     pub fn coordinator_written(&self, core_bytes: u64, history_bytes: u64) {
@@ -477,6 +484,11 @@ impl Health {
         counter("mmo_fleet_added_total", "Desired hosts this coordinator replica added (HostAdded::Done answers).", load(&self.fleet_added));
         counter("mmo_fleet_drained_total", "Desired hosts this coordinator replica marked draining (HostDrained answers that wrote).", load(&self.fleet_drained));
         counter("mmo_fleet_removed_total", "Desired hosts this coordinator replica removed (HostRemoved::Done answers).", load(&self.fleet_removed));
+        counter(
+            "mmo_fleet_full_total",
+            "Hosts this coordinator replica wanted to add while every slot was held (HostAdded::Full answers).",
+            load(&self.fleet_full),
+        );
         counter(
             "mmo_coordinator_transitions_total",
             "Coordinator transitions written (each one compare-and-set of the coordinator row).",

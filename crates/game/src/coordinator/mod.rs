@@ -321,6 +321,13 @@ pub struct Coordinator {
     /// After a fleet decision's answer, no rule runs until the lease watch has counted more
     /// successful `hosts` reads than this: the first read whose issue followed the answer.
     fleet_read_after: Option<u64>,
+    /// The rule of the fleet decision handed out and not answered yet (`fleet_pending`).
+    fleet_why: Option<fleet::FleetWhy>,
+    /// Since when (the lease watch's clock: a read's receive stamp) every `hosts` read showed
+    /// the scale-up condition (rule 5); `None`: the last read did not, or the count restarted.
+    fleet_up_since: Option<u64>,
+    /// Since when every `hosts` read showed the scale-down condition (rule 6), as above.
+    fleet_down_since: Option<u64>,
 }
 
 /// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
@@ -438,6 +445,13 @@ projection! {
             fleet_desired = None,
             fleet_last_ms = None,
             fleet_read_after = None,
+            // Elastic 4 Task 7: the load timers — observations of this replica's `hosts` reads
+            // (on the lease watch's clock, which a rebase keeps too), moved only by a new read,
+            // never by a replayed input; a new ticker clears them (`fleet_unread`). Cleared at a
+            // fleet decision's ANSWER, not its issue: a rebase that drops the issued decision
+            // replays the upkeep, which finds the count still standing and issues it again.
+            fleet_up_since = None,
+            fleet_down_since = None,
         }
         reset {
             out = Vec::new(),
@@ -461,6 +475,8 @@ projection! {
             // replayed upkeep issues it again, once (its pacing, `fleet_last_ms`, moves only
             // with an answer). Kept, it would wait for an answer that never comes.
             fleet_pending = false,
+            // Goes with `fleet_pending`: the rule of a decision that never reached the store.
+            fleet_why = None,
         }
     }
 }
@@ -546,6 +562,9 @@ impl Coordinator {
             fleet_pending: false,
             fleet_last_ms: None,
             fleet_read_after: None,
+            fleet_why: None,
+            fleet_up_since: None,
+            fleet_down_since: None,
         };
         c.push_view(Target::Every);
         c

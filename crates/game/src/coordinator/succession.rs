@@ -1647,6 +1647,8 @@ impl super::Coordinator {
         self.observe_leases_inner(rows, next_host_id, issued_mono, received_mono);
         // After the watch took the rows: both come from this read (`fleet_unread` clears both).
         self.fleet_desired = Some(desired);
+        // The load timers move only here: a read is the evidence (Elastic 4 Task 7).
+        self.fleet_observe_load();
     }
 
     /// A successful read of the `hosts` rows, issued at `issued_ms` and received at
