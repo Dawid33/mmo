@@ -426,6 +426,10 @@ pub fn rig_endpoint(h: HostId) -> HostEndpoint {
     HostEndpoint { id: h, quic: None, webtransport: None, cert_hash: None }
 }
 
+/// `world_store::DRAIN_MAX_SECS` (`game` does not depend on `world-store`): the longest drain
+/// notice the store's `drain_host_in` accepts. Keep the two equal.
+pub const RIG_DRAIN_MAX_SECS: u64 = 7 * 24 * 3600;
+
 impl MultiRig {
     /// `hosts` hosts of one voxel world (a one-block floor everywhere), `s` regions per
     /// super-region side; each host's spawner runs `schedule` (seeded from `seed` and
@@ -913,7 +917,7 @@ impl MultiRig {
                 }
                 StoreDecision::DrainHost(drain) => {
                     let outcome = self.drain_host_in_store(&drain);
-                    DecisionAnswer::HostDrained { stamp, drain, outcome: Ok(outcome) }
+                    DecisionAnswer::HostDrained { stamp, drain, outcome }
                 }
                 StoreDecision::RemoveHost(remove) => {
                     let outcome = self.remove_host_in_store(&remove);
@@ -1575,19 +1579,26 @@ impl MultiRig {
         HostAdded::Done { name, slot }
     }
 
-    /// `fleet::drain_host_in` against the rig's `desired_hosts` (Elastic 4): `Unknown` for no
-    /// row; else the row draining and, with `host` that live dirty boot's row, it marked
-    /// draining (`Marked`), or not (`RowOnly`).
-    pub fn drain_host_in_store(&mut self, d: &game::coordinator::DrainHost) -> game::coordinator::HostDrained {
+    /// `fleet::drain_host_in` against the rig's `desired_hosts` (Elastic 4): a notice longer
+    /// than [`RIG_DRAIN_MAX_SECS`] is refused before anything is written (the store's
+    /// `Unsupported`); `Unknown` for no row; else the row draining and, with `host` that live
+    /// dirty boot's row, it marked draining (`Marked`), or not (`RowOnly`).
+    pub fn drain_host_in_store(&mut self, d: &game::coordinator::DrainHost) -> Result<game::coordinator::HostDrained, String> {
         use game::coordinator::HostDrained;
-        let Some(row) = self.desired.get_mut(&d.name) else { return HostDrained::Unknown };
+        if d.in_ms > RIG_DRAIN_MAX_SECS * 1000 {
+            return Err(format!(
+                "a drain notice of {} ms is longer than the longest, {RIG_DRAIN_MAX_SECS} s (DRAIN_MAX_SECS)",
+                d.in_ms
+            ));
+        }
+        let Some(row) = self.desired.get_mut(&d.name) else { return Ok(HostDrained::Unknown) };
         row.1 = true;
-        let Some((h, boot)) = d.host else { return HostDrained::RowOnly };
+        let Some((h, boot)) = d.host else { return Ok(HostDrained::RowOnly) };
         if self.boots.get(h.0 as usize) != Some(&boot) || self.row_dead(h) || self.left.get(&h) == Some(&boot) {
-            return HostDrained::RowOnly;
+            return Ok(HostDrained::RowOnly);
         }
         self.draining.insert(h);
-        HostDrained::Marked
+        Ok(HostDrained::Marked)
     }
 
     /// `fleet::remove_host_in` against the rig's `desired_hosts` (Elastic 4).
