@@ -979,10 +979,10 @@ cut_policy="twin-cut-$cut_host"
 cut_from=$SECONDS
 pod_ip=$(pod_field "$pb" '{.status.podIP}')
 say "host $cut_host ($pb, $pod_ip, id $id_b) cut from $(printf '%s ' $coord_ips)and $svc_ip; the land's owner is $land_owner_name (id $land_owner)"
-sleep 2
 node_ct=k3d-mmo-server-0
+have_ct=''
 if command -v docker > /dev/null 2>&1 && docker exec "$node_ct" sh -c 'command -v conntrack' > /dev/null 2>&1; then
-    docker exec "$node_ct" conntrack -D -p tcp -s "$pod_ip" --dport 6480 2>&1 | sed 's/^/   conntrack: /' || true
+    have_ct=1
 else
     say "record: no docker or no conntrack in $node_ct: the established flows are not broken by this script"
 fi
@@ -994,14 +994,27 @@ detached_logged() {
     done
     return 1
 }
-seen_detached=''
-for _ in $(seq 1 25); do
+# Up to 50 s: the flows are deleted again on each of the first six rounds (kube-router installs the
+# policy's rules asynchronously; one delete right after the apply can lose that race), and the pod's
+# readiness is sampled every round.
+seen_detached='' went_unready=''
+for round in $(seq 1 25); do
+    if [ -n "$have_ct" ] && [ "$round" -le 6 ] && [ -n "$pod_ip" ]; then
+        docker exec "$node_ct" conntrack -D -p tcp -s "$pod_ip" --dport 6480 2>&1 | sed 's/^/   conntrack: /' || true
+    fi
+    pod_ready "$pb" || went_unready=1
     if detached_logged; then seen_detached=1; break; fi
     sleep 2
 done
+if [ -z "$seen_detached" ] && [ -n "$went_unready" ]; then
+    fail "7d: the cut took effect (host $cut_host's pod went not Ready) but no coordinator replica logged 'host h$id_b ... stalled' within 50 s: the coordinator did not detach it (a regression, or the log line changed)"
+fi
 if [ -z "$seen_detached" ]; then
-    skipped_7d="the cut did not take effect: no 'stalled' line for host h$id_b within 50 s and its pod stayed Ready"
-    echo "SKIP 7d: $skipped_7d (established flows survive the policy, no conntrack, or the CNI does not enforce policies); the phase is skipped, not passed"
+    if [ -z "$pod_ip" ]; then ct_note="its pod IP read came back empty: no flow could be deleted"
+    elif [ -n "$have_ct" ]; then ct_note="conntrack -D was run on the node"
+    else ct_note="conntrack was not available on the node"; fi
+    skipped_7d="no 'stalled' line for host h$id_b within 50 s and its pod stayed Ready at every sample ($ct_note)"
+    echo "SKIP 7d: $skipped_7d; the cut did not visibly take effect; the phase is skipped, not passed"
     k delete networkpolicy "$cut_policy" --ignore-not-found > /dev/null || true
     cut_policy=''
 else
