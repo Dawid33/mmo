@@ -116,8 +116,8 @@ copy) → `dns` → `login` → `monitoring` → `world` (`deploy/modules/world`
 `coordinator` (`var.coordinator_replicas` replicas, default 2, `Recreate`, every replica on the same identity
 Secret `coordinator-identity` — one pin for hosts and login — behind the Service `coordinator`: ClusterIP, TCP 6480 =
 the HTTPS API (`VOXEL_COORDINATOR_BIND=0.0.0.0:6480`) + the health port, each connection to a Ready replica — a world
-created before the coordinator HTTP API keeps its headless UDP Service on a plain apply (the provider keeps
-`cluster_ip`) until `-replace=module.world.kubernetes_service_v1.coordinator`; no Secret `login-link-identity`; a
+created before the coordinator HTTP API keeps its Service HEADLESS on a plain apply (its ports change to TCP in
+place; the provider keeps `cluster_ip`) until `-replace=module.world.kubernetes_service_v1.coordinator`; no Secret `login-link-identity`; a
 PodDisruptionBudget `min_available = 1` only above one replica), Deployment `fleet` (the reconciler, below; its
 ServiceAccount, Role and RoleBinding `fleet`), the ConfigMap `host-template` (key `template.json`: a host's Deployment,
 UDP NodePort Service and PodDisruptionBudget as one JSON template with placeholders, rendered by `hosts.tf`),
@@ -466,9 +466,13 @@ Verify with:
     are not applied again (`Coordinator::outbox_committed`). A replica's cache also follows the row by NOTIFY
     (`load_coordinator_since`, forward only).
   - **Attachments** (`WorldCuts::attached`: host → boot, `attached_ms` = the store time its `Attach` was applied):
-    attached = this boot's `Attach` was applied, on any replica, and nothing detached it since. Detached by the host's
-    lapse or end, `first_of_generation`, a refused `Attach` of that boot at least as new as the newest
-    (`admit_attach`), role `all`'s channel close, and a **stalled mailbox**: the ticker's `hosts` read carries each
+    attached = this boot's `Attach` was applied, on any replica, and nothing detached it since. Only `detach_host`
+    removes an attachment: `first_of_generation`, a world rollback (`detach_all`), `ReplicaJoined { alone }` under
+    `Direct`, and `Input::HostStalled` — from role `all`'s channel close, a refused `Attach` of that boot at least as
+    new as the newest (`admit_attach`), and a **stalled mailbox**. A host's END (a succession, `end_landless_host`,
+    `note_succeeded`) drops its mailbox rows but NOT its attachment: it no longer counts (`attached_live` skips a
+    succeeded or left host: never gate, heir or assignee), and the next row routed to it (a `Target::Every`) stalls
+    and detaches it. The stall: the ticker's `hosts` read carries each
     host's oldest unread row (`mailbox_oldest`); one of the current attachment (not older than `attached_ms` −
     `ATTACH_CLOCK_SLACK_MS`, 1 s: the `Attach` deleted the earlier ones) unread past `MAILBOX_STALL_MS` (15 s, store
     clock) → logged `Input::HostStalled { host, boot, epoch }`, applied only while the host's newest `Attach` is
