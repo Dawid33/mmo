@@ -137,13 +137,18 @@ never patches an existing Deployment's replicas or image (the recipes own those)
 only at 0 replicas (a `PUT` with the read `resourceVersion`, its own image kept) and never a Service or a budget; a
 draining row gets nothing created; an object labelled for the world without `errantry/host` is never touched; an
 EMPTY `desired_hosts` read deletes every labelled host object (each pod leaves by its leave cut: a disruption, never
-a loss), a FAILED read deletes and creates nothing. Exactly ONE replica, `Recreate`: two overlapping reconcilers
-could each act on a view the other just changed (one deleting a host the other just created for a fresh row). Each
+a loss), a FAILED read deletes and creates nothing. ONE replica, `Recreate` — which orders a rollout, not a deleted
+pod's replacement: that one can overlap the old pod for its grace period, harmlessly, because a pass reads the
+desired rows AFTER its object lists (an object whose name the later read lacks was really removed). Its Role can
+create Deployments, so it can mount any Secret of the namespace (the service token, the link identities' keys), and
+its `delete` is not limited to host objects (the code deletes only those labelled for the world with
+`errantry/host`). Each
 host Deployment is 1 replica, `Recreate`; never `kubectl rollout status` a host — poll each Deployment's
-`status.readyReplicas` and skip a drained one (unready for good), as the recipes do. A host is removed ONLY by
-`world-drain <name>` is the operator's only way to remove a host, nothing to apply (the coordinator also drains hosts
-itself: rules 6 and 7, "The fleet"): the coordinator marks its desired row draining, removes the row once the name
-owns nothing, the reconciler deletes its objects (below the minimum a new name is added). The coordinator's replicas move together: never
+`status.readyReplicas` and skip a drained one (unready for good), as the recipes do. The operator removes a host
+ONLY by `world-drain <name>`, nothing to apply (the coordinator also drains hosts itself: rules 6 and 7, "The
+fleet"): the coordinator marks its desired row draining, removes the row once nothing of the name runs (a leaver
+that kept land or in-flight rows included: its `Leave` succession needs only its clean `hosts` row), the reconciler
+deletes its objects (below the minimum a new name is added). The coordinator's replicas move together: never
 `kubectl rollout status` it either — `world-stop` records the count in the Deployment annotation `errantry/replicas`
 and scales it to 0, `world-start` restores it (absent: 2) and waits for every replica's `/readyz`, `world_update.sh`
 stops and starts every replica together (no two builds share the row). **Emptying a node**: a PodDisruptionBudget
@@ -162,16 +167,22 @@ re-forged into a NEW empty database (`worldctl forge` refuses a store that holds
 Deployments, Services and budgets; creates `fleet`, its Role and `host-template`; scales the coordinator back up on
 its OLD image and `fleet` to 1 on `var.images.server`) → `world-stop` again → `kubectl set image` the pushed digests on
 `coordinator`, `toolbox`, `fleet` and `web` (not `world_update.sh`: it refuses a stopped world, and its start step
-waits for `/readyz` 200 that an unforged store never gives) → a new empty database (not written yet) → `world-ctl
-forge …` from the new toolbox → `world-start` (the coordinator adds the minimum, the reconciler creates `h1`). A host pod that crash-loops AFTER registering no longer rolls the world back while it
+waits for `/readyz` 200 that an unforged store never gives) → `orion-login-push` (link protocol 11: an old login
+service's links are refused by the new coordinator, a new one's by the old — so only now, with no coordinator
+running; native clients need this build too) → a new empty database (not written yet; do not start the runbook
+before it is) → `world-ctl forge …` from the new toolbox → `world-start` (the coordinator adds the minimum, the reconciler creates `h1`). A host pod that crash-loops AFTER registering no longer rolls the world back while it
 holds no land (a landless incarnation is ended, not succeeded); one that is assigned land during an open run, or is
 made heir, and dies before the settle still does (the residual, Succession below); every check that needs no id still
 runs before the registration (`roles::check_before_registration`). A release is **stop → replace images → start, never a
-rolling update**; it (and `world-stop` / `world-start`) brings a drained or marked host back as a NEW host (which
-the coordinator marks again once the name's desired row is draining). An `orion-apply world`
+rolling update**; it (and `world-stop`) stops a drained or marked host for good: the coordinator drains and removes
+its desired row (rules 2 / 2b, 3) and the reconciler deletes its Deployment — usually before the start scales it; one
+still there runs as a NEW host for seconds (marked at once, deleted with its row). `world-start` and a release's
+start wait for the reconciler's `/readyz` 200 at most their timeout, then WARN and start the host Deployments that
+exist (one failing host object never keeps the world down). An `orion-apply world`
 owns the coordinator's and `fleet`'s replica counts (not the hosts'): applied while the world is stopped or mid-update
 it STARTS the coordinator and the reconciler on whatever images are set (the host Deployments at 0 stay there until
-`world-start`) — apply only with the world running and no update under way (images are never changed by an apply).
+`world-start`, but a wanted row with no Deployment is then created at 1 replica) — apply only with the world running
+and no update under way (images are never changed by an apply).
 
 **The world's operator recipes** (context `world_ctx`, namespace `world_ns`, default orion / `world-errantry`; the
 twin reuses them with `world_ctx=k3d-mmo world_ns=world-twin`): `world-ctl <worldctl args>` (e.g. `forge --preset …`),
@@ -615,8 +626,9 @@ Verify with:
     live host has a mark (`world-drain`) → `DrainHost` of the row only; (2b) a wanted name with no live host whose
     NEWEST row is clean WITH a mark (the drain finished before the ticker saw it) → the row only — clean without a
     mark (a SIGTERM leave: `world-stop`, a release) changes nothing; (3) a draining name none of whose rows is
-    live-and-dirty or `landed` → `RemoveHost` (a leaver that kept in-flight rows holds its row until its `Leave`
-    succession); (4) wanted < min → `AddHost`; (5) scale up: wanted < max and, for `up_after_ms`, every read showed
+    live-and-dirty → `RemoveHost` — also when its leaver kept land or in-flight rows: its `Leave` succession needs
+    only the clean `hosts` row (the drained process takes no part and writes nothing, even at its SIGTERM), and the
+    slot must be free for its heir to be added at all; (4) wanted < min → `AddHost`; (5) scale up: wanted < max and, for `up_after_ms`, every read showed
     the LEAST-loaded serving host at `tick_permille ≥ SCALE_UP_LOAD_PERMILLE` (600) → `AddHost`; (6) scale down:
     wanted > max(min, 1), every serving host known ≥ `min_lifetime_ms`, and for `down_after_ms` every read showed
     `Σ tick_permille ≤ (n − 1) · (1000 − SCALE_DOWN_SPARE_PERMILLE)` (700) → `DrainHost` of the victim (fewest
@@ -631,8 +643,8 @@ Verify with:
     coordinator's env, from the module's `var.fleet`): `VOXEL_FLEET_MIN` (default 1), `VOXEL_FLEET_MAX`,
     `VOXEL_SCALE_UP_AFTER_MS` (`SCALE_UP_AFTER_MS`, 60 s), `VOXEL_SCALE_DOWN_AFTER_MS` (5 min, also the quiet time
     before the last host goes), `VOXEL_HOST_MIN_LIFETIME_MS` (10 min); a dial that is unparsable or 0 (but the
-    minimum), or min > max, refuses the start, and min 0 needs max ≥ 2 (a last leaver holding in-flight rows keeps its
-    slot until the next host inherits them). With zero hosts no cut begins, the calendar runs on, free land stays
+    minimum), or min > max, refuses the start, and min 0 needs max ≥ 2 (a conservative bound: with one slot a login
+    that arrives while the last host leaves finds no slot free until rule 3 removes its row). With zero hosts no cut begins, the calendar runs on, free land stays
     free. Lock walks: `world-store/src/succession.rs`'s notes. Metrics (coordinator): `mmo_fleet_wanted`,
     `mmo_fleet_draining` (the ticker's last read; 0 on the others), `mmo_fleet_{added,drained,removed,full}_total`;
     `added=` / `drained=` / `removed=` / `scale=` on the `[coordinator] window=` line.
