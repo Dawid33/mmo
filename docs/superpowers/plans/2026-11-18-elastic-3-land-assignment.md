@@ -755,3 +755,263 @@ Then the whole-branch review split by area (store + server, game, ops + docs), o
 
 - **A world plays after every task:** T1–T3 change nothing a running world observes (T3's messages are not sent yet). T4 switches the ask in one commit, with the keeper's heal. T5 adds an unused part field. T6 turns release on behind a five-minute idle time. T7 makes peers learn sooner what a read already tells them. T8 changes only a leave's end state.
 - **Proportion:** ten tasks against the handoff's 7–9; the risk is in T4, T6 and T7, and each carries seeded conservation tests; T1, T2, T5 and T9 are narrow.
+
+## As built (2026-11-19)
+
+Built on `develop` from `94d292ce`, executed subagent-driven; the ledger and the per-task briefs, reports and review
+findings are in `.superpowers/sdd/2026-11-18-elastic-3-land-assignment/`. Every task was reviewed clean (Task 6 after
+two fix rounds; Tasks 6–9 by reading only, see "Tests" below). Not yet accepted: the whole-branch review follows this
+section and Dawid's hand checks (TODO.md, "Elastic 3") are pending; nothing ran live or on orion. The `go-nogo-r3`
+baseline was NOT taken before Task 4 (below).
+
+### Commits
+
+Foreign commits are interleaved on `develop` and not listed (the repository-wide test clean-up `6906f295..a450b3df`,
+`904f3ea0`, `a9165c9f`, worldgen `bca55929`, parry `22c9006c`, docs `6c40b65c`, and others' docs commits).
+
+| Task | Commits |
+|---|---|
+| plan | `94d292ce` docs: Elastic 3 plan — the coordinator assigns land, idle land is released |
+| T1 load in the beat | `bccd2c67` feat(host): the heartbeat row carries the host's load |
+| T2 `AssignLand` | `05bd3606` feat(store): AssignLand gives a free super-region to a live host inside a coordinator transition |
+| T3 the coordinator answers | `939ee28d` feat(coordinator): a need for free land is answered by an assignment to the least-loaded host (link protocol 10) — **the last commit before Task 4: the `go-nogo-r3` "before" baseline is measured from it** |
+| T4 hosts ask | `d9d4a426` feat(host): a host asks the coordinator for land; the claim preference and claim_free are gone |
+| plan amendment | `ff137989` docs(plan): Elastic 3 — no whole crate suites per task; they run once at the closing task |
+| T5 the part releases | `6fe4af64` feat(store): a cut part releases super-regions with its commit; a fence can shrink |
+| T6 idle release | `7baf5c81` feat(host): idle land is released in the host's own cut part; the fence shrinks; fix round 1 `32208681` fix(host): a record parked on released land is placed by its land's owner, never refused; fix round 2 `64aece2d` fix(host): a parked record handed to its land's new owner keeps its adventure claim |
+| plan amendment | `b4955c80` docs(plan): Elastic 3 — Tasks 7-10 under the regression-only test rule |
+| T7 `Released` | `db6e0ab4` feat(peer): Released tells peers land is free; what arrives for released land waits for its next owner |
+| T8 the clean leave | `f12e5293` feat(host): a clean leave releases its land; a Leave succession only carries a leaver's in-flight rows |
+| T9 metrics, twin | `959f1f3c` feat(world): land metrics, the idle dial, and the twin's assigned-idle-released-re-assigned phase |
+| T10 docs | `docs: Elastic 3 — the coordinator assigns land, idle land is released, as built` (CLAUDE.md, TODO.md, this section) |
+
+### "To confirm with Dawid" — defaults taken (not answered before execution)
+
+All five were taken as written: the assignment rule (fewest players, then fewest running regions, then a rendezvous;
+low headroom and freshly seen hosts skipped while another qualifies); `LAND_IDLE_MS` = 5 minutes; a clean leave
+releases all its land unless the leaver has `in_flight` rows (or an open succession run); assignment stops while every
+coordinator replica is down; a hand-off into land being released parks the player and makes the client rejoin.
+
+"Before Task 1" (the `go-nogo-r3` baseline): Task 4 started without it. Ruling (controller): Dawid said "execute it"
+after being told of the gate, a measurement is his to run, and the baseline is not lost — it is measured from
+`939ee28d`, the commit before Task 4 — cost if wrong: Dawid checks out that commit to measure the "before". TODO.md's
+hand check 1 says so.
+
+### Two rule changes by the owner during execution (2026-11-19)
+
+1. **No whole crate suites per task** (during Task 5): CLAUDE.md's testing rule; the plan's per-task Step 4 lists were
+   over-broad. Each task verified with its touched tests + `smoke`; whole suites were to run once in Task 10
+   (`ff137989`).
+2. **Only regression tests are committed** (mid-Task 6, then repository-wide): implementers write only regression
+   tests for bugs actually seen and run no tests (compile checks only: `smoke`, `web-check`). Dawid's clean-up
+   (`6906f295..a450b3df`) then deleted EVERY test Tasks 1–6 had committed (world-store's `tests/` emptied,
+   `peer_schedule.rs` down to 432 lines, `takeover.rs` to 467). From Task 7 the plan's named tests became reasoning
+   obligations for the implementer and the reviewer and hand checks in TODO.md (`b4955c80`); Task 6 was reviewed on its
+   source diff only. Execution paused while the clean-up landed (Task 6 implemented, not reviewed) and resumed after it.
+
+### Tests
+
+Tasks 1–6 wrote the plan's tests (TDD; RED / GREEN evidence in each `task-N-report.md`) and ran them green at their
+commits: T1 world-store + `test-pg` 153, game `coordinator::` 135; T2 `test-pg` `it` 160, game `it` 954,
+`test-threads` 299; T3 game `it` 969 (`coordinator::` 150), `test-threads` 299, `coordinator_rt` 10/10, `test-r2`
+20/20, login 85 + 3, svc-link 14 + 1; T4 `peer_schedule::` 188/188, game `it` 967, `test-threads` 302, world-store
+157 on both engines, server lib 109, `test-r2` 20/20, `test-r3` 52/52, `test-r4` 27/27; T5 `test-pg` 163, world-store
+163, game `it` 967, server lib 110, `test-threads` 302; T6 `peer_schedule::` 197/197, server lib 112, the new
+`takeover` test 1/1, `test-threads` 311 (all before its fix rounds). The clean-up deleted all of them. Task 6's two fix
+rounds and Tasks 7–9 ran `smoke` and `web-check` only (no tests written). **Nothing exercises Elastic 3 now** except
+the twin's phase 7c: the release path, `Released`, `forward_mailbox`, the clean leave's release, the peers' re-route
+and the parked-record fix rest on review by reading plus one twin run. The scenarios are TODO.md's hand check 3.
+
+### Rulings
+
+Execution-wide:
+- No git worktree; `develop` in place (CLAUDE.md). Files with foreign uncommitted hunks (justfile, CLAUDE.md, TODO.md,
+  `deploy/modules/world/variables.tf`, `deploy/envs/local/world/main.tf`) staged by filtered patch.
+- Commit trailers name the session's model (`Claude Opus 5.5`), as the session's attribution reminder says, not the
+  contract's.
+
+T1: `TickLoad` is threaded through `ThreadRegionSpawner::with_tick_load` (not a global); the boot beat sends the
+default load and sets no gauge; `tests/schema.rs` `EXPECTED` is a column list (it gained the three columns).
+
+T2: SQL errors of `assign_land_in` go through the generic `From<sqlx::Error>` (40P01 / 55P03 → `LockConflict`); the
+lock notes gained the drain-mark sentence (a drain `UPDATE` waits on the assignee's share lock like a beat);
+`answer_awaited` returns `true` for `Assigned` (no mark exists).
+
+T3:
+- The provisional load entry is added when the assignment is DECIDED (removed on a refusal), not at `Done`: eight asks
+  in one read must spread 4 / 4 — cost: an overcount ≤ 10 s after a rebase drops an uncommitted decision.
+- `assign_askers` is dropped at the answer's first apply; a replayed `Done` re-sends only `Assigned` (the other askers
+  re-ask within a second); an owned row in a later read drops a stale entry.
+- `ASSIGN_WARN_EVERY_MS` (60 s) and the kept field `assign_warned_ms` throttle "no host takes logins".
+- `pick_assignee` also requires a live, dirty lease row (the store refuses `HostNotLive` otherwise).
+- `LeaseWatch::known_for` per row `boot_received_ms`; `latest_received_ms()` is the watch's own "now".
+
+T4:
+- `with_assignment()` sets the `Succession` policy and creates no coordinator (tests that call `with_claims` then
+  `world_cuts` would make two).
+- Land of a departed host is asked only at the paced scan (once per period), `Free` / `Unknown` at once: asking it the
+  moment a placement needed it got the `Leave` succession declared before the next cut, exposing the pre-existing
+  hazard of an heir registered during the leave cut (FLAGGED, below).
+- `DIRECTORY_READ_RETRY_MS` (1 s): a failed directory read is retried after it (the old retry lived under
+  `claims_wait_for_read`, gone).
+- `told_where_its_body_went` accepts the body parked on its owner (the home naming the owner is the test's point);
+  `a_cleanly_left_boot_claims_nothing` kept, re-pointed at `assign_land`; the three `two_phase.rs` claim tests already
+  used `claim_super_regions`.
+
+T5: **`assign_land_in` reads the row plainly first** (absent → `INSERT`; free → `UPDATE … WHERE owner = -1`; owned →
+`Owned`, nothing locked) — the plan's `INSERT … ON CONFLICT DO NOTHING` WAITS for an uncommitted updater of the
+conflicting row (a staged releasing part): an assignment timed out (~10 s, `55P03`) behind it. Reviewer-confirmed
+safe under READ COMMITTED. The `succession.rs` notes were rewritten. `release_refusal` refuses a release outside the
+fence and a one-phase cut with releases before any statement; the standalone `release` is deleted.
+
+T6:
+- The busy table is one pass, `busy_land() -> BTreeSet<SuperRegion>` (not a per-row `land_busy(sr)`: thousands of rows
+  per host).
+- The mask lifts at `cut_failed` (a decided abort, or "nothing of it staged here"), not at `world_cut_failed`: a failed
+  part may still be staged, and a region load in that land would wait for its decision.
+- The server shrinks by the part's releases ∪ `manager.releases_of(id)`: a `CutPending` part this writer did not stage
+  has no `releases` here.
+- At `land_released`: `parked`, `terrain_cache`, `pristine_terrain` and `unavailable` entries of that land dropped;
+  `stored_regions`, `locations`, `parked_bodies`, `incarnation`, `lod_cache` kept.
+- `begin_release` refuses while `leave_parked` or for the leaving cut (Task 8 decides a leaver's release).
+- Fix round 1 (review Important 1): a player held here ONLY as a parked record is placed by the owner of its record's
+  region (`Me` → `Here`; another host → `Here`, then `move_to_peer` hands the record there; masked / `Free` / `Unknown`
+  → `Wait`, the land asked for); a refused `place_player` puts the record back unless another host owns its land;
+  `busy_land` counts unexpired spawn pins' regions; a committed release drops the parked records its part wrote
+  UNCHANGED (`released_parked`; else two writers of one `players` row); `release_aborted` on a failed `begin_cut_at`;
+  masked-land arrivals log below error; `VOXEL_LAND_IDLE_MS=0` refused. A player restored through `move_to_peer`
+  lands at the region's landing spot, not its parked pose.
+- Fix round 2 (Important A): `move_to_peer`'s restore lost the adventure claim → `restored_adventure` shared with
+  `restore_player`, `adventurer_of` set before the move.
+
+T7:
+- No existing live path forwarded `intent_mailbox` mail when its land changed hands (the comment meant cut rows /
+  `restore_in_flight`) → the new `forward_mailbox` at the end of `flush_unowned`; it also forwards a reply held because
+  two directories disagree (no loss, no duplicate; converges on the store), and a host sent an intent / reply for land
+  it neither owns nor masked / released sets `directory_wanted`.
+- `peer_released` runs no flush (free land makes nothing deliverable); `finish_move` unchanged (a move whose target
+  went free mid-move already parks on the sender via `is_unavailable`).
+
+T8:
+- **`reroute_held_for_landless_leavers`** (on PEERS, before `forget_landless_leavers`): the plan said `end_leaves`
+  needs nothing new, but nothing delivered a leaver's held session without a succession, and `forget_host` would drop
+  it. Transfers → `wait_for_owner`, intents refused back, replies → mailbox, the leaver's journal entries dropped;
+  exactly once even when a directory read beats a `Leave` order (what a peer held is its own state). A re-routed
+  leaver is forgotten only when its row is pruned (`left_peers` keeps it out of `outside`).
+- `DirectoryKeeper::new` lost its unused `_boot`.
+
+T9:
+- Phase 7c waits 210 s for the release, not 120 s: a placed order pins its region for `SPAWN_PIN_MS` (120 s) while it
+  waits for a session that never comes, then the 20 s dial, then the next cut (~150 s measured).
+- 7c first waits until no `super_regions` row is owned (phase 7's land must go back); "no succession row" = the
+  `successions` count unchanged across 7c; the coordinators' `mmo_land_assigned_total` must grow by ≥ 2.
+- `mmo_host_land` / `mmo_land_released_total` refresh once per `METRICS_REPORT_INTERVAL` (5 s), from the `[server]`
+  report.
+
+### Plan defects found
+
+- **`INSERT … ON CONFLICT DO NOTHING` waits behind a staged releasing part** (T5): the lock walk said statements 2 and
+  3 never wait; Postgres' unique check waits for an uncommitted UPDATER of the conflicting tuple. Fixed by the plain
+  read first.
+- **A region load in land a staged part releases WAITS for the decision** (`FOR SHARE` vs the part's `FOR NO KEY
+  UPDATE`; before, two share locks coexisted) — the mask must be up before the part reaches the store and stay until
+  after the shrink (T5 found, T6 built it so).
+- **The shrink by the part's `releases` alone** misses a `CutPending` part this writer did not stage (T6: union with
+  `releases_of`).
+- **`place_spawn` placed a parked record `Here` on released (or masked) land** (T6 review Important 1): the session was
+  then refused (`REGION_UNAVAILABLE_REFUSAL`) and the record was not put back — every login after a committed release
+  refused, and on an aborted cut the newest record dropped. The plan's "a parked player moves with `move_to_peer`"
+  held only for land another host owned. The busy table also missed spawn pins.
+- **`move_to_peer` restoring a parked record lost the adventure claim** (T6 fix round 2).
+- **No live path forwarded held intent mail** (T7): the plan suspected one; there was none.
+- **Peers' held messages for a released leaver** were never delivered and `forget_host` would drop them (T8): the plan
+  said `end_leaves` needed nothing beyond Task 7.
+- **The twin's 120 s release wait vs the 120 s spawn pin** (T9: run 1 failed 7c).
+- **Per-task whole suites** (the Step 4 lists) were against CLAUDE.md's testing rule (owner, during T5).
+- **The test strategy** (seeded conservation tests per task, "a task that changes who holds what is not done without a
+  conservation test") was overtaken by the regression-only rule: Tasks 7–8, the riskiest after T4 / T6, have no test.
+- The plan's provisional load at `Done` cannot spread a burst decided in one read (T3: at the decision).
+- Asking for a departed host's land the moment a need appears exposes a pre-existing `Leave`-heir hazard (T4, below).
+
+### Deferred minors (for the whole-branch review)
+
+**FLAGGED (conservation / correctness):**
+- T6: a record parked on land A does NOT own after the releasing part was built (`park_handed` from a peer not yet
+  told, or the re-park in `place_player`) stays on A and A writes it in every part; with ≥ 3 hosts a gate that knows
+  neither copy may place the player from the store on X → the player twice, two parts writing one `players` row (those
+  cuts abort). Suggested: at every committed part drop unchanged parked records on land not `Me`. T7's `Released`
+  narrows the window to its flight time; not closed.
+- T8 (b): `on_land_owner` / `leave_wanted` has no guard against declaring a `Leave` for a clean row that owns nothing
+  (a stale owners lookup applied after the leaver released and detached), and the store's declaration does not refuse
+  an empty `moved` → an empty `Leave` succession could open (it must settle; contradicts "never declared").
+- T4 / T8, pre-existing: a `Leave` succession declared before the next world cut whose heir registered DURING the leave
+  cut never applies its order (its journal counts from the cut before) — rarer now, not closed.
+- T8 (a), pre-existing: an heir whose directory read lands before its succession order sees the moved rows as `Me`
+  with no mask.
+
+By task:
+- T1: the load window resets when a beat is SENT, not when it succeeds (a failed beat loses that window's worst tick);
+  `HostLoad` re-export out of alphabetical order; a missing blank line in `ownership.rs`.
+- T2: `coordinator_tx.rs` long doc line (the other T2 minors were fixed in T3 / T4).
+- T3: a super-region pending in `assign_askers` can be decided again by the next read (a second provisional entry,
+  overcount ≤ 10 s); provisional removal by `rposition(host)`, not by `(host, sr)`; `ASSIGN_PER_PASS_MAX`'s doc says
+  "transition", it bounds a read; a new ticker before its first `hosts` read warns "no attached host takes logins"
+  (the pre-existing `unused_mut` in `tests/coordinator.rs` went with that file in the clean-up).
+- T4: a row both queued and healed in one pump is told twice (harmless); the rig's `assign_answers_lost` drops every
+  decision's answer of that transition; `drive_land` survives as lease read + `Leave`; stale docs naming `LandWanted`
+  as live (`coordinator/succession.rs` ~:401, ~:1420, `placement.rs` ~:25).
+- T5: an orphaned doc line at `thread.rs` ~:109 ("Free the fence's super-regions." heads `BootstrapCoordinator`'s doc).
+- T6: an idle stamp survives a busy spell shorter than one scan (doc line only); `land_released` returns early with no
+  directory and leaves that cut's `released_parked` entry.
+- T7: `directory_wanted` from a disagreeing intent re-reads the RIGHT side while a stale sender keeps sending per-tick
+  intents → back-to-back directory reads (one in flight, no minimum spacing; space them ≥ `DIRECTORY_READ_RETRY_MS`
+  or make the sender read); `intent_to_peer` from `forward_mailbox` does not raise `hops` (no cap on bounces while
+  directories stay apart); mail keyed by a foreign region whose own target is this host's / free stays until restart
+  (liveness, pre-existing shape; the debug line miscounts); `Released` goes to every key of `peers`, possibly
+  forgotten hosts.
+- T8: the re-route's `journal.take` drops `Received` entries too, unguarded (rests on leave pairs never receiving a
+  wrapped message from the leaver) → guard / `debug_assert`; `Owns` / `Released` broadcasts go to kept left peers, so
+  each `forget_landless_leavers` call re-fires the re-route (inflates `peer_dropped_for_dead`, re-arms `taken`, a
+  misleading WARN at the prune); a new warn for a landless-at-leave leaver with held entries.
+- T9: `twin_check.sh` `sql()` discards psql's stderr (a failing query reads as "no row" → a timeout without the SQL
+  error); the run folder keeps no phase transcript (7c's epochs could not be re-read there) and captured no `[server]`
+  line with `land=`.
+
+### The twin
+
+- T9, run 1 `target/twin/check-20261119T123900Z`: phases 1–7b PASS, 7c FAIL at the 120 s release wait (the spawn pin).
+- T9, run 2 `target/twin/check-20261119T125023Z`: **PASS in 802 s**, every phase 1, 1b, 2, 2b, 3, 4, 5, 6, 7, 7b, 7c,
+  8, 9, 10, 11. 7c: no owned row after 123 s; a join → super-region (0, 0) assigned to host b (id 3) at epoch 3 at once;
+  released after 151 s (free at epoch 4; host b's `mmo_land_released_total` 0 → 2); a second join → re-assigned to host
+  b at epoch 5 at once; generation 0 unchanged, successions 0 → 0, land assigned 0 → 2. `[coordinator] window=` lines
+  with `assigned=1` at 12:51:21 (`version=36`), 12:54:31 (117), 12:57:01 (191); per replica (phase 11) one with 1, one
+  with 2, five with 0.
+- The images were built from the working tree, which held other sessions' uncommitted worldgen edits at the time.
+- Environment: the disk at 90 % made kubelet's image GC delete the freshly imported images before the pods used them
+  (`ImagePullBackOff`, an interrupted apply's orphan `login` Deployment, deleted); Task 9 kept them with a temporary
+  re-import loop (not committed). `twin-images` / `twin-apply` keep failing until disk is freed or the GC threshold
+  raised (TODO.md).
+- Not exercised: a connected player, a host owning land that dies (a `Crash` succession), two hosts asking for one
+  row, a release racing anything. Not checked: whether phase 9's drain and phase 10's stop released land (host b may
+  still have held 7c's re-assigned row; those phases assert no land counts and no `[server]` line was kept).
+
+### Final checks (T10, at `959f1f3c` + docs)
+
+Task 10 changed documentation only. Both checks were blocked by other sessions' uncommitted work in the tree, not by
+Elastic 3:
+
+| Check | Result |
+|---|---|
+| `just smoke` | FAIL at its first step, `test-audit`: one unmarked test, `crates/game/tests/tmp_dwarf_perf.rs` (untracked, "TEMPORARY profiling harness — delete before commit", another session's). Its other four steps run by hand with the same CPU cap: `game --test it -- rollback_restore:: region_runner::` 4 passed, `server --lib` 3 passed, `server --tests --features test-hooks` and `client --lib --bins --tests` checked with no error (12 s). |
+| `just determinism-wasm` | NOT RUN: `game` does not compile for wasm32 (`E0425` / `E0433`: `Instant`, `tick_start`, `TMPPROF` in `crates/game/src/region.rs`, uncommitted profiling edits of another session). No Elastic 3 task ran it (Task 6's Step 4 listed it; Tasks 7 and 8 judged it not needed: no sim math, nothing state-hashed — the serialized forms that changed are the coordinator core, the link and peer messages and `WorldCut`). Owed once those edits are gone. |
+
+The plan's Step 3 suite list is void: `test-threads`, `test-r2`, `test-r3` and `test-pg` no longer exist, and the
+suites it named hold no Elastic 3 test. `just test` / `just test-full` were NOT run — they are Dawid's to ask for
+(CLAUDE.md, Testing). Client tests were not run.
+
+### Not done
+
+- **The whole-branch review** (store + server, game, ops + docs), its fix wave and a scoped re-review — next, as
+  Elastic 2b closed. The FLAGGED items above are its first input.
+- Dawid's hand checks (TODO.md, "Elastic 3"): the `go-nogo-r3` before / after, the live walk with a short idle dial, the
+  scenarios no test exercises, the client tests.

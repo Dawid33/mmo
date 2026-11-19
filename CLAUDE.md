@@ -137,9 +137,9 @@ change (a `var.hosts` key, host resources) goes through cuts on a running world.
 starts on `var.images.server` (`:latest`) beside the released digest: right after the apply, `kubectl set image
 deploy/host-<k> host=<the coordinator's image>` (TODO.md, Elastic 1) — else the next release finds mixed images and
 records no previous release. A host pod that crash-loops AFTER registering no longer rolls the world back while it
-holds no land (a landless incarnation is ended, not succeeded); one that claims land during an open run, or is made
-heir, and dies before the settle still does (the residual, Succession below); every check that needs no id still runs
-before the registration (`roles::check_before_registration`). A release is **stop → replace images → start, never a
+holds no land (a landless incarnation is ended, not succeeded); one that is assigned land during an open run, or is
+made heir, and dies before the settle still does (the residual, Succession below); every check that needs no id still
+runs before the registration (`roles::check_before_registration`). A release is **stop → replace images → start, never a
 rolling update**; it (and `world-stop` / `world-start`) brings a drained or marked host back as a NEW host. An `orion-apply world`
 owns the replica counts: applied while the world is stopped or mid-update it STARTS the world on whatever images are
 set — apply only with the world running and no update under way (images are never changed by an apply).
@@ -147,7 +147,8 @@ set — apply only with the world running and no update under way (images are ne
 **The world's operator recipes** (context `world_ctx`, namespace `world_ns`, default orion / `world-errantry`; the
 twin reuses them with `world_ctx=k3d-mmo world_ns=world-twin`): `world-ctl <worldctl args>` (e.g. `forge --preset …`),
 `world-status` (pods, host Deployments, node ports, each `/readyz` body; the coordinator's WANT / READY / RECORDED
-count and per replica its ticker flag, live replicas and conflicts), `world-logs|world-metrics <target>`,
+count and per replica its ticker flag, live replicas and conflicts; per host pod `land N, released M`),
+`world-logs|world-metrics <target>`,
 `world-hosts` (the `hosts` rows), `world-drain <name> [secs]` (`claim` worlds only; marks that name's live row,
 follows its log to the leave line), `world-stop` / `world-start` (hosts by label; drained and marked hosts warned
 about before acting; every host leaves through its leave cut, a host that left WITHOUT one is warned about; the
@@ -165,8 +166,11 @@ rollback goes forward again; a migration is NOT undone). Backups: `orion-pg-back
 <object>` PRINTS a drill into a scratch database and the live restore (world stopped, database renamed aside and
 recreated owned by `world_<id>`, `pg_restore --no-owner --role=world_<id>`, owners checked) — it runs nothing. The
 twin (`twin-up|twin-images|twin-apply|twin-check|twin-down`) runs the same module on k3d: `twin-check` proves the
-start, failure, leave, drain and stop/start paths (`scripts/twin_check.sh`'s header lists them); NOT owned land, a
-player, a browser pin, cert-manager, a real node drain, the nightly dump or load.
+start, failure, leave, drain and stop/start paths (`scripts/twin_check.sh`'s header lists them) and, since Elastic 3
+(phase 7c, the twin root sets the module's `land_idle_ms` = 20 s), land assigned to a join's placement, released idle
+by a committed cut part and assigned again (no succession, generation unchanged); NOT a connected player, a host
+dying while it owns land (a `Crash` succession), a browser pin, cert-manager, a real node drain, the nightly dump or
+load.
 
 **Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
 token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
@@ -319,9 +323,9 @@ Verify with:
   `docs/superpowers/plans/2026-11-17-elastic-2b-coordinator-replicas.md`, "As built")**: any number of coordinator
   processes, each a cache of the same row; the row's `version` compare-and-set is the ONLY fence — never a replica
   count, a budget, a lease or the ticker preference. Migration `0017_coordinator_replicas` (`coordinator_replicas`,
-  `outbox`, `coordinator.next_replica`, `coordinator.history_version`); the core format changed several times inside
-  `COORDINATOR_STATE_VERSION` 5 during the plan — a dev world written by a mid-plan build: re-forge (`just pg-reset`,
-  `just run --reset`).
+  `outbox`, `coordinator.next_replica`, `coordinator.history_version`). `COORDINATOR_STATE_VERSION` is 6 since
+  Elastic 3 (the land lookups keep their askers); a row of an older format beside saved regions is refused: re-forge
+  (`just pg-reset`, `just run --reset`).
   - **Replicas**: `register_replica` issues a `ReplicaId`; a split replica beats `coordinator_replicas.seen_ms` every
     `REPLICA_BEAT_MS` (2 s) from its main loop. Its first input is `Input::ReplicaJoined { me, alone }` (`alone`: no
     other row beaten within `REPLICA_LEASE_MS`, 10 s — a total replica crash; it drops the LOWER ids). The lowest
@@ -342,13 +346,15 @@ Verify with:
     replay, and leaves the log (else a replica's delayed write re-stamps a host that moved to another replica).
   - **Store decisions run inside the transition** (`world-store/src/coordinator_tx.rs`): the CAS `UPDATE` first (it
     locks the row), then each `StoreDecision` (`DecideCut`, `BeginCut` = `record_cut_begin`, `Declare`,
-    `EndLandless`, `Rollback`, `EndReplica`) in its own SAVEPOINT (a refusal is that decision's answer; the core
-    still commits), the outbox, `pg_notify('coordinator_row', version)`: issuing a decision IS committing it.
-    Answers come back as logged `Input::Decision`. Post-commit effects (`FinishCut`: `COMMIT PREPARED` of the parts,
-    THEN the cut notice) run after the commit and are retried. Every statement that locks `coordinator` takes it
-    FIRST (lock walk: `succession.rs`'s notes). SQLite: a transition with decisions or outbox rows is `Unsupported`.
+    `EndLandless`, `Rollback`, `EndReplica`, `AssignLand` — Elastic 3, below) in its own SAVEPOINT (a refusal is that
+    decision's answer; the core still commits), the outbox, `pg_notify('coordinator_row', version)`: issuing a
+    decision IS committing it. Answers come back as logged `Input::Decision`. Post-commit effects (`FinishCut`:
+    `COMMIT PREPARED` of the parts, THEN the cut notice) run after the commit and are retried. Every statement that
+    locks `coordinator` takes it FIRST (lock walk: `succession.rs`'s notes). SQLite: a transition with decisions or
+    outbox rows is `Unsupported`.
   - **The ticker** (`ticker()` = the lowest id of the core's durable live set `replicas`) ALONE runs `Maintain`, the
-    `hosts` read (leases, expected hosts, world tick), every `take_*` hand-out, land lookups and succession
+    `hosts` read (leases, expected hosts, world tick, load), every `take_*` hand-out, land lookups (the owners read,
+    `Input::LandOwners`, never logged — a rebased replica re-derives it from the hosts' next ask) and succession
     re-reads; the others apply host messages, link events, their own lifecycle and answers bearing their stamp. A
     dead ticker stalls timed work ≤ one replica lease + one read; a new ticker's `LeaseWatch` counts from zero (a
     declaration is delayed, never hastened).
@@ -370,10 +376,11 @@ Verify with:
     `mmo_coordinator_is_ticker`; alerts `WorldCoordinatorReplicasDown`, `WorldCoordinatorConflicts` (measure before
     splitting the row), `WorldCoordinatorNoTicker`. Dev: `just coordinators=2 dev-r3`, `just coordinator claim <n>`
     (replica n on 6480+n, login link 6490+n, the same cert files).
-- **Many hosts (R3 + R4 takeover + Elastic 1 hosts by id; plans `docs/superpowers/plans/2026-11-12-r3-multi-host.md`,
-  `2026-11-13-r4-takeover.md`, `2026-11-15-elastic-1-hosts-as-deployments.md` ("As built") — built; whole-branch
-  reviews and the owner's hand checks pending, see `TODO.md`)**: `claim` is any number of hosts and needs role
-  `host`, Postgres and the login link (`jwt` + a service token), else refused (`roles::check_claim_needs`);
+- **Many hosts (R3 + R4 takeover + Elastic 1 hosts by id + Elastic 3 land assignment; plans
+  `docs/superpowers/plans/2026-11-12-r3-multi-host.md`, `2026-11-13-r4-takeover.md`,
+  `2026-11-15-elastic-1-hosts-as-deployments.md`, `2026-11-18-elastic-3-land-assignment.md` ("As built") — built;
+  whole-branch reviews and the owner's hand checks pending, see `TODO.md`)**: `claim` is any number of hosts and
+  needs role `host`, Postgres and the login link (`jwt` + a service token), else refused (`roles::check_claim_needs`);
   `static` is ONE host (a `static` registration beside a live row is refused, `StoreError::NotAlone`); a host under
   `allinone` or no `VOXEL_OWNERSHIP` is refused.
   - **Identity**: a host is a `game::HostId`, issued by `register_host` from `world.next_host_id` (migration
@@ -401,9 +408,42 @@ Verify with:
   - **Ownership** (`VOXEL_OWNERSHIP`, `game::ownership`): `static` = a fixed table (`Static { me, layout }`; one
     host outside the seeded tests), a crash raises the world generation (`EXIT_WORLD_ROLLBACK`, 5); `claim`
     (default of `just host` / `just coordinator` / `dev-r3` / `go-nogo-r3`; `dev-r2` is `static`) = super-regions
-    claimed on demand, a dead host's land given to one heir while the others run on. A claim needs the
-    claimer's live, dirty `hosts` row (a declared-dead or cleanly-left boot wins nothing); a draining host is in
-    no host's claim preference and `claim_free` wins it nothing, while its own rows stay its.
+    ASSIGNED by the coordinator on demand (Elastic 3; `world_manager/land.rs`, `coordinator/assign.rs`,
+    `world-store/src/assign.rs`), a dead host's land given to one heir while the others run on. No host claims
+    free land itself any more (`claim_free`, `Volatile::ClaimWanted`'s ask and `Directory::preferred` are gone; a
+    boot's re-claim of its OWN rows, `claim_super_regions_live`, stays). A host that needs land it knows no reachable
+    owner of (`Free`, `Unknown`, a host in `left_peers`) sends `HostMsg::LandNeeded` (once per `LAND_NEEDED_EVERY_MS`,
+    1 s, per super-region, only while attached; a draining host asks too); the ticker reads the owners and, for a
+    free or absent row, issues the store decision `AssignLand` to `pick_assignee`'s host — attached, live, takes
+    logins (a draining or leaving host is assigned nothing), a live dirty lease row; skipped while another
+    qualifies: known < `ASSIGN_MIN_ATTACHED_MS` (30 s, the crash-loop guard) or tick headroom <
+    `ASSIGN_HEADROOM_MIN_PERMILLE` (200); then fewest players, fewest regions (each + its provisional count,
+    `ASSIGN_PROVISIONAL_MS` 10 s), rendezvous; ≤ `ASSIGN_PER_PASS_MAX` (64) per read. `AssignLand` checks the
+    assignee's `hosts` row FIRST (live, dirty, undrained — else `HostNotLive` / `HostDraining`), then reads the land
+    row plainly (an `INSERT … ON CONFLICT` would WAIT behind a staged releasing part) and takes only an absent or
+    free row (`WHERE owner = -1`, else `Owned`). No mark: a duplicate is refused by the store, a replayed answer
+    only re-sends. The answer: `CoordMsg::Assigned` to the assignee, `CoordMsg::LandIs` to other askers (also for an
+    owned row; an assignee asking for its own row is told `Assigned` again); the assignee QUEUES the rows, the
+    server's keeper grows the fence (`HostClaims::add`) and only then `claimed` (directory, `Reliable::Owns`,
+    `flush_unowned`) — **fence before use**. A lost `Assigned` heals by the next ask, or by the directory read: a
+    row owned by this host, absent from the fence, newer than the manager's epoch is fenced first
+    (`DirectoryKeeper`; a failed read retries after `DIRECTORY_READ_RETRY_MS`, 1 s). With EVERY replica down
+    nothing is assigned: free land stays free, a need waits (never guessed); owned land runs on.
+    **Idle land is released** in the host's OWN cut part: every `LAND_IDLE_SCAN_MS` (1 s) owned super-regions nothing
+    holds (`busy_land`: running/stopping regions, arrivals, mailboxes, in-flight targets, homes, moves, held spawns
+    and unexpired spawn pins, `succession_pinned`, `inheriting`) are stamped idle; at `BeginCut` those idle ≥
+    `land_idle_ms` (`LAND_IDLE_MS` 5 min; server dial `VOXEL_LAND_IDLE_MS`, 0 or unparsable refuses the start) are
+    MASKED (`releasing`: `owner_of` answers `Unknown`, as for `inheriting` — nothing loads, a need is noted without
+    an ask, arrivals take the unowned path) and the part's `WorldCut::releases` frees them with its commit. Committed:
+    the server shrinks the fence (`HostClaims::shrink`) and then `cut_committed` → `land_released` (directory free at
+    `epoch + 1`, parked blobs and the unchanged parked player records that part wrote dropped — the store holds them —
+    `Reliable::Released` to every peer, mask lifted, waits ask); aborted (`cut_failed` → `release_aborted`): the mask
+    lifts, the land stays. Nothing is released under `static` / all-in-one or while any succession run is open on the
+    host. A total crash's land drains back to free this way. A player record parked on released (or another host's)
+    land is placed by its land's owner: the gate's `place_spawn` waits (`Placement::Wait`, the land asked for) or
+    hands the record over with `move_to_peer`, its adventure claim kept (`restored_adventure`). Metrics
+    `mmo_host_land`, `mmo_land_released_total` (host), `mmo_land_assigned_total` (coordinator); `land=` /
+    `land_released=` on the `[server]` line, `assigned=` on the `[coordinator] window=` line.
   - **Lease**: a host stamps `hosts.seen_ms` every `HOST_HEARTBEAT_MS` (2 s) from its MAIN loop — never a
     timer thread (a hung loop must stop beating) — on a connection of its own (never the store's shared
     pool), each beat under a client-side deadline (`HEARTBEAT_DEADLINE_MS`), and once after each long boot
@@ -413,7 +453,11 @@ Verify with:
     declares nobody). The Postgres lease
     clock is `clock_timestamp()`, never `now()`. A fenced transaction (a cut part, a region load) idle longer
     than the lease loses its session (`FENCED_TX_IDLE_MS`, set by the fence check): a frozen host's row
-    locks do not outlive it.
+    locks do not outlive it. The beat statement also writes the host's load (Elastic 3, migration
+    `0018_host_load`: `hosts.load_players` / `load_regions` / `load_tick_permille` = sessions, running regions,
+    the worst tick since the last beat in permille of the period, `server/src/load.rs` `TickLoad`; a boot beat
+    sends zeros); the ticker's `hosts` read carries it (`HostSeen.load`) to `pick_assignee`. Gauges
+    `mmo_host_load_{players,regions,tick_permille}`.
   - **Succession** (`coordinator/succession.rs`, `world_manager/succession.rs`; migrations `0012_host_lease`,
     `0013_successions`): one fenced transaction marks the dead row and moves ALL its land to one heir per
     predecessor. Survivors report their peer journal against the dead host; the heir masks the inherited
@@ -442,16 +486,24 @@ Verify with:
     with nobody else live and a dirty row that is live, holds land or is an open run's predecessor (a total
     crash; an ended row is none) — abandons the open successions, takes every dirty
     row's `super_regions` and `in_flight` rows at `epoch + 1` and raises the generation (the first host back
-    holds all claimed land); otherwise the new host owns nothing. Rows owning nothing are pruned there. A
-    registration stuck behind a lock exits 1 after `CLAIM_LOCK_TIMEOUT_MS` (60 s).
+    holds all owned land, and releases what stays idle); otherwise the new host owns nothing. Rows owning nothing
+    are pruned there. A registration stuck behind a lock exits 1 after `CLAIM_LOCK_TIMEOUT_MS` (60 s).
   - Saves are coordinated world cuts in two phases (each host `prepare_cut`s its part, the coordinator
     decides; Postgres needs `max_prepared_transactions > 0`, the dev compose sets it); parts a crash left
     staged are resolved at start before anything else (`resolve_staged_cuts`; a start finishes only cuts no
     live host has a part in). An exiting host asks for a leave cut and exits 0 either way — not committed → its
     `hosts` row stays dirty (a crash to the others). A host that registers during a cut is not in it and is
     in the next (`cut_begins`, below).
-  - **Leave and drain**: a cleanly departed host never returns; `LandWanted` for its land → a `Leave`
-    succession at once, ALL its land to the first host that asks. `worldctl drain <url> <host id> [--in <secs>]`
+  - **Leave and drain**: a cleanly departed host never returns. **A clean leave releases its land** (Elastic 3):
+    the leaver's part (`leave_release`, in `try_complete_cut`) carries every super-region its directory gives it in
+    `releases` — unless the part carries an `in_flight` row or a succession run is open on it; then it releases
+    nothing (its `in_flight` rows are keyed to its host id, only a succession's adopting part moves them) and the
+    first `LandNeeded` for that land → the owners read names the departed owner → a `Leave` succession at once, ALL
+    its land to the asker. An aborted leave keeps the land, its retry decides again. Peers learn a released leave
+    from a directory read (`end_leaves` asks for one); what a peer held for the leaver goes on by the land's next
+    owner (`reroute_held_for_landless_leavers`, before `forget_landless_leavers`: transfers wait for an owner,
+    intents are refused back, replies go to the mailbox), and such a leaver is forgotten only when its row is
+    pruned. `worldctl drain <url> <host id> [--in <secs>]`
     (default `DRAIN_WARNING_SECS` 300, at most `DRAIN_MAX_SECS` 7 days; a mark only moves earlier, there is no
     un-drain) sets `hosts.drain_at_ms`, which a `claim` host reads at its heartbeat: it tells its home sessions
     the deadline (`ServerPacket::HostDraining { at_tick }`), stops being the gate, and at the deadline (its
@@ -459,7 +511,7 @@ Verify with:
     heartbeat, NO store call — it must survive its row being pruned) until removed; SIGTERM still means leave
     now; a drain leave that does not commit ends the process (exit 0, dirty row). A `static` host warns once and
     ignores a mark; `worldctl drain` refuses a row not beaten within the lease and warns when it marks the last
-    host not draining (no gate host: joins 503; no claimer). A stopping host tells its
+    host not draining (no gate host: joins 503; no assignee). A stopping host tells its
     sessions why on every exit branch (`LEAVING_REFUSAL`, `FENCED_REFUSAL`, `ROLLBACK_REFUSAL`).
   - `worldctl hosts <url>` lists the rows; `worldctl retire-host <url> <host id>` (`world-store/src/operator.rs`)
     only vouches a row dead while hosts run; with no host running it is refused (the first registration takes
@@ -490,8 +542,10 @@ Verify with:
     `coordinator`, `world-hosts-dev`, `drain-dev` (arguments: `just --list`; `host` and `coordinator` take the
     same ownership word). `just go-nogo-r3` re-forges each run and seams from the client's own region→host map
     (Elastic 2a Task 1); its first valid run is a hand check (TODO.md).
-- **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
-  with an epoch; every cut part / region load is fenced on it (`StoreError::Fenced`; the coordinator's writes and
+- **Owner epochs & fencing**: a host holds super-regions (`super_region_of`, `game::ownership`) in Postgres
+  with an epoch — assigned (`AssignLand`), moved by a succession or taken by a total-crash registration at
+  `epoch + 1`, freed by its own committed cut part (`owner = -1`, `epoch + 1`); every cut part / region load is fenced
+  on it (`StoreError::Fenced`; the coordinator's writes and
   store decisions are fenced by its row's `version` compare-and-set since Elastic 2b) — a fenced
   process stops writing and exits `EXIT_FENCED` (3, also when fenced at `register_host`); a dead coordinator
   thread exits `EXIT_COORDINATOR_FAILED` (4); a world rollback exits `EXIT_WORLD_ROLLBACK` (5). No advisory
@@ -503,7 +557,17 @@ Verify with:
   be missing; never relax that check without the host side (Peer link rules). Each decision prunes the older
   `cut_begins`; `cut_decisions` is never pruned (a re-attaching host's `pending_cut` looks one up). A succession
   moves rows at `epoch + 1`: the replaced process is fenced at its next heartbeat (`lease.rs`
-  `pump_or_fence`) or write. A new `hosts` / `super_regions` / `successions` statement needs its lock walk
+  `pump_or_fence`) or write. **A part's release** (Elastic 3, `rows.rs` `cut_rows`): the released rows are locked
+  `FOR NO KEY UPDATE` and checked against the fence BEFORE the ordinary `FOR SHARE` fence check (no lock upgrade
+  for a waiting declaration to sit in), freed by `UPDATE … WHERE owner = $me AND epoch = $e` after every other
+  write (`rows_affected != 1` → `Fenced`), then `PREPARE`; a release outside the fence, or in a one-phase cut
+  (`CutEnd::Commit`: static, all-in-one, SQLite), is `Unsupported` before any statement. A staged releasing part
+  holds those rows until its decision: a region load there WAITS (so the mask is up before the part reaches the
+  store and lifts only after the shrink), a declaration of the releaser waits and then moves only what is left.
+  **Fence before use; shrink before the next part**: `HostClaims::add` runs before the manager learns assigned
+  land, `HostClaims::shrink` (the part's releases ∪ `releases_of(cut)`) before `cut_committed`; a directory read
+  older than a release adds nothing back (the keeper's epoch guard). A new `hosts` / `super_regions` /
+  `successions` statement needs its lock walk
   (lock order and the one safe deadlock cycle: the module notes of `world-store/src/succession.rs`; the
   operator's in `operator.rs`; unfenced `successions` writers are the operator's rollback and a
   total-crash registration). The settles↔adopts pairing (a settled
@@ -518,8 +582,9 @@ Verify with:
   several answers (`LinkTarget::resolve_all`); a host's dialer tries them in turn, starting after the one that last
   failed or dropped, under ONE pin (every replica shares one identity). Every link hello names the world
   (`LinkHello.world` = `VOXEL_WORLD_ID`; a mismatch is refused, `""` matches only `""`); `LINK_PROTOCOL_VERSION`
-  is 9 (`HostToLogin::NoGate`) — older hosts, login services and clients do not mix with this build (stop,
-  upgrade, rejoin).
+  is 10 (Elastic 3: `HostMsg::LandNeeded`, `CoordMsg::Assigned`, `CoordMsg::LandIs`, `Reliable::Released`; the
+  unsent `HostMsg::LandWanted` / `Volatile::ClaimWanted` stay in their append-only enums) — older hosts, login
+  services and clients do not mix with this build (stop, upgrade, rejoin).
 - **Peer link rules** (`game::peer`, `world_manager/peers.rs`, `world_cut.rs`): a `PeerSession` is never
   replaced — `set_peer` on a known host id swaps the link and resets the connection. Resume is boot-scoped
   (`PeerHello.received_from_boot`: a count made against another boot renumbers). `Reliable` is numbered,
@@ -532,9 +597,16 @@ Verify with:
   by marks still aborts it. From `BeginCut` until `CutDone` a participant FREEZES its session with every host
   outside the cut (nothing sent or read), and refuses its part if it exchanged a state message with such a
   host that no committed cut of both saved (`unsaved_traffic`) — what lets `decide_cut` omit a newcomer. EVERY
-  coordinator replica down means no cuts, no takeover and no logins until one is back (it registers `alone`) —
-  but nothing they decided is lost: it resumes from the row. One live replica suffices; a host whose replica died
-  re-attaches to another.
+  coordinator replica down means no cuts, no takeover, no logins and no assignment until one is back (it registers
+  `alone`) — but nothing they decided is lost: it resumes from the row. One live replica suffices; a host whose
+  replica died re-attaches to another. **`Reliable::Released { rows }`** (Elastic 3) tells every peer land is free:
+  sent by `land_released`, and to a peer at its hello (after `Owns`) with all of `recently_released`; NOT
+  state-bearing (it names no entity, player or item; the store's row is the truth, a directory read repairs a lost
+  one, `Directory::set` ignores an older epoch), never `InCut`, never journalled. What arrives for released land
+  waits for its next owner (the unowned path) and goes on once: `flush_unowned` also forwards `intent_mailbox` mail
+  whose land another reachable host now owns (`forward_mailbox`); `forget_host` and `end_leaves` ask for a directory
+  read while the directory still names that host; a host sent an intent or reply for land it neither owns, masks nor
+  just released asks for one too (one of the two directories is stale).
 - **Peer journal** (`game/src/peer/journal.rs`): every host under `claim` (a `static` host records nothing)
   journals the state messages it exchanged with each peer since the last committed cut — a succession's
   reports; an entity's events are ordered by its transfer stamp, a player's by the hand-off's hop, never by a
@@ -561,6 +633,9 @@ Verify with:
   `VOXEL_WT_CERT` / `_KEY` are aliases): ONE certificate for the QUIC listener and WebTransport, files WAITED for at
   start (a WARN at most every 60 s) and re-read every 60 s (a cert-manager renewal needs no restart); unset = a
   self-signed P-256 certificate valid 14 days whose hash `HostEndpoint.cert_hash` carries (single-player too).
+  `VOXEL_LAND_IDLE_MS` (Elastic 3; ms, unset = `LAND_IDLE_MS` 5 min, 0 or unparsable refuses the start): how long
+  owned land nothing holds stays the host's before a cut releases it — the world module's `land_idle_ms` (default
+  null = unset; the twin sets 20000, orion does not).
 
 **Client** (`crates/client`)
 - `renderer/` bridges sim state to Bevy (`bridge.rs`); predicted regions run like the server's (`regions/`,
