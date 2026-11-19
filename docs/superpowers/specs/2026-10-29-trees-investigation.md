@@ -145,6 +145,9 @@ age, so a growing tree keeps its branches.
 
 ### 4.5 Rasterisation into world blocks
 
+> **Superseded 2026-11-19** by `docs/superpowers/plans/2026-11-18-block-trees.md`: tree wood is whole blocks
+> (block centre in the capsule + a face-connected axis walk), no voxel masks. The rest of this section is history.
+
 - **Trunk and limbs**: a block fully inside the tapered cylinder → `<sp>_log`; a partial block →
   `ChiselData::from_fn` (bark outside, wood inside). Exact from ~12 cm radius.
 - **Thin branches** below ~1 block → chiseled `<sp>_branch`, with a cuboid cap per block;
