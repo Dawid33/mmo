@@ -1,20 +1,21 @@
-# The twin's game world `twin` (namespace world-twin): the live world module with two
-# hosts (a, b) on the same node ports as orion, imported images (mmo/server:twin,
-# mmo/web:twin; no pull secret), each host's self-signed client certificate (pinned by
-# clients: the other certificate path than orion's Let's Encrypt one), plain-HTTP web
-# at http://game.localhost:8480/, no ServiceMonitor, a 10 s save period and small
-# requests. Needs ../postgres and ../login applied (their local state is read here).
+# The twin's game world `twin` (namespace world-twin): the live world module with a fleet
+# of exactly two hosts (min = max = 2; the coordinator names them h1, h2, … and the
+# reconciler makes their Deployments) on the four node ports k3d maps, 30466-30469, as
+# orion's, imported images (mmo/server:twin, mmo/web:twin; no pull secret), each host's
+# self-signed client certificate (pinned by clients: the other certificate path than
+# orion's Let's Encrypt one), plain-HTTP web at http://game.localhost:8480/, no
+# ServiceMonitor, a 10 s save period, short scale dials and small requests. Needs
+# ../postgres and ../login applied (their local state is read here).
 # Forge it from the toolbox: `just world_ctx=k3d-mmo world_ns=world-twin world-ctl forge`.
-# An apply owns the replica counts (coordinator: the module's coordinator_replicas, 2;
-# each host Deployment 1: applied to a
-# stopped world it starts it). An apply that changes anything the coordinator and the
-# hosts share (database_url, service_token, the coordinator's certificate, save_secs,
-# super_region_regions, ownership) restarts them all at once, the hosts likely leave
-# without a cut and the next start raises the world generation: make such a change with
-# the world stopped (`just world_ctx=k3d-mmo world_ns=world-twin world-stop`, then
-# apply). Only a host-only change (a key of `hosts`, a host's resources) restarts hosts
-# through their cuts on a running world with no update under way. A host added after a
-# release starts on the tag, not the released digest: see ../../orion/world/main.tf.
+# An apply owns the coordinator's replica count (the module's coordinator_replicas, 2:
+# applied to a stopped world it starts the coordinator, not the hosts — host Deployments
+# are the reconciler's and the recipes'). An apply that changes anything the coordinator
+# and the hosts share (database_url, service_token, the coordinator's certificate,
+# save_secs, super_region_regions, ownership) restarts the coordinator and changes the
+# host template: make it with the world stopped (`just world_ctx=k3d-mmo
+# world_ns=world-twin world-stop`, apply, then world-start). A change of the host template
+# alone (a host's resources, land_idle_ms) restarts no running host: each takes it at its
+# next stop and start.
 data "terraform_remote_state" "postgres" {
   backend = "local"
   config = {
@@ -43,9 +44,15 @@ module "world" {
   # Idle land goes back after 20 s, not the hosts' 5 min: twin_check phase 7c waits for it.
   land_idle_ms = 20000
 
-  hosts = {
-    a = { quic_node_port = 30466, wt_node_port = 30467 }
-    b = { quic_node_port = 30468, wt_node_port = 30469 }
+  # Two hosts, always: k3d maps exactly the node ports 30466-30469 (two slots). The dials
+  # are short so twin_check can watch a drain and a replacement within minutes.
+  fleet = {
+    min                  = 2
+    max                  = 2
+    port_base            = 30466
+    scale_up_after_ms    = 30000
+    scale_down_after_ms  = 30000
+    host_min_lifetime_ms = 60000
   }
   public_host        = "127.0.0.1"
   client_certificate = null
@@ -72,10 +79,6 @@ output "login_link_cert_pem" {
   value = module.world.login_link_cert_pem
 }
 
-output "endpoints" {
-  value = module.world.endpoints
-}
-
-output "host_names" {
-  value = module.world.host_names
+output "client_ports" {
+  value = module.world.client_ports
 }

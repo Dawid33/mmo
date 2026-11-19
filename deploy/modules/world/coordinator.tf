@@ -19,6 +19,22 @@
 # first (hosts.tf). world-stop records the count in the annotation errantry/replicas
 # before it scales to 0, and world-start restores it (absent: the module default).
 
+locals {
+  # How many hosts the world wants (var.fleet): the ticker's AddHost / DrainHost decisions
+  # stay within [min, max] (desired_hosts; the reconciler, fleet.tf, follows). The pace
+  # dials are set only when given (unset: the server's defaults). A coordinator-only
+  # change: an apply restarts every replica (Recreate), the hosts re-attach.
+  fleet_env = merge({
+    VOXEL_FLEET_MIN = tostring(var.fleet.min)
+    }, var.fleet.scale_up_after_ms == null ? {} : {
+    VOXEL_SCALE_UP_AFTER_MS = tostring(var.fleet.scale_up_after_ms)
+    }, var.fleet.scale_down_after_ms == null ? {} : {
+    VOXEL_SCALE_DOWN_AFTER_MS = tostring(var.fleet.scale_down_after_ms)
+    }, var.fleet.host_min_lifetime_ms == null ? {} : {
+    VOXEL_HOST_MIN_LIFETIME_MS = tostring(var.fleet.host_min_lifetime_ms)
+  })
+}
+
 resource "kubernetes_deployment_v1" "coordinator" {
   metadata {
     name      = "coordinator"
@@ -87,6 +103,8 @@ resource "kubernetes_deployment_v1" "coordinator" {
               VOXEL_COORDINATOR_BIND          = "0.0.0.0:6480"
               VOXEL_LOGIN_LINK_BIND           = "0.0.0.0:6490"
               VOXEL_LOGIN_LINK_CERT_HASH_FILE = "${local.login_link_dir}/${local.link_file}"
+              }, local.fleet_env, {
+              VOXEL_FLEET_MAX = tostring(var.fleet.max)
             })
             content {
               name  = env.key

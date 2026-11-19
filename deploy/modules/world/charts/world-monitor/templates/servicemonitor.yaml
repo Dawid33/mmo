@@ -1,6 +1,6 @@
 {{- if .Values.metrics }}
-# The coordinator and every host serve /metrics on their port `health` (9100).
-# Services coordinator and hosts are headless, so each pod is its own target.
+# The coordinator, every host and the fleet reconciler serve /metrics on their port
+# `health` (9100). Services coordinator, hosts and fleet are headless, so each pod is its own target.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -13,7 +13,7 @@ spec:
     matchExpressions:
       - key: app.kubernetes.io/component
         operator: In
-        values: [coordinator, host]
+        values: [coordinator, host, fleet]
   endpoints:
     - port: health
       path: /metrics

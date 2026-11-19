@@ -12,17 +12,10 @@ output "login_link_cert_pem" {
   value       = tls_self_signed_cert.login_link.cert_pem
 }
 
-output "endpoints" {
-  description = "Per host name: what clients are told (VOXEL_ADVERTISE_QUIC / _WT)."
+output "client_ports" {
+  description = "The UDP node ports the hosts' NodePort Services may open (var.fleet), both ends included: slot s is QUIC first + 2s and WebTransport first + 2s + 1. Open the whole range to clients."
   value = {
-    for k, h in var.hosts : k => {
-      quic = "${var.public_host}:${h.quic_node_port}"
-      wt   = "https://${var.public_host}:${h.wt_node_port}/"
-    }
+    first = var.fleet.port_base
+    last  = var.fleet.port_base + 2 * var.fleet.max - 1
   }
-}
-
-output "host_names" {
-  description = "The hosts' names (var.hosts' keys); each runs as Deployment host-<name>."
-  value       = keys(var.hosts)
 }

@@ -14,7 +14,7 @@ variable "namespace" {
 }
 
 variable "images" {
-  description = "Full image references the workloads are CREATED with: server (mmo/server: coordinator, hosts, toolbox) and web (mmo/web). Releases set digests with `kubectl set image` (scripts/world_update.sh) and every workload ignores later changes to its image, so changing these after the first apply does nothing."
+  description = "Full image references the workloads are CREATED with: server (mmo/server: coordinator, fleet, toolbox; a host is created on the coordinator's image of that moment) and web (mmo/web). Releases set digests with `kubectl set image` (scripts/world_update.sh) and every workload ignores later changes to its image, so changing these after the first apply does nothing."
   type        = object({ server = string, web = string })
 }
 
@@ -36,22 +36,45 @@ variable "service_token" {
   sensitive   = true
 }
 
-variable "hosts" {
-  description = "One entry per region host, keyed by its name (VOXEL_HOST_NAME; Deployment, Service and PodDisruptionBudget host-<name>; label errantry/host): the node ports its NodePort Service opens for QUIC and WebTransport (both UDP). Keep a running host's name stable — a key removed is that host's Deployment deleted (drain it first: hosts.tf), a key added is a new host."
-  type        = map(object({ quic_node_port = number, wt_node_port = number }))
+variable "fleet" {
+  description = <<-EOT
+    The world's region hosts (Elastic 4): the coordinator keeps between min and max of them in
+    the table desired_hosts (VOXEL_FLEET_MIN / _MAX, and the pace dials VOXEL_SCALE_UP_AFTER_MS,
+    VOXEL_SCALE_DOWN_AFTER_MS, VOXEL_HOST_MIN_LIFETIME_MS when set; null = the server's
+    defaults), and the reconciler (fleet.tf) runs one Deployment host-<name> per row. A row's
+    slot s gives its NodePort Service the UDP node ports port_base + 2s (QUIC) and
+    port_base + 2s + 1 (WebTransport): the range port_base .. port_base + 2·max - 1 (output
+    client_ports) must be open to clients. min 0 lets the last host go when the world is idle.
+    A coordinator-only change: an apply restarts the coordinator's replicas, no host.
+  EOT
+  type = object({
+    min                  = optional(number, 1)
+    max                  = number
+    port_base            = number
+    scale_up_after_ms    = optional(number)
+    scale_down_after_ms  = optional(number)
+    host_min_lifetime_ms = optional(number)
+  })
   validation {
-    condition     = length(var.hosts) >= 1
-    error_message = "hosts: at least one host."
+    condition = alltrue([
+      for v in [var.fleet.min, var.fleet.max, var.fleet.port_base] : floor(v) == v
+    ])
+    error_message = "fleet: min, max and port_base are whole numbers."
   }
   validation {
-    condition     = alltrue([for k in keys(var.hosts) : can(regex("^[a-z][a-z0-9]{0,11}$", k))])
-    error_message = "hosts: every key a lower-case letter, then up to 11 lower-case letters or digits."
+    condition     = var.fleet.min >= 0 && var.fleet.min <= var.fleet.max && var.fleet.max >= 1
+    error_message = "fleet: 0 <= min <= max, and max >= 1 (the coordinator refuses to start on min > max)."
   }
   validation {
-    condition = length(distinct(flatten([for h in values(var.hosts) : [h.quic_node_port, h.wt_node_port]]))) == 2 * length(var.hosts) && alltrue(flatten([
-      for h in values(var.hosts) : [for p in [h.quic_node_port, h.wt_node_port] : p >= 30000 && p <= 32767]
-    ]))
-    error_message = "hosts: every node port distinct and within 30000-32767."
+    condition     = var.fleet.port_base >= 30000 && var.fleet.port_base + 2 * var.fleet.max - 1 <= 32767
+    error_message = "fleet: the node ports port_base .. port_base + 2*max - 1 must lie within 30000-32767."
+  }
+  validation {
+    condition = alltrue([
+      for v in [var.fleet.scale_up_after_ms, var.fleet.scale_down_after_ms, var.fleet.host_min_lifetime_ms] :
+      v == null || try(v > 0 && floor(v) == v, false)
+    ])
+    error_message = "fleet: scale_up_after_ms, scale_down_after_ms and host_min_lifetime_ms are whole numbers of milliseconds above 0 (the server refuses 0), or null."
   }
 }
 
@@ -86,8 +109,8 @@ variable "ownership" {
     error_message = "ownership: static or claim (allinone is the single-process mode)."
   }
   validation {
-    condition     = var.ownership != "static" || length(var.hosts) == 1
-    error_message = "ownership: static runs ONE host (a second registers beside a live row and is refused: NotAlone, a crash loop); with more than one key in hosts use claim."
+    condition     = var.ownership != "static" || (var.fleet.min == 1 && var.fleet.max == 1)
+    error_message = "ownership: static runs ONE host (a second registers beside a live row and is refused: NotAlone, a crash loop): set fleet.min = fleet.max = 1, or use claim."
   }
 }
 
@@ -124,7 +147,7 @@ variable "land_idle_ms" {
 }
 
 variable "metrics" {
-  description = "A ServiceMonitor for the coordinator's and the hosts' /metrics. Needs the Prometheus operator's CRDs."
+  description = "A ServiceMonitor for the coordinator's, the hosts' and the fleet reconciler's /metrics. Needs the Prometheus operator's CRDs."
   type        = bool
   default     = true
 }

@@ -8,25 +8,22 @@
 #   just orion-init world && just orion-plan world && just orion-apply world
 # The coordinator and the hosts stay unready until the world is forged from the
 # toolbox (see modules/world/main.tf). Releases: scripts/world_update.sh.
-# An apply owns the replica counts (coordinator: the module's coordinator_replicas, 2,
-# with a PodDisruptionBudget; each host Deployment host-<name> 1):
-# an `orion-apply world` while the world is stopped (`just world-stop`) or in the
-# middle of an update STARTS it again on whatever images are set then (an interrupted
-# update's half-set images included); images are never changed by an apply
-# (ignore_changes). An apply that changes anything the coordinator AND the hosts share
-# (database_url, service_token, the coordinator's certificate, save_secs,
-# super_region_regions, ownership) restarts them all at the same moment: the hosts most
-# likely leave WITHOUT a cut, the next start raises the world generation and loses up to
-# a save interval. Make such a change with the world STOPPED: `just world-stop`, then
-# apply (the apply starts it). Only a change that touches hosts alone (a key of `hosts`,
-# a host's node ports or resources) restarts hosts on a running world, each through its
-# cut; apply that only with the world running and no update under way. Removing a host:
-# `just world-drain <name>`, then drop its key from `hosts` below and apply. A host added
-# after a release starts on var.images.server (the tag), the rest of the world on the
-# released digest: after the apply run `kubectl set image deploy/host-<k> host=<the
-# coordinator's image>`; until then the new host runs the tag's build (no race-free
-# recipe yet), and mixed builds leave the next release no previous release to record.
-# Emptying a node: modules/world/hosts.tf.
+# Hosts are not OpenTofu's: the coordinator keeps between fleet.min and fleet.max of them
+# in the table desired_hosts and the reconciler (Deployment fleet) makes one Deployment
+# host-<name> per row, on the coordinator's image of that moment, with the node ports of
+# its slot (fleet.port_base + 2·slot, + 1; output client_ports is the range to open).
+# An apply owns the coordinator's replica count (the module's coordinator_replicas, 2,
+# with a PodDisruptionBudget): an `orion-apply world` while the world is stopped (`just
+# world-stop`) or in the middle of an update STARTS the coordinator again on whatever
+# image is set then (an interrupted update's half-set images included), not the hosts;
+# images are never changed by an apply (ignore_changes). An apply that changes anything
+# the coordinator AND the hosts share (database_url, service_token, the coordinator's
+# certificate, save_secs, super_region_regions, ownership) restarts the coordinator and
+# changes the host template: make it with the world STOPPED: `just world-stop`, apply,
+# `just world-start`. A change of the host template alone (a host's resources) restarts
+# no running host: each takes it at its next stop and start. Removing a host by hand:
+# `just world-drain <name>`; the coordinator then removes its row and the reconciler its
+# Deployment. Emptying a node: modules/world/hosts.tf.
 variable "state_bucket" {
   description = "The orion state bucket (../backend.s3.tfbackend), to read other roots' outputs."
   type        = string
@@ -104,10 +101,8 @@ module "world" {
   database_url      = data.terraform_remote_state.postgres.outputs.world_urls[var.world_id]
   service_token     = data.terraform_remote_state.login.outputs.service_token
 
-  hosts = {
-    a = { quic_node_port = 30466, wt_node_port = 30467 }
-    b = { quic_node_port = 30468, wt_node_port = 30469 }
-  }
+  # One host at least, two at most: node ports 30466-30469.
+  fleet              = { min = 1, max = 2, port_base = 30466 }
   public_host        = var.public_host
   client_certificate = { issuer = "letsencrypt" }
   web = {
@@ -149,10 +144,6 @@ output "login_link_cert_pem" {
   value = module.world.login_link_cert_pem
 }
 
-output "endpoints" {
-  value = module.world.endpoints
-}
-
-output "host_names" {
-  value = module.world.host_names
+output "client_ports" {
+  value = module.world.client_ports
 }
