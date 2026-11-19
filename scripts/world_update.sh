@@ -19,8 +19,10 @@
 # while at 0, where a Recreate Deployment starts nothing — the coordinator comes back at its
 # count (every replica's /readyz 200, never `rollout status`), then the reconciler (its /readyz
 # 200: a pass that saw the coordinator up, which created any missing host on the coordinator's
-# new image and re-templated the stopped ones, keeping their new image), toolbox and web roll
-# out, and every host Deployment (listed again) at 0 comes back at 1 replica. A host is never
+# new image and re-templated the stopped ones, keeping their new image — waited for at most the
+# ready timeout, then a WARNING and the release goes on: one failing host object never keeps the
+# world down), toolbox and web roll out, and every host Deployment (listed again) at 0 comes
+# back at 1 replica. A host is never
 # started on a mixed set of images: no host Deployment is scaled up before the images of all
 # of them are set. A world with no host Deployment is updated too (the host steps do
 # nothing). `--dry-run` prints the commands and changes nothing (it reads the list of host
@@ -114,7 +116,7 @@ record_field() {
 
 # Recovery: armed when the hosts are about to be scaled down, disarmed at the end.
 # hostdeps: the host Deployments as `deploy/host-<name>` words; were: their replicas before.
-hostdeps='' were='' stopped=0 images_touched=0 scaled_up=0 finished=0 where='before step 2'
+hostdeps='' were='' stopped=0 images_touched=0 images_set=0 scaled_up=0 finished=0 where='before step 2'
 # coord_down: the coordinator was scaled to 0 (step 2) and is not back yet (step 4).
 coord_down=0 coord_replicas='' coord_count=''
 # fleet_down: the fleet reconciler was scaled to 0 (step 2) and is not back yet (step 4).
@@ -134,6 +136,15 @@ on_exit() {
             echo "world_update: STOPPED at: $where (exit $rc)."
             echo "world_update: the host Deployments were scaled back to 1 but are not all Ready yet; the new images are set."
             echo "world_update: look at them: kubectl --context $ctx -n $ns get deploy,pods -l $hostsel"
+        } >&2
+    elif [ "$stopped" -eq 1 ] && [ "$finished" -eq 0 ] && [ "$images_set" -eq 1 ]; then
+        {
+            echo "world_update: STOPPED at: $where (exit $rc)."
+            echo "world_update: the host Deployments are scaled to 0 (were:$were); the world is DOWN. Every image is set"
+            echo "world_update: (server $server_ref, web $web_ref): nothing runs the old build. Go on with either:"
+            echo "  just world_ctx=$ctx world_ns=$ns world-start   (coordinator, then the fleet reconciler, then every host Deployment)"
+            echo "or: $0 $ctx $ns $server_ref $web_ref"
+            echo "world_update: if the coordinator does not come up, look first: kubectl --context $ctx -n $ns logs deploy/coordinator"
         } >&2
     elif [ "$stopped" -eq 1 ] && [ "$finished" -eq 0 ] && [ "$images_touched" -eq 1 ]; then
         {
@@ -262,15 +273,17 @@ fi
 for d in $hostdeps; do preflight "$d" host; done
 preflight deploy/web web
 # A drained host is unready until the coordinator removes its desired row, and a host MARKED draining
-# (`worldctl hosts`' drain= column, not due yet) has its notice running: the release starts either
-# again as a NEW, unmarked host, which the coordinator marks again once the name's desired row is
-# draining (a warning, not a refusal). All warned at once, then ONE pause to stop.
+# (`worldctl hosts`' drain= column, not due yet) has its notice running: the release stops it now. The
+# coordinator drains such a name's desired row (rules 2 / 2b) and removes it once nothing of the name
+# runs (rule 3); the reconciler then deletes its Deployment — usually before step 5 lists the hosts
+# again; one still listed runs as a NEW host for seconds (marked at once, deleted with its row). A
+# warning, not a refusal. All warned at once, then ONE pause to stop.
 if [ "$dry" -eq 0 ]; then
     warned=0
     for pod in $(k get pods -l "$hostsel" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
         body=$(k get --raw "/api/v1/namespaces/$ns/pods/$pod:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true)
         if [ "$body" = drained ]; then
-            echo "world_update: WARNING: $pod is DRAINED and its desired row not removed yet: this release stops it and starts it again as a NEW host, which the coordinator drains again and then removes. To avoid that, wait until the coordinator removed it (just world-hosts) and run the release then." >&2
+            echo "world_update: WARNING: $pod is DRAINED and its desired row not removed yet: the coordinator removes that row and the reconciler deletes its Deployment — usually before step 5; else this release starts it as a NEW host that runs for seconds (marked at once, deleted with its row). To avoid that, wait until the coordinator removed it (just world-hosts) and run the release then." >&2
             warned=1
         fi
     done
@@ -278,7 +291,7 @@ if [ "$dry" -eq 0 ]; then
         marked=$(printf '%s\n' "$rows" | awk '$3 == "live" && $4 == "dirty" && $NF != "drain=-" { sub(/^drain=/, "", $NF); print $2 " (id " $1 ", due in " int($NF / 1000) " s)" }')
         if [ -n "$marked" ]; then
             printf '%s\n' "$marked" | while read -r m; do
-                echo "world_update: WARNING: host $m is MARKED draining: this release restarts it as a NEW host with NO mark; the coordinator marks it again (a new notice) once the name's desired row is draining (or let the drain finish first)." >&2
+                echo "world_update: WARNING: host $m is MARKED draining: this release stops it now, before its deadline (its players are cut off now); the coordinator then drains and removes its desired row and the reconciler deletes its Deployment (or let the drain finish first)." >&2
             done
             warned=1
         fi
@@ -536,6 +549,7 @@ for d in $hostdeps; do
     run set image "$d" "host=$server_ref"
 done
 run set image deploy/web "web=$web_ref"
+images_set=1
 
 step 4 "the coordinator back to $coord_count replica(s), each Ready; then the fleet reconciler, Ready; the toolbox and web rollouts"
 where='step 4 (coordinator up / rollouts)'
@@ -564,7 +578,10 @@ coord_down=0
 # The reconciler after the coordinator (it creates nothing while the coordinator is at 0), before
 # the hosts: its /readyz 200 means a pass without a failure that saw the coordinator up — every
 # wanted host without a Deployment got one (at 1 replica, on the coordinator's image: the new one),
-# every stopped host Deployment carries the current template (its image kept: the new one).
+# every stopped host Deployment carries the current template (its image kept: the new one). The
+# wait is bounded and never keeps the world down (final review, B-I1): one host object that keeps
+# failing holds /readyz at 503 for good, so after the timeout the release goes on with a warning
+# and starts the host Deployments that exist (their images are the new ones, set at step 3).
 where='step 4 (fleet reconciler up)'
 run scale deploy/fleet --replicas=1
 if [ "$dry" -eq 1 ]; then
@@ -579,12 +596,16 @@ else
         done
         [ "$said" = ok ] && break
         if [ "$SECONDS" -ge "$deadline" ]; then
-            echo "world_update: after $ready_timeout s the fleet reconciler's /readyz is not 200 (${said:-no answer})" >&2
-            exit 1
+            echo "world_update: WARNING: after $ready_timeout s the fleet reconciler's /readyz is not 200 (${said:-no answer}): no clean pass" >&2
+            echo "world_update: yet — a wanted host may have no Deployment, a stopped one may keep an older pod template (its image is" >&2
+            echo "world_update: the new one). Going on with the host Deployments that exist. Look: just world_ctx=$ctx world_ns=$ns world-status" >&2
+            echo "world_update: (the fleet pod: desired vs host Deployments, errors) and world-logs fleet (which object fails, and why)." >&2
+            said=timeout
+            break
         fi
         sleep "${WORLD_UPDATE_POLL:-3}"
     done
-    echo "  the fleet reconciler is Ready"
+    [ "$said" = ok ] && echo "  the fleet reconciler is Ready"
 fi
 fleet_down=0
 where='step 4 (toolbox / web rollouts)'
@@ -606,8 +627,11 @@ else
     hostdeps=$(deploy_words "$relisted")
 fi
 if [ -n "$hostdeps" ]; then
-    # shellcheck disable=SC2086 # one word per host Deployment
-    run scale $hostdeps --replicas=1
+    # One at a time: one the reconciler deleted since the listing (its desired row removed) answers
+    # NotFound, which is not an error here — step 6 counts it as deleted.
+    for d in $hostdeps; do
+        run scale "$d" --replicas=1 || echo "world_update: could not scale $d (deleted meanwhile?): step 6 classifies it" >&2
+    done
 else
     echo "  no host Deployment (the coordinator adds the fleet's minimum, the reconciler creates them)"
 fi

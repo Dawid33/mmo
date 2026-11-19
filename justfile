@@ -2088,7 +2088,7 @@ world-status:
             ''|'{"kind":"Status"'*) echo "(no answer)" ;;
             drained)
                 host=$(k get pod "$pod" -o jsonpath='{.metadata.labels.errantry/host}' 2>/dev/null || true)
-                echo "drained: host ${host:-?} left the world and stays unready until removed: the coordinator removes its desired row once it owns nothing, then the fleet reconciler deletes deployment/host-${host:-<name>} (nothing to apply)" ;;
+                echo "drained: host ${host:-?} left the world and stays unready until removed: the coordinator removes its desired row once it has left (land kept or not), then the fleet reconciler deletes deployment/host-${host:-<name>} (nothing to apply)" ;;
             *) echo "$body" ;;
         esac
         echo
@@ -2145,7 +2145,7 @@ world-hosts:
 # runs `worldctl drain <id> --in <secs>` (default 300; the host warns its players), follows its pod's log
 # until the leave line (WORLD_DRAIN_TIMEOUT s after the deadline, default 180), and prints it. Then the
 # world goes on by itself (nothing to apply): the coordinator marks the name's desired row draining (the
-# row follows the mark), removes the row once the host owns nothing, and the fleet reconciler deletes its
+# row follows the mark), removes the row once the host has left, and the fleet reconciler deletes its
 # Deployment, Service and budget; below the fleet's minimum the coordinator adds a new name. Deletes
 # nothing, scales nothing itself. Only a `claim` host acts on a mark: a world whose coordinator runs
 # VOXEL_OWNERSHIP other than claim is refused up front.
@@ -2199,7 +2199,7 @@ world-drain name secs="300":
     fi
     echo "world-drain: $(grep -F '[server] left the world in cut' "$log" | tail -1 | sed 's/.*\(\[server\] left the world in cut\)/\1/')"
     echo "world-drain: host $name (id $ids) is drained: /readyz says drained, it stays up until its pod is removed."
-    echo "world-drain: nothing to apply: the coordinator removes host $name's desired row once it owns nothing, and the fleet"
+    echo "world-drain: nothing to apply: the coordinator removes host $name's desired row now that it has left, and the fleet"
     echo "world-drain:   reconciler then deletes its Deployment, Service and budget (watch: just world_ctx={{world_ctx}} world_ns={{world_ns}} world-hosts)"
 
 # Stop the world. First the fleet reconciler (Deployment fleet) to 0, waiting until its pod is gone: from
@@ -2246,18 +2246,20 @@ world-stop:
         echo "world-stop: the coordinator is at 0 replicas but host pods still exist; they cannot leave cleanly. Run \`just world-start\` first, or delete the host pods knowingly. Nothing changed." >&2
         exit 2
     fi
-    # Before acting: a drained host and a host MARKED draining (not due yet) come back at the next
-    # world-start as NEW hosts; the coordinator marks them again from their desired rows (draining once it
-    # followed the mark). All warned at once, then one 10 s pause to stop.
+    # Before acting: a drained host and a host MARKED draining (not due yet). The coordinator drains such
+    # a name's desired row (rules 2 / 2b) and removes it once nothing of the name runs (rule 3), and the
+    # reconciler then deletes its Deployment — usually before world-start scales it; one still there then
+    # runs as a NEW host for seconds (marked at once, deleted with its row). All warned at once, then one
+    # 10 s pause to stop.
     warned=0
     for pod in $(printf '%s\n' "$hostpods" | sed -n 's#^pod/##p'); do
         body=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/readyz" -v=8 2>&1 | sed -n 's/.*Response Body: //p' | tail -1 || true)
-        [ "$body" = drained ] && { echo "world-stop: WARNING: $pod is DRAINED and its desired row not removed yet: world-start brings it back as a NEW host, which the coordinator drains again and then removes" >&2; warned=1; }
+        [ "$body" = drained ] && { echo "world-stop: WARNING: $pod is DRAINED and its desired row not removed yet: the coordinator removes that row and the reconciler then deletes its Deployment — usually before world-start scales it; else it runs as a NEW host for seconds, marked at once and deleted with its row" >&2; warned=1; }
     done
     if rows=$(k exec deploy/toolbox -c toolbox -- sh -c 'exec worldctl hosts "$VOXEL_WORLD_DB"' 2>/dev/null); then
         marked=$(printf '%s\n' "$rows" | awk '$3 == "live" && $4 == "dirty" && $NF != "drain=-" { print $2 " (id " $1 ")" }')
         if [ -n "$marked" ]; then
-            printf '%s\n' "$marked" | sed 's/^/world-stop: WARNING: host /; s/$/ is MARKED draining: it stops now, its drain unfinished; world-start brings it back as a NEW host, which the coordinator marks again (a new notice) once its desired row is draining/' >&2
+            printf '%s\n' "$marked" | sed 's/^/world-stop: WARNING: host /; s/$/ is MARKED draining: it stops now, before its deadline (its players are cut off now, not at the notice'"'"'s end); the coordinator then drains and removes its desired row and the reconciler deletes its Deployment — usually before world-start scales it; else it runs as a NEW host for seconds, marked at once and deleted with its row/' >&2
             warned=1
         fi
     elif printf '%s\n' "$hostpods" | grep -q '^pod/'; then
@@ -2272,7 +2274,7 @@ world-stop:
     if [ -n "$fleet" ]; then
         echo "world-stop: fleet reconciler to 0, waiting until its pod is gone ($timeout s; world-start brings it back)"
         k scale deploy/fleet --replicas=0
-        wait_gone 'app.kubernetes.io/component=fleet'
+        wait_gone 'app.kubernetes.io/component=fleet' || { echo "world-stop: the fleet reconciler's pod is not gone; nothing else was stopped (the reconciler is at 0). \`just world-start\` brings it back; then stop again" >&2; exit 1; }
     else
         echo "world-stop: the world has no fleet Deployment (from before Elastic 4): nothing to stop there"
     fi
@@ -2294,7 +2296,7 @@ world-stop:
     else
         echo "world-stop: the world has no host Deployment"
     fi
-    wait_gone "$hostsel"
+    wait_gone "$hostsel" || { echo "world-stop: host pods are left; the coordinator was NOT stopped (the hosts are at 0, the fleet reconciler at 0). Wait and run world-stop again, or \`just world-start\` to bring everything back" >&2; exit 1; }
     sleep 1
     for p in "${follow_pids[@]}"; do kill "$p" 2>/dev/null || true; done
     # The leave of each host (the same lines scripts/world_update.sh reads): WARN, never abort.
@@ -2335,14 +2337,15 @@ world-stop:
         echo "world-stop: coordinator already at 0"
     fi
     k scale deploy/coordinator --replicas=0
-    wait_gone 'app.kubernetes.io/component=coordinator'
+    wait_gone 'app.kubernetes.io/component=coordinator' || { echo "world-stop: coordinator pods are left (scaled to 0; they go by themselves). \`just world-start\` brings the world back" >&2; exit 1; }
     echo "world-stop: the world is down (web and toolbox keep running; the fleet reconciler is at 0); \`just world-start\` brings it back"
 
 # Start the world: the coordinator to its replica count (a stopped one: world-stop's record in the
 # annotation errantry/replicas, else 2), wait until every replica's /readyz is 200; then the fleet
 # reconciler (Deployment fleet) to 1, wait until its /readyz is 200 — a pass that saw the coordinator up: it
 # re-templated the stopped host Deployments and created the missing ones (on the coordinator's image, at 1
-# replica); then every host Deployment (-l app.kubernetes.io/component=host, listed now) that is at 0 to 1,
+# replica) — waited for at most WORLD_START_TIMEOUT, then a WARNING and the start goes on (one failing host
+# object never keeps the world down); then every host Deployment (-l app.kubernetes.io/component=host, listed now) that is at 0 to 1,
 # and wait until each has readyReplicas 1 (never `rollout status`). A drained host (/readyz `drained`,
 # unready for good) is not waited for: it is named (the coordinator removes it). A world with no host
 # Deployment starts too (the coordinator adds its minimum, the reconciler creates them). Also the way back
@@ -2386,9 +2389,12 @@ world-start:
     done
     # The fleet reconciler after the coordinator (it creates nothing while the coordinator is at 0),
     # before the hosts: its /readyz 200 means a pass without a failure that saw the coordinator up, so
-    # every stopped host Deployment carries the current template and every wanted host has one.
+    # every stopped host Deployment carries the current template and every wanted host has one. The
+    # wait is bounded and never keeps the world down: one host object that keeps failing (a node port
+    # taken, a refused re-template) holds /readyz at 503 for good, so after the timeout the hosts that
+    # exist are started anyway, with a warning (final review, B-I1).
     if [ -n "$fleet" ]; then
-        echo "world-start: fleet reconciler to 1; waiting until its /readyz answers 200 ($timeout s)"
+        echo "world-start: fleet reconciler to 1; waiting until its /readyz answers 200 (at most $timeout s)"
         k scale deploy/fleet --replicas=1
         deadline=$((SECONDS + timeout))
         while :; do
@@ -2399,8 +2405,8 @@ world-start:
             done
             [ "$said" = ok ] && break
             if [ "$SECONDS" -ge "$deadline" ]; then
-                echo "world-start: after $timeout s the fleet reconciler's /readyz is not 200 (${said:-no answer}); the coordinator is up, no host was scaled. Look: just world_ctx={{world_ctx}} world_ns={{world_ns}} world-logs fleet" >&2
-                exit 1
+                echo "world-start: WARNING: after $timeout s the fleet reconciler's /readyz is not 200 (${said:-no answer}): no clean pass yet — a wanted host may have no Deployment, a stopped one may keep an older pod template. Starting the host Deployments that exist anyway. Look: just world_ctx={{world_ctx}} world_ns={{world_ns}} world-status (the fleet pod: desired vs host Deployments, errors) and world-logs fleet (which object fails, and why)" >&2
+                break
             fi
             sleep 2
         done
@@ -2420,7 +2426,9 @@ world-start:
     fi
     if [ -n "$stopped" ]; then
         echo "world-start: host Deployments to 1: $(printf '%s\n' "$stopped" | tr '\n' ' ')"
-        for d in $stopped; do k scale "deploy/$d" --replicas=1; done
+        # One the reconciler deleted meanwhile (its desired row removed) answers NotFound: not an
+        # error here, the wait below counts it as deleted.
+        for d in $stopped; do k scale "deploy/$d" --replicas=1 || echo "world-start: could not scale $d (deleted meanwhile?): the wait below classifies it" >&2; done
     fi
     # Not `rollout status`: a drained host is unready for good, and a host waiting for a succession
     # may be unready for minutes. Poll each Deployment's readyReplicas (WORLD_START_TIMEOUT s, default
@@ -2451,7 +2459,7 @@ world-start:
         sleep 2
     done
     for h in $drained; do
-        echo "world-start: host $h is DRAINED (it left the world; /readyz says drained) and stays unready: the coordinator removes its desired row once it owns nothing, then the fleet reconciler deletes deployment/host-$h"
+        echo "world-start: host $h is DRAINED (it left the world; /readyz says drained) and stays unready: the coordinator removes its desired row (it has left), then the fleet reconciler deletes deployment/host-$h"
     done
     for h in $deleted; do
         echo "world-start: host $h's Deployment was deleted by the fleet reconciler while starting (its desired row is gone)"
@@ -2519,9 +2527,13 @@ fleet port_base proxy="18002" health="127.0.0.1:9190":
 # and web refs that update recorded in the world's ConfigMap release-history, through the same stop →
 # set images → start path, every workload (coordinator, toolbox, fleet, each host, web) to the same build. Refused (nothing changed) when no
 # previous release is recorded or a recorded ref is not a digest. A rollback records what it replaced:
-# a second one goes forward again. A database migration made by the newer build is NOT undone.
+# a second one goes forward again. A database migration made by the newer build is NOT undone. Never roll
+# back to a build from before Elastic 4 (the previous release recorded by the FIRST Elastic 4 release): it
+# has no `fleet` role and does not know migration 0019 — the world would stay down. Check the recorded
+# refs first: kubectl -n <ns> get configmap release-history -o yaml.
 orion-world-rollback namespace="world-errantry":
     @echo "orion-world-rollback: a schema migration made by the newer build is NOT undone by this; if the older build cannot read the database, restore it: just orion-pg-restore <world> <object>"
+    @echo "orion-world-rollback: never to a build from before Elastic 4 (the release the first Elastic 4 release replaced): check previous-server in ConfigMap release-history first"
     scripts/world_update.sh {{orion_context}} {{namespace}} --rollback
 
 # Run the nightly database dump now (a Job from the CronJob pg-dump in the postgres namespace).

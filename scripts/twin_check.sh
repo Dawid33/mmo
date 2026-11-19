@@ -991,8 +991,8 @@ grep -qF "host $hb (id $id_b2) is drained" "$out/world-drain.txt" || fail "world
 say "world-drain returned after $((SECONDS - t0))s"
 # Record: the drained pod says drained until the reconciler deletes it (which may already have happened).
 say "record: host $hb's pod $pb /readyz: '$(readyz "$pb")'"
-# The row follows the operator's mark (rule 2: DrainHost of the row), then, once the host left and
-# owns nothing, the coordinator removes it (rule 3: RemoveHost) — one decision per 10 s at most —
+# The row follows the operator's mark (rule 2: DrainHost of the row), then, once the host left (land
+# kept or not), the coordinator removes it (rule 3: RemoveHost) — one decision per 10 s at most —
 # and the reconciler deletes the Deployment, the PDB and the Service within a pass.
 drained_more() { local v; v=$(coord_sum mmo_fleet_drained_total) || return 1; [ "$v" -gt "$drained0" ]; }
 wait_until 60 "the coordinators' mmo_fleet_drained_total above $drained0 (host $hb's desired row draining)" drained_more

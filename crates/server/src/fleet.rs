@@ -8,11 +8,13 @@
 //! Postgres does. Deleting a host Deployment is always "SIGTERM → the host's leave cut" (a
 //! disruption, never a loss). It reaches only its own cluster's API and the world's database.
 //!
-//! **A pass** ([`FLEET_PASS_MS`]): read the desired rows — **a failed read ends the pass, nothing
-//! is created or deleted** —, then the `coordinator` Deployment (its `spec.replicas` and the image
-//! of its `coordinator` container), the template, and the Deployments, Services and PDBs labelled
-//! [`FLEET_LABEL`]`=<world id>` (any failed read ends the pass too); then [`plan_pass`] (pure) and
-//! the actions in its order. A failed action is logged (at most one line per
+//! **A pass** ([`FLEET_PASS_MS`]): read the `coordinator` Deployment (its `spec.replicas` and the
+//! image of its `coordinator` container), the template, and the Deployments, Services and PDBs
+//! labelled [`FLEET_LABEL`]`=<world id>`, then the desired rows — **a failed read ends the pass,
+//! nothing is created or deleted**; the rows are read LAST, so an object whose name they no longer
+//! show was really removed, even with two reconcilers overlapping (a deleted pod's replacement
+//! beside the old one in its grace period: `Recreate` orders a rollout, not a pod's replacement);
+//! then [`plan_pass`] (pure) and the actions in its order. A failed action is logged (at most one line per
 //! [`FLEET_LOG_EVERY_MS`] per object), counted (`mmo_fleet_errors_total`), skips the rest of that
 //! host's actions in this pass, and is retried by the next pass.
 //!
@@ -567,20 +569,24 @@ impl Fleet {
     /// One pass; `true` when every read succeeded, nothing was refused and no action failed.
     fn pass(&mut self) -> bool {
         let health = Health::global();
-        // 1. The desired rows. A failed read ends the pass: nothing is created or deleted.
-        let desired = match self.store.desired_hosts() {
-            Ok(rows) => rows,
-            Err(e) => {
-                self.failed("read desired_hosts", format!("reading desired_hosts: {e}; nothing created or deleted this pass"));
-                return false;
-            }
-        };
-        // 2. + 3. The coordinator, the template, the labelled objects.
+        // 1. + 2. The coordinator, the template, the labelled objects — BEFORE the desired rows
+        // (final review, B-M3): an object listed here whose name the later read no longer shows
+        // was really removed (a removed row never comes back, a name is never issued twice), so
+        // even two overlapping reconcilers (a deleted pod's replacement beside the old one in its
+        // grace period) never delete a host the other just created for a newer row.
         let read = self.runtime.block_on(read_cluster(&self.kube, &self.config));
         let (coordinator, template, objects) = match read {
             Ok(read) => read,
             Err(why) => {
                 self.failed("read cluster", format!("{why}; nothing created or deleted this pass"));
+                return false;
+            }
+        };
+        // 3. The desired rows. A failed read ends the pass: nothing is created or deleted.
+        let desired = match self.store.desired_hosts() {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.failed("read desired_hosts", format!("reading desired_hosts: {e}; nothing created or deleted this pass"));
                 return false;
             }
         };
