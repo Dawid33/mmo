@@ -180,6 +180,7 @@ pub mod coordinator_rt;
 pub mod cuts;
 pub mod dev_structures;
 pub mod drain;
+pub mod fleet;
 pub mod health;
 pub mod lease;
 pub mod load;
@@ -709,13 +710,18 @@ pub fn run() -> claims::ServerExit {
     };
 
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
-    // `VOXEL_ROLE`: the whole world here (`all`), its regions only (`host`), or its
-    // coordinator only (`coordinator`, no client edge, no regions).
+    // `VOXEL_ROLE`: the whole world here (`all`), its regions only (`host`), its
+    // coordinator only (`coordinator`, no client edge, no regions), or the fleet reconciler (`fleet`).
     let role = roles::Role::from_env().unwrap_or_else(|e| fatal(&e));
     if role == roles::Role::Coordinator {
         game::perf::init("coordinator");
         info!("[server] role: coordinator");
         return roles::run_coordinator();
+    }
+    if role == roles::Role::Fleet {
+        game::perf::init("fleet");
+        info!("[server] role: fleet");
+        return roles::run_fleet();
     }
     game::perf::init("server");
     info!("[server] role: {role:?}");

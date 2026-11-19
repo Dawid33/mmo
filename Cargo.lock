@@ -4940,6 +4940,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kube-api"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7737,6 +7745,7 @@ dependencies = [
  "crossbeam",
  "dashmap",
  "game",
+ "kube-api",
  "log",
  "login-api",
  "lz4_flex",
@@ -7746,6 +7755,8 @@ dependencies = [
  "pyroscope_pprofrs",
  "quinn",
  "reqwest",
+ "serde_json",
+ "sha2 0.10.9",
  "simplelog",
  "sqlx",
  "svc-link",

@@ -1,0 +1,10 @@
+[package]
+name = "kube-api"
+version = "0.1.0"
+edition = "2024"
+description = "The few Kubernetes API calls the world's own tools make (the fleet reconciler; the panel later), over reqwest with rustls/ring."
+
+[dependencies]
+# The Kubernetes API over HTTPS: rustls with ring (never aws-lc-rs), as login's and the panel's.
+reqwest = { workspace = true }
+serde_json = { workspace = true }

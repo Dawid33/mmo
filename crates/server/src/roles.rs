@@ -21,7 +21,7 @@ use world_store::StoreUrl;
 use crate::claims::{Fenced, ServerExit};
 use crate::world_file::{self, WorldSource};
 
-/// Environment: the process's role, `all` (default), `host` or `coordinator`.
+/// Environment: the process's role, `all` (default), `host`, `coordinator` or `fleet`.
 pub const ROLE_ENV: &str = "VOXEL_ROLE";
 /// Environment: where a coordinator listens for hosts.
 pub const COORDINATOR_BIND_ENV: &str = "VOXEL_COORDINATOR_BIND";
@@ -54,6 +54,9 @@ pub enum Role {
     Host,
     /// The world coordinator alone, serving host processes.
     Coordinator,
+    /// The fleet reconciler (Elastic 4, [`crate::fleet`]): makes the world's host Deployments
+    /// match `desired_hosts`; reads the store, never writes it.
+    Fleet,
 }
 
 impl Role {
@@ -63,7 +66,8 @@ impl Role {
             "" | "all" => Ok(Role::All),
             "host" => Ok(Role::Host),
             "coordinator" => Ok(Role::Coordinator),
-            other => Err(format!("{ROLE_ENV}={other:?} is not a role (all, host or coordinator)")),
+            "fleet" => Ok(Role::Fleet),
+            other => Err(format!("{ROLE_ENV}={other:?} is not a role (all, host, coordinator or fleet)")),
         }
     }
 
@@ -652,6 +656,26 @@ pub fn run_coordinator() -> ServerExit {
         return ServerExit::Fenced;
     }
     exit
+}
+
+/// `VOXEL_ROLE=fleet`: the fleet reconciler ([`crate::fleet`], Elastic 4). Postgres only; the
+/// store opened read-only once it is forged; a pass every [`crate::fleet::FLEET_PASS_MS`] until
+/// a stop signal (exit 0). Settings: [`crate::fleet::FleetConfig`].
+pub fn run_fleet() -> ServerExit {
+    let fatal = |e: String| -> ! { crate::fatal(&e) };
+    crate::health::start_from_env("fleet").unwrap_or_else(|e| fatal(e));
+    let source = world_file::resolve(
+        std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref(),
+        std::env::var(world_file::WORLD_DB_ENV).ok().as_deref(),
+    )
+    .unwrap_or_else(|e| fatal(e));
+    Role::Fleet.check_store(&source).unwrap_or_else(|e| fatal(e));
+    let WorldSource::Store { url, .. } = &source else { fatal(SPLIT_ROLES_NEED_POSTGRES.to_string()) };
+    let config = crate::fleet::FleetConfig::from_env(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(e));
+    let kube = kube_api::Kube::from_env(crate::fleet::FLEET_KUBE_API_ENV)
+        .unwrap_or_else(|e| fatal(format!("the Kubernetes API ({}): {e}", crate::fleet::FLEET_KUBE_API_ENV)));
+    let stop = crate::watch_stop_signals_on_thread();
+    crate::fleet::run(url, config, kube, &stop)
 }
 
 /// The most desired hosts (Elastic 4; unset or empty: no fleet decision at all).

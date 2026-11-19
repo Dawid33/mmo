@@ -2382,6 +2382,31 @@ world-register $name="Errantry":
         echo "kubectl --context {{world_ctx}} -n login exec deploy/login -- login $args"
     fi
 
+# The fleet reconciler (VOXEL_ROLE=fleet, crates/server/src/fleet.rs; Elastic 4) run from this checkout
+# against `world_ctx` / `world_ns`, with YOUR kubectl credentials (through a `kubectl proxy` on 127.0.0.1:<proxy>):
+# it creates and deletes the Deployments, Services and PodDisruptionBudgets `host-<name>` of that
+# namespace until they match the world's desired_hosts rows (an EMPTY table deletes every host). It
+# reads the world database at $VOXEL_WORLD_DB (required, never printed; from this machine the VPN
+# reaches the cluster's Postgres) and writes nothing to it. The world id is the namespace without its
+# `world-` prefix; `port_base` must be the world's (slot s gets node ports base + 2s and + 1). Its
+# /readyz and /metrics are on <health>. Do not run it beside the world's own fleet Deployment.
+# e.g. `VOXEL_WORLD_DB=postgres://… just world_ctx=k3d-mmo world_ns=world-twin fleet 30466`.
+fleet port_base proxy="18002" health="127.0.0.1:9190":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -n "${VOXEL_WORLD_DB:-}" ] || { echo "fleet: set VOXEL_WORLD_DB to the world's database URL" >&2; exit 2; }
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin server
+    kubectl --context {{world_ctx}} proxy --address 127.0.0.1 --port {{proxy}} > /dev/null &
+    proxy_pid=$!
+    trap 'kill $proxy_pid 2>/dev/null || true' EXIT
+    for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:{{proxy}}/version 2>/dev/null && break; sleep 0.1; done
+    ns="{{world_ns}}"
+    echo "fleet: context {{world_ctx}}, namespace $ns, world ${ns#world-}, health http://{{health}}/readyz"
+    VOXEL_ROLE=fleet VOXEL_WORLD_ID="${ns#world-}" VOXEL_FLEET_NAMESPACE="$ns" VOXEL_FLEET_PORT_BASE={{port_base}} \
+        VOXEL_FLEET_KUBE_API=http://127.0.0.1:{{proxy}} VOXEL_HEALTH_BIND={{health}} \
+        RUST_BACKTRACE=1 ./target/debug/server
+
 # Back to the release before the last `orion-world-update` (scripts/world_update.sh --rollback): the server
 # and web refs that update recorded in the world's ConfigMap release-history, through the same stop →
 # set images → start path, all four workloads to the same build. Refused (nothing changed) when no

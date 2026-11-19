@@ -9,8 +9,8 @@
 //! only tells Kubernetes what the process already knows. "Tokio stays at the networking edge":
 //! the listener runs on its own thread with its own current-thread runtime.
 //!
-//! Every metric carries one label `role` (`host` — role `all` included — or `coordinator`);
-//! the others come from fixed sets only.
+//! Every metric carries one label `role` (`host` — role `all` included —, `coordinator` or
+//! `fleet`, the reconciler of Elastic 4); the others come from fixed sets only.
 
 use std::io;
 use std::net::SocketAddr;
@@ -37,9 +37,18 @@ const _: () = assert!(LIVEZ_STALL_MS == 3 * game::HOST_LEASE_MS);
 /// What a process not yet registered waits for ([`Health::set_waiting`]); the index + 1 is
 /// stored, 0 = nothing. `forge`: an empty world store under `VOXEL_EMPTY_STORE=wait`;
 /// `drained`: a host that left the world after a drain (Elastic 1 Task 8) and waits to be
-/// removed ([`Health::set_drained`]). (Elastic 1 removed `succession` and `vouched`: a host no
-/// longer waits at its registration — a restarted process is a new host.)
-const WAITING: [&str; 2] = ["forge", DRAINED];
+/// removed ([`Health::set_drained`]); `stopped`: the fleet reconciler while the world's
+/// coordinator Deployment is scaled to 0 ([`STOPPED`]). (Elastic 1 removed `succession` and
+/// `vouched`: a host no longer waits at its registration — a restarted process is a new host.)
+const WAITING: [&str; 3] = ["forge", DRAINED, STOPPED];
+
+/// [`WAITING`]'s word for the fleet reconciler while the world is stopped (its `coordinator`
+/// Deployment at 0 replicas): `/readyz`'s body, `mmo_waiting{why="stopped"}`.
+pub const STOPPED: &str = "stopped";
+
+/// `/readyz`'s body for a fleet reconciler whose last pass without a failed action is older than
+/// [`crate::fleet::FLEET_READY_MS`] (or that has had none yet).
+pub const FLEET_FAILING: &str = "failing";
 
 /// [`WAITING`]'s word for a drained host: `/readyz`'s body, `mmo_waiting{why="drained"}`.
 pub const DRAINED: &str = "drained";
@@ -94,6 +103,16 @@ pub struct Health {
     coordinator_conflicts: AtomicU64,
     coordinator_replicas_live: AtomicU64,
     coordinator_is_ticker: AtomicBool,
+    /// The fleet reconciler (`VOXEL_ROLE=fleet`): `/readyz` follows its passes
+    /// ([`Health::require_fleet_passes`]).
+    fleet_role: AtomicBool,
+    /// Its last pass that completed without a failed action, ms after `epoch` ([`NEVER`]: none).
+    fleet_ok_ms: AtomicI64,
+    fleet_desired: AtomicU64,
+    fleet_deployments: AtomicU64,
+    fleet_created: AtomicU64,
+    fleet_deleted: AtomicU64,
+    fleet_errors: AtomicU64,
 }
 
 impl Health {
@@ -132,6 +151,13 @@ impl Health {
             coordinator_conflicts: AtomicU64::new(0),
             coordinator_replicas_live: AtomicU64::new(0),
             coordinator_is_ticker: AtomicBool::new(false),
+            fleet_role: AtomicBool::new(false),
+            fleet_ok_ms: AtomicI64::new(NEVER),
+            fleet_desired: AtomicU64::new(0),
+            fleet_deployments: AtomicU64::new(0),
+            fleet_created: AtomicU64::new(0),
+            fleet_deleted: AtomicU64::new(0),
+            fleet_errors: AtomicU64::new(0),
         }
     }
 
@@ -174,6 +200,9 @@ impl Health {
         if !self.registered.load(Ordering::Relaxed) {
             return false;
         }
+        if self.fleet_role.load(Ordering::Relaxed) {
+            return self.waiting().is_none() && self.fleet_pass_age_ms().is_some_and(|age| age <= crate::fleet::FLEET_READY_MS);
+        }
         if !self.requires_attach.load(Ordering::Relaxed) || self.attached.load(Ordering::Relaxed) {
             return true;
         }
@@ -181,8 +210,9 @@ impl Health {
         at != NEVER && self.now_ms() - at <= ATTACH_GRACE_MS
     }
 
-    /// Why the process is not registered yet: `"forge"` or [`DRAINED`] (anything else is taken
-    /// as `None`); `None`: not waiting.
+    /// Why the process is not registered yet: `"forge"`, [`DRAINED`] or [`STOPPED`] (anything else
+    /// is taken as `None`); `None`: not waiting. (The fleet reconciler is registered while
+    /// [`STOPPED`]: its loop still deletes, and `/livez` still judges it.)
     pub fn set_waiting(&self, why: Option<&'static str>) {
         let code = why.and_then(|w| WAITING.iter().position(|&x| x == w)).map_or(0, |i| i as u8 + 1);
         self.waiting.store(code, Ordering::Relaxed);
@@ -312,6 +342,49 @@ impl Health {
         self.coordinator_is_ticker.store(ticker, Ordering::Relaxed);
     }
 
+    /// The fleet reconciler (`VOXEL_ROLE=fleet`): Ready only while registered, not waiting, and its
+    /// last pass without a failed action is at most [`crate::fleet::FLEET_READY_MS`] old.
+    pub fn require_fleet_passes(&self) {
+        self.fleet_role.store(true, Ordering::Relaxed);
+    }
+
+    /// A fleet pass ended: `ok` when every read succeeded and no action failed.
+    pub fn fleet_pass_done(&self, ok: bool) {
+        if ok {
+            self.fleet_ok_ms.store(self.now_ms(), Ordering::Relaxed);
+        }
+    }
+
+    /// What the fleet pass read: `desired_hosts` rows, and host Deployments labelled for this world.
+    pub fn fleet_seen(&self, desired: u64, deployments: u64) {
+        self.fleet_desired.store(desired, Ordering::Relaxed);
+        self.fleet_deployments.store(deployments, Ordering::Relaxed);
+    }
+
+    /// The fleet reconciler created an object (a Kubernetes answer of 201; a conflict is not counted).
+    pub fn fleet_created(&self) {
+        self.fleet_created.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The fleet reconciler deleted an object (an object already gone is counted too).
+    pub fn fleet_deleted(&self) {
+        self.fleet_deleted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A fleet read or action failed.
+    pub fn fleet_error(&self) {
+        self.fleet_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Milliseconds since the fleet reconciler's last pass without a failed action; `None` before
+    /// the first.
+    fn fleet_pass_age_ms(&self) -> Option<u64> {
+        match self.fleet_ok_ms.load(Ordering::Relaxed) {
+            NEVER => None,
+            at => Some(u64::try_from(self.now_ms().saturating_sub(at)).unwrap_or(0)),
+        }
+    }
+
     /// Milliseconds since the last loop pass; `None` before the first.
     fn loop_age_ms(&self) -> Option<u64> {
         match self.last_beat_ms.load(Ordering::Relaxed) {
@@ -432,6 +505,27 @@ impl Health {
             "1 while this coordinator replica is the ticker (the lowest live replica).",
             u64::from(self.coordinator_is_ticker.load(Ordering::Relaxed)),
         );
+        // The fleet reconciler's (constant 0 on the other roles).
+        gauge("mmo_fleet_desired", "desired_hosts rows the fleet reconciler's last successful read showed.", load(&self.fleet_desired));
+        gauge(
+            "mmo_fleet_deployments",
+            "Host Deployments labelled for this world at the fleet reconciler's last successful list.",
+            load(&self.fleet_deployments),
+        );
+        counter("mmo_fleet_created_total", "Kubernetes objects the fleet reconciler created.", load(&self.fleet_created));
+        counter("mmo_fleet_deleted_total", "Kubernetes objects the fleet reconciler deleted.", load(&self.fleet_deleted));
+        counter("mmo_fleet_errors_total", "Fleet reads and actions that failed (each retried by the next pass).", load(&self.fleet_errors));
+        let pass_age = if self.fleet_role.load(Ordering::Relaxed) {
+            // Before the first good pass: since the process started.
+            self.fleet_pass_age_ms().unwrap_or_else(|| u64::try_from(self.now_ms()).unwrap_or(0))
+        } else {
+            0
+        };
+        gauge(
+            "mmo_fleet_pass_age_ms",
+            "Milliseconds since the fleet reconciler's last pass without a failed read or action (0 on the other roles).",
+            pass_age,
+        );
         let build = IntGaugeVec::new(
             opts("mmo_build_info", "The running build (always 1)."),
             &["region_blocks", "chunk_blocks", "revision"],
@@ -481,7 +575,7 @@ struct Served {
     role: &'static str,
 }
 
-/// Serves [`Health::global`] on `bind` for a process of `role` (`host` or `coordinator`):
+/// Serves [`Health::global`] on `bind` for a process of `role` (`host`, `coordinator` or `fleet`):
 /// bound here (an error is the caller's), served on a thread of its own with a current-thread
 /// tokio runtime. Returns once bound.
 pub fn serve(bind: SocketAddr, role: &'static str) -> io::Result<()> {
@@ -537,6 +631,8 @@ async fn livez(State(s): State<Served>) -> impl IntoResponse {
 async fn readyz(State(s): State<Served>) -> impl IntoResponse {
     if s.health.ready() {
         (StatusCode::OK, "ok")
+    } else if s.health.fleet_role.load(Ordering::Relaxed) && s.health.registered.load(Ordering::Relaxed) {
+        (StatusCode::SERVICE_UNAVAILABLE, s.health.waiting().unwrap_or(FLEET_FAILING))
     } else if s.health.registered.load(Ordering::Relaxed) {
         (StatusCode::SERVICE_UNAVAILABLE, "attaching")
     } else {

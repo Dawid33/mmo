@@ -33,6 +33,11 @@ svc-link = { path = "../svc-link" }
 auth = { workspace = true }
 login-api = { workspace = true }
 reqwest = { workspace = true }
+# The fleet reconciler (`VOXEL_ROLE=fleet`, `fleet.rs`): the Kubernetes API, the host template
+# (JSON) and its hash.
+kube-api = { path = "../kube-api" }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 # The health and metrics endpoint (`VOXEL_HEALTH_BIND`, `health.rs`).
 axum = { workspace = true }
 prometheus = { workspace = true }
