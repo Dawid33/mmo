@@ -144,9 +144,11 @@ pub enum Declared {
     /// caller rolls the world back.
     SuccessionOpen,
     /// These rows are gone: no row, another boot, already dead or already succeeded — or,
-    /// named as heirs, not live with a fresh lease any more. The list mixes predecessor and
-    /// heir ordinals (sorted): the caller does not tell them apart — it forgets the whole
-    /// declaration and re-observes (its next lease read gives a new lapsed set and new heirs).
+    /// named as heirs, not live with a fresh lease any more — or, a `Leave`'s predecessor, it
+    /// owns nothing an heir could take (no `super_regions` row, no `in_flight` row: an empty
+    /// `Leave` is never declared). The list mixes predecessor and heir ordinals (sorted): the
+    /// caller does not tell them apart — it forgets the whole declaration and re-observes (its
+    /// next lease read gives a new lapsed set, new heirs and what each leaver still holds).
     Gone(Vec<HostId>),
 }
 

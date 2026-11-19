@@ -11,7 +11,18 @@
 //! A `Leave` declaration needs the predecessor's row clean and does not mark it dead; a claim
 //! by that boot is refused anyway — a claim's last statement (`rows.rs` `check_live`) needs
 //! the claimer's row live AND dirty, so a cleanly-left boot claims nothing from its leave
-//! cut's commit on, and its next boot registers dirty and claims normally.
+//! cut's commit on, and its next boot registers dirty and claims normally. A `Leave` whose
+//! predecessor owns NOTHING is refused (`Gone`, nothing written; Elastic 3 final review): after
+//! its `super_regions` rows were locked and moved (none: its leave cut released them — a part
+//! of it still staged was waited for by that lock) one PLAIN read of `in_flight` (`EXISTS`, no
+//! lock, after every lock of the walk: no new edge) decides — rows there are what the heir
+//! adopts (a landless leaver's in-flight rows move only this way: the coordinator wants such a
+//! row from its `hosts` read, with no host's ask), none means no succession. Rows of a part
+//! still staged are invisible to it: refused now, declared after a later `hosts` read. The
+//! coordinator declares a `Leave` only between cuts, after a cut later than the leave cut
+//! committed, to an heir that took part in the last committed cut (`game`
+//! `coordinator/succession.rs`, `LeaveGate`): that is the core's rule, the store checks none
+//! of it.
 //!
 //! Locks (the declaration): `coordinator` (held `FOR NO KEY UPDATE` by its transition's
 //! compare-and-set, below), then `world` `FOR NO KEY UPDATE`
@@ -40,7 +51,9 @@
 //!    to the heir, or the row is no longer lapsed).
 //!
 //! A second safe cycle (Elastic 3) is a declaration against a cut part of the same host that
-//! releases land: under "A part's release" below.
+//! releases land: under "A part's release" below. A third (Elastic 3 final review, A-S3) is an
+//! assignment followed, in the same transition, by a decision that takes `world`, against a
+//! registration: under "Assigning a free super-region" below.
 //!
 //! (Corrected, Elastic 1: the R4 notes listed a second cycle, "a zombie's claim of free land vs
 //! a declaration of several predecessors". Elastic 3 removed the host's claim of free land
@@ -154,6 +167,24 @@
 //!   mark the row dead waits too, then reads `super_regions` in a later statement and sees the
 //!   assignment. A drain mark (one `UPDATE` of that row) waits likewise: one that committed
 //!   first is seen (`HostDraining`), one after it finds land the host then leaves with.
+//!
+//! - **One deadlock cycle with a registration, safe** (final review, A-S3). `AssignLand` is the
+//!   only decision that holds a `hosts` row (the assignee's, `FOR SHARE`, to the transition's
+//!   commit) WITHOUT holding `world`. A transition whose decisions are `[AssignLand(A), …, X]`
+//!   with X one that locks `world` (`Declare`, `EndLandless`, a committing `DecideCut`, a
+//!   rollback) holds `hosts(A)` and then waits for `world`; a registration holds `world` and
+//!   then runs `UPDATE hosts SET seen_ms = 0 WHERE name = $1 …` (`rows.rs` `register_host`: it
+//!   lapses the other dirty live rows of its name) — if A carries the registering process's
+//!   name, that update waits for A's share lock: a cycle. Postgres aborts one side (`40P01`) or
+//!   a lock timeout ends it; neither side has written anything that stays. The transition's
+//!   side: the failed statement is X's (its savepoint's refusal — or, when the abort poisons
+//!   the transaction, the whole transition fails and is retried: the compare-and-set did not
+//!   commit, so nothing of it is in the row, and the core decides again). The registration's
+//!   side: the boot exits 1 and its supervisor restarts it as a new host (`CLAIM_LOCK_TIMEOUT_MS`
+//!   names the same outcome for a lock it cannot get). It needs a host being assigned land in
+//!   the very transaction that declares, ends or decides, while a process of the SAME name
+//!   registers: a pod restarting under its Deployment's name while its old row still takes
+//!   land — rare, and never a loss.
 //!
 //! Cost: at most `ASSIGN_PER_PASS_MAX` (64) assignments per transition; each is at most four
 //! single-row statements.
@@ -666,6 +697,23 @@ pub(crate) async fn declare_in(
             moved.push((sr, epoch as u64));
         }
         moved.sort();
+        if kind == SuccessionKind::Leave && moved.is_empty() {
+            // A leaver that owns nothing — its leave cut released its land (that part's
+            // `COMMIT PREPARED` was waited for above, or came before) and it carries no
+            // in-flight row — has nothing an heir could take: no succession is declared for it
+            // (final review: never an empty `Leave`). In-flight rows alone ARE something: a
+            // landless leaver's rows move by this succession's adopting part. A plain read (no
+            // lock): rows of a part still staged are not visible yet — refused now, declared
+            // once a later `hosts` read shows them (`owns_land`).
+            let rows: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM in_flight WHERE host = $1)")
+                .bind(i(predecessor.0))
+                .fetch_one(&mut *tx)
+                .await?;
+            if !rows {
+                log::info!("[world-store] host {predecessor} left owning no land and no in-flight row: no Leave succession");
+                return Ok(Declared::Gone(vec![*predecessor]));
+            }
+        }
         let id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM successions")
             .fetch_one(&mut *tx)
             .await?;

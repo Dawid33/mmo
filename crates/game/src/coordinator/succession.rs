@@ -86,17 +86,25 @@
 //! (its directory stale: no order reached it) stops itself without a save at the next
 //! `BeginCut` (`world_manager/world_cut.rs`, `take_unaccounted_dead`), which is that rollback.
 //!
-//! **Drain** (Task 11, decision 7): a host that leaves parks everything in its leave cut, its
-//! `hosts` row turns clean and its claims STAY. When a live host needs one of its regions it
-//! says so ([`HostMsg::LandNeeded`]); the runtime looks the owner up
-//! ([`Coordinator::take_land_lookups`] → [`super::Input::LandOwners`]) and, when no host
-//! lapsed, [`Coordinator::declare_wanted`] hands out ONE `Leave` succession giving ALL that
-//! host's land to `heir_of` over the live attached hosts, with the same runs as a crash's —
-//! at once (Elastic 1: a host that left never returns as itself — its restarted process is a
-//! new host with a new id — so nothing waits for it). Only between cuts, and only for the boot
-//! the latest hosts read shows clean and live; a request is dropped if that row stops being
-//! clean and live, and the store refuses a declaration whose rows changed under it (`Gone` /
-//! `NotLapsed`: asked again after a fresh read). Nothing is decided by the leaver. The requests
+//! **Drain** (Task 11, decision 7; Elastic 3): a host that leaves parks everything in its leave
+//! cut and its `hosts` row turns clean. Its part RELEASES its land (free with the commit) unless
+//! it carries in-flight rows or a succession is open on it — then its land and rows STAY its own
+//! and go to one heir by a `Leave` succession. Such a leaver is wanted (`land_wanted`) from the
+//! ticker's `hosts` read — a clean live row that still holds land or in-flight rows
+//! ([`Coordinator::note_clean_rows`]: a leaver holding only in-flight rows owns no
+//! `super_regions` row an ask could find) — or when a host asks for one of its super-regions
+//! ([`HostMsg::LandNeeded`] → [`Coordinator::take_land_lookups`] → [`super::Input::LandOwners`]
+//! → [`Coordinator::on_land_owner`]). When no host lapsed, [`Coordinator::declare_wanted`] hands
+//! out ONE `Leave` succession giving ALL that host's land to `heir_of` over the heir candidates,
+//! with the same runs as a crash's (Elastic 1: a host that left never returns as itself — its
+//! restarted process is a new host with a new id — so nothing waits for it). Only between cuts;
+//! only once a world cut LATER than the leave cut committed, to an heir that took part in the
+//! last committed cut ([`LeaveGate`]: a host registered during a cut is outside it and would
+//! wait for a base cut it never takes part in); only for the boot the latest hosts read shows
+//! clean, live and landed — a request is dropped if that row stops being clean and live or owns
+//! nothing (never an empty `Leave`: the store refuses one too), and the store refuses a
+//! declaration whose rows changed under it (`Gone` / `NotLapsed`: asked again after a fresh
+//! read). Nothing is decided by the leaver. The requests
 //! are in the projection (Elastic 2a); the hosts ask again every [`crate::LAND_NEEDED_EVERY_MS`]
 //! anyway.
 
@@ -259,6 +267,45 @@ impl LeaseWatch {
     }
 }
 
+/// What this replica saw that a `Leave` declaration waits for (final review, item 4): the
+/// process's own observations, never in the projection (a restart or a new ticker starts
+/// empty and waits for the next committed cut — a declaration is delayed, never hastened).
+///
+/// A `Leave` succession's base cut is the store's last committed cut, and its heir answers the
+/// order only from a journal that counts from that cut. A host that registered while a cut ran
+/// is outside it: its journal still counts from the cut before, and it would wait for a base
+/// cut it never takes part in (until the deadline rolls the world back). So a leaver's land is
+/// declared only once a cut LATER than its leave cut has committed, to an heir that TOOK PART
+/// in the last committed cut.
+#[derive(Clone, Debug, Default)]
+pub(super) struct LeaveGate {
+    /// Per clean row this replica read, `(host, boot)`: the newest world cut its cache had made
+    /// when it first read the row clean. The leave cut is that one or an earlier one (a row
+    /// turns clean in its leave cut's decision), so a commit this replica applies of a LATER
+    /// cut is a commit after the leave cut.
+    clean_seen: BTreeMap<(HostId, u64), crate::CutId>,
+    /// The last world cut this replica applied the commit of, with the hosts that took part
+    /// in it and stayed (not leaving in it).
+    last_commit: Option<(crate::CutId, BTreeSet<HostId>)>,
+}
+
+impl LeaveGate {
+    /// World cut `cut` committed with `staying` (its participants that did not leave in it).
+    pub(super) fn committed(&mut self, cut: crate::CutId, staying: BTreeSet<HostId>) {
+        if self.last_commit.as_ref().is_none_or(|(last, _)| *last <= cut) {
+            self.last_commit = Some((cut, staying));
+        }
+    }
+
+    /// The hosts host `leaver`'s land (boot `boot`) may go to now: those of the last committed
+    /// cut, once that cut is later than the newest one made when the row was first read clean.
+    /// `None`: not yet (no commit applied here since, or the row not read clean here).
+    fn heirs_for(&self, leaver: HostId, boot: u64) -> Option<&BTreeSet<HostId>> {
+        let seen = self.clean_seen.get(&(leaver, boot))?;
+        self.last_commit.as_ref().filter(|(last, _)| last > seen).map(|(_, staying)| staying)
+    }
+}
+
 /// A lapsed host that holds no land, for the runtime to end in the store
 /// (`end_landless_host`, [`Coordinator::take_end_landless`]): its row marked dead, no
 /// succession, no generation change. The answer goes to [`Coordinator::landless_ended`].
@@ -398,12 +445,14 @@ pub(super) struct SuccessionRuns {
     reread: bool,
     /// Dead rows nobody here declared that already asked for a re-read (asked once each).
     reread_for: BTreeSet<(HostId, u64)>,
-    /// Super-regions hosts asked for ([`crate::HostMsg::LandWanted`],
-    /// [`crate::HostMsg::LandNeeded`]), each with the hosts that asked, that the ticker's runtime
-    /// is to look up in the store ([`Coordinator::take_land_lookups`]).
+    /// Super-regions hosts asked for ([`crate::HostMsg::LandNeeded`]), each with the hosts that
+    /// asked, that the ticker's runtime is to look up in the store
+    /// ([`Coordinator::take_land_lookups`]).
     pub(super) land_lookups: BTreeMap<crate::SuperRegion, BTreeSet<HostId>>,
-    /// Hosts that left cleanly whose land is wanted ([`Coordinator::land_wanted`]): given
-    /// away at the next [`Coordinator::declare_wanted`] between cuts.
+    /// Hosts that left cleanly and still hold land — `super_regions` rows a host asked for
+    /// ([`Coordinator::on_land_owner`]), or any land or in-flight row a `hosts` read shows
+    /// ([`Coordinator::note_clean_rows`]): given to one heir by a `Leave` succession
+    /// ([`Coordinator::leave_wanted`]).
     land_wanted: BTreeSet<HostId>,
     /// The landless host handed out to end ([`Coordinator::take_end_landless`]), not answered
     /// yet, with its mark.
@@ -1416,8 +1465,8 @@ fn order(s: &Succession) -> CoordMsg {
 }
 
 impl super::Coordinator {
-    /// Host `host` needs a region of `sr` ([`crate::HostMsg::LandNeeded`]; or
-    /// [`crate::HostMsg::LandWanted`]: its owner left cleanly): queued with its asker, looked up
+    /// Host `host` needs a region of `sr` ([`crate::HostMsg::LandNeeded`]: it knows no reachable
+    /// owner of it — free, unknown, or a host that left cleanly): queued with its asker, looked up
     /// by the ticker's runtime ([`Self::take_land_lookups`]) and answered by
     /// [`Self::on_land_read`] (`assign.rs`). Ignored unless successions run (`Static` never gives
     /// land away: its leaver gets it back when it returns, R3; nor does it assign any).
@@ -1450,9 +1499,10 @@ impl super::Coordinator {
 
     /// Host `owner` holds a super-region a host asked for (the ticker's lookup,
     /// [`super::Input::LandOwners`], [`Self::on_land_read`]) and is not an attached live host:
-    /// if it left cleanly, ALL its land goes to one heir at the
-    /// next [`Self::declare_wanted`] between cuts — at once: a host that left never returns as
-    /// itself (the module docs).
+    /// if it left cleanly, ALL its land goes to one heir by a `Leave` succession
+    /// ([`Self::leave_wanted`]: between cuts, once a later cut than its leave cut committed) —
+    /// a host that left never returns as itself (the module docs). A `hosts` read notes the
+    /// same without an ask ([`Self::note_clean_rows`]).
     pub(super) fn on_land_owner(&mut self, owner: HostId, now_ms: u64) {
         if !self.successions.enabled {
             return;
@@ -1496,12 +1546,16 @@ impl super::Coordinator {
         }
     }
 
-    /// The `Leave` succession to declare now for drained land, if any (called by
+    /// The `Leave` succession to declare now for a departed host's land, if any (called by
     /// [`Self::declare_wanted`] when no host lapsed): a wanted owner whose `hosts` row the
-    /// latest read shows clean and live, not declared yet, with a live attached heir, between
-    /// cuts. A request is dropped once that row is no longer clean and live, or its id is
-    /// attached and live (neither happens to a host that left: its id never registers again —
-    /// kept as a guard); a row not read (yet) is waited for.
+    /// latest read shows clean, live and LANDED (a `super_regions` or `in_flight` row of its
+    /// id), not declared yet, between cuts, once a cut later than its leave cut committed
+    /// ([`LeaveGate`]), with a live attached heir that took part in the last committed cut. A
+    /// request is dropped once that row is no longer clean and live, or its id is attached and
+    /// live (neither happens to a host that left: its id never registers again — kept as a
+    /// guard), or the read shows it owning NOTHING (its leave cut released its land and it
+    /// carried no in-flight row, or a stale owners lookup named it: an empty `Leave` is never
+    /// declared — the store refuses one too, `declare_in`); a row not read (yet) is waited for.
     fn leave_wanted(&mut self) -> Option<Declare> {
         if self.successions.land_wanted.is_empty() {
             return None;
@@ -1517,18 +1571,32 @@ impl super::Coordinator {
             let back = attached.contains(owner) || row.is_some_and(|r| !r.clean || r.state != HOST_LIVE);
             if back {
                 log::info!("coordinator: host {owner} is attached or its row is no longer a clean live one: its land is not given away");
+                return false;
             }
-            !back
+            if row.is_some_and(|r| !r.landed) {
+                log::info!("coordinator: host {owner} left and owns nothing (no land, no in-flight row): no Leave succession");
+                return false;
+            }
+            true
         });
-        let (owner, boot) =
-            self.successions.land_wanted.iter().find_map(|&owner| self.leases.row(owner).map(|row| (owner, row.boot)))?;
         if self.cuts_running_participants().is_some() {
             // Only between cuts: the store's base cut is the one every survivor counts from.
             return None;
         }
-        let live = self.heir_candidates(attached.into_iter().filter(|h| *h != owner).collect());
+        // The first wanted owner whose row is read and whose gate is open, with the hosts of
+        // the last committed cut (its heir is one of them).
+        let wanted: Vec<HostId> = self.successions.land_wanted.iter().copied().collect();
+        let (owner, boot, in_last_cut) = wanted.into_iter().find_map(|owner| {
+            let boot = self.leases.row(owner)?.boot;
+            let Some(staying) = self.leave_gate.heirs_for(owner, boot) else {
+                log::debug!("coordinator: host {owner}'s land is wanted: waiting for a world cut later than its leave cut to commit");
+                return None;
+            };
+            Some((owner, boot, staying.clone()))
+        })?;
+        let live = self.heir_candidates(attached.into_iter().filter(|h| *h != owner && in_last_cut.contains(h)).collect());
         let Some(heir) = crate::heir_of(owner, &live) else {
-            log::debug!("coordinator: host {owner}'s land is wanted and no live host is attached to inherit it");
+            log::debug!("coordinator: host {owner}'s land is wanted and no live attached host of the last committed cut can inherit it");
             return None;
         };
         log::warn!("coordinator: host {owner} (boot {boot:#x}) left and its land is wanted: giving it all to heir {heir}");
@@ -1581,6 +1649,7 @@ impl super::Coordinator {
             run.beat.extend(beating.iter().copied());
         }
         self.leases.observe(rows, issued_ms, received_ms);
+        self.note_clean_rows(rows);
         let draining: BTreeSet<HostId> = rows.iter().filter(|r| r.draining).map(|r| r.ordinal).collect();
         if draining != self.draining {
             self.draining = draining;
@@ -1618,6 +1687,41 @@ impl super::Coordinator {
         }
     }
 
+    /// The clean live rows of a `hosts` read (hosts that left in a committed leave cut; the
+    /// ticker's read, outside the log like the rest of it):
+    /// - each is stamped, once per boot, with the newest world cut this cache had made
+    ///   ([`LeaveGate`]: its `Leave` succession waits for a later cut to commit);
+    /// - one that still holds land or in-flight rows (`landed`), not declared and not attached
+    ///   live, is WANTED without waiting for a host's ask (final review, A-F3 / B-I4): a
+    ///   leaver that released its last land earlier and carried in-flight rows in its leave
+    ///   part owns no `super_regions` row, so no owners lookup ever names it — its rows would
+    ///   stay keyed to a host that never returns. Every clean landed row is declared this way,
+    ///   not only those holding in-flight rows alone: the read does not tell the two apart
+    ///   (`landed` is one `EXISTS` over both tables), and a leaver that kept `super_regions`
+    ///   rows kept them BECAUSE its part carried in-flight rows or a succession was open on it
+    ///   (`leave_release`) — nothing is gained by waiting for an ask.
+    fn note_clean_rows(&mut self, rows: &[HostSeen]) {
+        let made = self.last_cut_made();
+        let clean: BTreeSet<(HostId, u64)> =
+            rows.iter().filter(|r| r.clean && r.state == HOST_LIVE).map(|r| (r.ordinal, r.boot)).collect();
+        self.leave_gate.clean_seen.retain(|k, _| clean.contains(k));
+        for k in &clean {
+            self.leave_gate.clean_seen.entry(*k).or_insert(made);
+        }
+        if !self.successions.enabled {
+            return;
+        }
+        let attached: BTreeSet<HostId> = self.attached_live().into_iter().collect();
+        for r in rows.iter().filter(|r| r.clean && r.state == HOST_LIVE && r.landed) {
+            if attached.contains(&r.ordinal) || self.successions.declared.contains(&(r.ordinal, r.boot)) {
+                continue;
+            }
+            if self.successions.land_wanted.insert(r.ordinal) {
+                log::info!("coordinator: host {} left and still holds land or in-flight rows: they go to an heir", r.ordinal);
+            }
+        }
+    }
+
     /// A failed read of the `hosts` rows ([`LeaseWatch::observe_failed`]).
     pub fn leases_unread(&mut self) {
         self.leases.observe_failed();
@@ -1646,6 +1750,12 @@ impl super::Coordinator {
             out.push("reread_for");
         }
         out
+    }
+
+    /// Whether an open run moved super-region `sr` to host `host`, its heir (`assign.rs`: such
+    /// land is never told as assigned).
+    pub(super) fn succession_moved_to(&self, host: HostId, sr: crate::SuperRegion) -> bool {
+        self.successions.open.values().any(|run| run.s.heir == host && run.s.moved.iter().any(|(m, _)| *m == sr))
     }
 
     /// Whether an open run names host `host` heir or survivor.

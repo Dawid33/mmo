@@ -72,6 +72,15 @@ impl Coordinator {
                 }
                 for asker in askers {
                     if asker == owner {
+                        // Never land a succession moved to it (or may be moving: one is being
+                        // declared, or the open ones are not known here): INHERITED land comes
+                        // by its order and is used only behind the heir's mask, after its
+                        // adoption — an `Assigned` would make it plain land (final review,
+                        // A-F1). The heir asks again; after the settle the heal runs.
+                        if self.inherits_or_may(owner, sr) {
+                            log::debug!("coordinator: host {owner} asks for {sr:?}, which a succession gives it: its order carries it");
+                            continue;
+                        }
                         self.push(Target::Host(owner), CoordMsg::Assigned { rows: vec![(sr, epoch)] });
                     } else {
                         self.push(Target::Host(asker), CoordMsg::LandIs { sr, owner, epoch });
@@ -104,6 +113,13 @@ impl Coordinator {
             }
             decided += 1;
         }
+    }
+
+    /// Whether super-region `sr`, `host`'s in the store, is (or may be) land a succession not
+    /// settled yet moved to it: an open run names `host` heir of it, a declaration is in flight,
+    /// or this replica does not know the open successions yet.
+    fn inherits_or_may(&self, host: HostId, sr: SuperRegion) -> bool {
+        !self.successions_known() || self.successions_declaring().is_some() || self.succession_moved_to(host, sr)
     }
 
     /// The host free super-region `sr` goes to, with the boot its `hosts` row is of (what the

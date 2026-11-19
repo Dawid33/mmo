@@ -666,6 +666,10 @@ impl Coordinator {
         }
         if committed {
             self.cuts.lead = WORLD_CUT_LEAD_TICKS;
+            // What a `Leave` declaration waits for (`succession.rs`, `LeaveGate`): a later cut
+            // than the leave cut, committed with its heir in it.
+            let staying: BTreeSet<HostId> = run.participants().filter(|h| !run.leaving.contains(h)).collect();
+            self.leave_gate.committed(cut, staying);
         }
         for &h in &run.leaving {
             self.cuts.leave_requests.remove(&h);
@@ -1059,7 +1063,12 @@ impl Coordinator {
     /// Whether `cut` is above every cut id this cache made: a cut another replica began after the
     /// row this cache holds (ids are durable and never repeat within a row's life).
     fn cut_not_made_yet(&self, cut: CutId) -> bool {
-        cut.0 > ((self.cuts.epoch << 32) | self.cuts.next)
+        cut > self.last_cut_made()
+    }
+
+    /// The newest world cut id this cache made (or holds as made: `next` is durable).
+    pub(super) fn last_cut_made(&self) -> CutId {
+        CutId((self.cuts.epoch << 32) | self.cuts.next)
     }
 
     fn remember_outcome(&mut self, cut: CutId, committed: bool) {

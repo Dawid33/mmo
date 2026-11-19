@@ -301,6 +301,10 @@ pub struct Coordinator {
     /// When the ticker last logged that no host could take free land (store ms): at most once
     /// per [`ASSIGN_WARN_EVERY_MS`].
     assign_warned_ms: Option<u64>,
+    /// What this replica saw that a `Leave` declaration waits for (`succession.rs`): the
+    /// process's own observations of the store (clean rows read, cuts it applied the commit
+    /// of), kept by a rebase — they are facts of the store, not of the projection replaced.
+    leave_gate: succession::LeaveGate,
 }
 
 /// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
@@ -409,6 +413,7 @@ projection! {
             provisional = Vec::new(),
             assign_askers = BTreeMap::new(),
             assign_warned_ms = None,
+            leave_gate = succession::LeaveGate::default(),
         }
         reset {
             out = Vec::new(),
@@ -505,6 +510,7 @@ impl Coordinator {
             provisional: Vec::new(),
             assign_askers: BTreeMap::new(),
             assign_warned_ms: None,
+            leave_gate: succession::LeaveGate::default(),
         };
         c.push_view(Target::Every);
         c

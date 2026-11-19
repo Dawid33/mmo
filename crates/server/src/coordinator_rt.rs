@@ -1191,7 +1191,7 @@ struct SuccessionPump {
     /// [`Coordinator::take_generation_lookup`]).
     generation_rx: Option<Answer<u64>>,
     generation_retry_at: u64,
-    /// The owners read for the super-regions hosts asked for (`LandNeeded`, `LandWanted`), with
+    /// The owners read for the super-regions hosts asked for (`LandNeeded`), with
     /// them and their askers.
     land_rx: Option<(Vec<(game::SuperRegion, Vec<HostId>)>, Answer<Vec<(game::SuperRegion, i64, u64)>>)>,
     /// No end of a landless host is handed out before this (after a refused one).
@@ -2026,10 +2026,10 @@ impl CoordinatorRuntime {
             }
             return Ok(());
         }
-        // Land asked for (`LandNeeded`, `LandWanted`): the owners read (a plain read), the rows of
+        // Land asked for (`LandNeeded`): the owners read (a plain read), the rows of
         // the asked super-regions told to the core (Elastic 3: it assigns a free one, names a live
-        // owner, and gives a departed owner's land away at its next declaration between cuts —
-        // no heir wait: a host that left never returns as itself). A failed read is dropped: the
+        // owner, and wants a departed owner's land given away — a `Leave` succession between
+        // cuts, once a cut later than its leave cut committed). A failed read is dropped: the
         // hosts ask again every second.
         let mut failed = None;
         if let Some((asked, rx)) = &mut p.land_rx {

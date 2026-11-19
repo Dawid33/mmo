@@ -205,7 +205,7 @@ pub enum HostMsg {
     /// Something on this host needs a region of super-region `sr`, whose directory owner
     /// left in a committed leave cut (its `hosts` row clean) and has not come back (R4
     /// drain). The coordinator looks the owner up and gives ALL its land to one heir by a
-    /// `Leave` succession at once (a host that left never returns as itself: a restarted
+    /// `Leave` succession (a host that left never returns as itself: a restarted
     /// process is a new host). No longer sent since Elastic 3 ([`HostMsg::LandNeeded`] covers
     /// it); applied as a `LandNeeded`. Ignored under `Static`.
     LandWanted { sr: SuperRegion },
