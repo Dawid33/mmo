@@ -1743,7 +1743,11 @@ twin_ctx := "k3d-mmo"
 # Create (or start) the twin. Ports on 127.0.0.1 only: the hosts' UDP node ports
 # 30466-30469 and Traefik's port 80 as 8480 (http://game.localhost:8480/). Kubelet
 # eviction thresholds are ABSOLUTE: the default "<15% disk free" taints a large,
-# fairly full disk with disk-pressure and nothing schedules. The kubeconfig entry is
+# fairly full disk with disk-pressure and nothing schedules. Kubelet's image GC starts at
+# 98 % disk use (default 85 %): the node shares the machine's disk and the twin's images are
+# imported (no registry), so the default GC deleted freshly imported images before their pods
+# started (seen at 90 %, Elastic 3); like the eviction thresholds it applies only to a newly
+# created cluster (`twin-down` then `twin-up`). The kubeconfig entry is
 # added to the default kubeconfig WITHOUT switching the current context.
 twin-up:
     #!/usr/bin/env bash
@@ -1757,6 +1761,8 @@ twin-up:
             -p '127.0.0.1:8480:80@loadbalancer' \
             --k3s-arg '--kubelet-arg=eviction-hard=imagefs.available<5Gi,nodefs.available<5Gi,memory.available<500Mi@server:0' \
             --k3s-arg '--kubelet-arg=eviction-minimum-reclaim=imagefs.available=1Gi,nodefs.available=1Gi@server:0' \
+            --k3s-arg '--kubelet-arg=image-gc-high-threshold=98@server:0' \
+            --k3s-arg '--kubelet-arg=image-gc-low-threshold=95@server:0' \
             --kubeconfig-update-default --kubeconfig-switch-context=false --wait
     fi
     kubectl --context {{twin_ctx}} wait --for=condition=Ready node --all --timeout=180s
