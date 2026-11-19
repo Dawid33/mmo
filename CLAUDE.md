@@ -115,62 +115,103 @@ hand steps are its Phase D) — the deployment chain**: apply order `registry` (
 copy) → `dns` → `login` → `monitoring` → `world` (`deploy/modules/world`, namespace `world-<id>`: Deployment
 `coordinator` (`var.coordinator_replicas` replicas, default 2, `Recreate`, every replica on the same identity
 Secrets — one pin — behind the headless Service, each holding a login link, Secret `login-link-identity`; a
-PodDisruptionBudget `min_available = 1` only above one replica), per key `<name>` of the MAP `var.hosts` a
-Deployment, a UDP NodePort Service and a PodDisruptionBudget `host-<name>` (label `errantry/host=<name>`, all hosts
-`app.kubernetes.io/component=host`), Deployment `toolbox` holding `worldctl`, Deployment
+PodDisruptionBudget `min_available = 1` only above one replica), Deployment `fleet` (the reconciler, below; its
+ServiceAccount, Role and RoleBinding `fleet`), the ConfigMap `host-template` (key `template.json`: a host's Deployment,
+UDP NodePort Service and PodDisruptionBudget as one JSON template with placeholders, rendered by `hosts.tf`),
+Deployment `toolbox` holding `worldctl`, Deployment
 `web` = page + a `/login` proxy that forwards ONLY login's `/v1/` and `/.well-known/jwks.json` (never its `/healthz`
 or `/metrics`), the cert-manager Certificate `client-tls` for `game.errantry.renownandruin.com`, the `ecr-pull`
-secret). Pods never forge (`VOXEL_EMPTY_STORE=wait`): the forge runs in the toolbox, then the pods turn Ready. Each
+secret). Pods never forge (`VOXEL_EMPTY_STORE=wait`): the forge runs in the toolbox, then the pods turn Ready.
+**Hosts are not OpenTofu's** (Elastic 4, plan `docs/superpowers/plans/2026-11-19-elastic-4-reconciler-scaling.md`;
+`var.hosts` is gone, `var.fleet` = `min` (default 1), `max`, `port_base`, the optional pace dials): the coordinator's
+decisions write `desired_hosts` ("The fleet", below) and the reconciler makes one Deployment, Service and
+PodDisruptionBudget `host-<name>` per row (names `h1`, `h2`, … issued by the store, never reused; labels
+`errantry/fleet=<world id>`, `errantry/host=<name>`, `app.kubernetes.io/component=host`): the Deployment at 1 replica
+on the image of the `coordinator` container of Deployment `coordinator` AT THAT MOMENT (the released digest — a host
+added after a release never runs another build), the Service on node ports `port_base + 2·slot` (QUIC) and `+ 1`
+(WebTransport) — output `client_ports`, the range `port_base … port_base + 2·max − 1`, must be open to clients.
+**The reconciler** (`VOXEL_ROLE=fleet`, `server/src/fleet.rs`, a pass every `FLEET_PASS_MS`, 2 s) writes nothing to
+the store (`OpenMode::ReadOnly`) and never talks to the coordinator (nor the coordinator to the Kubernetes API); it
+creates and re-templates nothing while the `coordinator` Deployment's `spec.replicas` is 0 (it still deletes); it
+never patches an existing Deployment's replicas or image (the recipes own those); it re-templates a host Deployment
+only at 0 replicas (a `PUT` with the read `resourceVersion`, its own image kept) and never a Service or a budget; a
+draining row gets nothing created; an object labelled for the world without `errantry/host` is never touched; an
+EMPTY `desired_hosts` read deletes every labelled host object (each pod leaves by its leave cut: a disruption, never
+a loss), a FAILED read deletes and creates nothing. Exactly ONE replica, `Recreate`: two overlapping reconcilers
+could each act on a view the other just changed (one deleting a host the other just created for a fresh row). Each
 host Deployment is 1 replica, `Recreate`; never `kubectl rollout status` a host — poll each Deployment's
-`status.readyReplicas` and skip a drained one (unready for good), as the recipes do. A host is removed by
-`world-drain <name>` → remove its key from `var.hosts` → apply. The coordinator's replicas move together: never
+`status.readyReplicas` and skip a drained one (unready for good), as the recipes do. A host is removed ONLY by
+`world-drain <name>`, nothing to apply: the coordinator marks its desired row draining, removes the row once the name
+owns nothing, the reconciler deletes its objects (below the minimum a new name is added). The coordinator's replicas move together: never
 `kubectl rollout status` it either — `world-stop` records the count in the Deployment annotation `errantry/replicas`
 and scales it to 0, `world-start` restores it (absent: 2) and waits for every replica's `/readyz`, `world_update.sh`
 stops and starts every replica together (no two builds share the row). **Emptying a node**: a PodDisruptionBudget
 of 0 holds each host pod and the coordinator's keeps one replica (which cannot move on ONE node, so the drain cannot
-finish); toolbox, web and login have none and go at once — on ONE node `world-stop` first, then `kubectl drain`;
-with more nodes drain and remove that node's hosts first. **An apply that changes
+finish); toolbox, web, login and `fleet` have none and go at once — on ONE node `world-stop` first, then `kubectl drain`;
+with more nodes drain (`world-drain`) that node's hosts first. **An apply starts no host**: it restarts the
+coordinator on a change of its own, and a change of the host template (env, resources, the secrets' checksum)
+reaches a running host only at its next stop and start (re-templated at 0 replicas). **An apply that changes
 anything the coordinator and the hosts share** (`database_url`, `service_token`, the coordinator certificate,
-`save_secs`, `super_region_regions`, `ownership`) restarts them ALL at once — the hosts likely leave without a cut,
-a total crash, the generation raised: such a change is `world-stop` → apply (which starts it); only a host-only
-change (a `var.hosts` key, host resources) goes through cuts on a running world. **A host added after a release**
-starts on `var.images.server` (`:latest`) beside the released digest: right after the apply, `kubectl set image
-deploy/host-<k> host=<the coordinator's image>` (TODO.md, Elastic 1) — else the next release finds mixed images and
-records no previous release. A host pod that crash-loops AFTER registering no longer rolls the world back while it
+`save_secs`, `super_region_regions`, `ownership`) is `world-stop` → apply → `world-start`. **The FIRST apply on a
+world deployed before Elastic 4** destroys its `var.hosts` Deployments (SIGTERM, leave cuts): `world-stop`, apply,
+re-forge (worlds are never migrated; `0019_desired_hosts`), `world-start`. A host pod that crash-loops AFTER registering no longer rolls the world back while it
 holds no land (a landless incarnation is ended, not succeeded); one that is assigned land during an open run, or is
 made heir, and dies before the settle still does (the residual, Succession below); every check that needs no id still
 runs before the registration (`roles::check_before_registration`). A release is **stop → replace images → start, never a
-rolling update**; it (and `world-stop` / `world-start`) brings a drained or marked host back as a NEW host. An `orion-apply world`
-owns the replica counts: applied while the world is stopped or mid-update it STARTS the world on whatever images are
-set — apply only with the world running and no update under way (images are never changed by an apply).
+rolling update**; it (and `world-stop` / `world-start`) brings a drained or marked host back as a NEW host (which
+the coordinator marks again once the name's desired row is draining). An `orion-apply world`
+owns the coordinator's and `fleet`'s replica counts (not the hosts'): applied while the world is stopped or mid-update
+it STARTS the coordinator and the reconciler on whatever images are set (the host Deployments at 0 stay there until
+`world-start`) — apply only with the world running and no update under way (images are never changed by an apply).
 
 **The world's operator recipes** (context `world_ctx`, namespace `world_ns`, default orion / `world-errantry`; the
 twin reuses them with `world_ctx=k3d-mmo world_ns=world-twin`): `world-ctl <worldctl args>` (e.g. `forge --preset …`),
-`world-status` (pods, host Deployments, node ports, each `/readyz` body; the coordinator's WANT / READY / RECORDED
-count and per replica its ticker flag, live replicas and conflicts; per host pod `land N, released M`),
+`world-status` (pods, host Deployments, the desired rows (`worldctl desired`), node ports, each `/readyz` body; the
+coordinator's WANT / READY / RECORDED count and per replica its ticker flag, live replicas and conflicts and its fleet
+counters (wanted, draining, added, drained, removed); the reconciler's (desired, host Deployments, created, deleted,
+errors, pass age); per host pod `land N, released M`),
 `world-logs|world-metrics <target>`,
-`world-hosts` (the `hosts` rows), `world-drain <name> [secs]` (`claim` worlds only; marks that name's live row,
-follows its log to the leave line), `world-stop` / `world-start` (hosts by label; drained and marked hosts warned
-about before acting; every host leaves through its leave cut, a host that left WITHOUT one is warned about; the
-coordinator's count recorded / restored as above; start waits per Deployment, never on a drained host),
+`world-hosts` (the `hosts` rows, then `worldctl desired`), `world-drain <name> [secs]` (`claim` worlds only; marks that
+name's live row, follows its log to the leave line; the coordinator and the reconciler then remove the host),
+`world-stop` / `world-start` (hosts by label; drained and marked hosts warned about before acting; every host leaves
+through its leave cut, a host that left WITHOUT one is warned about; the coordinator's count recorded / restored as
+above; start waits per Deployment, never on a drained host; a world with no host Deployment stops and starts too).
+`world-stop` scales `fleet` to 0 FIRST and waits until its pod is gone (the reconciler's own rule does not cover the
+hosts' leave while the coordinator is still up), then the hosts (listed after), then the coordinator; `world-start`
+the coordinator first (every replica's `/readyz`), then `fleet` to 1 and its `/readyz` 200 (a pass that saw the
+coordinator up: stopped hosts re-templated, missing ones created on the coordinator's image), then every host
+Deployment at 0 to 1. A failed stop leaves `fleet` at 0 (`world-start` brings it back); a world with no `fleet`
+Deployment (from before Elastic 4) skips that step. `fleet <port_base>` runs the reconciler from the checkout against
+`world_ctx` / `world_ns` through a `kubectl proxy` with your credentials (`VOXEL_WORLD_DB` required) — never beside
+the world's own `fleet` Deployment.
 `world-register` (prints the login service's `world add …` line; the link is
 `coordinator.<ns>.svc.cluster.local:6490` — every replica's address, login links each — pin from Secret
 `login-link-identity`). Releases: `just
 orion-world-push` builds and pushes both images and prints digests;
 `orion-world-update <server> <web>` = `scripts/world_update.sh` (records the refs it replaces in the world's ConfigMap
 `release-history` first, prints the leave lines, refuses a world whose coordinator is at 0 (`world-start` first), and
-after a failure once images began to change offers only a re-run with the same two refs); `orion-world-rollback` =
+after a failure once images began to change offers only a re-run with the same two refs; the steps of `world-stop`,
+every image set — coordinator, toolbox, `fleet`, each host Deployment at 0 — then the steps of `world-start`; a
+world with no host Deployment is updated too); `orion-world-rollback` =
 `world_update.sh --rollback` (back to the recorded previous release,
-every workload — coordinator, toolbox, web, each host Deployment — to one build, same stop → set → start; refused when none is recorded or a ref is a tag; a second
+every workload — coordinator, toolbox, `fleet`, web, each host Deployment — to one build, same stop → set → start; refused when none is recorded or a ref is a tag; a second
 rollback goes forward again; a migration is NOT undone). Backups: `orion-pg-backup-now`; `orion-pg-restore <world>
 <object>` PRINTS a drill into a scratch database and the live restore (world stopped, database renamed aside and
 recreated owned by `world_<id>`, `pg_restore --no-owner --role=world_<id>`, owners checked) — it runs nothing. The
-twin (`twin-up|twin-images|twin-apply|twin-check|twin-down`) runs the same module on k3d: `twin-check` proves the
+twin (`twin-up|twin-images|twin-apply|twin-check|twin-down`) runs the same module on k3d (`twin-up` creates the
+cluster with kubelet's image GC at 98 / 95 % disk use — it applies only to a newly created cluster: `twin-down`
+first): `twin-check` proves the
 start, failure, leave, drain and stop/start paths (`scripts/twin_check.sh`'s header lists them) and, since Elastic 3
 (phase 7c, the twin root sets the module's `land_idle_ms` = 20 s), land assigned to a join's placement, released idle
-by a committed cut part and assigned again (no succession, generation unchanged); NOT a connected player, a host
-dying while it owns land (a `Crash` succession), a browser pin, cert-manager, a real node drain, the nightly dump or
-load.
+by a committed cut part and assigned again (no succession, generation unchanged); since Elastic 4 (the twin's fleet
+is `min = max = 2`: k3d maps exactly the node ports 30466–30469 of two slots) the hosts appearing by themselves after
+the forge on the coordinator's image and their slots' ports (2c), a drained host removed and a new name on the freed
+slot (9), stop/start with the reconciler and a stray labelled Deployment deleted (10), the reconciler's pod deleted
+with nothing changed (10b), the world taken to zero hosts one at a time with `VOXEL_FLEET_MIN=0` (12) and a join that
+answers 503 `world_starting`, then gets in on one new host (13; the seconds recorded in `cold-start.txt`, images
+already on the node); NOT a connected player, load-driven scale-up, a host
+dying while it owns land (a `Crash` succession), a browser pin, cert-manager, a real node drain, the nightly dump,
+the firewall's port range, an image pull at a cold start, or load.
 
 **Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
 token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
@@ -272,7 +313,8 @@ Verify with:
   <email>` ends an account's sessions; no register / password / reset routes). A `jwt` host without a
   service token refuses to start unless `VOXEL_JWT_ADMISSION=newest`, dev only. The workspace's
   only rustls crypto provider is **ring** — keep `aws-lc-rs` out of the tree.
-- **Role split (R2, `VOXEL_ROLE=all|host|coordinator`, default `all` = one process as before; plan
+- **Role split (R2, `VOXEL_ROLE=all|host|coordinator|fleet` (`fleet`: Elastic 4's reconciler, Postgres and
+  Kubernetes only — "The world on k8s" above), default `all` = one process as before; plan
   `docs/superpowers/plans/2026-11-07-r2b-role-split.md`)**: the coordinator (`game::coordinator`, claims,
   adventures, history, sites, the coordinator row) and the host (`WorldManager` + regions) talk only via
   `HostMsg`/`CoordMsg` over a `WorldLink` — `InlineWorldLink`/channel in `all`, `QuicWorldLink` over
@@ -376,9 +418,10 @@ Verify with:
     `mmo_coordinator_is_ticker`; alerts `WorldCoordinatorReplicasDown`, `WorldCoordinatorConflicts` (measure before
     splitting the row), `WorldCoordinatorNoTicker`. Dev: `just coordinators=2 dev-r3`, `just coordinator claim <n>`
     (replica n on 6480+n, login link 6490+n, the same cert files).
-- **Many hosts (R3 + R4 takeover + Elastic 1 hosts by id + Elastic 3 land assignment; plans
+- **Many hosts (R3 + R4 takeover + Elastic 1 hosts by id + Elastic 3 land assignment + Elastic 4 the fleet; plans
   `docs/superpowers/plans/2026-11-12-r3-multi-host.md`, `2026-11-13-r4-takeover.md`,
-  `2026-11-15-elastic-1-hosts-as-deployments.md`, `2026-11-18-elastic-3-land-assignment.md` ("As built") — built;
+  `2026-11-15-elastic-1-hosts-as-deployments.md`, `2026-11-18-elastic-3-land-assignment.md` ("As built"),
+  `2026-11-19-elastic-4-reconciler-scaling.md` — built;
   whole-branch reviews and the owner's hand checks pending, see `TODO.md`)**: `claim` is any number of hosts and
   needs role `host`, Postgres and the login link (`jwt` + a service token), else refused (`roles::check_claim_needs`);
   `static` is ONE host (a `static` registration beside a live row is refused, `StoreError::NotAlone`); a host under
@@ -473,7 +516,9 @@ Verify with:
     predecessor. Survivors report their peer journal against the dead host; the heir masks the inherited
     land (`inheriting`, from the order on) until it resolved every report and adopted, holds every login order
     until then, pins the affected regions, and its parts carry `adopts` until the settle. No cut begins until
-    every survivor applied and the heir adopted (answers count per BOOT); then one is due at once
+    every survivor applied and the heir adopted (answers count per BOOT; a survivor that took no part in the order's
+    base cut — it registered during it: `cuts_joined_max` is not that cut and no cut up to it is undecided here —
+    answers at once from its WHOLE journal, which only a committed cut its host took part in truncates); then one is due at once
     (`SETTLE_CUT_RETRY_MS` after the last cut ended, not a save period), and its commit decision names the open
     successions (`settles`) — the store records any other set as an abort. Conserved: identities (entities,
     players, people) exactly once; items and terrain edits that crossed the dead host's seams within one
@@ -497,7 +542,9 @@ Verify with:
     crash; an ended row is none) — abandons the open successions, takes every dirty
     row's `super_regions` and `in_flight` rows at `epoch + 1` and raises the generation (the first host back
     holds all owned land, and releases what stays idle); otherwise the new host owns nothing. Rows owning nothing
-    are pruned there. A registration stuck behind a lock exits 1 after `CLAIM_LOCK_TIMEOUT_MS` (60 s).
+    are pruned there — never a host with a staged cut part (`two_phase::staged_hosts`, read in a statement of its own
+    BEFORE the `DELETE`, Postgres only: a leaver between its leave cut's decision and its part's `COMMIT PREPARED`
+    keeps its row, whose in-flight rows are not visible yet). A registration stuck behind a lock exits 1 after `CLAIM_LOCK_TIMEOUT_MS` (60 s).
   - Saves are coordinated world cuts in two phases (each host `prepare_cut`s its part, the coordinator
     decides; Postgres needs `max_prepared_transactions > 0`, the dev compose sets it); parts a crash left
     staged are resolved at start before anything else (`resolve_staged_cuts`; a start finishes only cuts no
@@ -527,24 +574,76 @@ Verify with:
     un-drain) sets `hosts.drain_at_ms`, which a `claim` host reads at its heartbeat: it tells its home sessions
     the deadline (`ServerPacket::HostDraining { at_tick }`), stops being the gate, and at the deadline (its
     coordinator attached) leaves through its leave cut and stays up **drained** (`/readyz` 503 `drained`, no
-    heartbeat, NO store call — it must survive its row being pruned) until removed; SIGTERM still means leave
+    heartbeat, NO store call — it must survive its row being pruned) until removed (under the fleet: by the
+    coordinator's `RemoveHost` and the reconciler); SIGTERM still means leave
     now; a drain leave that does not commit ends the process (exit 0, dirty row). A `static` host warns once and
     ignores a mark; `worldctl drain` refuses a row not beaten within the lease and warns when it marks the last
-    host not draining (no gate host: joins 503; no assignee). A stopping host tells its
+    host not draining (no gate host: joins 503; no assignee — with fleet dials the joins answer `world_starting`
+    and the coordinator adds a host while a slot is free). A stopping host tells its
     sessions why on every exit branch (`LEAVING_REFUSAL`, `FENCED_REFUSAL`, `ROLLBACK_REFUSAL`).
   - `worldctl hosts <url>` lists the rows; `worldctl retire-host <url> <host id>` (`world-store/src/operator.rs`)
     only vouches a row dead while hosts run; with no host running it is refused (the first registration takes
     the land, a total crash). `claim` only — the store does not record the policy, so it cannot refuse a
     `static` world.
+  - **The fleet** (Elastic 4; `game/src/coordinator/fleet.rs`, `world-store/src/fleet.rs`, migration
+    `0019_desired_hosts`): the table `desired_hosts` — `name` `h<n>` from `world.next_desired_host` (never reused),
+    `slot` (the lowest free at its add, reused after a removal; the reconciler's node ports), `state` wanted /
+    draining — is written ONLY by the coordinator's store decisions, inside its transition: `AddHost { max,
+    expect_wanted }` (adds a row only while the wanted rows number `expect_wanted`, else `NotNeeded`; `Full` when ALL
+    rows, draining ones included, reach `max`), `DrainHost { name, host, in_ms }` (the row draining; with a host, that
+    boot's live dirty row marked `drain_at_ms = LEAST(…, now + in_ms)` → `Marked`, else `RowOnly`; no row →
+    `Unknown`), `RemoveHost { name }` (`Done` / `Gone`) — each idempotent, no mark (a lost answer is repaired by the
+    next read). The reconciler and `worldctl desired` only read it (SQLite: always empty). The core keeps NO durable
+    fleet state (`COORDINATOR_STATE_VERSION` stays 6; the fleet fields are process fields in `projection!`,
+    `fleet_pending` `reset`, `start_asked_ms` `kept`): the desired rows come with the ticker's `hosts` read (never
+    logged; `HostSeen.name` ties a `hosts` row to its name). `maintain_fleet` runs only on the ticker, only with
+    dials set (`VOXEL_FLEET_MAX` unset = no fleet decision at all: `dev-r3`, role `all`), at most one decision per
+    `SCALE_DECISION_EVERY_MS` (10 s), none while one is unanswered, and after an answer none before a `hosts` read
+    issued after it. The live host of a name = its live dirty `hosts` row (the newest still beating). The first rule
+    that applies: (1) a draining name whose live host has no mark → `DrainHost` of that host; (2) a wanted name whose
+    live host has a mark (`world-drain`) → `DrainHost` of the row only; (2b) a wanted name with no live host whose
+    NEWEST row is clean WITH a mark (the drain finished before the ticker saw it) → the row only — clean without a
+    mark (a SIGTERM leave: `world-stop`, a release) changes nothing; (3) a draining name none of whose rows is
+    live-and-dirty or `landed` → `RemoveHost` (a leaver that kept in-flight rows holds its row until its `Leave`
+    succession); (4) wanted < min → `AddHost`; (5) scale up: wanted < max and, for `up_after_ms`, every read showed
+    the LEAST-loaded serving host at `tick_permille ≥ SCALE_UP_LOAD_PERMILLE` (600) → `AddHost`; (6) scale down:
+    wanted > max(min, 1), every serving host known ≥ `min_lifetime_ms`, and for `down_after_ms` every read showed
+    `Σ tick_permille ≤ (n − 1) · (1000 − SCALE_DOWN_SPARE_PERMILLE)` (700) → `DrainHost` of the victim (fewest
+    players, then fewest running regions, then the highest id); (7) to zero (only `min == 0`): one wanted name, its
+    serving host known ≥ `min_lifetime_ms` and at 0 players and 0 running regions for `down_after_ms` →
+    `DrainHost`. A drain's notice is 0 with no players, else `DRAIN_WARNING_SECS`. Rules 1–3 and 5–7 need `claim`;
+    rule 4 runs under `static` too (with dials set a `static` coordinator reads `hosts`, so its gate follows a drain
+    mark the static host itself ignores). Rules 5–7 also need the scale gates: nothing draining, no succession run
+    open, being declared or rolling back (and the open runs known), every wanted name with a SERVING host (live,
+    attached to a live replica, takes logins). Their timers move only on a NEW `hosts` read (a failed read and every
+    fleet answer clear them); a new ticker counts from zero (a decision delayed, never hastened). Dials (the
+    coordinator's env, from the module's `var.fleet`): `VOXEL_FLEET_MIN` (default 1), `VOXEL_FLEET_MAX`,
+    `VOXEL_SCALE_UP_AFTER_MS` (`SCALE_UP_AFTER_MS`, 60 s), `VOXEL_SCALE_DOWN_AFTER_MS` (5 min, also the quiet time
+    before the last host goes), `VOXEL_HOST_MIN_LIFETIME_MS` (10 min); a dial that is unparsable or 0 (but the
+    minimum), or min > max, refuses the start, and min 0 needs max ≥ 2 (a last leaver holding in-flight rows keeps its
+    slot until the next host inherits them). With zero hosts no cut begins, the calendar runs on, free land stays
+    free. Lock walks: `world-store/src/succession.rs`'s notes. Metrics (coordinator): `mmo_fleet_wanted`,
+    `mmo_fleet_draining` (the ticker's last read; 0 on the others), `mmo_fleet_{added,drained,removed,full}_total`;
+    `added=` / `drained=` / `removed=` / `scale=` on the `[coordinator] window=` line.
   - Login links to the COORDINATOR — one link per replica (every address of the world's `host_link`, re-resolved
     at each join and kick sweep) — and each replica relays an order (`CoordMsg::Login(LoginOrder)`) to ITS **gate
     host** — the lowest host attached to that replica, live, not leaving, not draining (`Coordinator::gate_host_here`)
     — or answers `HostToLogin::NoGate` at once and login tries the next link (every link `NoGate` → 503; acks match
-    by `(token, epoch)` on any link); each answer (`HostMsg::Login`) goes back, keeping no per-order state (a gate
+    by `(token, epoch)` on any link). `Coordinator::login_gate`: `Gate::Here` (relay), `Elsewhere` (a serving host
+    on another live replica: `NoGate`), `Nobody` — with fleet dials set the replica then answers
+    `HostToLogin::Starting` (login: `SpawnError::Starting` → 503 `world_starting` at once, no other link tried) and
+    applies `Input::StartWanted` (logged and replayed, ANY replica, at most once per `WORLD_START_ASK_EVERY_MS`, 5 s,
+    per replica) → `AddHost { expect_wanted: 0 }` (two replicas asking at once add one row); without dials `Nobody`
+    is `NoGate`. The client repeats a join answered `world_starting` — a first join from the world list and a rejoin
+    alike — every `REJOIN_RETRY_MS` for up to `WORLD_START_WAIT_MS` (180 s, provisional until the cold start is
+    measured), status "The world is starting…". Each answer (`HostMsg::Login`) goes back, keeping no per-order state (a gate
     that dies holding an order costs a 503 and the client's retry); a placement on a host of another replica goes
     gate → holder over the peer link. The gate resolves the player — a store read its main loop never waits on
     (`login_link::OrderResolver`, at most `LOGIN_ORDERS_IN_FLIGHT_MAX` waiting, one more is dropped) — and places them on
-    the host that holds them (`world_manager/placement.rs`, relayed `SpawnOrder`s); a world request carries its
+    the host that holds them (`world_manager/placement.rs`, relayed `SpawnOrder`s; a host drops a stale `departed`
+    pointer when the very order it sent on by it comes back from ANY host — same origin, token and epoch, more hops,
+    its own hop of the player unchanged, within `SPAWN_SENT_ON_MS` (`departed_denied`) — so a chain of stale pointers
+    ends; `SPAWN_RELAY_MAX_HOPS` is 32); a world request carries its
     player's hop (`HostMsg::Request { hop }`, an older placement's is refused). Regions of another host reach a
     client through an observer session: `RegionElsewhere { endpoint, ticket }` → a second connection with
     `Credential::Observer` — no body, input only as its own `origin_client`.
@@ -603,7 +702,7 @@ Verify with:
   several answers (`LinkTarget::resolve_all`); a host's dialer tries them in turn, starting after the one that last
   failed or dropped, under ONE pin (every replica shares one identity). Every link hello names the world
   (`LinkHello.world` = `VOXEL_WORLD_ID`; a mismatch is refused, `""` matches only `""`); `LINK_PROTOCOL_VERSION`
-  is 10 (Elastic 3: `HostMsg::LandNeeded`, `CoordMsg::Assigned`, `CoordMsg::LandIs`, `Reliable::Released`; the
+  is 11 (Elastic 4: `HostToLogin::Starting`; 10 was Elastic 3: `HostMsg::LandNeeded`, `CoordMsg::Assigned`, `CoordMsg::LandIs`, `Reliable::Released`; the
   unsent `HostMsg::LandWanted` / `Volatile::ClaimWanted` stay in their append-only enums) — older hosts, login
   services and clients do not mix with this build (stop, upgrade, rejoin).
 - **Peer link rules** (`game::peer`, `world_manager/peers.rs`, `world_cut.rs`): a `PeerSession` is never
@@ -648,15 +747,21 @@ Verify with:
   has not passed for `LIVEZ_STALL_MS` (30 s = 3 × the lease — the lease always acts first; it never replaces or feeds
   the lease heartbeat), `/readyz` is 200 once registered (503 body: `forge` / `drained` / `starting`) — a host
   also needs its attach acknowledged by a coordinator replica (503 `attaching`; Ready for `ATTACH_GRACE_MS`, one
-  lease, after a detach), a coordinator replica its `ReplicaJoined` committed —
-  `/metrics` is Prometheus text with a `role` label (`host` or `coordinator`; coordinator-only series are constant on a
-  host — alerts select `role="coordinator"`). `VOXEL_CLIENT_CERT` / `VOXEL_CLIENT_KEY` (PEM chain + key; the old
+  lease, after a detach), a coordinator replica its `ReplicaJoined` committed, the reconciler a pass without a failed
+  read or action within `FLEET_READY_MS` (6 s) and the coordinator above 0 (503 `forge` / `stopped` / `failing`) —
+  `/metrics` is Prometheus text with a `role` label (`host`, `coordinator` or `fleet`; each role's series are constant
+  on the others — alerts select the role; the reconciler's: `mmo_fleet_desired`, `mmo_fleet_deployments`,
+  `mmo_fleet_pass_age_ms`, `mmo_fleet_{created,deleted,errors}_total`; alerts `WorldFleetDown`, `WorldFleetBehind`,
+  `WorldFleetFull`). `VOXEL_CLIENT_CERT` / `VOXEL_CLIENT_KEY` (PEM chain + key; the old
   `VOXEL_WT_CERT` / `_KEY` are aliases): ONE certificate for the QUIC listener and WebTransport, files WAITED for at
   start (a WARN at most every 60 s) and re-read every 60 s (a cert-manager renewal needs no restart); unset = a
   self-signed P-256 certificate valid 14 days whose hash `HostEndpoint.cert_hash` carries (single-player too).
   `VOXEL_LAND_IDLE_MS` (Elastic 3; ms, unset = `LAND_IDLE_MS` 5 min, 0 or unparsable refuses the start): how long
   owned land nothing holds stays the host's before a cut releases it — the world module's `land_idle_ms` (default
-  null = unset; the twin sets 20000, orion does not).
+  null = unset; the twin sets 20000, orion does not). The fleet (Elastic 4): the coordinator's `VOXEL_FLEET_MIN` /
+  `_MAX` and pace dials ("The fleet" above); the reconciler's `VOXEL_FLEET_NAMESPACE`, `VOXEL_FLEET_PORT_BASE` and
+  `VOXEL_WORLD_ID` (its label value) — all three required — and `VOXEL_FLEET_KUBE_API` (a `kubectl proxy` URL; unset =
+  the in-cluster API server).
 
 **Client** (`crates/client`)
 - `renderer/` bridges sim state to Bevy (`bridge.rs`); predicted regions run like the server's (`regions/`,
@@ -681,7 +786,8 @@ Verify with:
   `FENCED_REFUSAL` / `ROLLBACK_REFUSAL` / `LEAVING_REFUSAL` / `PLAYER_PARKED_ELSEWHERE`, rejoins by itself
   with its kept refresh token, re-read from the store before every join call (`login::flow::rejoinable`; one
   join call at a time, `REJOIN_RETRY_MS` apart; a 503 = not yet; a ticket's connect is bounded by
-  `REJOIN_CONNECT_MS` (15 s), then a new join; gives up after `REJOIN_MAX_MS`; revoked → the sign-in screen). Native QUIC keep-alive
+  `REJOIN_CONNECT_MS` (15 s), then a new join; gives up after `REJOIN_MAX_MS`, or `WORLD_START_WAIT_MS` after the first
+  `world_starting`; revoked → the sign-in screen). Native QUIC keep-alive
   3 s / idle 10 s (`netcode.rs`, as WebTransport).
 - **Native QUIC trust** (`quic_verify.rs`, `policy_for`): a host that advertises a `cert_hash` is pinned to it; with no
   hash a non-loopback address must present a certificate the public web PKI vouches for (a typed-in "Join server"
