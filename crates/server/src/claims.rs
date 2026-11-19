@@ -466,23 +466,33 @@ pub const DIRECTORY_READ_RETRY_MS: u64 = 1_000;
 /// At most one warning per this long about failed directory reads.
 pub const DIRECTORY_WARN_MS: u64 = 10_000;
 
-/// A directory read in flight: its three plain reads, each answered on its own receiver.
+/// A directory read in flight: the owners read first, then — only once it answered — the
+/// `hosts` read and the database clock.
+///
+/// **The order is the keeper's open-run check** ([`DirectoryKeeper`]): each read is its own
+/// statement on its own pooled connection and snapshot, so two reads issued together may be
+/// answered in either order. Issued one after the other, the `hosts` snapshot is never older
+/// than the owners one: a succession's declaration whose moved rows the owners read shows
+/// committed before the `hosts` read began, and that read shows its predecessor `succeeding`
+/// (or the run settled meanwhile, and the heir's fence holds the rows since its adoption).
 struct DirectoryRead {
     owners: Receiver<Result<Vec<(SuperRegion, i64, u64)>, StoreError>>,
-    hosts: Receiver<Result<world_store::HostsRead, StoreError>>,
-    now: Receiver<Result<u64, StoreError>>,
+    /// Asked once the owners read answered.
+    hosts: Option<Receiver<Result<world_store::HostsRead, StoreError>>>,
+    now: Option<Receiver<Result<u64, StoreError>>>,
     got: (Option<Vec<(SuperRegion, i64, u64)>>, Option<world_store::HostsRead>, Option<u64>),
 }
 
 impl DirectoryRead {
     fn start(store: &StoreHandle) -> DirectoryRead {
-        DirectoryRead { owners: store.owners_later(), hosts: store.hosts_later(), now: store.db_now_ms_later(), got: (None, None, None) }
+        DirectoryRead { owners: store.owners_later(), hosts: None, now: None, got: (None, None, None) }
     }
 
     /// The read's rows, live hosts, `hosts` rows and `world.next_host_id` (read before them)
-    /// once all three answered; an error as soon as one fails.
+    /// once all three answered; an error as soon as one fails. Asks `store` for the `hosts`
+    /// rows and the clock when the owners answered.
     #[allow(clippy::type_complexity)]
-    fn poll(&mut self) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>, Vec<HostRow>, u64), StoreError>> {
+    fn poll(&mut self, store: &StoreHandle) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>, Vec<HostRow>, u64), StoreError>> {
         fn take<T>(rx: &Receiver<Result<T, StoreError>>, slot: &mut Option<T>) -> Result<(), StoreError> {
             if slot.is_none() {
                 match rx.try_recv() {
@@ -493,8 +503,15 @@ impl DirectoryRead {
             }
             Ok(())
         }
-        let read = take(&self.owners, &mut self.got.0).and_then(|()| take(&self.hosts, &mut self.got.1)).and_then(|()| take(&self.now, &mut self.got.2));
-        if let Err(e) = read {
+        if let Err(e) = take(&self.owners, &mut self.got.0) {
+            return Some(Err(e));
+        }
+        if self.got.0.is_none() {
+            return None;
+        }
+        let hosts = self.hosts.get_or_insert_with(|| store.hosts_later());
+        let now = self.now.get_or_insert_with(|| store.db_now_ms_later());
+        if let Err(e) = take(hosts, &mut self.got.1).and_then(|()| take(now, &mut self.got.2)) {
             return Some(Err(e));
         }
         match &mut self.got {
@@ -543,8 +560,8 @@ fn unfenced(fence: &Fence, me: i64, row: &(SuperRegion, i64, u64)) -> bool {
 /// ([`AdoptionReader`]). Fenced and told here they would be plain land of this host: a region
 /// of the dead host's land could start from the store with no drop set, beside the copies the
 /// survivors' journals hold. So while the read's `hosts` rows show any open run (a row
-/// `succeeding`; the owners are read before the hosts on one store thread, so a declaration
-/// the owners show is in the hosts rows too) nothing is healed — a truly lost `Assigned` is
+/// `succeeding`; the `hosts` read is ISSUED only after the owners read answered
+/// ([`DirectoryRead`]), so a declaration the owners show is in the hosts rows too) nothing is healed — a truly lost `Assigned` is
 /// then healed by the coordinator (this host asks, the owners lookup shows it the owner) or by
 /// the first read after the settle.
 ///
@@ -660,7 +677,7 @@ impl DirectoryKeeper {
     /// stopping).
     pub fn pump(&mut self, manager: &mut impl ClaimingManager) {
         if let Some(read) = self.reading.as_mut() {
-            if let Some(answer) = read.poll() {
+            if let Some(answer) = read.poll(self.claims.store()) {
                 self.reading = None;
                 match answer {
                     Ok((rows, live, hosts, next_host_id)) => {

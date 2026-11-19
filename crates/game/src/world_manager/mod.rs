@@ -1456,6 +1456,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Players a spawn order taken here waits to connect, with when it was taken: not handed
     /// to another host meanwhile (`placement.rs`).
     spawn_pins: BTreeMap<PlayerId, placement::Pin>,
+    /// Spawn orders sent on to the host a `departed` pointer names, for
+    /// [`placement::SPAWN_SENT_ON_MS`]: one that comes back drops the pointer (`placement.rs`).
+    spawn_sent_on: BTreeMap<PlayerId, placement::SentOn>,
     /// When an unacknowledgeable kick was last warned about ([`KICK_UNACKED_WARN_MS`]).
     kick_warned_ms: Option<u64>,
     /// The successions this host was ordered to answer (R4, `succession.rs`), until the
@@ -1661,6 +1664,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             kicked: BTreeMap::new(),
             login_out: Vec::new(),
             spawn_pins: BTreeMap::new(),
+            spawn_sent_on: BTreeMap::new(),
             kick_warned_ms: None,
             successions: BTreeMap::new(),
             dead_boots: BTreeSet::new(),
