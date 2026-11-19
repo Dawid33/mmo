@@ -33,7 +33,7 @@ Old RTS pivot is on branch `ds/rtsPivot`. `TODO.md` tracks the current direction
 The root `justfile` is canonical — `just --list`. Key recipes: `build`, `run` (debug launch straight into
 an adventure), `run-two` (two players adventuring at one site), `play` (real start: main menu → generator →
 world map → Adventure tab), `server` + `client` (dev server on 127.0.0.1:6466), `web`, `smoke`, `test-one`,
-`test`, `test-full`, `test-audit`, `determinism-wasm`, `clippy`, `world-map`. **Keep the justfile in sync**: any new or
+`test`, `test-full`, `test-audit`, `fuzz`, `determinism-wasm`, `clippy`, `world-map`. **Keep the justfile in sync**: any new or
 changed build/run/test command updates its recipe in the same change.
 
 - **Toolchain**: one DATED nightly pinned in `rust-toolchain.toml` (used only to keep `target/` small —
@@ -203,10 +203,11 @@ Verify with:
 - `just determinism-wasm` after touching sim math, the physics forks, or anything hashed/serialized.
   `physics_goldens::` pins physics behaviour (re-record only on purpose).
 - A test slower than 100 ms is tagged `#[ignore = "slow: >100ms — run via just test-full"]`. `just test` runs every
-  fast test everywhere (both workspaces, the vendored forks' upstream subset, the quest fuzz regressions, the
-  website's node test), `just test-full` adds the slow ones, the wasm32 determinism runs (`determinism-wasm`,
+  fast test everywhere (both workspaces, the vendored forks' upstream subset, the website's node test),
+  `just test-full` adds the slow ones, the wasm32 determinism runs (`determinism-wasm`,
   `quest-wasm`) and the takeover rig against the dev Postgres. Both keep going after a failing stage and end with a PASS/FAIL line per stage; run them when the user
-  asks or a change is wide — say so first.
+  asks or a change is wide — say so first. Fuzzing is never part of either: `just fuzz [secs]` replays every kept crash input,
+  then runs every fuzz target for `secs` seconds (default 60) each.
 - Headless client harnesses must use a tiny world (`set_lod_table(&[])`, near radius 0) or they OOM.
 - A test whose outcome reads block props calls `common::install_real_block_props()` first.
 

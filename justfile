@@ -2457,8 +2457,8 @@ orion-login-token-push:
     unset tok
 
 # Every test in the repository that is not tagged slow: both Rust workspaces (the root and
-# quest/), the vendored forks' upstream tests, the quest fuzz regressions and the website's
-# node test — after `test-audit`. Every committed test is a
+# quest/), the vendored forks' upstream tests and the website's node test — after
+# `test-audit`. No fuzzing: that is `just fuzz`. Every committed test is a
 # regression or a gate (CLAUDE.md, Testing); a test slower than 100 ms carries
 # `#[ignore = "slow: >100ms — run via just test-full"]` and runs only in `test-full`.
 # Keeps going after a failing stage and ends with one PASS/FAIL line per stage.
@@ -2494,10 +2494,6 @@ _test_all mode:
         stage determinism-wasm just determinism-wasm
         stage quest-wasm just quest-wasm
     fi
-    for d in quest/fuzz/regressions/*/; do
-        t=$(basename "$d")
-        stage "quest-fuzz-replay $t" just quest-fuzz-replay "$t"
-    done
     stage site-test just site-test
     echo
     echo "=== just {{ if mode == "full" { "test-full" } else { "test" } }}"
@@ -2855,6 +2851,31 @@ quest-wasm:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test --manifest-path quest/Cargo.toml -p quest-corpus --test determinism --target wasm32-unknown-unknown 2>&1 | tee "$log"
     grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$log" || { echo "quest-wasm: the wasm32 half ran no test" >&2; exit 1; }
+
+# All the fuzzing, never part of `just test` / `test-full`: every kept crash input replayed
+# (quest/fuzz/regressions/<target>/), then every fuzz target of quest/fuzz/ for `secs` seconds
+# each. Keeps going after a failing stage and ends with one PASS/FAIL line per stage.
+fuzz secs="60":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    results=()
+    stage() {
+        local name=$1; shift
+        echo "=== $name"
+        if "$@"; then results+=("PASS $name"); else results+=("FAIL $name"); fi
+    }
+    for d in quest/fuzz/regressions/*/; do
+        t=$(basename "$d")
+        stage "replay $t" just quest-fuzz-replay "$t"
+    done
+    for f in quest/fuzz/fuzz_targets/*.rs; do
+        t=$(basename "$f" .rs)
+        stage "fuzz $t ({{secs}} s)" just quest-fuzz "$t" "{{secs}}"
+    done
+    echo
+    echo "=== just fuzz"
+    printf '%s\n' "${results[@]}"
+    ! printf '%s\n' "${results[@]}" | grep -q '^FAIL'
 
 # quest-fuzz <target> [secs] [jobs] — run one fuzz target of quest/fuzz/ (compile, program_bytes, vm_load,
 # wire_decode, stub_inputs, invariants, conversation) for `secs` seconds on `jobs` libFuzzer processes.
