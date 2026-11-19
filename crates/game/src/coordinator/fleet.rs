@@ -29,9 +29,11 @@
 //!    nothing: its pod comes back as a new host of the same name. Residual: a marked row pruned
 //!    before the ticker read it looks like a pod that has not started yet (the name stays
 //!    wanted, its drained pod stays up until an operator removes it);
-//! 3. a draining name none of whose `hosts` rows is live-and-dirty or `landed` (pruned rows count
-//!    as none) → [`super::RemoveHost`] — a leaver that kept land (in-flight rows) holds its row
-//!    until its `Leave` succession moved it;
+//! 3. a draining name none of whose `hosts` rows is live-and-dirty (pruned rows count as none) →
+//!    [`super::RemoveHost`] — also when its host left still holding land or in-flight rows: its
+//!    `Leave` succession needs only the clean `hosts` row (the store moves the land to an heir;
+//!    the drained process takes no part and writes nothing, even at its SIGTERM), not the desired
+//!    row or the pod — and the slot must be free for that heir to be added at all;
 //! 4. fewer wanted rows than the minimum → [`super::AddHost`];
 //! 5. **scale up**: the scale gates hold (below), fewer wanted rows than the maximum, and for
 //!    `up_after_ms` without a break every read showed the least-loaded serving host's
@@ -140,7 +142,7 @@ pub enum FleetWhy {
     FollowMark,
     /// Rule 2b: a wanted name's newest row left clean with a mark.
     LeftMarked,
-    /// Rule 3: a draining name nothing runs or holds land for.
+    /// Rule 3: a draining name nothing runs for (a leaver that kept land included).
     Remove,
     /// Rule 4: below the minimum.
     Minimum,
@@ -299,10 +301,13 @@ impl Coordinator {
                     return Some((FleetWhy::LeftMarked, StoreDecision::DrainHost(DrainHost { name: d.name.clone(), host: None, in_ms: 0 })));
                 }
             }
-            // 3. A draining name nothing of which runs or holds land any more: removed.
+            // 3. A draining name nothing of which runs any more: removed — whether or not its
+            // leaver kept land. The land waits in the store for its `Leave` succession, which
+            // needs the clean `hosts` row only (never this row or the drained pod), and its heir
+            // can exist only once this slot is free (final review, A-I1).
             for d in desired.iter().filter(|d| d.draining) {
-                let holds = self.leases.rows().any(|r| r.name == d.name && ((!r.clean && r.state == HOST_LIVE) || r.landed));
-                if !holds {
+                let runs = self.leases.rows().any(|r| r.name == d.name && !r.clean && r.state == HOST_LIVE);
+                if !runs {
                     return Some((FleetWhy::Remove, StoreDecision::RemoveHost(RemoveHost { name: d.name.clone() })));
                 }
             }

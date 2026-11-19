@@ -2193,7 +2193,8 @@ impl CoordinatorRuntime {
                     self.tally.added += 1;
                     self.tally.scale.extend(self.core.fleet_why().and_then(|w| w.scale_word()));
                 }
-                // Every slot held: expected under a sustained load at the maximum (an alert's).
+                // Every slot held when a host is wanted (rule 4, or a starting login) — draining
+                // hosts hold the slots; rule 5 never asks at the maximum (`WorldFleetNoFreeSlot`).
                 DecisionAnswer::HostAdded { outcome: Ok(game::coordinator::HostAdded::Full), .. } => {
                     crate::health::Health::global().fleet_full();
                 }

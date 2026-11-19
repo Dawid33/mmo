@@ -692,10 +692,11 @@ pub const HOST_MIN_LIFETIME_MS_ENV: &str = "VOXEL_HOST_MIN_LIFETIME_MS";
 /// The fleet's dials from the environment (`var` reads one variable; Elastic 4, plan decision 8):
 /// `None` while [`FLEET_MAX_ENV`] is unset or empty. A dial that is not a number, a maximum or a
 /// pace dial of 0, or a minimum above the maximum refuses the start; the minimum alone may be 0,
-/// and only with a maximum of 2 or more: a last host that left still holding in-flight rows keeps
-/// its desired row (and slot) until its `Leave` succession gives them to the next host, so scale
-/// to zero needs a second slot for that host (Elastic 4 Task 8, fix round 1). The pace dials are
-/// read (and refused) only with a maximum set.
+/// and only with a maximum of 2 or more — a conservative bound kept from Elastic 4 Task 8's fix
+/// round 1: with one slot, a login that arrives while the last host is still leaving finds no
+/// slot free until that host's row is removed (rule 3 frees it once the host no longer runs, land
+/// kept or not — final review A-I1). The pace dials are read (and refused) only with a maximum
+/// set.
 pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<game::coordinator::FleetDials>, String> {
     let read = |name: &str| var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let number = |name: &str, value: &str, zero_ok: bool| -> Result<u64, String> {
@@ -722,8 +723,8 @@ pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<g
     }
     if min == 0 && max < 2 {
         return Err(format!(
-            "{FLEET_MIN_ENV}=0 needs {FLEET_MAX_ENV} of 2 or more (it is {max}): a last host that left still holding \
-             in-flight rows keeps its slot until the next host inherits them, so the world could never start again"
+            "{FLEET_MIN_ENV}=0 needs {FLEET_MAX_ENV} of 2 or more (it is {max}): with one slot a login that arrives \
+             while the last host leaves finds no slot free"
         ));
     }
     let pace = |name: &str, default: u64| -> Result<u64, String> {

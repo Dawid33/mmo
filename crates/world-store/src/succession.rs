@@ -168,9 +168,9 @@
 //!   assignment. A drain mark (one `UPDATE` of that row) waits likewise: one that committed
 //!   first is seen (`HostDraining`), one after it finds land the host then leaves with.
 //!
-//! - **One deadlock cycle with a registration, safe** (final review, A-S3). `AssignLand` is the
-//!   only decision that holds a `hosts` row (the assignee's, `FOR SHARE`, to the transition's
-//!   commit) WITHOUT holding `world`. A transition whose decisions are `[AssignLand(A), …, X]`
+//! - **One deadlock cycle with a registration, safe** (final review, A-S3). `AssignLand` holds a
+//!   `hosts` row (the assignee's, `FOR SHARE`, to the transition's commit) WITHOUT holding
+//!   `world` — and so, since Elastic 4, does `DrainHost` (its paragraph below). A transition whose decisions are `[AssignLand(A), …, X]`
 //!   with X one that locks `world` (`Declare`, `EndLandless`, a committing `DecideCut`, a
 //!   rollback) holds `hosts(A)` and then waits for `world`; a registration holds `world` and
 //!   then runs `UPDATE hosts SET seen_ms = 0 WHERE name = $1 …` (`rows.rs` `register_host`: it
@@ -184,7 +184,7 @@
 //!   names the same outcome for a lock it cannot get). It needs a host being assigned land in
 //!   the very transaction that declares, ends or decides, while a process of the SAME name
 //!   registers: a pod restarting under its Deployment's name while its old row still takes
-//!   land — rare, and never a loss.
+//!   land — rare for `AssignLand`, and never a loss (for `DrainHost` it is not rare: below).
 //!
 //! Cost: at most `ASSIGN_PER_PASS_MAX` (64) assignments per transition; each is at most four
 //! single-row statements.
@@ -225,11 +225,27 @@
 //!   transition wants `world` while a registration holds `world` and lapses that name's rows)
 //!   applies unchanged, with `DrainHost` in `AssignLand`'s place: `40P01` or a timeout, X's
 //!   refusal (or the whole transition's failure, decided again), retried; nothing stays written on
-//!   the aborted side. The host's beat (`UPDATE hosts SET seen_ms …` of its own row, 1 s
-//!   `lock_timeout`) and the operator's `worldctl drain` (one `UPDATE` of that row) update the
-//!   same one row and want nothing after it: they wait for the transition's commit, or it for
-//!   theirs. A total-crash registration that marks the row dead waits likewise and then sees the
-//!   mark (a dead row's mark means nothing).
+//!   the aborted side. Unlike `AssignLand`'s it is NOT rare (final review, A-M3): rule 1 marks
+//!   exactly a restarted pod of a draining name, and a crash-looping pod registers under that
+//!   name every few seconds, while any later `world`-locking decision of the same transition
+//!   (an `AddHost` from a starting login, a `Declare`) closes the cycle — still bounded, still
+//!   never a loss.
+//!   **A second cycle, with a boot re-claim**: unlike `AssignLand`'s `FOR SHARE`, the
+//!   `UPDATE`'s `FOR NO KEY UPDATE` conflicts with the re-claim's `check_live` (`FOR SHARE` of
+//!   the host's own row). `claim_super_regions_live` takes `LOCK TABLE super_regions IN SHARE ROW
+//!   EXCLUSIVE MODE` first, then that row; a transition `[DrainHost(h), …, X]` with X writing
+//!   `super_regions` (`AssignLand`, `Declare`) holds `hosts(h)` and waits for the table. Reached
+//!   through rule 1 after a total crash (the first host back is a pod of a draining name: it takes
+//!   all land, re-claims, and is marked at once). Postgres ends it (`40P01`, or the decision's
+//!   `lock_timeout`): a refused decision decided again, or a boot that exits and returns as a new
+//!   host — never a loss.
+//!   The host's beat (`UPDATE hosts SET seen_ms …` of its own row, 1 s `lock_timeout`) and the
+//!   operator's `worldctl drain` (one `UPDATE` of that row) update the same one row and want
+//!   nothing after it: they wait for the transition's commit, or it for theirs — the row is held
+//!   until the transition commits, so the marked host's beats fail (their 1 s timeout) for as long
+//!   as a later decision of that transition waits, as behind `AssignLand`'s share lock. A
+//!   total-crash registration that marks the row dead waits likewise and then sees the mark (a
+//!   dead row's mark means nothing).
 //! - **`RemoveHost`**: `DELETE FROM desired_hosts WHERE name = $1` (one row → `Done`, else
 //!   `Gone`). Its walk is `coordinator` → `desired_hosts` (one row): it joins no cycle.
 //! - **The reads** of `desired_hosts` (the ticker's `hosts` read, after its rows; the
