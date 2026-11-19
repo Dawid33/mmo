@@ -15,6 +15,9 @@
 //!
 //! `--world <file> --layer biome|temperature|precipitation|drainage|regions` also writes
 //! `<out>-<layer>.png` in the world map's colours (the forged world's own rasters).
+//! These pictures are `--size` pixels wide and as tall as the whole world's proportions give
+//! (a 2:1 world: `size / 2` rows), at the same m/px; the height follows the world, not the
+//! requested window (`--span 600` on a 2:1 world covers 600 x 300 m).
 //!
 //! `--layer rain|temperature|moisture|salinity|trees` also writes `<out>-<layer>.png`
 //! (greyscale ramp over the layer's fixed range, `worldgen::habitat`).

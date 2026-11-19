@@ -612,7 +612,8 @@ prefab-check *args:
 # --center <x,z> --out <path stem> --seed <hex> --relief <factor> --world <file>
 # --layer rain|temperature|moisture|salinity (extra habitat PNG; with --world
 # also coloured biome|temperature|precipitation|drainage|regions from the forged
-# world's rasters, `<out>-<layer>.png`), e.g.
+# world's rasters, `<out>-<layer>.png`; those pictures are --size wide and as tall as the
+# world's proportions give, at the same m/px, so --span 600 on a 2:1 world is 600 x 300 m), e.g.
 # `just world-map --span 65536 --size 2048`. `--world <file> --tiles` writes the
 # in-game world map instead (every map layer, `<out>-tiles-<layer>.png`) and
 # prints the WorldMap packet size; pass `region_blocks=256` for the play tiling.
