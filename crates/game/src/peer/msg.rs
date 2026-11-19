@@ -132,6 +132,16 @@ pub enum Reliable {
         entries: Vec<super::JournalEntry>,
         owed: Vec<Reliable>,
     },
+    /// "These super-regions were mine; they are free now, at these epochs" (Elastic 3, a
+    /// committed release: `WorldManager::land_released`): sent to every peer when the
+    /// sender's releasing cut commits and, with every row it released and no read showed
+    /// owned since (`recently_released`), on every hello after [`Reliable::Owns`]. The
+    /// receiver's directory marks each row free unless it knows a newer epoch. Not a state
+    /// message, as [`Reliable::Owns`] is not: it names no entity, player or item, the store's
+    /// `super_regions` is the truth (a directory read repairs a lost one), and applying it
+    /// twice or late is harmless (`Directory::set` ignores an older epoch). Never
+    /// [`Reliable::InCut`], never journalled.
+    Released { rows: Vec<(crate::SuperRegion, u64)> },
 }
 
 impl Reliable {

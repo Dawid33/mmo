@@ -472,6 +472,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.kicks_pending.remove(&key);
             self.login_out.push(LoginOut::KickAck { player_token: key.0, session_epoch: key.1 });
         }
+        // Rows the directory still gives it (land it released, a peer not told before it died
+        // or left — `Reliable::Released` lost with it — or land a succession moves): read
+        // again, so what is routed by them waits for, and asks, the land's real owner.
+        if self.ownership.0.directory().is_some_and(|d| !d.owned_by(host).is_empty()) {
+            self.directory_wanted = true;
+        }
         self.forget_fields(host, me);
         self.forgotten_hosts.insert(host);
         self.peer_dropped_for_dead += dropped as u64;

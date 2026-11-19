@@ -522,6 +522,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if let Some(directory) = self.ownership.0.directory_mut() {
                     // Not live here at once (its row is clean: the next read leaves it out too).
                     directory.note_dead(ordinal);
+                    // Rows still giving it land: read again (land its leave cut released —
+                    // its `Released` may never have come — shows free; land it left with
+                    // stays its until its `Leave` succession moves it).
+                    if !directory.owned_by(ordinal).is_empty() {
+                        self.directory_wanted = true;
+                    }
                     self.left_land.insert(ordinal, land);
                 }
                 back = self.peer_boots.get(&ordinal).copied().filter(|b| Some(*b) != boot);

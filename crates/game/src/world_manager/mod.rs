@@ -1813,7 +1813,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// starting kit, which is only for players new to the world.
     ///
     /// A target another host owns: the player is handed to that host
-    /// ([`Self::move_to_peer`]), reachable or not (the record waits in the queue).
+    /// ([`Self::move_to_peer`]), reachable or not (the record waits in the queue). A target
+    /// nobody is known to own any more (its owner released it meanwhile: `!reaches`) is
+    /// unavailable: the record parks here, never handed to a host that no longer owns it.
     fn finish_move(&mut self, client: ClientId, record: Option<Box<PlayerRecord>>, now_ms: u64) {
         let Some(m) = self.moving.remove(&client) else { return };
         if self.is_foreign(m.target) {
@@ -3825,9 +3827,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Put a returning player back: its body and `Client` in the record's region
-    /// (`RestorePlayer`, waking it if parked), and its adventure — only if the
-    /// history still knows its site.
     /// The adventure claim a restored `record` brings back: its site, unless the coordinator's
     /// view knows no such site. Before the coordinator's first view the host cannot tell: the
     /// claim stands. The filter is only this host's early guess: the coordinator's answer to
@@ -3836,6 +3835,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         record.adventure.filter(|site| self.world_view.is_none() || self.site_regions.contains_key(site))
     }
 
+    /// Put a returning player back: its body and `Client` in the record's region
+    /// (`RestorePlayer`, waking it if parked), and its adventure — only if the
+    /// history still knows its site ([`Self::restored_adventure`]).
     fn restore_player(&mut self, id: ClientId, record: PlayerRecord, now_ms: u64) {
         let region = record.region;
         let adventure = self.restored_adventure(&record);

@@ -39,7 +39,8 @@
 //! part's commit. Committed ([`WorldManager::land_released`], after the server shrank its
 //! fence): each row is free at `epoch + 1` in the directory, the parked blobs of that land are
 //! dropped (the store holds its state now; land assigned back here later starts from the
-//! store), the mask lifts and what waited asks for an owner. Aborted
+//! store), every peer is told ([`crate::Reliable::Released`]; a peer that links later, at its
+//! hello), the mask lifts and what waited asks for an owner. Aborted
 //! ([`WorldManager::release_aborted`]): the mask lifts, the land is this host's, what waited is
 //! delivered here. Nothing is released under `static` / all-in-one, by a leaving host (Task 8),
 //! or while any succession run is open on this host.
@@ -306,8 +307,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// epoch it held), the parked blobs of its regions and their cached terrain are dropped
     /// (the store holds that land now: land assigned back here later starts from the store),
     /// so are their load-retry marks; its idle stamp goes, the row is remembered in
-    /// `recently_released` and counted. Then the mask lifts and what waited goes on (it asks
-    /// for an owner).
+    /// `recently_released` and counted, every peer is told ([`crate::Reliable::Released`]).
+    /// Then the mask lifts and what waited goes on (it asks for an owner).
     pub(super) fn land_released(&mut self, cut: CutId) {
         let released = self.releases_of(cut);
         if released.is_empty() {
@@ -318,10 +319,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::error!("[server] world cut {}: {} super-region(s) released, but this host keeps no directory", cut.0, released.len());
             return;
         };
+        let mut rows = Vec::with_capacity(released.len());
         for &sr in &released {
             let epoch = directory.epoch(sr).unwrap_or(0) + 1;
             directory.set(sr, None, epoch);
             self.recently_released.insert(sr, epoch);
+            rows.push((sr, epoch));
         }
         let of_released = |rc: &RegionCoords| released.contains(&crate::super_region_of(*rc, s));
         self.parked.retain(|rc, _| !of_released(rc));
@@ -342,6 +345,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.land_released_total += released.len() as u64;
         log::info!("[server] world cut {} committed: {} super-region(s) released (free now)", cut.0, released.len());
+        // Every peer learns it now (a peer that links later, at its hello): nothing it sends
+        // for that land comes here any more — a need asks the coordinator, an arrival waits
+        // on the peer for the land's next owner.
+        let peers: Vec<HostId> = self.peers.keys().copied().collect();
+        for p in peers {
+            self.queue_to_peer(p, crate::Reliable::Released { rows: rows.clone() });
+        }
         self.flush_unowned();
     }
 

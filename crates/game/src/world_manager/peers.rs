@@ -1299,6 +1299,23 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.flush_unowned();
     }
 
+    /// Host `from` released `rows` (`(super-region, epoch)`, its [`Reliable::Released`]): each
+    /// is free in this host's directory unless it knows a newer epoch (an assignment the
+    /// message is late for). From now on nothing is sent to `from` for that land: a need for
+    /// it asks the coordinator (`land.rs`), and what arrives for it waits here for its next
+    /// owner (`wait_for_owner`, `can_move`, a held reply) — nothing becomes deliverable, so
+    /// nothing is flushed.
+    fn peer_released(&mut self, from: HostId, rows: Vec<(crate::SuperRegion, u64)>) {
+        let Some(directory) = self.ownership.0.directory_mut() else {
+            log::warn!("[server] host {from} released {} super-region(s), but this host keeps no directory: ignored", rows.len());
+            return;
+        };
+        log::info!("[server] host {from} released super-region(s) {rows:?}: free");
+        for (sr, epoch) in rows {
+            directory.set(sr, None, epoch);
+        }
+    }
+
     /// Everything [`Self::wait_for_owner`] kept for a super-region that has an owner now
     /// goes there, in order, with its cut flags: delivered here as an inbound arrival
     /// (`Me`), or sent to its owner (`Host`).
@@ -1328,6 +1345,39 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.unowned_waiting.entry(sr).or_default().push(keep);
                     }
                 }
+                self.inbound_accounted = lineage;
+            }
+        }
+        self.forward_mailbox();
+    }
+
+    /// Intents and replies held in `intent_mailbox` for a region another host owns now and
+    /// this host reaches (land released here — mail held while it was masked — then assigned
+    /// to that host; a reply held because its sender's directory and this host's disagreed)
+    /// go to that host, in order, with their cut flags (as [`Self::flush_unowned`] sends a
+    /// transfer), and leave the mailbox as they are queued: exactly once. Mail for a region
+    /// this host owns waits for its next run here (delivered as it starts); for land nobody
+    /// owns, or whose owner this host does not reach, it stays.
+    fn forward_mailbox(&mut self) {
+        let ready: Vec<RegionCoords> = self
+            .intent_mailbox
+            .keys()
+            .copied()
+            .filter(|rc| self.foreign_host(*rc).is_some_and(|h| self.peer_reachable(h)))
+            .collect();
+        for rc in ready {
+            let list = self.intent_mailbox.remove(&rc).unwrap_or_default();
+            log::debug!("[server] {rc:?} is another host's now: {} intent(s) or reply(ies) held for it go there", list.len());
+            for m in list {
+                let to = peer_intent_target(&m.msg);
+                if !self.foreign_host(to).is_some_and(|h| self.peer_reachable(h)) {
+                    // Held under another key than its own target (a reply routed by where
+                    // its entity was): kept until that target's owner is reached.
+                    self.intent_mailbox.entry(rc).or_default().push(m);
+                    continue;
+                }
+                let lineage = std::mem::replace(&mut self.inbound_accounted, m.accounted_in);
+                self.intent_to_peer(to, m.msg, m.in_source_view);
                 self.inbound_accounted = lineage;
             }
         }
@@ -1621,6 +1671,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if !rows.is_empty() {
                         self.queue_to_peer(from, Reliable::Owns { rows });
                     }
+                    // And every row this host released that no read showed owned since: a
+                    // peer that linked after the release (or missed it) learns it is free.
+                    let released: Vec<(crate::SuperRegion, u64)> =
+                        self.recently_released.iter().map(|(sr, epoch)| (*sr, *epoch)).collect();
+                    if !released.is_empty() {
+                        self.queue_to_peer(from, Reliable::Released { rows: released });
+                    }
                 }
                 // Every region (stopping ones too: their `RegionDown` follows) bordering
                 // that host; it asks each for the seeds of its own neighbours of them.
@@ -1779,12 +1836,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.route_intent(msg, target, after);
                     return;
                 }
-                // Ownership disagrees: never forwarded (it could bounce between hosts). An
-                // intent is refused back (its items return), a reply held here.
+                // Ownership disagrees: not forwarded on receipt (it could bounce between hosts). An
+                // intent is refused back (its items return), a reply held here — sent on by
+                // `forward_mailbox` once the directory names another owner this host reaches.
                 if self.masked_or_released(target) {
                     log::debug!("[server] host {from} sent {msg:?} for {target:?}, inherited or released here");
                 } else {
                     log::error!("[server] host {from} sent {msg:?} for {target:?}, which this host does not own");
+                    // One of the two directories is stale: read this one again.
+                    self.directory_wanted = true;
                 }
                 match msg {
                     // Refused back to where it came from: its items return.
@@ -1794,7 +1854,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.route_intent(crate::IntentMsg::Reply(back), target, after);
                     }
                     // A reply is held here, in the mailbox of its region (a cut carries it,
-                    // and a restore queues it to the owner): never lost.
+                    // a restore queues it to the owner, `forward_mailbox` sends it to an owner
+                    // found since): never lost.
                     reply @ crate::IntentMsg::Reply(_) => {
                         self.intent_mailbox.entry(target).or_default().push(Mail { msg: reply, in_source_view: after, accounted_in: self.inbound_accounted });
                     }
@@ -1810,6 +1871,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             Reliable::PlayerParked { client, player } => self.player_parked_elsewhere(from, client, player),
             Reliable::Owns { rows } => self.peer_owns(from, rows),
+            Reliable::Released { rows } => self.peer_released(from, rows),
             Reliable::SuccessionReport { id, base_cut, entries, owed } => {
                 self.peer_succession_report(from, id, base_cut, entries, owed)
             }
@@ -1924,6 +1986,7 @@ fn reliable_name(r: &Reliable) -> &'static str {
         Reliable::InCut { .. } => "InCut",
         Reliable::Owns { .. } => "Owns",
         Reliable::SuccessionReport { .. } => "SuccessionReport",
+        Reliable::Released { .. } => "Released",
     }
 }
 
