@@ -144,7 +144,7 @@ pub enum ApiErrorCode {
     Internal,
     /// No host of the world takes logins and the world is starting one (Elastic 4: the world
     /// went to zero hosts, or every host drains): the client repeats the join every second for
-    /// a bounded time. HTTP 503. Appended: the codes' order is the wire's.
+    /// a bounded time. HTTP 503. On the wire as the string `world_starting` (snake_case JSON).
     WorldStarting,
 }
 

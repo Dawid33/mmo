@@ -63,8 +63,11 @@
 //! kept refresh token (re-read before every call), for up to
 //! [`WORLD_START_WAIT_MS`] from the first such answer; meanwhile the status
 //! line says [`WORLD_STARTING_STATUS`] and the error line stays empty; after
-//! it the ordinary error. A `world_unavailable` on a first join still shows
-//! its error at once. The
+//! it the ordinary error. A `world_unavailable` as a first join's FIRST
+//! answer still shows its error at once; once the wait has begun it is
+//! repeated like `world_starting`, until the same bound (the new host may
+//! hold the order past the service's ack budget while it is assigned the
+//! player's land, or its replica may be changing). The
 //! [`Rejoin`] lives in the login, which outlives sessions; it ends when the new
 //! session is in the world ([`rejoin_arrived`]), when it gives up (the world
 //! list, with why), on a revoked token (the sign-in screen; it never starts a
@@ -221,7 +224,8 @@ pub struct FirstJoin {
     pub next_call: f64,
     /// A join call is on its way: no second one until it answers.
     pub calling: bool,
-    /// The line shown when it gives up: the last `world_starting` answer's.
+    /// The line shown when it gives up: the last answer's during the wait
+    /// (`world_starting`, or a `world_unavailable` repeated inside it).
     pub why: String,
 }
 
@@ -902,13 +906,21 @@ impl LoginSession {
 
     /// A first join's answer `failure`, on screen `state`: whether it is the
     /// world starting and the join repeats ([`Self::tick_first_join`] sends
-    /// the next call), with an empty error line. Not while a rejoin runs, nor
-    /// off the world list, nor past [`WORLD_START_WAIT_MS`] after the first
-    /// such answer (the ordinary error then).
+    /// the next call), with an empty error line. A `world_unavailable` repeats
+    /// too once the wait has begun (an earlier answer was `world_starting`;
+    /// final review, C-I3), as a rejoin repeats it; as the first answer it is
+    /// the ordinary error. Not while a rejoin runs, nor off the world list,
+    /// nor past [`WORLD_START_WAIT_MS`] after the first `world_starting`
+    /// answer (the ordinary error then).
     fn first_join_starting(&mut self, failure: &LoginFailure, state: AppState) -> bool {
         let now = self.clock;
-        let starting = matches!(failure, LoginFailure::Api(e) if e.code == ApiErrorCode::WorldStarting);
-        let Some(first) = self.first_join.as_mut().filter(|_| starting && state == AppState::Worlds && self.rejoin.is_none())
+        let code = match failure {
+            LoginFailure::Api(e) => Some(e.code),
+            _ => None,
+        };
+        let waiting = self.first_join.as_ref().is_some_and(|f| f.starting());
+        let repeats = code == Some(ApiErrorCode::WorldStarting) || (waiting && code == Some(ApiErrorCode::WorldUnavailable));
+        let Some(first) = self.first_join.as_mut().filter(|_| repeats && state == AppState::Worlds && self.rejoin.is_none())
         else {
             return false;
         };
