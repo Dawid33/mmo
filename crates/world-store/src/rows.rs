@@ -208,8 +208,23 @@ pub(crate) fn beat_of(row: Option<Option<i64>>) -> crate::Beat {
     }
 }
 
+/// SQLite has no staged cut parts: its prune skips nothing ([`engine_rows`]' `$staged_hosts`).
+async fn staged_hosts_sqlite(
+    _tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+) -> Result<Vec<HostId>, crate::succession::DeclareError> {
+    Ok(Vec::new())
+}
+
+/// Postgres: the hosts with a staged cut part ([`crate::two_phase::staged_hosts`]), for a
+/// registration's prune to skip (Elastic 4 Decision 6).
+async fn staged_hosts_pg(
+    tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+) -> Result<Vec<HostId>, crate::succession::DeclareError> {
+    Ok(crate::two_phase::staged_hosts(&mut **tx).await?)
+}
+
 macro_rules! engine_rows {
-    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr, $lock_timeout:expr, $claims_lock:expr, $now_ms:expr) => {
+    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr, $lock_timeout:expr, $claims_lock:expr, $now_ms:expr, $staged_hosts:path) => {
         pub(crate) mod $module {
             use sqlx::Row;
 
@@ -482,7 +497,7 @@ macro_rules! engine_rows {
             ///    are not live below: a restarted process's own old row never is);
             /// 3. `Rollback` (`static`) and another row live → [`StoreError::NotAlone`];
             /// 4. no live row and some dirty one (a total crash) → [`total_crash`];
-            /// 5. [`prune_hosts`];
+            /// 5. [`prune_hosts`], skipping every host with a staged cut part (read first);
             /// 6. the new row: dirty, live, seen now, at the world's generation.
             ///
             /// "Live" is [`live_ids`]. Nothing of a refused registration is written: the
@@ -628,8 +643,12 @@ macro_rules! engine_rows {
                         return Ok(Err(live));
                     }
                 }
-                // 5. Rows nothing needs any more.
-                prune_hosts(tx).await?;
+                // 5. Rows nothing needs any more — but never the row of a host whose cut part is
+                // still staged (Elastic 4 Decision 6): a leave cut's decision sets its `clean = 1`
+                // before `COMMIT PREPARED` makes the part's `in_flight` rows visible. Read first,
+                // in a statement of its own (`two_phase::staged_hosts`).
+                let staged = $staged_hosts(tx).await?;
+                prune_hosts(tx, &staged).await?;
                 // 6. The new row. `reg` (no longer read) gets the id: also a registration number.
                 let sql = format!(
                     "INSERT INTO hosts (id, name, boot, generation, clean, state, seen_ms, reg, drain_at_ms, peer_addr, \
@@ -714,13 +733,23 @@ macro_rules! engine_rows {
             }
 
             /// Deletes every `hosts` row nothing refers to any more: clean or dead, owning no
-            /// `super_regions` row and no `in_flight` row, and named by no open succession (as
-            /// predecessor, heir or survivor). Its id is never issued again (`world.next_host_id`
-            /// only grows), so nothing that still carries it — a coordinator's saved state, a
-            /// journal, a prepared part's gid — can ever match a new host.
-            async fn prune_hosts(tx: &mut Tx) -> Result<(), crate::succession::DeclareError> {
+            /// `super_regions` row and no `in_flight` row, named by no open succession (as
+            /// predecessor, heir or survivor), and not in `staged` — the hosts with a cut part
+            /// still staged (Postgres; SQLite has none), whose `in_flight` rows a `COMMIT PREPARED`
+            /// may yet make visible (a leaver's part, after its decision set `clean = 1`). Its id
+            /// is never issued again (`world.next_host_id` only grows), so nothing that still
+            /// carries it — a coordinator's saved state, a journal, a prepared part's gid — can
+            /// ever match a new host.
+            async fn prune_hosts(tx: &mut Tx, staged: &[HostId]) -> Result<(), crate::succession::DeclareError> {
+                // Host ids are integers: written into the statement, no bind list per engine.
+                let skip = if staged.is_empty() {
+                    String::new()
+                } else {
+                    let ids: Vec<String> = staged.iter().map(|h| i(h.0).to_string()).collect();
+                    format!(" AND hosts.id NOT IN ({})", ids.join(", "))
+                };
                 let sql = format!(
-                    "DELETE FROM hosts WHERE (clean = 1 OR state = {dead}) \
+                    "DELETE FROM hosts WHERE (clean = 1 OR state = {dead}){skip} \
                      AND NOT EXISTS (SELECT 1 FROM super_regions sr WHERE sr.owner = hosts.id) \
                      AND NOT EXISTS (SELECT 1 FROM in_flight f WHERE f.host = hosts.id) \
                      AND NOT EXISTS (SELECT 1 FROM successions s WHERE s.settled_cut IS NULL AND s.abandoned = 0 \
@@ -1882,7 +1911,7 @@ macro_rules! engine_rows {
 // lock and one writer process holds the file lock.
 // `$lock_timeout`: whether a cut's transaction sets a `lock_timeout` (Postgres).
 // `$now_ms`: the engine's SQL for the database clock in ms since the epoch (`seen_ms`).
-engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false, None, "CAST(unixepoch('subsec') * 1000 AS INTEGER)");
+engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false, None, "CAST(unixepoch('subsec') * 1000 AS INTEGER)", staged_hosts_sqlite);
 engine_rows!(
     pg,
     sqlx::Postgres,
@@ -1893,7 +1922,8 @@ engine_rows!(
     Some("LOCK TABLE super_regions IN SHARE ROW EXCLUSIVE MODE"),
     // clock_timestamp(), not now(): now() is the transaction's start, and a registration or a
     // heartbeat transaction may have waited for locks before it stamps.
-    "(extract(epoch from clock_timestamp()) * 1000)::bigint"
+    "(extract(epoch from clock_timestamp()) * 1000)::bigint",
+    staged_hosts_pg
 );
 
 /// Announces committed cut `cut` at `tick` to every listener of this world (Postgres:

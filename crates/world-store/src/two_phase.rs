@@ -143,6 +143,22 @@ pub(crate) async fn staged_cut_parts(pool: &PgPool, world_tag: u32) -> Result<Ve
     Ok(parts.into_iter().flat_map(|(cut, hosts)| hosts.into_keys().map(move |h| (cut, h))).collect())
 }
 
+/// The hosts with a staged part of any cut of this world, read on `conn` (a registration's
+/// transaction, `rows.rs` `register_in`, Elastic 4 Decision 6): its prune skips them. Two
+/// statements of their own — the world tag, then `pg_prepared_xacts` — before the prune's
+/// `DELETE`: the prepared transactions are not read under a statement's snapshot, so a part
+/// still staged at this read is skipped, and one committed before it has its `in_flight` rows
+/// visible to the later `DELETE`'s snapshot (the transaction is `READ COMMITTED`). No row lock.
+pub(crate) async fn staged_hosts(conn: &mut sqlx::PgConnection) -> Result<Vec<HostId>, StoreError> {
+    let oid: i64 = sqlx::query_scalar("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")
+        .fetch_one(&mut *conn)
+        .await?;
+    let tag = u32::try_from(oid).map_err(|_| StoreError::Corrupt(format!("database oid {oid}")))?;
+    let parts = staged_parts(&mut *conn, tag, None).await?;
+    let hosts: BTreeSet<HostId> = parts.into_values().flat_map(|hosts| hosts.into_keys()).collect();
+    Ok(hosts.into_iter().collect())
+}
+
 /// This database's OID: the world tag of its gids.
 pub(crate) async fn world_tag(pool: &PgPool) -> Result<u32, StoreError> {
     let oid: i64 = sqlx::query_scalar("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")

@@ -393,6 +393,17 @@
 //!   settle, an end of a landless host, another registration) holds `world` first. In a total crash the
 //!   dirty rows it deletes were locked above (`FOR NO KEY UPDATE`, upgraded by the delete —
 //!   no other transaction can hold a lock on them that conflicts).
+//!   **Before the `DELETE`** (Elastic 4 Decision 6, Postgres only): two plain reads in statements
+//!   of their own — the database's OID, then `pg_prepared_xacts` (`two_phase::staged_hosts`) —
+//!   and the `DELETE` skips every host with a staged cut part. They take no row lock and wait for
+//!   nothing (a prepared transaction is not a waiting backend), so the walk is unchanged. Why: a
+//!   leave cut's decision sets the leaver's `clean = 1` in the coordinator's transition, but the
+//!   leaver's part — its `in_flight` rows — becomes visible only at its `COMMIT PREPARED`, after
+//!   that commit (`FinishCut`); a prune in between would delete a row whose `in_flight` rows then
+//!   appear keyed to an id no read shows. Read first: a part still staged is skipped; a part
+//!   committed by then has its `in_flight` rows visible to the `DELETE`'s later snapshot (the
+//!   registration is `READ COMMITTED`), where the `in_flight` check keeps the row. A clean row
+//!   prepares no later part (its process left), so no part can appear after the read.
 //! - The `INSERT` of the new row: a key nobody holds (never issued before).
 //!
 //! Against the cycle above: a registration takes `hosts` rows before `super_regions` rows, as a

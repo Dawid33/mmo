@@ -239,6 +239,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         leaving: &[HostId],
     ) -> Result<(), CutFailure> {
         let me = self.ordinal();
+        if hosts.iter().chain(leaving).any(|h| *h == me) {
+            // Named in it: a succession based on this cut waits for its decision here, whether
+            // this part begins or not (`try_apply_succession`).
+            self.cuts_joined_max = Some(self.cuts_joined_max.map_or(cut, |j| j.max(cut)));
+        }
         if leaving.contains(&me) && self.leave_requested {
             // This attempt's cut, whether this host manages to take part or not: its
             // outcome (an abort, if it fails here) is what the exit waits for.

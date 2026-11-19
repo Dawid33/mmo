@@ -1379,6 +1379,11 @@ pub struct WorldManager<S: RegionSpawner> {
     /// The highest world cut id this host began or refused: a peer's mark of a cut at or
     /// below it is stale.
     world_cut_seen: Option<CutId>,
+    /// The highest world cut whose `BeginCut` named this host (this boot), whether its part
+    /// began or not: a succession whose base cut it is waits for that cut's decision here; one
+    /// whose base cut this host never joined is answered from the whole journal
+    /// (`succession.rs` `try_apply_succession`, Elastic 4 Decision 7).
+    cuts_joined_max: Option<CutId>,
     /// Per peer: its mark of a world cut this host has not begun yet (counted when it does).
     early_marks: BTreeMap<HostId, CutId>,
     /// The highest world cut a wrapped message ([`crate::Reliable::InCut`]) of arrived for
@@ -1636,6 +1641,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             unseeded_warned: false,
             world_cut: None,
             world_cut_seen: None,
+            cuts_joined_max: None,
             early_marks: BTreeMap::new(),
             wrapper_seen: None,
             marks_queued: Vec::new(),

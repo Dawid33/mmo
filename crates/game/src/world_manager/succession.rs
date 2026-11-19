@@ -351,7 +351,7 @@ macro_rules! host_fields {
             foreign_input_warned_ms, unseeded_warned, world_cut, world_cut_seen, wrapper_seen, marks_queued,
             leave_requested, leaving_cut, leave_outcome, leave_decided, leave_parked, world_cut_done,
             inbound_accounted, login_orders, logins, spawn_held, spawn_here, kicks_in, kicked, login_out,
-            spawn_pins, spawn_sent_on, kick_warned_ms, successions, succession_reports, succession_wait_logged_ms, inheriting,
+            spawn_pins, spawn_sent_on, cuts_joined_max, kick_warned_ms, successions, succession_reports, succession_wait_logged_ms, inheriting,
             successions_done, adoptions, succession_pinned, succession_seam_events, drain
             ],
         }
@@ -673,7 +673,33 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn try_apply_succession(&mut self, id: SuccessionId) {
         let Some(run) = self.successions.get(&id).filter(|r| !r.applied) else { return };
         let base = self.journal.base();
-        if base != run.order.base_cut {
+        let order_base = run.order.base_cut;
+        // Elastic 4 Decision 7: a survivor that never took part in the order's base cut K — it
+        // registered while K ran — has an older base for good. It answers from its WHOLE
+        // journal, at K. A journal is truncated only by a committed cut its host took part in
+        // (`PeerJournal::committed`, toward that cut's participants), and every participant of
+        // K froze its session with this host from its `BeginCut` until its `CutDone`
+        // (`begin_world_cut`, the outsiders; and refused its part had it unsaved traffic with
+        // this host): everything this host exchanged with a participant of K is after K, and
+        // what it exchanged with another non-participant is in no cut at all. A PARTICIPANT of K
+        // whose decision has not reached it yet has the older base too and must wait (its
+        // journal still holds what K saved): `cuts_joined_max == Some(K)`, or K still begun and
+        // undecided in its journal (a `CutDone` that never came, then a later `BeginCut`
+        // handled). A later cut it joined (`cuts_joined_max` above K) that aborted truncated
+        // nothing (`PeerJournal::aborted` keeps every entry), so it changes none of this.
+        let outside_base = base < order_base
+            && self.cuts_joined_max != Some(order_base)
+            && !self.journal.undecided_through(order_base);
+        if outside_base {
+            log::info!(
+                "[server] succession {}: this host's journal counts from cut {}, the succession from cut {}: it answers \
+                 from its whole journal (not in cut {})",
+                id.0,
+                base.0,
+                order_base.0,
+                order_base.0
+            );
+        } else if base != order_base {
             let now = self.clock_ms;
             if self.succession_wait_logged_ms.is_none_or(|at| now.saturating_sub(at) >= SUCCESSION_WAIT_LOG_MS) {
                 self.succession_wait_logged_ms = Some(now);

@@ -143,6 +143,13 @@ impl PeerJournal {
         self.cuts.insert(cut, participants.clone());
     }
 
+    /// Whether a world cut at or below `cut` was begun here ([`Self::cut_begun`]) and is not
+    /// decided here yet: this host's base may still move to it (a succession waits, Elastic 4
+    /// Decision 7).
+    pub fn undecided_through(&self, cut: CutId) -> bool {
+        self.cuts.keys().next().is_some_and(|c| *c <= cut)
+    }
+
     /// The last committed cut the journal counts from.
     pub fn base(&self) -> CutId {
         self.base

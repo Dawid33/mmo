@@ -28,8 +28,9 @@
 //!   adoption may take longer) — a login there is then answered 503 and the client retries. A
 //!   `departed` pointer at a host that left owning no land is dropped (`peers.rs`,
 //!   `reroute_held_for_landless_leavers`): the store's record places that player. So is a
-//!   pointer at a LIVE host that sends this host's own forwarded order back: it dropped the
-//!   record after a committed cut wrote it ([`WorldManager::departed_denied`]). An order taken here keeps an online player
+//!   pointer whose own forwarded order comes back to this host, from any host: the end of the
+//!   player's walk dropped the record after a committed cut wrote it
+//!   ([`WorldManager::departed_denied`]). An order taken here keeps an online player
 //!   here — no hand-off at a host seam — until its new session connects ([`SPAWN_PIN_MS`]).
 //! - **Kick**: applied by the gate host and relayed to every other host; acknowledged to
 //!   the login service by the gate host alone, once every peer applied it (a peer's
@@ -73,6 +74,9 @@ pub const SPAWN_SENT_ON_MS: u64 = 2 * SPAWN_SYNC_WAIT_MS;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SentOn {
     pub(super) to: HostId,
+    /// The order's origin (its gate host): a copy of the same login pushed to another gate (the
+    /// login service resends on another link) is not this order.
+    pub(super) origin: HostId,
     pub(super) player_token: String,
     pub(super) session_epoch: u64,
     /// The order's `hops` as it left here.
@@ -380,6 +384,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.spawn_sent_on.retain(|_, s| now.saturating_sub(s.at_ms) < SPAWN_SENT_ON_MS);
                         let sent = SentOn {
                             to: owner,
+                            origin: req.origin,
                             player_token: req.player_token.clone(),
                             session_epoch: req.session_epoch,
                             hops: req.hops + 1,
@@ -415,35 +420,45 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// A spawn order arrives from host `from`. If it is the very order this host sent on to
-    /// `from` because its `departed` pointer names `from` for the player ([`SentOn`]), `from`
-    /// holds the player no more: the pointer is dropped, and the order is placed by its
-    /// record's region like any other.
+    /// the host its `departed` pointer names for the player ([`SentOn`]) — come back from ANY
+    /// host (Elastic 4 Task 1: a chain of stale pointers) — the end of the player's walk holds
+    /// it no more: the pointer is dropped, and the order is placed by its record's region like
+    /// any other.
     ///
-    /// Why that is safe: `from` sent the order back only after it took it from this host's
-    /// reliable stream — behind every hand-off or move of the player this host had sent it
-    /// before the order. It applied those, and still neither holds the player (it would place
-    /// it there), nor a record parked there (placed there, or it waits), nor a pointer of its
-    /// own (the order would go to that host): it dropped the record after a committed cut wrote
-    /// it ([`Self::drop_stored_parked`]), so the store places the player. An order `from`
-    /// sends here on its own account proves none of this — a hand-off of this host may still be
-    /// on its way to it — so the match is exact: the order's token and epoch, one hop more than
-    /// it left here with, within [`SPAWN_SENT_ON_MS`], and this host's hop of the player
-    /// unchanged (the player was not handed or placed here, and so not handed on again, since).
+    /// Why that is safe: an order sent on by a pointer follows the player's walk. Every host
+    /// the player left points at the next (`hand_off_to_peer`, `move_to_peer`; a succession
+    /// re-points at the heir that parks the player, or at the survivor that holds it), and the
+    /// order travels behind every hand-off or move of the player on the same ordered reliable
+    /// stream: each host of the walk has applied the hand-off that brought the player before it
+    /// reads the order. So the order goes on by pointers until it reaches a host with none,
+    /// which places the player if it holds it live or parked (or waits), and otherwise has
+    /// nothing of it — it dropped the record after a committed cut wrote it
+    /// ([`Self::drop_stored_parked`]), or its own pointer ended the same way — and only then
+    /// does the order travel by its record's region. An order that left here by the pointer
+    /// and comes back from anywhere was therefore refused by the end of the walk: the store
+    /// places the player. An order this host did not send on by the pointer proves none of
+    /// this — a hand-off of this host may still be on its way — so the match is exact: the
+    /// order's origin (another gate's copy of the same login is not this order), token and
+    /// epoch, more hops than it left here with, within [`SPAWN_SENT_ON_MS`], the pointer still
+    /// naming the host it was sent to, and this host's hop of the player unchanged (the player
+    /// was not handed or placed here, and so not handed on again, since).
     fn departed_denied(&mut self, from: HostId, req: &SpawnRequest) {
         let Some(sent) = self.spawn_sent_on.remove(&req.player) else { return };
-        let same_order = sent.to == from
+        let same_order = sent.origin == req.origin
             && sent.player_token == req.player_token
             && sent.session_epoch == req.session_epoch
-            && sent.hops.checked_add(1) == Some(req.hops)
+            && req.hops > sent.hops
             && self.clock_ms.saturating_sub(sent.at_ms) < SPAWN_SENT_ON_MS;
         if !same_order || sent.hop != self.hop_here(req.player) || self.holds_player(req.player) {
             return;
         }
-        if self.departed.get(&req.player) == Some(&from) {
+        if self.departed.get(&req.player) == Some(&sent.to) {
             self.departed.remove(&req.player);
             log::info!(
-                "[server] spawn order for player {} came back from host {from}, which holds it no more: placed by its stored record from now on",
-                req.player.0
+                "[server] spawn order for player {} sent on to host {} came back from host {from}: the player's walk holds \
+                 it no more, placed by its stored record from now on",
+                req.player.0,
+                sent.to
             );
         }
     }
