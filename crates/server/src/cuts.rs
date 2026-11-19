@@ -306,6 +306,11 @@ impl CutWriter {
         self.claims.store()
     }
 
+    /// The super-regions this host's fence holds now (its land; the `[server]` line's `land=`).
+    pub fn land(&self) -> usize {
+        self.claims.fence().epochs.len()
+    }
+
     /// Commits still unanswered.
     pub fn in_flight(&self) -> usize {
         self.pending.len()

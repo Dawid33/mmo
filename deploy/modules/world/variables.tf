@@ -113,6 +113,16 @@ variable "super_region_regions" {
   default     = 16
 }
 
+variable "land_idle_ms" {
+  description = "VOXEL_LAND_IDLE_MS on every host: how long a host's land stays idle (no player, nothing in flight) before the host releases it. null = unset, the server's default (300000, 5 min). A host-only change: it goes through cuts on a running world."
+  type        = number
+  default     = null
+  validation {
+    condition     = var.land_idle_ms == null || try(var.land_idle_ms > 0 && floor(var.land_idle_ms) == var.land_idle_ms, false)
+    error_message = "land_idle_ms: a whole number of milliseconds above 0 (the server refuses 0), or null."
+  }
+}
+
 variable "metrics" {
   description = "A ServiceMonitor for the coordinator's and the hosts' /metrics. Needs the Prometheus operator's CRDs."
   type        = bool

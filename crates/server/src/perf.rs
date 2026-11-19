@@ -28,6 +28,9 @@
 //!   the longest single encode / decode and the window's total decode / encode time. High latency
 //!   with high cpu_sum = decoding is the bottleneck; high latency with low cpu_sum = the database.
 //!   Measure with a client connected (see below).
+//! * `land` / `land_released` — the super-regions this host's fence holds now, and how many it
+//!   released (idle land given back, Elastic 3) since it started; both also in `/metrics`
+//!   (`mmo_host_land`, `mmo_land_released_total`), stored once per window here.
 //! * `tiles` — the served forged world's tile cache (only for a tiled world):
 //!   decoded MB resident (pinned ones included), MB pinned by running jobs, the
 //!   budget (`VOXEL_TILE_CACHE_MB`), and tiles loaded / failed loads in the
@@ -136,12 +139,16 @@ impl ServerReport {
         manager: &mut game::WorldManager<S>,
         backlog: Backlog,
         store: Option<&world_store::StoreHandle>,
+        land: Option<usize>,
     ) {
         let window = self.window_start.elapsed();
         if window < game::METRICS_REPORT_INTERVAL {
             return;
         }
         self.window_start = Instant::now();
+        let land = land.unwrap_or(0) as u64;
+        let land_released = manager.land_released_total();
+        crate::health::Health::global().host_land(land, land_released);
         // Taken once per window, whether or not the line is said: a max must mean one window,
         // so an idle window's counters are dropped, not carried into the next line. Startup
         // loads, before any region runs, fall in such an idle window: measure with a client
@@ -163,7 +170,7 @@ impl ServerReport {
         let lod_build_ms = ns_ms(take(&EDGE.lod_build_ns));
         let tiles = self.tiles_section();
         log::info!(
-            "[server] window={:.1}s sessions={} regions={} parked={} transfers_inflight={} pending_arrivals={} peer_unreceived={} unowned_waiting={} journal_entries={} succession_seam_events={} peer_dropped_for_dead={} peer_state_to_forgotten={} login_ends_dropped={} arrivals_despawned={} \
+            "[server] window={:.1}s sessions={} regions={} parked={} transfers_inflight={} pending_arrivals={} peer_unreceived={} unowned_waiting={} land={} land_released={} journal_entries={} succession_seam_events={} peer_dropped_for_dead={} peer_state_to_forgotten={} login_ends_dropped={} arrivals_despawned={} \
              items_destroyed={} intent_replies_lost={} \
              | gen n={} sum={:.1}ms max={:.1}ms \
              | lod hit={} sub={} built={} inflight={} wait_terrain={} cache={} \
@@ -179,6 +186,8 @@ impl ServerReport {
             d.pending_arrivals,
             d.peer_unreceived,
             d.unowned_waiting,
+            land,
+            land_released,
             d.journal_entries,
             d.succession_seam_events,
             d.peer_dropped_for_dead,

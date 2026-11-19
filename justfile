@@ -2022,6 +2022,18 @@ world-status:
             echo "  $pod: (no /metrics answer)"
         fi
     done
+    # Each host pod's land (Elastic 3): the super-regions its fence holds, and how many it released
+    # (idle land given back) since it started.
+    echo
+    echo "HOST LAND"
+    for pod in $(k get pods -l app.kubernetes.io/component=host -o jsonpath='{.items[*].metadata.name}'); do
+        if text=$(k get --raw "/api/v1/namespaces/{{world_ns}}/pods/$pod:9100/proxy/metrics" 2>/dev/null); then
+            sample() { printf '%s\n' "$text" | awk -v n="$1" '$1 ~ ("^" n "([{]|$)") { print $NF; exit }'; }
+            echo "  $pod: land $(sample mmo_host_land || true), released $(sample mmo_land_released_total || true)"
+        else
+            echo "  $pod: (no /metrics answer)"
+        fi
+    done
     echo
     k get svc -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,PORT:.spec.ports[*].port,NODEPORT:.spec.ports[*].nodePort
     echo

@@ -178,6 +178,8 @@ resource "kubernetes_deployment_v1" "host" {
               }, var.client_certificate == null ? {} : {
               VOXEL_CLIENT_CERT = "${local.client_cert_dir}/tls.crt"
               VOXEL_CLIENT_KEY  = "${local.client_cert_dir}/tls.key"
+              }, var.land_idle_ms == null ? {} : {
+              VOXEL_LAND_IDLE_MS = tostring(var.land_idle_ms)
             })
             content {
               name  = env.key

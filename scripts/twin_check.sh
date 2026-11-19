@@ -36,6 +36,16 @@
 #   7b. Every replica killed and restarted: the coordinator scaled to 0 (no pod left), then
 #      back to its count: every host re-attaches (`world coordinator link up` after the
 #      start, both hosts Ready), a cut commits, the generation is unchanged.
+#   7c. Land assigned, idle, released, re-assigned (Elastic 3; the twin's hosts run
+#      VOXEL_LAND_IDLE_MS=20000, the module's land_idle_ms): once no super_regions row is owned
+#      (phase 7's land went back), a join through the login service (phase 7's helper, no
+#      client connects) → within 30 s exactly one row is owned, by a live host id (assigned);
+#      within 210 s that row's owner is -1 at a higher epoch and its host's
+#      mmo_land_released_total grew (idle, released: the placed order pins its region for
+#      SPAWN_PIN_MS, 120 s, while it waits for a session, then 20 s idle, then the next cut); a second join → the row has an owner again
+#      at a higher epoch (re-assigned). The coordinators' mmo_land_assigned_total grew by 2 or
+#      more, the generation is unchanged and no succession row was added. Rows are read with
+#      psql in the CloudNativePG primary (database world_<id>, TWIN_WORLD_DB).
 #   8. The web Ingress answers through Traefik; its /login proxy reaches login's key set
 #      and API, and login's /metrics and /healthz are NOT published (404).
 #   9. world-drain b 5 (the recipe): host-b leaves at the deadline and stays up drained
@@ -47,16 +57,18 @@
 #      annotation errantry/replicas), everything comes back Ready at that count.
 #  11. Records (asserts nothing): each pod's memory after the forge and five minutes
 #      after the world-start, any pod log line about a file it could not write, and each
-#      coordinator replica's `[coordinator] window=` lines (transitions, conflicts).
+#      coordinator replica's `[coordinator] window=` lines (transitions, conflicts, assigned).
 # Every wait has a timeout and says what it waited for. Exit 0 = pass, 1 = a check
 # failed (pods, events and logs are dumped and saved under target/twin/check-<time>/).
-# Env: TWIN_CONTEXT (k3d-mmo), TWIN_NAMESPACE (world-twin), TWIN_COORDINATORS (2).
+# Env: TWIN_CONTEXT (k3d-mmo), TWIN_NAMESPACE (world-twin), TWIN_COORDINATORS (2),
+# TWIN_WORLD_DB (world_twin).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ctx="${TWIN_CONTEXT:-k3d-mmo}"
 ns="${TWIN_NAMESPACE:-world-twin}"
 coordinators="${TWIN_COORDINATORS:-2}"
+world_db="${TWIN_WORLD_DB:-world_twin}"
 out="target/twin/check-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$out"
 started=$SECONDS
@@ -713,6 +725,79 @@ wait_until 30 "exactly one ticker" one_ticker
 say "replicas $(coordinator_pods | tr '\n' ' '), ticker $(ticker_pod), generation $gen, hosts untouched"
 
 # ---------------------------------------------------------------------------------
+step "7c. land assigned, idle, released, re-assigned (the hosts' VOXEL_LAND_IDLE_MS=20000)"
+pg_primary=$(kc -n postgres get pods -l cnpg.io/cluster=pg,cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}' 2> /dev/null || true)
+[ -n "$pg_primary" ] || fail "no CloudNativePG primary pod of cluster pg (namespace postgres)"
+# sql <query>: its rows, columns separated by '|' (psql in the primary, as the postgres superuser).
+sql() { kc -n postgres exec "$pg_primary" -c postgres -- psql -d "$world_db" -v ON_ERROR_STOP=1 -Atc "$1" 2> /dev/null; }
+# owned_rows: the super_regions rows with an owner (not -1), `sx|sz|owner|epoch`, one per line.
+owned_rows() { sql "select sx, sz, owner, epoch from super_regions where owner <> -1 order by sx, sz"; }
+no_owned_land() {
+    local r
+    r=$(owned_rows) || return 1
+    [ -z "$r" ]
+}
+# host_name_of <id>: the name on that id's hosts row ('' when there is none).
+host_name_of() { rows | awk -v i="$1" '$1 == i { print $2 }'; }
+# one_owned_live: exactly one owned row, its owner a live hosts row; sets land_row.
+land_row=''
+one_owned_live() {
+    local r owner
+    r=$(owned_rows) || return 1
+    [ "$(printf '%s' "$r" | grep -c .)" = 1 ] || return 1
+    owner=$(printf '%s' "$r" | cut -d'|' -f3)
+    [ "$(row_state "$owner")" = live ] || return 1
+    land_row=$r
+}
+# the_row: our row's `owner|epoch`.
+the_row() { sql "select owner, epoch from super_regions where sx = $sr_x and sz = $sr_z"; }
+# released_above <epoch> <host pod> <count>: our row is free at an epoch above the given one, and the
+# host pod's mmo_land_released_total is above the given count.
+released_above() {
+    local r v
+    r=$(the_row) || return 1
+    [ "${r%%|*}" = -1 ] && [ "${r##*|}" -gt "$1" ] || return 1
+    v=$(metric "$2" mmo_land_released_total) || return 1
+    [ "$v" -gt "$3" ]
+}
+# owned_above <epoch>: our row is owned by a live host at an epoch above the given one.
+owned_above() {
+    local r
+    r=$(the_row) || return 1
+    [ "${r%%|*}" != -1 ] && [ "${r##*|}" -gt "$1" ] && [ "$(row_state "${r%%|*}")" = live ]
+}
+succ0=$(sql "select count(*) from successions") || fail "cannot read the successions rows of $world_db"
+assigned0=$(coord_sum mmo_land_assigned_total) || fail "no coordinator replica answers mmo_land_assigned_total"
+# Phase 7's joins placed the same player (no client connected): its land goes back first.
+wait_until 210 "no super_regions row owned (phase 7's land released)" no_owned_land
+join_or_fail 60 "a join through the login service answers 200"
+t0=$SECONDS
+wait_until 30 "exactly one super_regions row owned, by a live host (assigned)" one_owned_live
+IFS='|' read -r sr_x sr_z owner1 epoch1 <<< "$land_row"
+owner_name=$(host_name_of "$owner1")
+owner_pod=$(host_pod "$owner_name")
+[ -n "$owner_pod" ] || fail "no pod of host '$owner_name' (id $owner1), the owner of super-region ($sr_x, $sr_z)"
+released0=$(metric "$owner_pod" mmo_land_released_total) || fail "host pod $owner_pod does not answer mmo_land_released_total"
+say "assigned: super-region ($sr_x, $sr_z) to host $owner_name (id $owner1) at epoch $epoch1; its released total $released0"
+# The placed spawn order pins the land for SPAWN_PIN_MS (120 s) waiting for its session; then
+# the dial's 20 s idle; then the next world cut (save_secs 10) releases it: ~150 s.
+wait_until 210 "super-region ($sr_x, $sr_z) free at an epoch above $epoch1 and host $owner_name's released total above $released0 (idle, released)" \
+    released_above "$epoch1" "$owner_pod" "$released0"
+r=$(the_row) || fail "cannot read super-region ($sr_x, $sr_z)"
+epoch2=${r##*|}
+say "released after $((SECONDS - t0))s: super-region ($sr_x, $sr_z) free at epoch $epoch2; host $owner_name released $(metric "$owner_pod" mmo_land_released_total || echo '?') in all"
+join_or_fail 60 "a second join answers 200"
+wait_until 30 "super-region ($sr_x, $sr_z) owned again, by a live host, at an epoch above $epoch2 (re-assigned)" owned_above "$epoch2"
+r=$(the_row) || fail "cannot read super-region ($sr_x, $sr_z)"
+say "re-assigned: super-region ($sr_x, $sr_z) to host $(host_name_of "${r%%|*}") (id ${r%%|*}) at epoch ${r##*|}"
+[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed across the land's release and re-assignment: $gen -> $(coord_gen)"
+succ1=$(sql "select count(*) from successions") || fail "cannot read the successions rows of $world_db"
+[ "$succ1" = "$succ0" ] || fail "a succession row was added while land was assigned, released and re-assigned ($succ0 -> $succ1)"
+assigned1=$(coord_sum mmo_land_assigned_total) || fail "no coordinator replica answers mmo_land_assigned_total"
+[ "$assigned1" -ge $((assigned0 + 2)) ] || fail "the coordinators' mmo_land_assigned_total grew by less than 2 ($assigned0 -> $assigned1)"
+say "generation $gen unchanged, successions rows $succ1 (unchanged), land assigned $assigned0 -> $assigned1; hosts' land: $(for h in a b; do printf '%s=%s ' "$h" "$(metric "$(host_pod "$h")" mmo_host_land || echo '?')"; done)"
+
+# ---------------------------------------------------------------------------------
 step "8. the web Ingress and its /login proxy (only what login's own Ingress publishes)"
 # http_code <path>: the status; the body goes to $out/web-body.
 http_code() { curl -s -o "$out/web-body" -w '%{http_code}' --max-time 10 -H 'Host: game.localhost' "http://127.0.0.1:8480$1" || true; }
@@ -847,15 +932,16 @@ else
     echo "   no pod log line about a file it could not write"
 fi
 # Each replica's `[coordinator] window=` lines (the running replicas' logs, and the stopped ones'
-# followed at world-stop): windows, transitions and conflicts summed per file, into windows.txt.
+# followed at world-stop): windows, transitions, conflicts and land assignments summed per file,
+# into windows.txt.
 for f in "$out"/coordinator-*.log; do
     [ -e "$f" ] || continue
     grep -F '[coordinator] window=' "$f" | awk -v f="$(basename "$f")" '
         { for (i = 1; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
-          n++; t += v["transitions"]; c += v["conflicts"]; w += v["write_failures"]
+          n++; t += v["transitions"]; c += v["conflicts"]; w += v["write_failures"]; a += v["assigned"]
           if (v["conflicts"] + 0 > cmax) cmax = v["conflicts"] + 0
           if (v["transitions"] + 0 > tmax) tmax = v["transitions"] + 0 }
-        END { printf "   %s: %d windows, transitions %d (max %d per window), conflicts %d (max %d per window), write failures %d\n", f, n, t, tmax, c, cmax, w }' || true
+        END { printf "   %s: %d windows, transitions %d (max %d per window), conflicts %d (max %d per window), write failures %d, assigned %d\n", f, n, t, tmax, c, cmax, w, a }' || true
 done | tee "$out/windows.txt"
 
 echo

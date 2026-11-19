@@ -1208,11 +1208,13 @@ struct WriteTally {
     failures: u64,
     /// Host links closed after a lost commit answer took their outbox rows (final review S-I3).
     relinks: u64,
+    /// Land assignments (`Assigned::Done` answers) this replica applied (Elastic 3).
+    assigned: u64,
 }
 
 impl WriteTally {
     fn new() -> Self {
-        WriteTally { since: Instant::now(), transitions: 0, core_bytes: 0, history_bytes: 0, conflicts: 0, failures: 0, relinks: 0 }
+        WriteTally { since: Instant::now(), transitions: 0, core_bytes: 0, history_bytes: 0, conflicts: 0, failures: 0, relinks: 0, assigned: 0 }
     }
 }
 
@@ -2126,6 +2128,10 @@ impl CoordinatorRuntime {
                 DecisionAnswer::Cut { cut, committed: Err(e), .. } => {
                     self.warn_cuts(now, &format!("world cut {}: its decision could not be recorded ({e}); looking it up", cut.0));
                 }
+                DecisionAnswer::Assigned { outcome: Ok(game::coordinator::Assigned::Done { .. }), .. } => {
+                    crate::health::Health::global().land_assigned();
+                    self.tally.assigned += 1;
+                }
                 DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } | DecisionAnswer::Assigned { .. } => {}
                 DecisionAnswer::Declared { outcome, .. } => {
                     let Some(p) = self.successions.as_mut() else { continue };
@@ -2933,19 +2939,20 @@ impl CoordinatorRuntime {
 
     /// The periodic `[coordinator] window=…` line (every [`game::METRICS_REPORT_INTERVAL`], only
     /// when anything was written or failed): the transitions written in the window, their core
-    /// and history bytes, the conflicts and failed writes (Elastic 2a, decision 8: E2b's measure).
+    /// and history bytes, the conflicts and failed writes (Elastic 2a, decision 8: E2b's measure),
+    /// and the land assignments applied (`assigned=`, Elastic 3).
     fn report_writes(&mut self) {
         let window = self.tally.since.elapsed();
         if window < game::METRICS_REPORT_INTERVAL {
             return;
         }
         let t = std::mem::replace(&mut self.tally, WriteTally::new());
-        if t.transitions == 0 && t.conflicts == 0 && t.failures == 0 {
+        if t.transitions == 0 && t.conflicts == 0 && t.failures == 0 && t.assigned == 0 {
             return;
         }
         log::info!(
             "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={} \
-             lost_answer_relinks={}",
+             lost_answer_relinks={} assigned={}",
             window.as_secs_f32(),
             t.transitions,
             t.core_bytes,
@@ -2953,7 +2960,8 @@ impl CoordinatorRuntime {
             t.conflicts,
             t.failures,
             self.core.version(),
-            t.relinks
+            t.relinks,
+            t.assigned
         );
     }
 

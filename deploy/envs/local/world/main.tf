@@ -40,6 +40,9 @@ module "world" {
   database_url  = data.terraform_remote_state.postgres.outputs.world_urls["twin"]
   service_token = data.terraform_remote_state.login.outputs.service_token
 
+  # Idle land goes back after 20 s, not the hosts' 5 min: twin_check phase 7c waits for it.
+  land_idle_ms = 20000
+
   hosts = {
     a = { quic_node_port = 30466, wt_node_port = 30467 }
     b = { quic_node_port = 30468, wt_node_port = 30469 }

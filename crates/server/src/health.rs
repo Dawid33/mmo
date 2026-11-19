@@ -80,6 +80,9 @@ pub struct Health {
     load_players: AtomicU64,
     load_regions: AtomicU64,
     load_tick_permille: AtomicU64,
+    host_land: AtomicU64,
+    land_released: AtomicU64,
+    land_assigned: AtomicU64,
     coordinator_transitions: AtomicU64,
     coordinator_core_bytes: AtomicU64,
     coordinator_history_bytes: AtomicU64,
@@ -110,6 +113,9 @@ impl Health {
             load_players: AtomicU64::new(0),
             load_regions: AtomicU64::new(0),
             load_tick_permille: AtomicU64::new(0),
+            host_land: AtomicU64::new(0),
+            land_released: AtomicU64::new(0),
+            land_assigned: AtomicU64::new(0),
             coordinator_transitions: AtomicU64::new(0),
             coordinator_core_bytes: AtomicU64::new(0),
             coordinator_history_bytes: AtomicU64::new(0),
@@ -242,6 +248,18 @@ impl Health {
         self.load_tick_permille.store(u64::from(load.tick_permille), Ordering::Relaxed);
     }
 
+    /// A host's land (Elastic 3): the super-regions its fence holds now, and how many it has
+    /// released since it started ([`game::WorldManager::land_released_total`]).
+    pub fn host_land(&self, land: u64, released_total: u64) {
+        self.host_land.store(land, Ordering::Relaxed);
+        self.land_released.store(released_total, Ordering::Relaxed);
+    }
+
+    /// A coordinator replica applied a store decision's `Assigned::Done` answer (Elastic 3).
+    pub fn land_assigned(&self) {
+        self.land_assigned.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The coordinator committed a transition: its row's `core` and `history` (0: not written)
     /// bytes (Elastic 2a, decision 8).
     pub fn coordinator_written(&self, core_bytes: u64, history_bytes: u64) {
@@ -341,6 +359,9 @@ impl Health {
             "Worst tick compute time of the heartbeat window over the tick period, x1000, as last reported.",
             load(&self.load_tick_permille),
         );
+        gauge("mmo_host_land", "Super-regions this host's fence holds (its land).", load(&self.host_land));
+        counter("mmo_land_released_total", "Super-regions this host released (idle land given back) since it started.", load(&self.land_released));
+        counter("mmo_land_assigned_total", "Land assignments (Assigned::Done answers) this coordinator replica applied.", load(&self.land_assigned));
         gauge("mmo_hosts_live", "Hosts whose `hosts` row is dirty and live at the coordinator's last read.", load(&self.hosts_live));
         counter(
             "mmo_coordinator_transitions_total",

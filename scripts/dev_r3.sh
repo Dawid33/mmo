@@ -34,7 +34,10 @@
 #
 #   scripts/dev_r3.sh <dir> <coordinator env words> <host 0 env words> [<host 1 env words> ...]
 #
-# Env words are `NAME=value` separated by spaces (no value holds a space). State in <dir>:
+# Env words are `NAME=value` separated by spaces (no value holds a space); e.g. a host's
+# `VOXEL_LAND_IDLE_MS=20000` releases its idle land after 20 s instead of 5 min (Elastic 3: a host
+# that gives land back keeps running — nothing here restarts on it; `[server] … land= land_released=`
+# in its log). State in <dir>:
 # coordinator.log (the first replica), coordinator-<k>.log (the k-th other), coordinator-<k>.pid
 # (while the k-th replica's server runs; 0: the first), host-<n>.log, host-<n>.pid (while the
 # n-th host's server runs; n is the

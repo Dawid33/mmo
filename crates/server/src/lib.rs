@@ -1461,6 +1461,7 @@ pub fn run() -> claims::ServerExit {
                 writer: writer_backlog.len(),
             },
             store.as_ref(),
+            cuts.as_ref().map(|c| c.land()),
         );
     }
     // Stopping: no longer ready (and no longer judged by its loop's beat).
