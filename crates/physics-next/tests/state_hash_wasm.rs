@@ -96,6 +96,7 @@ fn log(line: &str) {
     wasm_bindgen_test::console_log!("{line}");
 }
 
+/// Gate: pins the `mmo-fork` hunk: the physics state hash matches across native and wasm32 (`just determinism-wasm`)
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn scene_state_hash_native() {
@@ -103,6 +104,7 @@ fn scene_state_hash_native() {
     assert_eq!(hash, SCENE_STATE_HASH, "native scene StateHash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
 }
 
+/// Gate: pins the `mmo-fork` hunk: the physics state hash matches across native and wasm32 (`just determinism-wasm`)
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn scene_state_hash_wasm() {

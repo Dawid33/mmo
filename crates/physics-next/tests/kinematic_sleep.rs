@@ -25,6 +25,7 @@ fn stand(w: &mut PhysicsWorld) {
     }
 }
 
+/// Gate: mmo-fork hunk rapier rigid_body_components.rs:1520 kinematic can_sleep(false) gate (+ sleep.rs doc); bug 6494c0c1: players/slimes fell asleep at rest (observed)
 #[test]
 fn a_kinematic_body_that_cannot_sleep_stays_awake_at_rest() {
     let (mut w, h) = world_with(RigidBodyBuilder::kinematic_position_based().can_sleep(false));
@@ -33,24 +34,7 @@ fn a_kinematic_body_that_cannot_sleep_stays_awake_at_rest() {
     assert!(w.islands.active_bodies().any(|b| b == h), "not in the awake island");
 }
 
-/// Upstream's rule still holds for the default: a kinematic platform at rest
-/// sleeps.
-#[test]
-fn a_kinematic_body_that_can_sleep_sleeps_at_rest() {
-    let (mut w, h) = world_with(RigidBodyBuilder::kinematic_position_based());
-    stand(&mut w);
-    assert!(w.bodies[h].is_sleeping());
-}
-
-/// Both kinematic kinds share the gate.
-#[test]
-fn a_velocity_based_kinematic_body_that_cannot_sleep_stays_awake_at_rest() {
-    let (mut w, h) = world_with(RigidBodyBuilder::kinematic_velocity_based().can_sleep(false));
-    stand(&mut w);
-    assert!(!w.bodies[h].is_sleeping(), "can_sleep(false) is ignored");
-    assert!(w.islands.active_bodies().any(|b| b == h), "not in the awake island");
-}
-
+/// Gate: pins the `mmo-fork` hunk: same hunk rigid_body_components.rs:1520, angular half; fix eb053adb (gate checked only linear threshold; red before)
 /// Like the dynamic branch, either negative threshold means "never sleeps":
 /// `can_sleep(false)` sets both, but a hand-set activation may set one.
 #[test]

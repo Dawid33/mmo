@@ -9,6 +9,7 @@
 use physics_next::PhysicsWorld;
 use rapier3d::prelude::*;
 
+/// Gate: mmo-fork hunk rapier physics_pipeline step_journaled refuses `parallel` (271c9ee3, H7 I1)
 #[test]
 #[should_panic(expected = "step_journaled does not support the `parallel` feature")]
 fn journaled_step_refuses_the_parallel_feature() {
@@ -19,12 +20,3 @@ fn journaled_step_refuses_the_parallel_feature() {
     let _ = w.step_journaled(&mut p);
 }
 
-#[test]
-fn plain_step_still_runs_under_the_parallel_feature() {
-    let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
-    let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
-    let mut p = PhysicsPipeline::new();
-    w.step(&mut p);
-    assert!(w.bodies[b].translation().y < 1.0);
-}

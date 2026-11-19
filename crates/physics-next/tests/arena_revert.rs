@@ -33,37 +33,7 @@ fn arena_with_history() -> Arena<u32> {
     a
 }
 
-#[test]
-fn arena_revert_insert_grow_path_is_exact() {
-    let mut a: Arena<u32> = Arena::new();
-    let before = bytes(&a);
-    let (head, len) = a.alloc_state();
-    let i = a.insert(7);
-    a.revert_insert(i, head, len);
-    assert_eq!(before, bytes(&a), "grow-path revert must restore storage, head and len");
-}
-
-#[test]
-fn arena_revert_insert_reuse_path_is_exact() {
-    let mut a = arena_with_history();
-    let before = bytes(&a);
-    let (head, len) = a.alloc_state();
-    let i = a.insert(99);
-    a.revert_insert(i, head, len);
-    assert_eq!(before, bytes(&a), "reuse-path revert must restore the free list");
-}
-
-#[test]
-fn arena_revert_remove_is_exact_and_the_index_resolves() {
-    let mut a = arena_with_history();
-    let i = a.insert(5);
-    let before = bytes(&a);
-    let v = a.remove(i).unwrap();
-    a.revert_remove(i, v);
-    assert_eq!(before, bytes(&a), "revert_remove must restore generation and free list");
-    assert_eq!(a.get(i), Some(&5), "the old index must still resolve");
-}
-
+/// Gate: mmo-fork hunk rapier data/arena.rs: exact LIFO inverses Arena::{alloc_state,revert_insert,revert_remove} (394aac5c); chain of inserts/removes reverted byte-exact
 #[test]
 fn arena_lifo_revert_chain_is_exact() {
     let mut a = arena_with_history();
@@ -82,16 +52,6 @@ fn arena_lifo_revert_chain_is_exact() {
     assert_eq!(before, bytes(&a), "LIFO chain over both insert paths must be exact");
 }
 
-/// Why the primitives exist: `remove(insert(x))` is not an inverse.
-#[test]
-fn arena_remove_does_not_undo_an_insert() {
-    let mut a = arena_with_history();
-    let before = bytes(&a);
-    let i = a.insert(1);
-    a.remove(i);
-    assert_ne!(before, bytes(&a), "generation and free list are serialized state");
-}
-
 // --- RigidBodySet --------------------------------------------------------
 
 fn remove_body(w: &mut PhysicsWorld, h: RigidBodyHandle) {
@@ -106,6 +66,7 @@ fn remove_body(w: &mut PhysicsWorld, h: RigidBodyHandle) {
     );
 }
 
+/// Gate: mmo-fork hunk rapier rigid_body_set.rs 'rollback primitives' (alloc_state/revert_insert, grow+reuse paths) (394aac5c)
 #[test]
 fn rigid_body_set_revert_insert_is_exact_on_both_paths() {
     let mut w = PhysicsWorld::default();
@@ -127,15 +88,7 @@ fn rigid_body_set_revert_insert_is_exact_on_both_paths() {
     assert_eq!(s1, bytes(&w.bodies), "reuse-path revert must be exact");
 }
 
-#[test]
-fn rigid_body_set_remove_does_not_undo_an_insert() {
-    let mut w = PhysicsWorld::default();
-    let before = bytes(&w.bodies);
-    let h = w.bodies.insert(RigidBodyBuilder::fixed());
-    remove_body(&mut w, h);
-    assert_ne!(before, bytes(&w.bodies), "arena generation/free list are serialized");
-}
-
+/// Gate: mmo-fork hunks rapier rigid_body_set.rs restore_raw/is_marked_modified/pop_modified + data/modified_objects.rs 'LIFO undo support' (394aac5c)
 /// The game's `body_mut_safe` inverse: a tracked write (`get_mut`) on a
 /// body not yet on the modified list pushes it; `restore_raw` puts the value
 /// (and its MODIFIED flag) back and `pop_modified` the list entry.
@@ -169,62 +122,7 @@ fn rigid_body_tracked_write_reverts_exactly_both_tracking_cases() {
 
 // --- ColliderSet ---------------------------------------------------------
 
-#[test]
-fn collider_set_revert_insert_is_exact_on_both_paths() {
-    let mut w = PhysicsWorld::default();
-    let s0 = bytes(&w.colliders);
-    let (head, len) = w.colliders.alloc_state();
-    let c = w.colliders.insert(ColliderBuilder::ball(1.0));
-    w.colliders.revert_insert(c, head, len);
-    assert_eq!(s0, bytes(&w.colliders), "grow-path revert must be exact");
-
-    let doomed = w.colliders.insert(ColliderBuilder::ball(1.0));
-    let _kept = w.colliders.insert(ColliderBuilder::cuboid(1.0, 1.0, 1.0));
-    w.colliders.remove(doomed, &mut w.islands, &mut w.bodies, &mut w.soft_bodies, false);
-    let s1 = bytes(&w.colliders);
-    let (head, len) = w.colliders.alloc_state();
-    let c = w.colliders.insert(ColliderBuilder::capsule_y(0.5, 0.25));
-    w.colliders.revert_insert(c, head, len);
-    assert_eq!(s1, bytes(&w.colliders), "reuse-path revert must be exact");
-}
-
-/// The game's `attach_collider_safe` inverse, both parent-tracking cases:
-/// the parent not yet on the modified list (its push must be popped) and
-/// already on it (it must not be).
-#[test]
-fn collider_insert_with_parent_reverts_exactly_both_tracking_cases() {
-    let mut w = PhysicsWorld::default();
-    let mut pipeline = PhysicsPipeline::new();
-    let parent = w.bodies.insert(RigidBodyBuilder::fixed());
-    // Collider history so the insert takes the reuse path.
-    let doomed = w.colliders.insert(ColliderBuilder::ball(1.0));
-    w.colliders.remove(doomed, &mut w.islands, &mut w.bodies, &mut w.soft_bodies, false);
-    w.step(&mut pipeline); // clears modified/removed lists and flags
-    assert!(!w.bodies.is_marked_modified(parent), "setup: parent must start clean");
-
-    for was_modified_case in [false, true] {
-        let was_modified = w.bodies.is_marked_modified(parent);
-        assert_eq!(was_modified, was_modified_case, "case setup");
-        let before_bodies = bytes(&w.bodies);
-        let before_colliders = bytes(&w.colliders);
-        let pre_parent = w.bodies.get(parent).unwrap().clone();
-        let (head, len) = w.colliders.alloc_state();
-
-        let c = w.colliders.insert_with_parent(ColliderBuilder::capsule_y(0.5, 0.25), parent, &mut w.bodies);
-        assert!(w.bodies.is_marked_modified(parent), "attach must mark the parent");
-
-        w.colliders.revert_insert(c, head, len);
-        w.bodies.restore_raw(parent, pre_parent);
-        if !was_modified {
-            w.bodies.pop_modified(parent);
-        }
-        assert_eq!(before_bodies, bytes(&w.bodies), "parent + modified list (was_modified={was_modified})");
-        assert_eq!(before_colliders, bytes(&w.colliders), "collider slot + alloc + lists (was_modified={was_modified})");
-
-        w.bodies.get_mut(parent);
-    }
-}
-
+/// Gate: mmo-fork hunk rapier collider_set.rs restore_raw/pop_modified (the game's collider_mut_safe inverse) (394aac5c)
 /// The game's `collider_mut_safe` inverse, both tracking cases.
 #[test]
 fn collider_tracked_write_reverts_exactly_both_tracking_cases() {

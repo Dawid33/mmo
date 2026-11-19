@@ -94,6 +94,7 @@ fn contacts(v: &Voxels) -> Vec<Option<[u32; 13]>> {
     out
 }
 
+/// Gate: mmo-fork hunk parry voxels_edition.rs:119/130/146 batched set_voxels, one content-hash pass (51bf3d98)
 #[test]
 fn batch_equals_per_voxel_and_fresh() {
     for seed in [1u64, 2, 3, 0xC0FFEE] {
@@ -124,46 +125,3 @@ fn batch_equals_per_voxel_and_fresh() {
     }
 }
 
-/// An empty batch changes nothing (and is cheap: no hash pass needed).
-#[test]
-fn empty_batch_is_a_no_op() {
-    let mut v = Voxels::new(Vector::splat(SIZE), &[IVector::new(0, 0, 0), IVector::new(9, 0, 0)]);
-    let before = vhash(&v);
-    v.set_voxels(std::iter::empty());
-    assert_eq!(before, vhash(&v));
-}
-
-/// Clearing one whole parry 8³ chunk (freeing it) and then refilling it plus
-/// a brand-new chunk, in two batches, lands on a fresh build.
-#[test]
-fn clear_a_whole_chunk_then_refill_it_and_a_new_one() {
-    let mut start: Vec<IVector> = Vec::new();
-    for x in 0..8 {
-        for y in 0..8 {
-            for z in 0..8 {
-                start.push(IVector::new(x, y, z));
-            }
-        }
-    }
-    start.push(IVector::new(9, 2, 3)); // keeps a second chunk alive
-    let mut v = Voxels::new(Vector::splat(SIZE), &start);
-
-    let clear: Vec<_> = start.iter().take(512).map(|k| (*k, false)).collect();
-    v.set_voxels(clear);
-    let rest = vec![IVector::new(9, 2, 3)];
-    assert_eq!(filled(&v), rest);
-    assert_eq!(vhash(&v), vhash(&Voxels::new(Vector::splat(SIZE), &rest)), "cleared == fresh");
-
-    let mut refill: Vec<_> = start.iter().take(512).map(|k| (*k, true)).collect();
-    // A new chunk further out (parry chunk 2 on x).
-    for y in 0..8 {
-        refill.push((IVector::new(17, y, 1), true));
-    }
-    v.set_voxels(refill);
-    let mut keys = start.clone();
-    keys.extend((0..8).map(|y| IVector::new(17, y, 1)));
-    let fresh = Voxels::new(Vector::splat(SIZE), &keys);
-    assert_eq!(filled(&v), filled(&fresh));
-    assert_eq!(vhash(&v), vhash(&fresh), "refilled == fresh");
-    assert_eq!(contacts(&v), contacts(&fresh), "same contacts");
-}

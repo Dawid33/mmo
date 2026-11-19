@@ -1,9 +1,8 @@
 //! A player walking through the fork the way the game drives one: the game's
 //! own movement code (`game::movement::{plan, sweep_character, settle}`, its
 //! constants, `game::collider_cells` for terrain) against a bare physics
-//! world, so the fork is pinned by exactly what the game runs. The ports of
-//! `crates/game/tests/{walking_smoothness,sunk_body}.rs` drive it.
-#![allow(dead_code)]
+//! world, so the fork is pinned by exactly what the game runs. The port of
+//! `crates/game/tests/walking_smoothness.rs` drives it.
 
 use game::movement::{self, Motion, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 use game::{BLOCK_VOXELS, CHUNK_BLOCKS, Chunk};
@@ -25,22 +24,12 @@ pub fn chunk_index_of(u: f32) -> i32 {
     (u / CHUNK).floor() as i32
 }
 
-/// The chunk holding the world-unit position `units`.
-pub fn chunk_of(units: Vector) -> game::ChunkCoords {
-    game::chunk_coords_from_translation(game::rapier3d::math::Vector::new(units.x, units.y, units.z))
-}
-
 /// Chunk `(x, z)` pairs overlapping the half-open world-unit rectangle
 /// (negative edges clamp to 0).
 pub fn chunks_over(x_units: Range<f32>, z_units: Range<f32>) -> Vec<(i32, i32)> {
     let span = |r: Range<f32>| chunk_index_of(r.start.max(0.0))..(r.end / CHUNK).ceil() as i32;
     let zs = span(z_units);
     span(x_units).flat_map(|x| zs.clone().map(move |z| (x, z))).collect()
-}
-
-/// Every chunk overlapping the unit rectangle, each a `Chunk::flat_floor(depth)`.
-pub fn floor_chunks(x_units: Range<f32>, z_units: Range<f32>, depth: u32) -> Vec<((i32, i32, i32), Chunk)> {
-    chunks_over(x_units, z_units).into_iter().map(|(x, z)| ((x, 0, z), Chunk::flat_floor(depth))).collect()
 }
 
 /// The first chunk row past the spawn's (row 5, z = 160, at 2-block chunks).

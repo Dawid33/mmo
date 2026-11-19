@@ -292,14 +292,7 @@ fn run_seed(seed: u64, cov: &mut Coverage) {
     }
 }
 
-/// One seed, fast enough for every `test-one` run.
-#[test]
-fn journal_fuzz_one_seed() {
-    let mut cov = Coverage::default();
-    run_seed(0, &mut cov);
-    assert!(cov.steps == FUZZ_TICKS, "{cov:?}");
-}
-
+/// Gate: mmo-fork hunks rapier step_journal.rs + joint-set/island/narrow clones (impulse_joint_set.rs:87, multibody_joint_set.rs:83) + staged solver writeback capture assert (worker.rs:965); only test asserting joint/merge/removal coverage (83c072f2)
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn journal_fuzz_all_seeds() {

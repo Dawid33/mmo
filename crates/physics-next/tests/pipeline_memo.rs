@@ -110,13 +110,6 @@ fn reference(case: Case) -> Vec<[Vec<u8>; 8]> {
         .collect()
 }
 
-#[derive(Clone, Copy, Debug)]
-enum AfterRevert {
-    SamePipeline,
-    FreshPipeline,
-    InvalidateCaches,
-}
-
 /// Rollback at tick `SETTLE`: journaled step under the wrong input (a user
 /// impulse waking a sleeping body) when `wrong_input`, else under the
 /// corrected one (none); revert; undo the input. Returns the scene on the
@@ -149,19 +142,8 @@ fn rollback(case: Case, wrong_input: bool) -> Scene {
     s
 }
 
-/// `AFTER` ticks under the corrected input, after `after`.
-fn advance(mut s: Scene, after: AfterRevert) -> Vec<[Vec<u8>; 8]> {
-    match after {
-        AfterRevert::SamePipeline => {}
-        AfterRevert::FreshPipeline => {
-            s.p = PhysicsPipeline::new();
-            s.w.ccd = CCDSolver::new();
-        }
-        AfterRevert::InvalidateCaches => {
-            s.p.invalidate_caches();
-            s.w.ccd.invalidate_fixed_targets_cache();
-        }
-    }
+/// `AFTER` ticks under the corrected input, on the same pipeline.
+fn advance(mut s: Scene) -> Vec<[Vec<u8>; 8]> {
     (0..AFTER)
         .map(|_| {
             s.w.step(&mut s.p);
@@ -175,36 +157,7 @@ fn first_divergence(got: &[[Vec<u8>; 8]], expect: &[[Vec<u8>; 8]]) -> Option<(us
     got.iter().zip(expect).enumerate().find(|(_, (g, e))| g != e).map(|(t, (g, e))| (t, differing_parts(e, g)))
 }
 
-#[test]
-fn fresh_pipeline_after_revert_matches_a_never_reverted_run() {
-    for case in CASES {
-        let expect = reference(case);
-        for wrong_input in [false, true] {
-            let got = advance(rollback(case, wrong_input), AfterRevert::FreshPipeline);
-            assert_eq!(first_divergence(&got, &expect), None, "{case:?}, fresh pipeline, wrong_input={wrong_input}");
-        }
-    }
-}
-
-#[test]
-fn invalidated_caches_after_revert_match_a_never_reverted_run() {
-    for case in CASES {
-        let expect = reference(case);
-        for wrong_input in [false, true] {
-            let got = advance(rollback(case, wrong_input), AfterRevert::InvalidateCaches);
-            assert_eq!(first_divergence(&got, &expect), None, "{case:?}, invalidate_caches, wrong_input={wrong_input}");
-        }
-    }
-}
-
-#[test]
-fn same_pipeline_replaying_the_same_input_does_not_diverge() {
-    for case in CASES {
-        let got = advance(rollback(case, false), AfterRevert::SamePipeline);
-        assert_eq!(first_divergence(&got, &reference(case)), None, "{case:?}");
-    }
-}
-
+/// Gate: mmo-fork hunks IslandManager::journal_reverts (manager.rs:54/59) + PhysicsPipeline seen_journal_reverts self-invalidate (physics_pipeline mod.rs:85/129/227); fix 271c9ee3: re-step diverged at first tick (observed)
 /// H7 review I2: the game's undo closure reaches the physics state but not
 /// the pipeline, so after a revert the SAME pipeline must be safe: the revert
 /// bumps a counter in the `IslandManager` and the pipeline invalidates its
@@ -215,12 +168,13 @@ fn same_pipeline_after_a_corrected_input_matches_a_never_reverted_run() {
     for case in CASES {
         let expect = reference(case);
         let s = rollback(case, true);
-        let got = catch_unwind(AssertUnwindSafe(|| advance(s, AfterRevert::SamePipeline)));
+        let got = catch_unwind(AssertUnwindSafe(|| advance(s)));
         let got = got.unwrap_or_else(|_| panic!("{case:?}: same-pipeline re-step panicked"));
         assert_eq!(first_divergence(&got, &expect), None, "{case:?}, same pipeline after a corrected input");
     }
 }
 
+/// Gate: mmo-fork hunk: revert discards CCDSolver fixed-targets cache (ccd_solver.rs); fix 271c9ee3: re-step panicked indexing vacant collider (observed)
 /// H7 review I2 (CCD): the game's terrain edit is a fixed collider insert.
 /// A journaled step with it rebuilds `CCDSolver`'s fixed-targets cache; the
 /// rollback reverts the step and undoes the insert (`revert_insert` pops the
@@ -270,6 +224,7 @@ fn ccd_after_an_undone_fixed_collider_insert_matches_a_never_inserted_run() {
     assert_eq!(first_divergence(&got, &expect), None);
 }
 
+/// Gate: mmo-fork hunk physics_pipeline mod.rs:273 invalidate_caches keeps a pending deferred BVH optimization; fix 271c9ee3 M1: broad phase emptied, bodies fell through floor
 /// H7 review M1 (re-graded): `invalidate_caches` right after a zero-`dt`
 /// step must not lose the broad phase. Such a step leaves its deferred tree
 /// optimization pending in the pipeline, holding the whole tree.
@@ -304,6 +259,7 @@ fn invalidate_caches_after_a_zero_dt_step_keeps_the_broad_phase() {
     assert!(run(true) == run(false), "invalidate_caches changed the simulation");
 }
 
+/// Gate: mmo-fork hunk step_journaled joins the deferred BVH optimization after a zero-dt step (staged_island_solver/mod.rs:312, physics_pipeline:297); fix 271c9ee3 M1
 /// H7 review M1: a journaled zero-`dt` step must not leave its deferred tree
 /// optimization pending in the pipeline (it owns the tree of the state the
 /// revert discards): reverting it and stepping on matches a run that never

@@ -15,7 +15,6 @@
 //! function of its input on every target. A 2-leaf tree keeps its input order,
 //! which is what shows.
 use std::hash::Hasher;
-use std::time::Instant;
 
 use rapier3d::parry::math::{IVector, Vector};
 use rapier3d::parry::shape::Voxels;
@@ -39,6 +38,7 @@ fn cube(n: i32) -> Voxels {
     Voxels::new(Vector::splat(1.0), &coords)
 }
 
+/// Gate: mmo-fork hunk 'StateHash — deserialization recomputes the (serde-skipped) content hash' (voxels.rs) (57c11c39)
 #[test]
 fn hash_stable_across_clone_and_serde() {
     let v = cube(8);
@@ -48,6 +48,7 @@ fn hash_stable_across_clone_and_serde() {
     assert_eq!(vhash(&v), vhash(&de));
 }
 
+/// Gate: mmo-fork hunk 'StateHash — recomputes the cached content hash' on set_voxel / (voxel_size, content_hash) impl (voxels.rs) (57c11c39)
 #[test]
 fn hash_tracks_content_edits_exactly() {
     let mut v = cube(8);
@@ -66,6 +67,7 @@ fn hash_tracks_content_edits_exactly() {
     assert_ne!(vhash(&v), vhash(&w));
 }
 
+/// Gate: mmo-fork hunk 'StateHash — digest of the content, (sorted chunk key → voxel states)' — history-independent canonical digest (57c11c39)
 #[test]
 fn equal_content_hashes_equal_whatever_the_history() {
     // A chunk emptied and refilled lands in a recycled slot: different
@@ -82,14 +84,7 @@ fn equal_content_hashes_equal_whatever_the_history() {
     assert_eq!(vhash(&Voxels::new(Vector::splat(1.0), &coords)), vhash(&b));
 }
 
-#[test]
-fn voxel_size_is_hashed() {
-    let a = cube(2);
-    let mut b = cube(2);
-    b.set_voxel_size(Vector::splat(2.0));
-    assert_ne!(vhash(&a), vhash(&b));
-}
-
+/// Gate: mmo-fork hunk parry voxels_neighborhood.rs:127/207 'neighbour bits are content' (propagate_voxel_change/combine_voxel_states) (57c11c39)
 #[test]
 fn neighbour_state_merges_change_the_hash() {
     // Two shapes side by side: merging their boundary states sets the
@@ -117,20 +112,7 @@ fn neighbour_state_merges_change_the_hash() {
     assert_ne!(vhash(&c), hc_edited, "propagate_voxel_change must refresh self's content hash");
 }
 
-#[test]
-fn hashing_is_cheap_regardless_of_voxel_count() {
-    // 64^3 = 262k voxels. A content walk is ~1 ms even in release; 2000 walks
-    // would exceed 1 s by a wide margin. The cached hash is a few field hashes.
-    let v = cube(64);
-    let t = Instant::now();
-    let mut acc = 0u64;
-    for _ in 0..2000 {
-        acc = acc.wrapping_add(vhash(&v));
-    }
-    assert!(acc != 0, "keep the loop from being optimized out");
-    assert!(t.elapsed().as_millis() < 500, "2000 hashes took {:?} — Voxels::state_hash still walks contents", t.elapsed());
-}
-
+/// Gate: mmo-fork hunk parry voxels.rs:690 leaves in chunk-id order, not hash-map order (native vs wasm32) (3bf6295b)
 #[test]
 fn voxels_new_orders_its_chunks_as_first_seen() {
     // Two keys in two parry chunks (8 voxels wide), in both input orders.

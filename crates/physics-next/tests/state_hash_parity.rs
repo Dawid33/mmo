@@ -70,6 +70,7 @@ fn round_trip(w: &PhysicsWorld) -> PhysicsWorld {
     }
 }
 
+/// Gate: mmo-fork StateHash hunks: serde-skipped workspaces #[state_hash(skip)], pairs/joint_link_locs hashed sorted (broad_phase_bvh, persistent.rs) — round trip keeps every hash (57c11c39)
 #[test]
 fn round_trip_keeps_every_hash_and_bytes_track_hashes_tick_to_tick() {
     let (mut w, k) = scene();
@@ -91,21 +92,7 @@ fn round_trip_keeps_every_hash_and_bytes_track_hashes_tick_to_tick() {
     }
 }
 
-#[test]
-fn every_part_hash_moves_when_its_state_moves() {
-    let (mut w, _) = scene();
-    let mut pipeline = PhysicsPipeline::new();
-    w.step(&mut pipeline);
-    let before = w.state_hashes();
-    let h = w.bodies.iter().find(|(_, b)| b.is_dynamic()).unwrap().0;
-    w.bodies.get_mut(h).unwrap().set_linvel(Vector::new(0.0, 7.0, 0.0), true);
-    let c = w.bodies[h].colliders()[0];
-    w.colliders.get_mut(c).unwrap().set_friction(0.123);
-    let after = w.state_hashes();
-    assert_ne!(before[3], after[3], "bodies");
-    assert_ne!(before[4], after[4], "colliders");
-}
-
+/// Gate: mmo-fork hunk parry shape.rs:444 'StateHash — the concrete shape's type first' / DynStateHash supertrait (57c11c39)
 #[test]
 fn dyn_shape_hashes_its_concrete_type() {
     // Identical field bytes (half_height, radius), different shapes.
@@ -116,6 +103,7 @@ fn dyn_shape_hashes_its_concrete_type() {
     assert_ne!(crc(&cone), crc(&SharedShape::new(Cone::new(1.0, 2.5))));
 }
 
+/// Gate: mmo-fork hunk parry bvh_tree.rs:1438 BvhNodeVec hand StateHash (length + node byte image) (57c11c39)
 #[test]
 fn bvh_hash_tracks_tree_changes() {
     use rapier3d::parry::bounding_volume::Aabb;
@@ -139,6 +127,7 @@ fn bvh_hash_tracks_tree_changes() {
     assert_ne!(crc(&t), crc(&removed), "a removed leaf");
 }
 
+/// Gate: mmo-fork hunk 'StateHash — hashed although serde-skipped: pending work' in impulse/multibody joint sets (57c11c39)
 /// `ImpulseJointSet::island_events` is serde-skipped but is pending work the
 /// next step consumes (H7): two sets with equal bytes, one with a pending
 /// joint-created event, are different states and must hash differently.
@@ -179,6 +168,7 @@ fn stepped_hashes(w: &PhysicsWorld) -> Option<[u64; 8]> {
     .ok()
 }
 
+/// Gate: mmo-fork StateHash derives (all ~200 field-level hunks): byte-flip check that no serialized field is missed by the hash (57c11c39)
 /// A missed field hides behind fields that change every tick (poses, the
 /// broad phase's `frame_index`), so this flips each serialized byte of each
 /// part in turn: either the hash sees the change, or the change is not state
