@@ -123,6 +123,9 @@ struct WorldPart {
     fence: Option<Arc<Fence>>,
     /// The prepare's answer, while it has not come.
     reply: Option<Answer<CutCommitted>>,
+    /// The super-regions the part releases (`WorldCut::releases`, Elastic 3): the fence shrinks
+    /// by them once the part is committed, before the manager hears it.
+    releases: Vec<game::SuperRegion>,
     /// Staged (the prepare answered `Ok`): its region versions.
     versions: Option<Vec<(RegionCoords, u64)>>,
     /// The store may hold the part staged (a prepare that succeeded, or failed with the
@@ -147,6 +150,7 @@ impl WorldPart {
             tick,
             fence: None,
             reply,
+            releases: Vec::new(),
             versions: None,
             maybe_staged: true,
             done: None,
@@ -410,9 +414,11 @@ impl CutWriter {
         // The manager's cut as it is: `adopts` included (an heir's parts adopt its
         // predecessor from its `SuccessionAdopted` until the settle, R4).
         let fence = self.claims.fence();
+        let releases = cut.releases.clone();
         let reply = self.claims.store().prepare_cut(cut, (*fence).clone(), generation);
         let mut part = WorldPart::new(id, tick, Some(reply));
         part.fence = Some(fence);
+        part.releases = releases;
         self.part = Some(part);
     }
 
@@ -581,6 +587,12 @@ impl CutWriter {
                         log::warn!("[server] world cut {} committed with this host's part, whose prepare answer was lost", id.0);
                         Vec::new()
                     });
+                    // What the part carried — or, for a part this writer did not stage (a
+                    // `CutPending` of an earlier one), what the manager masked for that cut.
+                    let mut releases = std::mem::take(&mut part.releases);
+                    releases.extend(manager.releases_of(id));
+                    releases.sort_unstable();
+                    releases.dedup();
                     self.part = None;
                     self.failed_in_a_row = 0;
                     self.world_saved = Instant::now();
@@ -589,6 +601,9 @@ impl CutWriter {
                     }
                     game::perf_event!("world_saved", "cut={} world=1", id.0);
                     crate::health::Health::global().world_saved();
+                    // The released rows are free in the store: out of the fence BEFORE the
+                    // manager learns it (no later load or part is checked against them).
+                    self.claims.shrink(&releases);
                     manager.cut_committed(id, versions);
                 }
                 Ok(Some(false)) => {

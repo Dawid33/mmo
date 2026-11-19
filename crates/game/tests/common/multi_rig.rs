@@ -258,6 +258,9 @@ pub enum Place {
     Transit { to: HostId },
     /// In the state of a region parked on a host (only with [`MultiRig::parked_hold`]).
     Parked { host: HostId, rc: RegionCoords },
+    /// Only in the store: a stored region of released land that runs and parks nowhere (only
+    /// with [`MultiRig::parked_hold`]).
+    Stored { rc: RegionCoords },
     /// Waiting on a host for its region's super-region to have an owner it knows
     /// (`unowned_waiting`, [`MultiRig::with_directory`]).
     Unowned { host: HostId, sr: game::SuperRegion },
@@ -419,6 +422,18 @@ pub struct MultiRig {
     /// from every later directory read, below its `next_host_id` (the rig's next id,
     /// `hosts.len()`), so each reader forgets them ([`game::WorldManager::forget_absent_hosts`]).
     pub pruned: BTreeSet<HostId>,
+    /// Every host's idle-land dial ([`Self::with_land_idle_ms`]; `None`: the manager's default),
+    /// a started host's too.
+    pub land_idle_ms: Option<u64>,
+    /// Super-regions a committed part released (Elastic 3 Task 6): their stored regions that run
+    /// and park nowhere are places of what they hold ([`Place::Stored`], with `parked_hold`).
+    pub released: BTreeSet<game::SuperRegion>,
+    /// The releases of each staged part, by `(cut, host)`: the host's fence shrinks by them
+    /// before it hears the commit ([`Self::drive_world_cuts`], the server's order).
+    pub part_releases: BTreeMap<(CutId, HostId), Vec<game::SuperRegion>>,
+    /// Hosts whose world-cut parts the rig store refuses to stage ([`Self::drive_world_cuts`]):
+    /// each such cut is decided aborted for a missing part.
+    pub fail_parts: BTreeSet<HostId>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -552,6 +567,10 @@ impl MultiRig {
                 coordinator_starts: 0,
                 decide_executions: BTreeMap::new(),
                 pruned: BTreeSet::new(),
+                land_idle_ms: None,
+                released: BTreeSet::new(),
+                part_releases: BTreeMap::new(),
+                fail_parts: BTreeSet::new(),
             };
         for h in host_ids(keepers) {
             rig.keep(h);
@@ -848,6 +867,16 @@ impl MultiRig {
             rig.manager.maintain(now);
             rig.settle();
         }
+        // What the upkeep read of the coordinator's assignments is fenced and taken in the same
+        // pass, before any peer message is read (the server's directory keeper runs right after
+        // its world link is pumped).
+        if self.claim_store.is_some() {
+            let live: Vec<HostId> = host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h)).collect();
+            for h in live {
+                let rows = self.hosts[h.0 as usize].manager.take_assigned();
+                self.fence_then_claim(h, rows);
+            }
+        }
         self.drive_world_cuts();
         self.answer_successions_read();
         self.drive_land();
@@ -940,18 +969,32 @@ impl MultiRig {
             }
             if let Some(cut) = m.take_cut() {
                 let id = cut.id;
+                if self.fail_parts.contains(&h) {
+                    self.hosts[h.0 as usize].manager.world_cut_failed(id, game::CutFailure::Store("test: refused".into()));
+                    continue;
+                }
                 match self.prepare_part(h, cut) {
                     Ok(()) => self.hosts[h.0 as usize].manager.world_cut_prepared(id),
                     Err(why) => self.hosts[h.0 as usize].manager.world_cut_failed(id, game::CutFailure::Store(why)),
                 }
             }
         }
-        for rig in &mut self.hosts {
-            for (cut, committed) in rig.manager.take_world_cut_done() {
-                if committed {
-                    rig.manager.cut_committed(cut, Vec::new());
+        for h in host_ids(self.hosts.len() as u32) {
+            for (cut, committed) in self.hosts[h.0 as usize].manager.take_world_cut_done() {
+                // The store's decision is what settles the part (a part prepared after the
+                // decision is the decision's too).
+                let stored = self.decided.get(&cut).copied().unwrap_or(committed);
+                let releases = self.part_releases.remove(&(cut, h)).unwrap_or_default();
+                if committed && stored {
+                    // The fence shrinks BEFORE the manager hears the commit (the server's order).
+                    if let Some(fence) = self.assigned_fences.get_mut(&h) {
+                        for sr in &releases {
+                            fence.remove(sr);
+                        }
+                    }
+                    self.hosts[h.0 as usize].manager.cut_committed(cut, Vec::new());
                 } else {
-                    rig.manager.cut_failed(cut);
+                    self.hosts[h.0 as usize].manager.cut_failed(cut);
                 }
             }
         }
@@ -993,6 +1036,7 @@ impl MultiRig {
     pub fn prepare_part(&mut self, h: HostId, cut: WorldCut) -> Result<(), String> {
         assert!(cut.history.is_none(), "a host's part never carries the history");
         assert_eq!(cut.host, h, "a part is its host's");
+        self.part_releases.insert((cut.id, h), cut.releases.clone());
         if let Some(&committed) = self.decided.get(&cut.id) {
             if committed {
                 self.apply_part(h, &cut);
@@ -1022,6 +1066,19 @@ impl MultiRig {
                 cut.id.0,
                 cut.tick
             );
+        }
+        // A part releases only land the store says its host holds, at the epoch its fence holds.
+        for sr in &cut.releases {
+            let row = self.claim_store.as_ref().and_then(|s| s.get(sr)).copied();
+            assert!(
+                matches!(row, Some((Some(o), _)) if o == h),
+                "cut {}: host {h} releases {sr:?}, whose row is {row:?} (seed {})",
+                cut.id.0,
+                self.seed
+            );
+            if let (Some(fenced), Some((_, epoch))) = (self.assigned_fence(h).get(sr).copied(), row) {
+                assert_eq!(fenced, epoch, "cut {}: host {h} releases {sr:?} at its fence's epoch", cut.id.0);
+            }
         }
         let mine_players: BTreeSet<PlayerId> = cut.players.iter().map(|(p, _)| *p).collect();
         let mine_ids = part_entities(&cut);
@@ -1204,8 +1261,26 @@ impl MultiRig {
                 }
             }
         }
+        // A region row is the region's, not a host's: one another host stored (land it released
+        // since) is this part's to write over.
+        for (rc, _) in &part.regions {
+            let held: Vec<HostId> = self.committed.iter().filter(|(o, s)| **o != h && s.regions.contains_key(rc)).map(|(o, _)| *o).collect();
+            for o in held {
+                let region = self.committed.get_mut(&o).and_then(|s| s.regions.remove(rc)).expect("held");
+                self.committed.entry(h).or_default().regions.entry(*rc).or_insert(region);
+            }
+        }
         self.committed.entry(h).or_default().apply(part);
         self.committed_players.extend(part.players.iter().cloned());
+        // Its releases: free rows at `epoch + 1`, with its commit (`release_in`).
+        if let Some(store) = self.claim_store.as_mut() {
+            for sr in &part.releases {
+                if let Some(row) = store.get_mut(sr) {
+                    *row = (None, row.1 + 1);
+                }
+                self.released.insert(*sr);
+            }
+        }
     }
 
     /// The last committed cut, or a panic.
@@ -1429,6 +1504,15 @@ impl MultiRig {
         }
     }
 
+    /// Every host releases land idle for `ms` (Elastic 3 Task 6, `set_land_idle_ms`; a host
+    /// started later too).
+    pub fn with_land_idle_ms(&mut self, ms: u64) {
+        self.land_idle_ms = Some(ms);
+        for rig in &mut self.hosts {
+            rig.manager.set_land_idle_ms(ms);
+        }
+    }
+
     /// The next `n` [`game::CoordMsg::Assigned`] host `h` reads are lost (0: none any more).
     pub fn drop_assigned(&mut self, h: HostId, n: usize) {
         self.world_drop_assigned[h.0 as usize].store(n, std::sync::atomic::Ordering::SeqCst);
@@ -1461,7 +1545,20 @@ impl MultiRig {
             return;
         }
         self.assigned_fences.entry(h).or_default().extend(rows.iter().copied());
-        self.hosts[h.0 as usize].manager.claimed(rows);
+        // What its region threads would read from the store for that land (another host may
+        // have saved it since: land released and assigned again).
+        let srs: BTreeSet<game::SuperRegion> = rows.iter().map(|(sr, _)| *sr).collect();
+        let s = self.s;
+        let stored: BTreeMap<RegionCoords, StoredRegion> = self
+            .committed
+            .values()
+            .flat_map(|c| c.regions.iter())
+            .filter(|(rc, _)| srs.contains(&game::super_region_of(**rc, s)))
+            .map(|(rc, r)| (*rc, r.clone()))
+            .collect();
+        let m = &mut self.hosts[h.0 as usize].manager;
+        m.spawner_mut().add_portable(stored);
+        m.claimed(rows);
     }
 
     /// Host `h` reads the rig's `super_regions` table whole, with the `hosts` rows as the
@@ -1611,7 +1708,9 @@ impl MultiRig {
     /// Host `h` holds no super-region any more: each of its rows in the rig's `super_regions`
     /// table is free (epoch + 1), and every live host's directory is read again — the state
     /// of a host that never claimed anything (claim on demand: an idle host).
-    pub fn free_land_of(&mut self, h: HostId) {
+    /// Not a release (no cut, no part: an operator's edit of the table, or a release every peer
+    /// has heard of at once) — a test that needs a real one uses [`Self::with_land_idle_ms`].
+    pub fn force_free_land_of(&mut self, h: HostId) {
         let store = self.claim_store.as_mut().expect("with_assignment");
         for (owner, epoch) in store.values_mut() {
             if *owner == Some(h) {
@@ -1677,7 +1776,7 @@ impl MultiRig {
                 }
                 Some(Place::Unsent { host, peer }) => *host == h || *peer == h,
                 Some(Place::Transit { to }) => *to == h,
-                None => false,
+                Some(Place::Stored { .. }) | None => false,
             };
             if on_h {
                 gone.insert(*id);
@@ -1802,6 +1901,9 @@ impl MultiRig {
         let live: BTreeSet<HostId> = host_ids(n).filter(|o| !self.dead.contains(o) || *o == h).collect();
         let rows = rows.into_iter().map(|(sr, o, e)| (sr, o.map_or(game::NO_OWNER, |o| o.0 as i64), e)).collect();
         rig.manager.directory_read(rows, live);
+        if let Some(ms) = self.land_idle_ms {
+            rig.manager.set_land_idle_ms(ms);
+        }
         self.hosts[h.0 as usize] = rig;
         self.dead.remove(&h);
         self.boots[h.0 as usize] = boot;
@@ -2592,6 +2694,25 @@ impl MultiRig {
             for (sr, id) in rig.manager.unowned_waiting_ids() {
                 places.entry(id).or_default().push(Place::Unowned { host, sr });
             }
+        }
+        if parked_hold && !self.released.is_empty() {
+            let mut live: BTreeSet<RegionCoords> = BTreeSet::new();
+            for rig in &self.hosts {
+                live.extend(rig.manager.running_regions());
+                live.extend(rig.manager.parked_regions());
+            }
+            for store in self.committed.values() {
+                for (rc, region) in &store.regions {
+                    if self.released.contains(&game::super_region_of(*rc, self.s)) && !live.contains(rc) {
+                        for b in &region.entities {
+                            places.entry(b.id).or_default().push(Place::Stored { rc: *rc });
+                        }
+                    }
+                }
+            }
+        }
+        for (h, rig) in self.hosts.iter_mut().enumerate() {
+            let host = HostId(h as u64);
             for (peer, id, sent) in rig.manager.peer_unreceived_ids() {
                 if sent {
                     shadows.insert(id);

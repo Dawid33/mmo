@@ -9095,7 +9095,7 @@ fn ownerless_returns(rig: &mut MultiRig) {
     let (s, leaver) = (rig.owner(rs), rig.owner(rd));
     keeper_may_park(rig, leaver);
     until_committed(rig, 1);
-    rig.free_land_of(leaver);
+    rig.force_free_land_of(leaver);
     for h in host_ids(rig.hosts.len() as u32) {
         assert_eq!(rig.hosts[h.0 as usize].manager.owner_of(rd), game::Owner::Free, "host {h}: the leaver holds nothing");
     }
@@ -11598,4 +11598,428 @@ fn the_rig_store_refuses_a_stale_version() {
     assert_eq!(write(&mut store, 1, vec![3], None, vec![begin.clone()]), Ok(2));
     assert_eq!(store.take_committed(), vec![(CallStamp { replica: me, version: 2 }, begin)], "committed with its transition");
     assert_eq!(store.row().unwrap().history, vec![9]);
+}
+
+// --- Elastic 3 Task 6: idle land is released in a committed cut --------------------------------
+
+/// The idle dial of the release tests (two world-cut periods of the rig).
+const IDLE_MS: u64 = 2_000;
+
+/// Cut rounds a release may take once its land is idle: the idle time, a scan period, a few cuts.
+const RELEASE_ROUNDS: usize = ((IDLE_MS + game::LAND_IDLE_SCAN_MS + 4 * WORLD_CUT_EVERY_MS) / game::TICK_RATE) as usize;
+
+/// An assigning world (`assigning_world` over `rows`) with world cuts, whose hosts release land
+/// idle for [`IDLE_MS`].
+fn releasing_world(rig: &mut MultiRig, rows: Vec<(game::SuperRegion, Option<HostId>, u64)>) {
+    assigning_world(rig, rows);
+    rig.with_world_cuts(WORLD_CUT_EVERY_MS);
+    rig.with_land_idle_ms(IDLE_MS);
+    // Regions park and their land is released: what they hold is tracked parked, then stored.
+    rig.parked_hold = true;
+}
+
+/// [`rendezvous_rows`] with `sr` given to host `h`.
+fn rows_giving(rig: &MultiRig, sr: game::SuperRegion, h: HostId) -> Vec<(game::SuperRegion, Option<HostId>, u64)> {
+    let mut rows = rendezvous_rows(rig, &[], &[]);
+    for row in &mut rows {
+        if row.0 == sr {
+            row.1 = Some(h);
+        }
+    }
+    rows
+}
+
+/// [`push_player_into`] with cut rounds (world cuts and every host's upkeep go on meanwhile).
+fn push_player_cutting(rig: &mut MultiRig, a: RegionCoords, b: RegionCoords, rounds: usize) -> bool {
+    for _ in 0..rounds {
+        match rig.player_body(P_CLIENT) {
+            Some((_, rc, _)) if rc == b => return true,
+            Some((_, rc, id)) if rc == a => {
+                rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0));
+            }
+            _ => {}
+        }
+        rig.cut_round();
+    }
+    matches!(rig.player_body(P_CLIENT), Some((_, rc, _)) if rc == b)
+}
+
+/// Cut rounds until host `h` released `sr`: the store's row is free and `h` heard the decision
+/// (its mask lifted, its directory says free); then every live host's backstop directory read
+/// (until Task 7's `Released`, a peer learns of a release only by a read). `false` past the
+/// budget.
+fn until_released(rig: &mut MultiRig, h: HostId, sr: game::SuperRegion, rc: RegionCoords) -> bool {
+    let done = until_cut_rounds(rig, RELEASE_ROUNDS + WORLD_CUT_ROUNDS, |rig| {
+        let m = &rig.hosts[h.0 as usize].manager;
+        rig.stored_owner(sr).is_none() && !m.land_releasing().contains(&sr) && m.owner_of(rc) == game::Owner::Free
+    });
+    let live: Vec<HostId> = host_ids(rig.hosts.len() as u32).filter(|o| !rig.dead.contains(o)).collect();
+    for o in live {
+        rig.read_directory(o);
+    }
+    done
+}
+
+/// Every live host's released total.
+fn released_total(rig: &MultiRig) -> u64 {
+    host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).map(|h| rig.hosts[h.0 as usize].manager.land_released_total()).sum()
+}
+
+/// Whether some live host masks `sr` for a release now.
+fn releasing_now(rig: &MultiRig, sr: game::SuperRegion) -> bool {
+    host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).any(|h| rig.hosts[h.0 as usize].manager.land_releasing().contains(&sr))
+}
+
+/// A player walks into free `b` (assigned to the least-loaded host), walks back out; `b` parks,
+/// idles, and its owner releases it in a committed cut: the row is free, the owner's fence lacks
+/// it. The player walks in again: the land is assigned afresh (the old owner is the busiest now)
+/// and the player crosses into `b` once.
+fn idle_released_and_assigned_afresh(rig: &mut MultiRig) {
+    let hosts = rig.hosts.len() as u32;
+    let (a, b) = host_seam(hosts, 1);
+    let sr = sr_of(rig, b);
+    releasing_world(rig, rendezvous_rows(rig, &[sr], &[]));
+    let ha = rig.owner(a);
+    rig.run(a);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    assert!(push_player_cutting(rig, a, b, WALK_ROUNDS), "the player never crossed into {b:?}");
+    let first = rig.stored_owner(sr).expect("assigned");
+    assert!(push_player_cutting(rig, b, a, WALK_ROUNDS), "the player never walked back into {a:?}");
+    assert!(
+        until_cut_rounds(rig, WORLD_CUT_ROUNDS, |rig| rig.stored_owner(sr).is_none()),
+        "{sr:?} was never released (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
+    // The store committed; the host hears the decision at its next upkeep.
+    assert!(
+        until_cut_rounds(rig, WORLD_CUT_ROUNDS, |rig| !rig.hosts[first.0 as usize].manager.land_releasing().contains(&sr)),
+        "the mask is lifted"
+    );
+    assert!(!rig.assigned_fence(first).contains_key(&sr), "the old owner's fence lacks {sr:?}");
+    assert_eq!(rig.hosts[first.0 as usize].manager.owner_of(b), game::Owner::Free, "free in the old owner's directory");
+    // Every host's backstop directory read (`TERRAIN_POLL_SECS`) shows the row free: until
+    // Task 7's `Released`, a peer that has not read since hands the player to the old owner,
+    // which parks it (the arrivals table's "Free, B not yet told").
+    for h in host_ids(hosts) {
+        rig.read_directory(h);
+    }
+    rig.loads.insert(first, BUSY);
+    let owner = least_loaded(rig, sr);
+    assert!(push_player_cutting(rig, a, b, WALK_ROUNDS), "the player never crossed into {b:?} again");
+    assert_eq!(rig.stored_owner(sr), Some(owner), "assigned afresh, to the least-loaded host");
+    assert_eq!(rig.player_owners(P_CLIENT), [(owner, b)], "the player is in {b:?} once");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn idle_land_is_released_in_a_committed_cut_and_assigned_afresh_on_the_next_need() {
+    for hosts in [2, 3] {
+        sweep(
+            "idle_land_is_released_in_a_committed_cut_and_assigned_afresh_on_the_next_need",
+            hosts,
+            1,
+            SEEDS / 4,
+            idle_released_and_assigned_afresh,
+        );
+    }
+}
+
+/// One row of the busy table holds `b`'s super-region on its owner: through three committed
+/// cuts after it would have idled out, it is never masked and stays its owner's — while other
+/// idle land is released meanwhile.
+fn busy_land_stays(rig: &mut MultiRig, case: u32) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    let sr = sr_of(rig, b);
+    releasing_world(rig, rows_giving(rig, sr, ha));
+    rig.run(a);
+    match case {
+        // A running region.
+        0 => rig.run(b),
+        // A connected home.
+        1 => rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(b, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])),
+        // A pending arrival: a slime walks into `b`, which does not run (nothing wakes it).
+        _ => {
+            let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+            assert!(
+                until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == id)),
+                "the slime never waited for {b:?}"
+            );
+        }
+    }
+    // Three committed cuts after other idle land was first released (`b` idled out as long).
+    let mut goal = None;
+    for _ in 0..RELEASE_ROUNDS + WORLD_CUT_ROUNDS {
+        if goal.is_none() && released_total(rig) > 0 {
+            goal = Some(committed(rig) + 3);
+        }
+        if goal.is_some_and(|g| committed(rig) >= g) {
+            break;
+        }
+        rig.cut_round();
+        assert!(!releasing_now(rig, sr), "case {case}: {sr:?} is masked for a release (seed {})", rig.seed);
+    }
+    assert!(goal.is_some_and(|g| committed(rig) >= g), "other idle land was released, then three cuts committed");
+    assert_eq!(rig.stored_owner(sr), Some(ha), "case {case}: {sr:?} stays host {ha}'s");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn land_with_anything_aimed_at_it_is_not_released() {
+    fn running(rig: &mut MultiRig) {
+        busy_land_stays(rig, 0);
+    }
+    fn home(rig: &mut MultiRig) {
+        busy_land_stays(rig, 1);
+    }
+    fn arrival(rig: &mut MultiRig) {
+        busy_land_stays(rig, 2);
+    }
+    sweep("land_with_anything_aimed_at_it_is_not_released (running)", 2, 1, SEEDS / 4, running);
+    sweep("land_with_anything_aimed_at_it_is_not_released (home)", 2, 1, SEEDS / 4, home);
+    sweep("land_with_anything_aimed_at_it_is_not_released (arrival)", 2, 1, SEEDS / 4, arrival);
+}
+
+/// One host owning every super-region of the rows, its clock at 0: its upkeep at `idle_ms` past
+/// the first idle scan, then a world cut begun directly — the super-regions it masks.
+fn masked_after_idle(idle_ms: u64) -> Vec<game::SuperRegion> {
+    let mut rig = MultiRig::new(1, 1, None, 0, 0);
+    let rows = rendezvous_rows(&rig, &[], &[]);
+    rig.with_directory(rows);
+    rig.with_assignment();
+    rig.with_land_idle_ms(IDLE_MS);
+    rig.maintain_all(game::LAND_IDLE_SCAN_MS);
+    rig.maintain_all(idle_ms);
+    let m = &mut rig.hosts[0].manager;
+    let tick = m.spawner_mut().world_tick() + 100;
+    m.begin_world_cut(game::CutId(1), tick, &[HostId(0)], &[]).expect("begun");
+    let masked = m.land_releasing();
+    assert!(!masked.contains(&sr_of(&rig, rig.homes[0])), "the keeper's land is busy");
+    masked
+}
+
+#[test]
+fn land_is_not_released_before_it_was_idle_long_enough() {
+    assert_eq!(masked_after_idle(IDLE_MS - 1), Vec::new(), "idle 1 999 ms: nothing released");
+    assert!(!masked_after_idle(IDLE_MS).is_empty(), "idle 2 000 ms: released");
+}
+
+/// Host `ha` owns idle `b`; the cut that masks it aborts for another host's missing part. A slime
+/// walking into `b` meanwhile waits on `ha`; at the abort the mask lifts, the land stays `ha`'s and
+/// the slime lands there once.
+fn aborted_release_keeps_the_land(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    let other = HostId(1 - ha.0);
+    let sr = sr_of(rig, b);
+    releasing_world(rig, rows_giving(rig, sr, ha));
+    rig.run(a);
+    rig.fail_parts.insert(other);
+    assert!(
+        until_cut_rounds(rig, RELEASE_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.land_releasing().contains(&sr)),
+        "{sr:?} was never masked (seed {})",
+        rig.seed
+    );
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.unowned_waiting_ids().contains(&(sr, id))),
+        "the slime waits for {sr:?} on host {ha} while it is masked"
+    );
+    assert!(rig.hosts[ha.0 as usize].manager.land_releasing().contains(&sr), "still masked (no decision read)");
+    assert!(
+        until_cut_rounds(rig, WORLD_CUT_ROUNDS, |rig| !rig.hosts[ha.0 as usize].manager.land_releasing().contains(&sr)),
+        "the abort never lifted the mask"
+    );
+    rig.fail_parts.clear();
+    assert_eq!(rig.stored_owner(sr), Some(ha), "the land stays host {ha}'s");
+    assert!(
+        until(rig, CROSS_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.pending_arrival_ids().iter().any(|(i, _)| *i == id)),
+        "the slime waits for {b:?} on host {ha} (delivered there)"
+    );
+    rig.run(b);
+    until_settled_in(rig, id, b);
+    assert_eq!(rig.owners_of(id), [(ha, b)], "landed once on host {ha}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_aborted_cut_keeps_the_land_and_what_waited_is_delivered_here() {
+    sweep("an_aborted_cut_keeps_the_land_and_what_waited_is_delivered_here", 2, 1, SEEDS / 4, aborted_release_keeps_the_land);
+}
+
+/// Review Focus 1. The player stands in `a` beside idle `b`, both host `ha`'s. Once a cut masks
+/// `b` (its part may be staged, its decision not read yet) the player is pushed into `b`: with
+/// plain rounds first (the walk before the decision) or with cut rounds throughout (the decision
+/// meanwhile). It is clamped at the seam while the land is masked, conserved every round, and
+/// crosses into `b` exactly once when the land has an owner again.
+fn walk_into_land_being_released(rig: &mut MultiRig, walk_first: bool) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    let sr = sr_of(rig, b);
+    releasing_world(rig, rows_giving(rig, sr, ha));
+    rig.run(a);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    assert!(
+        until_cut_rounds(rig, RELEASE_ROUNDS, |rig| rig.hosts[ha.0 as usize].manager.land_releasing().contains(&sr)),
+        "{sr:?} was never masked (seed {})",
+        rig.seed
+    );
+    let mut crossed = false;
+    for i in 0..WALK_ROUNDS {
+        match rig.player_body(P_CLIENT) {
+            Some((_, rc, _)) if rc == b => {
+                crossed = true;
+                break;
+            }
+            Some((_, rc, id)) if rc == a => {
+                rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0));
+            }
+            _ => {}
+        }
+        if rig.hosts[ha.0 as usize].manager.land_releasing().contains(&sr) {
+            assert_ne!(rig.player_body(P_CLIENT).map(|(_, rc, _)| rc), Some(b), "in {b:?} while it is masked");
+        }
+        if walk_first && i < 2 * CROSS_ROUNDS / 3 {
+            rig.round();
+        } else {
+            rig.cut_round();
+        }
+    }
+    assert!(crossed, "the player never crossed into {b:?}: {:?} (seed {})", rig.player_body(P_CLIENT), rig.seed);
+    let owner = rig.stored_owner(sr).expect("an owner");
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.player_owners(P_CLIENT) == [(owner, b)]), "the player is in {b:?} once, on host {owner}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_player_walking_into_land_being_released_waits_at_the_seam_and_crosses_once() {
+    fn walk_first(rig: &mut MultiRig) {
+        walk_into_land_being_released(rig, true);
+    }
+    fn decision_first(rig: &mut MultiRig) {
+        walk_into_land_being_released(rig, false);
+    }
+    sweep("a_player_walking_into_land_being_released_waits_at_the_seam_and_crosses_once (walk first)", 2, 1, SEEDS / 4, walk_first);
+    sweep("a_player_walking_into_land_being_released_waits_at_the_seam_and_crosses_once (decision first)", 2, 1, SEEDS / 4, decision_first);
+}
+
+/// Review Focus 4. Host A runs and parks `b` (a blob of `b` empty of slimes on A), then releases
+/// its super-region. Host B is assigned it, takes in a slime, parks and releases it in turn. A is
+/// assigned it again: `b` starts from the store — holding B's slime — never from A's old blob.
+fn back_to_its_releaser_from_the_store(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let host_b = rig.owner(a);
+    let host_a = rig.owner(b);
+    let sr = sr_of(rig, b);
+    releasing_world(rig, rendezvous_rows(rig, &[], &[]));
+    rig.parked_hold = true;
+    rig.run(b);
+    rig.park(b);
+    rig.run(a);
+    assert!(until_released(rig, host_a, sr, b), "host {host_a} never released {sr:?} (seed {})", rig.seed);
+    assert!(!rig.hosts[host_a.0 as usize].manager.parked_regions().contains(&b), "the releaser's blob of {b:?} is dropped");
+    rig.loads.insert(host_a, BUSY);
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    assert!(until_cut_rounds(rig, WORLD_CUT_ROUNDS, |rig| rig.stored_owner(sr) == Some(host_b)), "{sr:?} assigned to host {host_b}");
+    assert!(until(rig, CROSS_ROUNDS, |rig| owners_seen(rig, b).iter().all(|o| *o == Some(host_b))), "every directory names {host_b}");
+    rig.run(b);
+    until_settled_in(rig, id, b);
+    rig.park(b);
+    rig.loads.insert(host_b, BUSY);
+    rig.loads.remove(&host_a);
+    assert!(until_released(rig, host_b, sr, b), "host {host_b} never released {sr:?} (seed {})", rig.seed);
+    rig.hosts[host_a.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), crate::common::rig::CLIENT));
+    assert!(until_cut_rounds(rig, WORLD_CUT_ROUNDS, |rig| rig.stored_owner(sr) == Some(host_a)), "{sr:?} assigned back to host {host_a}");
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.hosts[host_a.0 as usize].manager.owns(b)), "host {host_a} owns {b:?} again");
+    // Its keeper keeps `b` running there (the other host's directory may not name it yet).
+    rig.hosts[host_a.0 as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), crate::common::rig::CLIENT));
+    assert!(until(rig, CROSS_ROUNDS, |rig| rig.owners_of(id) == [(host_a, b)]), "{b:?} holds host {host_b}'s slime on host {host_a}: {:?}", rig.owners_of(id));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn land_released_and_assigned_back_to_its_releaser_starts_from_the_store() {
+    sweep(
+        "land_released_and_assigned_back_to_its_releaser_starts_from_the_store",
+        2,
+        1,
+        SEEDS / 4,
+        back_to_its_releaser_from_the_store,
+    );
+}
+
+/// A total crash's taker holds all the land (host 0, all but host 1's keeper's): the world
+/// restarted from the store, every super-region with no player in it is free within the idle
+/// time plus a scan and a few cuts.
+fn total_crash_land_drains(rig: &mut MultiRig) {
+    let home1 = sr_of(rig, rig.homes[1]);
+    let rows: Vec<_> = rendezvous_rows(rig, &[], &[]).into_iter().map(|(sr, _, e)| (sr, Some(HostId(if sr == home1 { 1 } else { 0 })), e)).collect();
+    rig.with_directory(rows);
+    let mut again = rig.rebuild_from_last_cut();
+    let rows = again.directory.clone().expect("rows");
+    releasing_world(&mut again, rows);
+    let homes: std::collections::BTreeSet<game::SuperRegion> = again.homes.iter().map(|rc| sr_of(&again, *rc)).collect();
+    let held = |rig: &MultiRig| -> std::collections::BTreeSet<game::SuperRegion> {
+        rig.claim_store.as_ref().expect("a table").iter().filter(|(_, (o, _))| o.is_some()).map(|(sr, _)| *sr).collect()
+    };
+    assert!(
+        until_cut_rounds(&mut again, RELEASE_ROUNDS, |rig| held(rig) == homes),
+        "land with no player is not free: {} rows held (seed {})",
+        held(&again).len(),
+        again.seed
+    );
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_total_crash_takers_idle_land_drains_back_to_free() {
+    sweep("a_total_crash_takers_idle_land_drains_back_to_free", 2, 1, SEEDS / 4, total_crash_land_drains);
+}
+
+/// A host dies holding land; while its succession is open no live host masks anything for a
+/// release (its idle land idled out long ago); once it is settled, idle land goes.
+fn nothing_released_during_a_succession(rig: &mut MultiRig) {
+    let chain = heir_world(rig);
+    let rd = chain[1];
+    until_committed(rig, 1);
+    let dead = rig.owner(rd);
+    rig.kill(dead);
+    let s = rig.run_succession(dead).remove(0);
+    rig.with_land_idle_ms(IDLE_MS);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        let open = rig.open_successions().contains(&s.id)
+            || host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h)).any(|h| !rig.hosts[h.0 as usize].manager.successions().is_empty());
+        if !open {
+            break;
+        }
+        let masked: Vec<HostId> =
+            host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h) && !rig.hosts[h.0 as usize].manager.land_releasing().is_empty()).collect();
+        assert!(masked.is_empty(), "hosts {masked:?} mask land while succession {} is open (seed {})", s.id.0, rig.seed);
+        rig.cut_round();
+    }
+    assert!(!rig.open_successions().contains(&s.id), "succession {} settled", s.id.0);
+    assert!(until_cut_rounds(rig, RELEASE_ROUNDS, |rig| released_total(rig) > 0), "idle land goes once it is settled");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn no_land_is_released_while_a_succession_is_open() {
+    sweep_hosts("no_land_is_released_while_a_succession_is_open", nothing_released_during_a_succession);
+}
+
+#[test]
+fn a_static_host_releases_nothing() {
+    let mut rig = MultiRig::new(2, 1, None, 0, 0);
+    rig.with_land_idle_ms(IDLE_MS);
+    rig.maintain_all(game::LAND_IDLE_SCAN_MS);
+    rig.maintain_all(10 * IDLE_MS);
+    for h in host_ids(2) {
+        let m = &mut rig.hosts[h.0 as usize].manager;
+        let tick = m.spawner_mut().world_tick() + 100;
+        m.begin_world_cut(game::CutId(1), tick, &[HostId(0), HostId(1)], &[]).expect("begun");
+        assert_eq!(m.land_releasing(), Vec::new(), "host {h} (static) masks nothing");
+    }
 }

@@ -142,9 +142,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Who simulates super-region `sr`, as this host knows it — `Unknown` for one it
-    /// inherits by a succession it has not adopted yet (`succession.rs`, `inheriting`).
+    /// inherits by a succession it has not adopted yet (`succession.rs`, `inheriting`), and for
+    /// one its pending world-cut part releases (`land.rs`, `releasing`).
     pub(super) fn owner_of_sr(&self, sr: crate::SuperRegion) -> crate::Owner {
-        if self.inheriting.contains_key(&sr) {
+        // Land being inherited, and land this host's pending part releases (`land.rs`): no
+        // region of it starts until the cut is decided.
+        if self.inheriting.contains_key(&sr) || self.releasing.contains_key(&sr) {
             return crate::Owner::Unknown;
         }
         self.ownership.0.owner_of(sr)
@@ -1196,6 +1199,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         let sr = crate::super_region_of(rc, self.ownership.1);
         if self.inheriting.contains_key(&sr) {
             // This host's already (a succession not adopted yet): nothing to ask or read.
+            return;
+        }
+        if self.releasing.contains_key(&sr) {
+            // Masked for a release: the need waits for the decision (asked once it is free).
+            self.land_needed.insert(sr);
             return;
         }
         match self.ownership.0.owner_of(sr) {

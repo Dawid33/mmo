@@ -310,6 +310,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             return Err(CutFailure::Aborted);
         }
         let outsiders: BTreeSet<HostId> = self.peers.keys().copied().filter(|h| outside(h)).collect();
+        // Idle land this part releases is masked from here until the cut is decided here
+        // (`land.rs`): a region load there would wait for the staged part's decision.
+        let now_ms = self.clock_ms;
+        if !i_leave {
+            self.begin_release(cut, now_ms);
+        }
         // A participant this host cannot reach now would never bring its mark: the pair
         // counts instead (the fourth case), once the part is begun.
         let unreachable: Vec<HostId> = peers.iter().copied().filter(|p| !self.peer_reachable(*p)).collect();

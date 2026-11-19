@@ -2275,3 +2275,49 @@ fn the_ticker_killed_mid_cut_hands_over_without_a_double_declaration() {
     assert_eq!(t.w.store.world_generation().unwrap(), generation);
     t.stop(&db, &dir);
 }
+
+/// Elastic 3 Task 6 (the server's dial `VOXEL_LAND_IDLE_MS`; set on each manager here, as the
+/// server does from it): a host comes to own a second super-region, which then idles — nothing
+/// runs or waits there. A world cut releases it: its `super_regions` row is free (-1), the
+/// host's fence lacks it, its next two cuts commit (a fence still holding the row would refuse
+/// them), and it is never fenced.
+#[test]
+#[ignore = "slow: >100ms — run via just test-r4"]
+fn idle_land_is_released_and_the_releasers_next_cut_commits() {
+    install_props();
+    let Some(db) = PgDb::create("tk_release") else { return };
+    let dir = scratch("tk_release");
+    let mut t = Takeover::start(&db, &dir, 2, CrashPolicy::Succession, false);
+    let s = t.w.store.super_region_regions();
+    let seam_srs: BTreeSet<game::SuperRegion> = t.seams.iter().map(|rc| game::super_region_of(*rc, s)).collect();
+    let far = RegionCoords::new(t.seams[0].x, t.seams[0].z + 3 * s as i32);
+    let sr = game::super_region_of(far, s);
+    assert!(!seam_srs.contains(&sr), "{sr:?} is no seam's");
+    // A visitor of host 0 needs `far`: the coordinator assigns its land to a host.
+    t.watch(h(0), far);
+    let row = |t: &Takeover| t.w.store.owners().unwrap().into_iter().find(|(r, _, _)| *r == sr);
+    t.until("the far land is assigned", LONG, |t| row(t).is_some_and(|(_, o, _)| o >= 0));
+    let owner = HostId(row(&t).unwrap().1 as u64);
+    t.until("its owner holds it", WAIT, |t| t.sim(owner).manager.owner_of(far) == game::Owner::Me);
+    // The visitor lets it go: nothing holds that land any more.
+    let visitor = 90 + far.x as u64 * 7 + far.z as u64;
+    let now = t.w.pair.now();
+    let _ = t.sim(h(0)).manager.handle_server_event(ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(far), visitor), now);
+    let _ = t.sim(h(0)).manager.handle_server_event(ServerEvent::ClientDisconnected(visitor), now);
+    for sim in &mut t.w.pair.sims {
+        sim.manager.set_land_idle_ms(1_500);
+    }
+    t.until("the idle land is released", LONG, |t| row(t).is_some_and(|(_, o, _)| o == game::NO_OWNER));
+    let fenced_epoch = t.w.claims[owner.0 as usize].fence().epochs.get(&sr).copied();
+    t.until("its owner heard the decision", WAIT, |t| t.sim(owner).manager.owner_of(far) == game::Owner::Free);
+    assert_eq!(t.w.claims[owner.0 as usize].fence().epochs.get(&sr), None, "the fence lacks {sr:?} (was {fenced_epoch:?})");
+    assert!(t.sim(owner).manager.land_released_total() >= 1);
+    let k = decisions(&db).into_iter().filter(|(_, _, c)| *c).map(|(c, _, _)| c).max().unwrap();
+    let k = t.until_committed_after(&db, k);
+    let _ = t.until_committed_after(&db, k);
+    for h in [h(0), h(1)] {
+        assert!(!t.w.claims[h.0 as usize].fenced().is_set(), "host {h} is not fenced");
+    }
+    assert_eq!(row(&t).map(|(_, o, _)| o), Some(game::NO_OWNER), "still free");
+    t.stop(&db, &dir);
+}

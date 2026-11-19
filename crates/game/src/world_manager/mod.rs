@@ -32,7 +32,7 @@ mod succession;
 mod world_cut;
 mod world_link;
 pub use drain::{drain_remaining_secs, DRAIN_RETELL_TOLERANCE_TICKS};
-pub use land::LAND_NEEDED_EVERY_MS;
+pub use land::{LAND_IDLE_MS, LAND_IDLE_SCAN_MS, LAND_NEEDED_EVERY_MS};
 pub use peers::intents_in;
 pub use succession::{SuccessionReportIn, SUCCESSION_WAIT_LOG_MS};
 pub use placement::{
@@ -1241,6 +1241,22 @@ pub struct WorldManager<S: RegionSpawner> {
     /// `clock_ms` of the last scan for land of departed hosts ([`LAND_NEEDED_EVERY_MS`]: what
     /// is held for them is looked through at most once per period, not every pump).
     land_scanned_ms: Option<u64>,
+    /// How long owned land nothing holds stays this host's ([`LAND_IDLE_MS`];
+    /// [`Self::set_land_idle_ms`]; `land.rs`).
+    land_idle_ms: u64,
+    /// Each owned super-region nothing holds, with the `now_ms` it was first seen so
+    /// ([`Self::scan_idle_land`]).
+    land_idle_since: BTreeMap<crate::SuperRegion, u64>,
+    /// When the idle stamps were last made ([`LAND_IDLE_SCAN_MS`]; 0: never).
+    idle_scanned_ms: u64,
+    /// Super-regions this host's part of a world cut releases, by that cut: masked
+    /// ([`Self::owner_of`] answers `Unknown`) from its `BeginCut` until it is decided here.
+    releasing: BTreeMap<crate::SuperRegion, CutId>,
+    /// Super-regions this host released, with the free row's epoch, until the directory shows
+    /// them owned again.
+    recently_released: BTreeMap<crate::SuperRegion, u64>,
+    /// Super-regions released since start (the `[server]` line).
+    land_released_total: u64,
     /// An `Unknown` owner was hit: the server reads the directory whole
     /// ([`Self::take_directory_wanted`]).
     directory_wanted: bool,
@@ -1570,6 +1586,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             land_needed_sent: BTreeMap::new(),
             assigned_rows: Vec::new(),
             land_scanned_ms: None,
+            land_idle_ms: LAND_IDLE_MS,
+            land_idle_since: BTreeMap::new(),
+            idle_scanned_ms: 0,
+            releasing: BTreeMap::new(),
+            recently_released: BTreeMap::new(),
+            land_released_total: 0,
             directory_wanted: false,
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
@@ -2376,6 +2398,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.client_disconnected(c, now_ms);
         }
         self.close_idle_observers(now_ms);
+        // Owned land nothing holds is stamped idle (`land.rs`): a world cut releases it.
+        self.scan_idle_land(now_ms);
         // A drain's notice to the sessions that became home here since (`drain.rs`).
         self.tell_drain();
         // A succession waiting for its base cut (a commit found by the store's poll).
@@ -2590,6 +2614,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         for rc in stale {
             self.invalidate_region_lod(rc);
         }
+        // Its releases (the server shrank its fence first): free now, the mask lifts.
+        self.land_released(id);
     }
 
     /// The store failed to commit cut `id` (one-phase), or world cut `id` was decided
@@ -2600,6 +2626,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         // the journal forgets its marks.
         self.journal.aborted(id);
         self.cut_settled_failed(id);
+        // Decided (or never staged): what its part would have released stays this host's. Not
+        // at `world_cut_failed`: a part that failed may still be staged (a backend error), and
+        // a region load in that land waits for its decision meanwhile.
+        self.release_aborted(id);
     }
 
     /// [`Self::cut_failed`] without the journal: this host's part failed before any decision.
@@ -3083,7 +3113,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             // From `SuccessionAdopted` until the settle: what the coordinator's `settles`
             // pairs with (`succession.rs`).
             adopts: self.adopting_predecessors(),
-            releases: Vec::new(),
+            // Masked since its `BeginCut` (`land.rs`): the store frees them with the commit.
+            releases: self.releases_of(cut.id),
         };
         log::debug!(
             "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",

@@ -59,6 +59,20 @@ fn server_port_from(value: Option<&str>) -> Result<u16, String> {
     }
 }
 
+/// How long owned land nothing holds stays this host's before a world cut releases it, in ms
+/// (Elastic 3; unset or empty = [`game::LAND_IDLE_MS`]): the twin's and the tests' dial.
+pub const LAND_IDLE_MS_ENV: &str = "VOXEL_LAND_IDLE_MS";
+
+/// The idle-land dial from the value of [`LAND_IDLE_MS_ENV`]; anything but a number refuses the
+/// start.
+fn land_idle_ms_from(value: Option<&str>) -> Result<u64, String> {
+    let value = value.map(str::trim).unwrap_or("");
+    if value.is_empty() {
+        return Ok(game::LAND_IDLE_MS);
+    }
+    value.parse::<u64>().map_err(|_| format!("invalid {LAND_IDLE_MS_ENV} value `{value}` (expected a number of ms)"))
+}
+
 /// The WebTransport ingress's port (unset or empty = [`WEBTRANSPORT_PORT`]): several hosts
 /// on one machine (`just dev-r3`) each need their own.
 pub const WT_PORT_ENV: &str = "VOXEL_WT_PORT";
@@ -1161,6 +1175,11 @@ pub fn run() -> claims::ServerExit {
         lod_result_recv,
     );
     manager.set_ownership(ownership, super_region_regions);
+    let land_idle_ms = land_idle_ms_from(std::env::var(LAND_IDLE_MS_ENV).ok().as_deref()).unwrap_or_else(|message| fatal(&message));
+    if land_idle_ms != game::LAND_IDLE_MS {
+        info!("[server] land idle for {land_idle_ms} ms is released ({LAND_IDLE_MS_ENV})");
+    }
+    manager.set_land_idle_ms(land_idle_ms);
     // `claim`: the directory read whole before anything is placed or restored (until then
     // every owner is `Unknown`), and the loop's directory keeper (it fences assigned land).
     let mut directory_keeper = None;
@@ -1734,6 +1753,13 @@ mod tests {
         let gone = std::sync::atomic::AtomicBool::new(false);
         watch_parent(&b"anything"[..], &gone);
         assert!(gone.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn land_idle_ms_from_env_value() {
+        assert_eq!(land_idle_ms_from(None), Ok(game::LAND_IDLE_MS));
+        assert_eq!(land_idle_ms_from(Some(" 1500 ")), Ok(1500));
+        assert!(land_idle_ms_from(Some("soon")).unwrap_err().contains(LAND_IDLE_MS_ENV));
     }
 
     #[test]

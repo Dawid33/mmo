@@ -1116,6 +1116,34 @@ mod tests {
         store.shutdown();
     }
 
+    /// Elastic 3, Review Focus 3: a read issued before a release, applied after it. The part
+    /// that released `sr` committed (the store's row is free at epoch 5), the fence was shrunk
+    /// and the manager knows `(sr, None, 5)`; a read taken before the commit shows `(sr, me, 4)`:
+    /// it adds nothing to the fence (a fence holding a row this host no longer has would refuse
+    /// its next cut part).
+    #[test]
+    fn a_directory_read_older_than_a_release_adds_nothing_to_the_fence() {
+        let store = memory_store();
+        let me = register(&store, 10);
+        let sr = (0, 3);
+        for _ in 0..4 {
+            store.claim_super_regions(me, vec![sr]).unwrap();
+        }
+        assert_eq!(store.owners().unwrap(), vec![(sr, me.0 as i64, 4)], "the stale read's row");
+        let claims = HostClaims::none(store.clone(), me);
+        claims.add(Fence { owner: me, epochs: [(sr, 4)].into_iter().collect(), all_hosts: false });
+        claims.shrink(&[sr]);
+        assert!(claims.fence().epochs.is_empty(), "shrunk at the commit");
+        let mut keeper = DirectoryKeeper::new(claims.clone(), 10);
+        let mut m = Told::new(claims.clone());
+        m.known = Some(5);
+        m.wants_read = true;
+        until_read(&mut keeper, &mut m);
+        assert_eq!(m.events, [format!("read, fence {:?}", Vec::<(SuperRegion, u64)>::new())], "nothing healed");
+        assert!(claims.fence().epochs.is_empty(), "the fence still lacks {sr:?}");
+        store.shutdown();
+    }
+
     /// Elastic 3: the rows the coordinator assigned are in the fence before the manager's
     /// `claimed` (the fake checks the fence when it is told).
     #[test]
