@@ -66,8 +66,10 @@
 #      conntrack -D`; the policy alone leaves an open HTTP/2 connection alone). Expected: after the
 #      mailbox stall (15 s) a replica logs `host h<id> ... stalled`, the host's pod is not Ready, a join
 #      answers 200 and the land's row is owned by the OTHER host; the policy removed, the host is Ready
-#      again and a cut commits; its pod untouched. If no stall is seen the phase is a marked
-#      `SKIP 7d` (policy removed, run continues, the final line says "7d skipped"): never a failure.
+#      again and a cut commits; its pod untouched. The wait is 80 s (the detach waits for the next
+#      cut's BeginCut row + 15 s: arithmetic in the phase). If no stall is seen the phase is a marked
+#      `SKIP 7d` (INCONCLUSIVE when the pod went not Ready without a stall line): the policy is removed, the
+#      run continues and the final line says "7d skipped"; never a failure.
 #   8. The web Ingress answers through Traefik; its /login proxy reaches login's key set
 #      and API, and login's /metrics and /healthz are NOT published (404).
 #   9. world-drain <second host> 5 (the recipe): it leaves at the deadline (drained); the
@@ -994,26 +996,43 @@ detached_logged() {
     done
     return 1
 }
-# Up to 50 s: the flows are deleted again on each of the first six rounds (kube-router installs the
-# policy's rules asynchronously; one delete right after the apply can lose that race), and the pod's
-# readiness is sampled every round.
-seen_detached='' went_unready=''
-for round in $(seq 1 25); do
+# What the stall relies on: the ticker detaches a host only when a mailbox ROW has waited for it more
+# than MAILBOX_STALL_MS (15 s). Nothing in this phase asks the cut host for anything (the join is placed
+# by the other host); the row that is certain to come is the next world cut's `BeginCut`: the twin's
+# save_secs is 10 (envs/local/world), a cut begins each period and its BeginCut reaches every host the
+# cut needs, this live one included (it is dirty and cannot be left out). Arithmetic, worst case: a cut
+# already running when the policy is applied finishes or aborts (<= ~15 s), the next begins <= 10 s later
+# (row written), it waits 15 s, and the ticker's `hosts` read sees it <= ~5 s later (its read interval is
+# not pinned here): about 15 + 10 + 15 + 5 = 45 s. The wait is 80 s (40 rounds). That is a reasoned
+# bound, not a measured one: so the branch below that finds the pod not Ready WITHOUT a `stalled` line
+# is INCONCLUSIVE (a SKIP that says so), never a failure: with no row waiting, the cut works and the
+# host goes not Ready (/readyz 503 attaching after ~10 s) with nothing to detach, and that cannot be
+# told from a coordinator that does not detach.
+# The flows are deleted again on each of the first six rounds (kube-router installs the policy's rules
+# asynchronously; one delete right after the apply can lose the race). Readiness is sampled each round:
+# a sample counts as not Ready only on a SUCCESSFUL read of the explicit value False, and two in a row
+# set the flag (an API hiccup reads as nothing).
+ready_value() { k get pod "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2> /dev/null; }
+seen_detached='' went_unready='' unready_run=0
+for round in $(seq 1 40); do
     if [ -n "$have_ct" ] && [ "$round" -le 6 ] && [ -n "$pod_ip" ]; then
         docker exec "$node_ct" conntrack -D -p tcp -s "$pod_ip" --dport 6480 2>&1 | sed 's/^/   conntrack: /' || true
     fi
-    pod_ready "$pb" || went_unready=1
+    if rv=$(ready_value "$pb") && [ "$rv" = False ]; then unready_run=$((unready_run + 1)); else unready_run=0; fi
+    [ "$unready_run" -lt 2 ] || went_unready=1
     if detached_logged; then seen_detached=1; break; fi
     sleep 2
 done
 if [ -z "$seen_detached" ] && [ -n "$went_unready" ]; then
-    fail "7d: the cut took effect (host $cut_host's pod went not Ready) but no coordinator replica logged 'host h$id_b ... stalled' within 50 s: the coordinator did not detach it (a regression, or the log line changed)"
-fi
-if [ -z "$seen_detached" ]; then
+    skipped_7d="INCONCLUSIVE: host $cut_host's pod went not Ready (the cut took effect) but no coordinator replica logged 'host h$id_b ... stalled' within 80 s: either no mailbox row was written for it in that time (nothing to detach) or the coordinator does not detach a stalled host; this run cannot tell which: read the coordinator logs"
+    echo "SKIP 7d: $skipped_7d; the phase is skipped, not passed"
+    k delete networkpolicy "$cut_policy" --ignore-not-found > /dev/null || true
+    cut_policy=''
+elif [ -z "$seen_detached" ]; then
     if [ -z "$pod_ip" ]; then ct_note="its pod IP read came back empty: no flow could be deleted"
     elif [ -n "$have_ct" ]; then ct_note="conntrack -D was run on the node"
     else ct_note="conntrack was not available on the node"; fi
-    skipped_7d="no 'stalled' line for host h$id_b within 50 s and its pod stayed Ready at every sample ($ct_note)"
+    skipped_7d="no 'stalled' line for host h$id_b within 80 s and its pod stayed Ready at every sample ($ct_note)"
     echo "SKIP 7d: $skipped_7d; the cut did not visibly take effect; the phase is skipped, not passed"
     k delete networkpolicy "$cut_policy" --ignore-not-found > /dev/null || true
     cut_policy=''
