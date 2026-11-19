@@ -8,7 +8,9 @@
 //!
 //! Run: just forge-proto                          (32 m cells, ~5 s)
 //!      just forge-proto --cell 16                (full detail, ~30 s)
-//!      just forge-proto --cell 64 --size 100352  (a ~100 km continent, ~15 s)
+//!      just forge-proto --cell 64 --size medium  (a 100 × 50 km world)
+//!      just forge-report --size dev --seeds 4    (forge in-process, print the
+//!                                                 report's numbers, no PNGs)
 //!      just forge-proto --search 64              (rank 64 seeds at 32 m)
 //!      just forge-proto --no-geology --no-climate   (the F0 behaviour)
 //!      just forge-ui                             (tuning page: every knob as a
@@ -39,6 +41,7 @@
 
 mod render;
 use worldgen::forge::render::PreviewLayer;
+mod report;
 mod search;
 mod serve;
 
@@ -47,6 +50,7 @@ use std::path::PathBuf;
 
 use worldgen::forge::hydrology;
 use worldgen::forge::knobs;
+use worldgen::forge::play;
 use worldgen::forge::{forge, ForgeParams};
 
 const DEFAULT_OUT: &str = "target/world-forge/f1";
@@ -65,6 +69,13 @@ pub struct Params {
     /// its viewer in the middle of the land instead of where `spawn::pick`
     /// chose.
     pub spawn: Option<[f64; 2]>,
+    /// `--report`: print the report's lines ([`report::report`]) instead of
+    /// writing PNGs.
+    pub report: bool,
+    /// `--seeds N`: how many seeds `--report` forges (`seed`, `seed + 1`, …).
+    pub seeds: usize,
+    /// `--out` was given (`--report` writes a world file only then).
+    pub out_given: bool,
 }
 
 impl Deref for Params {
@@ -88,15 +99,23 @@ impl Params {
             search: 0,
             serve: None,
             spawn: None,
+            report: false,
+            seeds: 1,
+            out_given: false,
         };
+        let (mut width, mut height) = (None, None);
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
             let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
             match flag.as_str() {
                 "--size" => {
-                    let size: f64 = value().parse().expect("--size <meters>");
-                    (p.width_m, p.height_m) = (size, size);
+                    let size = play::size_flag(&value()).unwrap_or_else(|e| panic!("{e}"));
+                    (width, height) = (Some(size.width_m), Some(size.height_m));
                 }
+                "--width" => width = Some(value().parse().expect("--width <meters>")),
+                "--height" => height = Some(value().parse().expect("--height <meters>")),
+                "--report" => p.report = true,
+                "--seeds" => p.seeds = value().parse().expect("--seeds <count>"),
                 "--cell" => p.cell_m = value().parse().expect("--cell <meters>"),
                 "--iters" => p.knobs.iters = value().parse().expect("--iters <count>"),
                 "--seed" => {
@@ -104,7 +123,10 @@ impl Params {
                     let hex = v.trim_start_matches("0x").replace('_', "");
                     p.seed = u64::from_str_radix(&hex, 16).expect("--seed <hex>");
                 }
-                "--out" => p.out = PathBuf::from(value()),
+                "--out" => {
+                    p.out = PathBuf::from(value());
+                    p.out_given = true;
+                }
                 "--dt" => p.knobs.dt_years = value().parse().expect("--dt <years>"),
                 "--uplift" => p.knobs.uplift = value().parse().expect("--uplift <m/yr>"),
                 "--k" => p.knobs.erodibility = value().parse().expect("--k <erodibility>"),
@@ -136,12 +158,13 @@ impl Params {
                     assert!(p.knobs.set(key, number), "--set: no knob named {key} (see knobs.rs)");
                 }
                 other => panic!(
-                    "unknown argument {other}; flags: --size --cell --iters --seed --out --dt \
+                    "unknown argument {other}; flags: --size <name> | --width <m> --height <m>, --cell --iters --seed --out --dt \
                      --uplift --k --diffusivity --no-geology --no-climate --preset <name> --set <knob>=<value> \
-                     --search <n> --serve <port> --spawn <x>,<z>"
+                     --search <n> --serve <port> --spawn <x>,<z> --report [--seeds <n>]"
                 ),
             }
         }
+        (p.width_m, p.height_m) = play::sides_flags(width, height, (p.width_m, p.height_m)).unwrap_or_else(|e| panic!("{e}"));
         p
     }
 }
@@ -149,6 +172,15 @@ impl Params {
 
 fn main() {
     let p = Params::parse();
+    if p.report {
+        if p.out_given {
+            if let Some(dir) = p.out.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).expect("create output directory");
+            }
+        }
+        report::run(&p);
+        return;
+    }
     if let Some(dir) = p.out.parent() {
         std::fs::create_dir_all(dir).expect("create output directory");
     }
@@ -300,14 +332,11 @@ fn print_rivers_and_peaks(forged: &worldgen::forge::Forged, a: &worldgen::forged
 /// Biome shares (of all cells, and of land), region counts per type, and
 /// the alignment and savagery split.
 fn print_biomes(a: &worldgen::forged::WorldArtifact) {
-    use worldgen::forge::regions::{biome_shares, region_counts};
-    use game::Biome;
-    let water = |b: Biome| matches!(b, Biome::Ocean | Biome::FrozenOcean | Biome::Lake);
-    let land_cells = a.biome.iter().filter(|&&b| !Biome::from_u8(b).is_some_and(water)).count().max(1) as f64;
+    use worldgen::forge::regions::region_counts;
     let total = a.biome.len() as f64;
     println!("biomes (share of all cells / of land):");
-    for (b, share) in biome_shares(&a.biome) {
-        let land = if water(b) { String::from("     -") } else { format!("{:5.1}%", 100.0 * share * total / land_cells) };
+    for (b, share, land) in report::biome_shares_with_land(a) {
+        let land = land.map_or_else(|| String::from("     -"), |land| format!("{:5.1}%", 100.0 * land));
         println!("  {:<26} {:5.1}%  {land}", b.name(), 100.0 * share);
     }
     let counts = region_counts(&a.regions);

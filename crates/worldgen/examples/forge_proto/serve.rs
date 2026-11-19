@@ -163,7 +163,14 @@ fn parse_query(query: &str) -> Vec<(String, String)> {
 /// The page's query -> forge parameters. Knob values are clamped to their
 /// table range, so a typo cannot ask for a million iterations.
 fn params_from_query(base: &Params, query: &str) -> Result<Params, String> {
-    let mut p = Params { forge: ForgeParams { quiet: true, ..base.forge.clone() }, search: 0, serve: None, spawn: None, out: base.out.clone() };
+    let mut p = Params {
+        forge: ForgeParams { quiet: true, ..base.forge.clone() },
+        search: 0,
+        serve: None,
+        spawn: None,
+        report: false,
+        ..base.clone()
+    };
     for (key, value) in parse_query(query) {
         match key.as_str() {
             "seed" => {
@@ -208,7 +215,10 @@ fn num(v: f64) -> String {
 }
 
 fn knobs_json(base: &Params) -> String {
-    let mut s = format!("{{\"seed\": \"{:X}\", \"width_m\": {}, \"knobs\": [", base.seed, base.width_m);
+    let mut s = format!(
+        "{{\"seed\": \"{:X}\", \"width_m\": {}, \"height_m\": {}, \"knobs\": [",
+        base.seed, base.width_m, base.height_m
+    );
     for (i, spec) in SPECS.iter().enumerate() {
         let _ = write!(
             s,

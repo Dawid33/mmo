@@ -270,13 +270,16 @@ pub fn delete(root: &Path, entry: &WorldEntry) -> io::Result<()> {
 
 /// A world's extent for the menu: "100 × 50 km" (whole km from 10 km up, so
 /// 16,384 m reads 16 km), "2.5 × 2.5 km", "800 × 400 m" — the unit of the
-/// longer side.
+/// longer side; in km a side under 1 km keeps one decimal ("16 × 0.4 km").
 pub fn size_text(width_m: f64, height_m: f64) -> String {
     let longer = width_m.max(height_m);
+    let km = |side: f64, whole: bool| {
+        if whole && side >= 1000.0 { format!("{}", (side / 1000.0).round() as u64) } else { format!("{:.1}", side / 1000.0) }
+    };
     if longer >= 10_000.0 {
-        format!("{} × {} km", (width_m / 1000.0).round() as u64, (height_m / 1000.0).round() as u64)
+        format!("{} × {} km", km(width_m, true), km(height_m, true))
     } else if longer >= 1000.0 {
-        format!("{:.1} × {:.1} km", width_m / 1000.0, height_m / 1000.0)
+        format!("{} × {} km", km(width_m, false), km(height_m, false))
     } else {
         format!("{} × {} m", width_m as u64, height_m as u64)
     }

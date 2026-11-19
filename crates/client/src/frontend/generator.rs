@@ -92,11 +92,12 @@ pub const PREVIEW_CELLS: [(f64, &str); 5] =
 /// at the chosen size (`play::offered_cells`).
 pub use worldgen::forge::play::WORLD_CELLS;
 
-/// Land's non-knob row: the world's edge length (`ForgeParams::size_m`) for
-/// the preview and Play forges. The row's labels add the Play forge's
-/// estimated time at the chosen world cell (`forge::play::forge_estimate`).
-/// The sizes live in `forge::play` (default 100 km, DF's medium world).
-pub const WORLD_SIZE_KEY: &str = "world_size";
+/// Land's non-knob row: the world's size (`forge::play::WORLD_SIZES`, its
+/// width and height) for the preview and Play forges. The row's labels add the
+/// Play forge's estimated time at the chosen world cell
+/// (`forge::play::forge_estimate`). Its value is an index into the 2:1 table,
+/// so the key is not the old square table's `world_size`.
+pub const WORLD_SIZE_KEY: &str = "world_size_2to1";
 pub use worldgen::forge::play::{DEFAULT_WORLD_SIZE, WORLD_SIZES};
 
 /// A knob whose range is whole numbers at least this wide slides in steps of 1.
@@ -281,12 +282,15 @@ impl GeneratorState {
         if self.tab == 0 {
             let sizes: Vec<String> = WORLD_SIZES
                 .iter()
-                .map(|&(size_m, label)| format!("{label} · {}", forge_estimate(size_m, self.world_cell_m()).time_text()))
+                .map(|s| {
+                    let time = forge_estimate(s.width_m, s.height_m, self.world_cell_m()).time_text();
+                    format!("{} · {} · {time}", s.name, play::km_text(s.width_m, s.height_m))
+                })
                 .collect();
             rows.push(choice_row(
                 WORLD_SIZE_KEY,
                 "World size",
-                "Edge length of the square world, with the estimated Play forge time at the World cell (Advanced). 100 km is Dwarf Fortress's medium world.",
+                "The world's width (west to east) and height (north to south), with the estimated Play forge time at the World cell (Advanced).",
                 &sizes,
                 self.world_size,
                 DEFAULT_WORLD_SIZE,
@@ -307,7 +311,8 @@ impl GeneratorState {
                 self.preview_cell,
                 0,
             ));
-            let offered = play::offered_cells(self.size_m());
+            let (width_m, height_m) = self.dimensions();
+            let offered = play::offered_cells(width_m, height_m);
             rows.push(choice_row(
                 WORLD_CELL_KEY,
                 "World cell",
@@ -320,14 +325,19 @@ impl GeneratorState {
         rows
     }
 
-    pub fn size_m(&self) -> f64 {
-        WORLD_SIZES[self.world_size.min(WORLD_SIZES.len() - 1)].0
+    /// The chosen size's (width, height) in metres.
+    pub fn dimensions(&self) -> (f64, f64) {
+        let s = WORLD_SIZES[self.world_size.min(WORLD_SIZES.len() - 1)];
+        (s.width_m, s.height_m)
     }
 
     /// The preview's cell: the override, or auto for the world size.
     pub fn preview_cell_m(&self) -> f64 {
         match PREVIEW_CELLS[self.preview_cell.min(PREVIEW_CELLS.len() - 1)].0 {
-            PREVIEW_AUTO => play::preview_cell_for(self.size_m()),
+            PREVIEW_AUTO => {
+                let (width_m, height_m) = self.dimensions();
+                play::preview_cell_for(width_m, height_m)
+            }
             cell => cell,
         }
     }
@@ -339,18 +349,21 @@ impl GeneratorState {
 
     /// What Play is expected to cost at the current size and world cell.
     pub fn play_estimate(&self) -> ForgeEstimate {
-        forge_estimate(self.size_m(), self.world_cell_m())
+        let (width_m, height_m) = self.dimensions();
+        forge_estimate(width_m, height_m, self.world_cell_m())
     }
 
-    /// The line beside Play, e.g. "100 km at 16 m: ≈ 8 min, ≈ 8 GB RAM (est.)".
+    /// The line beside Play, e.g. "100 × 50 km at 16 m: ≈ 8 min, ≈ 4 GB RAM (est.)".
     pub fn play_estimate_text(&self) -> String {
-        format!("{:.0} km at {:.0} m: {}", self.size_m() / 1_000.0, self.world_cell_m(), self.play_estimate().text())
+        let (width_m, height_m) = self.dimensions();
+        format!("{} at {:.0} m: {}", play::km_text(width_m, height_m), self.world_cell_m(), self.play_estimate().text())
     }
 
     pub fn params(&self, cell_m: f64) -> ForgeParams {
+        let (width_m, height_m) = self.dimensions();
         ForgeParams {
-            width_m: self.size_m(),
-            height_m: self.size_m(),
+            width_m,
+            height_m,
             cell_m,
             seed: self.seed,
             knobs: self.knobs.clone(),
@@ -435,15 +448,19 @@ impl GeneratorState {
             WORLD_SIZE_KEY => {
                 self.world_size = (value.round().max(0.0) as usize).min(WORLD_SIZES.len() - 1);
                 self.stale = true;
-                // A cell over the memory cap at the new size falls back to the default.
-                if !play::offered_cells(self.size_m()).contains(&self.world_cell) {
-                    self.world_cell = 0;
+                // A cell over the memory cap at the new size falls back to the
+                // first offered one (Large at 16 m is over the cap: 32 m).
+                let (width_m, height_m) = self.dimensions();
+                let offered = play::offered_cells(width_m, height_m);
+                if !offered.contains(&self.world_cell) {
+                    self.world_cell = offered.first().copied().unwrap_or(0);
                     self.row_updates.push(WORLD_CELL_KEY.to_string());
                 }
             }
             WORLD_CELL_KEY => {
                 // The row lists only the offered cells: its value indexes them.
-                let offered = play::offered_cells(self.size_m());
+                let (width_m, height_m) = self.dimensions();
+                let offered = play::offered_cells(width_m, height_m);
                 let pick = (value.round().max(0.0) as usize).min(offered.len().saturating_sub(1));
                 self.world_cell = offered.get(pick).copied().unwrap_or(0);
                 // The size row's labels carry the estimate at this cell.
@@ -707,6 +724,8 @@ fn forge_world(
         return fail(ForgeEvent::Cancelled);
     }
     let png = render::encode_png(&render::render(&forged, PreviewLayer::Relief));
+    // The world's sides as forged (`nx · cell`), not as asked for.
+    let (width_m, height_m) = (forged.world.nx as f64 * forged.world.dx, forged.world.nz as f64 * forged.world.dx);
     drop(forged);
     let meta = world_store::WorldMeta {
         format_version: world_store::META_FORMAT,
@@ -714,8 +733,8 @@ fn forge_world(
         name: name.clone(),
         created_utc: rfc3339_utc(SystemTime::now()),
         seed: params.seed,
-        width_m: params.width_m,
-        height_m: params.height_m,
+        width_m,
+        height_m,
         cell_m: params.cell_m,
         preset: presets::matching(&params.knobs).map_or(CUSTOM, |p| p.name).to_string(),
         knobs: world_store::knobs_map(&params.knobs),
@@ -821,7 +840,8 @@ fn apply_generator_actions(
             GeneratorAction::Play if job.is_none() && state.forging.is_none() => {
                 // Backstop for the offered cells: never start a forge the
                 // machine is not expected to hold.
-                if let Err(why) = play::check_play_ram(state.size_m(), state.world_cell_m(), play::physical_memory_bytes()) {
+                let (width_m, height_m) = state.dimensions();
+                if let Err(why) = play::check_play_ram(width_m, height_m, state.world_cell_m(), play::physical_memory_bytes()) {
                     state.play_error = why;
                     continue;
                 }

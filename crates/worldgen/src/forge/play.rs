@@ -13,13 +13,13 @@ pub const PREVIEW_CELL_CHOICES: [f64; 4] = [32.0, 64.0, 128.0, 256.0];
 /// forge, so it can follow the sliders.
 pub const PREVIEW_MAX_CELLS: f64 = 262_144.0;
 
-/// The finest of [`PREVIEW_CELL_CHOICES`] whose grid has at most
-/// [`PREVIEW_MAX_CELLS`] cells (the coarsest if none does).
-pub fn preview_cell_for(size_m: f64) -> f64 {
+/// The finest of [`PREVIEW_CELL_CHOICES`] whose `width_m × height_m` grid has
+/// at most [`PREVIEW_MAX_CELLS`] cells (the coarsest if none does).
+pub fn preview_cell_for(width_m: f64, height_m: f64) -> f64 {
     PREVIEW_CELL_CHOICES
         .iter()
         .copied()
-        .find(|&cell| (size_m / cell).powi(2) <= PREVIEW_MAX_CELLS)
+        .find(|&cell| (width_m / cell) * (height_m / cell) <= PREVIEW_MAX_CELLS)
         .unwrap_or(PREVIEW_CELL_CHOICES[PREVIEW_CELL_CHOICES.len() - 1])
 }
 
@@ -48,8 +48,9 @@ pub struct ForgeEstimate {
     pub peak_ram_bytes: f64,
 }
 
-pub fn forge_estimate(size_m: f64, cell_m: f64) -> ForgeEstimate {
-    let cells = (size_m / cell_m).round().powi(2);
+/// The cost of a `width_m × height_m` forge at `cell_m` (`nx · nz` cells).
+pub fn forge_estimate(width_m: f64, height_m: f64, cell_m: f64) -> ForgeEstimate {
+    let cells = (width_m / cell_m).round() * (height_m / cell_m).round();
     ForgeEstimate {
         secs: FORGE_SECS_PER_MCELL * (cells / 1.0e6).powf(FORGE_COST_EXPONENT),
         peak_ram_bytes: FORGE_RAM_BASE_BYTES + FORGE_RAM_BYTES_PER_CELL * cells,
@@ -82,12 +83,59 @@ impl ForgeEstimate {
     }
 }
 
-/// The generator's world sizes (edge length, label). The default is
-/// [`DEFAULT_WORLD_SIZE`], Dwarf Fortress's medium world (196 tiles of 512 m);
-/// `ForgeParams::default()` (server auto-forge, tests) stays 16 km / 32 m.
-pub const WORLD_SIZES: [(f64, &str); 4] =
-    [(16_000.0, "16 km"), (32_000.0, "32 km"), (64_000.0, "64 km"), (100_352.0, "100 km (DF Medium)")];
-pub const DEFAULT_WORLD_SIZE: usize = 3;
+/// One of the generator's world sizes: a name and the world's two sides. Every
+/// size is 2:1 (west–east twice north–south) and a multiple of 256 m (the play
+/// `REGION_BLOCKS`; all but Tiny's height also of 512 m, the largest) and of
+/// 128 m (the coarsest forge cell), so it is a whole number of regions and of
+/// cells with no snapping.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldSize {
+    pub name: &'static str,
+    pub width_m: f64,
+    pub height_m: f64,
+}
+
+/// The generator's world sizes, smallest first. The default is
+/// [`DEFAULT_WORLD_SIZE`] (Medium); `ForgeParams::default()` (server
+/// auto-forge, tests) stays 16 km / 32 m.
+pub const WORLD_SIZES: [WorldSize; 4] = [
+    WorldSize { name: "Tiny", width_m: 25_088.0, height_m: 12_544.0 },
+    WorldSize { name: "Small", width_m: 50_176.0, height_m: 25_088.0 },
+    WorldSize { name: "Medium", width_m: 100_352.0, height_m: 50_176.0 },
+    WorldSize { name: "Large", width_m: 200_704.0, height_m: 100_352.0 },
+];
+pub const DEFAULT_WORLD_SIZE: usize = 2;
+
+/// The developers' size (not in the menu): small enough to forge in seconds.
+pub const DEV_WORLD_SIZE: WorldSize = WorldSize { name: "Dev", width_m: 16_384.0, height_m: 8_192.0 };
+
+/// The size called `name` (any case): one of [`WORLD_SIZES`] or `"dev"`.
+pub fn world_size_named(name: &str) -> Option<WorldSize> {
+    WORLD_SIZES.iter().chain([&DEV_WORLD_SIZE]).find(|s| s.name.eq_ignore_ascii_case(name)).copied()
+}
+
+/// The forms a world size takes on a command line (`worldctl forge`, `forge_proto`).
+pub const SIZE_FORMS: &str = "--size <tiny|small|medium|large|dev> or --width <m> --height <m>";
+
+/// `--size`'s value: a size name ([`world_size_named`]). A bare number is
+/// refused — a world has two sides; give them with `--width` / `--height`.
+pub fn size_flag(value: &str) -> Result<WorldSize, String> {
+    world_size_named(value).ok_or_else(|| format!("--size {value}: not a size name; give {SIZE_FORMS}"))
+}
+
+/// The two sides given by `--width` / `--height` (both or neither) over `default`.
+pub fn sides_flags(width: Option<f64>, height: Option<f64>, default: (f64, f64)) -> Result<(f64, f64), String> {
+    match (width, height) {
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Ok((w, h)),
+        (None, None) => Ok(default),
+        _ => Err(format!("--width and --height are given together, both above 0; give {SIZE_FORMS}")),
+    }
+}
+
+/// "16 × 8 km", "100 × 50 km": a size's sides, rounded to whole km.
+pub fn km_text(width_m: f64, height_m: f64) -> String {
+    format!("{:.0} × {:.0} km", width_m / 1_000.0, height_m / 1_000.0)
+}
 
 /// The cells Play may forge at (cell, label), the default first. Which are
 /// offered depends on the size: [`offered_cells`].
@@ -97,11 +145,11 @@ pub const WORLD_CELLS: [(f64, &str); 3] = [(16.0, "16 m"), (32.0, "32 m (coarse,
 /// estimated peak memory is above this is offered or forged.
 pub const MAX_PLAY_FORGE_RAM_BYTES: f64 = 12.0 * 1024.0 * 1024.0 * 1024.0;
 
-/// Indices into [`WORLD_CELLS`] whose forge at `size_m` is estimated within
-/// [`MAX_PLAY_FORGE_RAM_BYTES`] (100 km: 16 m and 32 m, not 8 m).
-pub fn offered_cells(size_m: f64) -> Vec<usize> {
+/// Indices into [`WORLD_CELLS`] whose forge of `width_m × height_m` is
+/// estimated within [`MAX_PLAY_FORGE_RAM_BYTES`].
+pub fn offered_cells(width_m: f64, height_m: f64) -> Vec<usize> {
     (0..WORLD_CELLS.len())
-        .filter(|&i| forge_estimate(size_m, WORLD_CELLS[i].0).peak_ram_bytes <= MAX_PLAY_FORGE_RAM_BYTES)
+        .filter(|&i| forge_estimate(width_m, height_m, WORLD_CELLS[i].0).peak_ram_bytes <= MAX_PLAY_FORGE_RAM_BYTES)
         .collect()
 }
 
@@ -113,16 +161,16 @@ pub fn play_ram_limit_bytes(physical: Option<f64>) -> f64 {
 
 /// Play's backstop: `Err(status line)` when the forge's estimated peak
 /// memory is over [`play_ram_limit_bytes`].
-pub fn check_play_ram(size_m: f64, cell_m: f64, physical: Option<f64>) -> Result<(), String> {
-    let need = forge_estimate(size_m, cell_m).peak_ram_bytes;
+pub fn check_play_ram(width_m: f64, height_m: f64, cell_m: f64, physical: Option<f64>) -> Result<(), String> {
+    let need = forge_estimate(width_m, height_m, cell_m).peak_ram_bytes;
     let limit = play_ram_limit_bytes(physical);
     if need <= limit {
         return Ok(());
     }
     let why = if limit < MAX_PLAY_FORGE_RAM_BYTES { "half of this machine's memory" } else { "the forge's memory cap" };
     Err(format!(
-        "{:.0} km at {cell_m:.0} m needs ≈ {:.0} GB to forge (est.), over {why} ({:.0} GB): pick a coarser World cell or a smaller size.",
-        size_m / 1_000.0,
+        "{} at {cell_m:.0} m needs ≈ {:.0} GB to forge (est.), over {why} ({:.0} GB): pick a coarser World cell or a smaller size.",
+        km_text(width_m, height_m),
         (need / 1.0e9).ceil(),
         limit / 1.0e9
     ))

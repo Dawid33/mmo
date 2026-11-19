@@ -346,7 +346,12 @@ pub struct WorldArtifact {
 pub fn knobs_from_map(map: &BTreeMap<String, f64>) -> crate::forge::Knobs {
     let mut k = crate::forge::Knobs::default();
     for (key, &value) in map {
-        k.set(key, value);
+        // A stored value that is not a number keeps the default; the rest
+        // are held to the knob's range (an unknown key is ignored).
+        let Some(spec) = crate::forge::knobs::SPECS.iter().find(|s| s.key == key) else { continue };
+        if value.is_finite() {
+            k.set(key, value.clamp(spec.min, spec.max));
+        }
     }
     k
 }

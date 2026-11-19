@@ -71,12 +71,13 @@
 use std::path::Path;
 
 use game::HostId;
-use worldgen::forge::{self, ForgeParams};
+use worldgen::forge::{self, play, ForgeParams};
 
 use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
-pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
+pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] \
+[--size <tiny|small|medium|large|dev> | --width <m> --height <m>] [--cell <m>] \
 [--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl hosts <url>\n       worldctl desired <url>\n       worldctl drain <url> <host id> [--in <secs>]\n       worldctl retire-host <url> <host id>\n       worldctl rollback <url> --yes";
 
 /// Runs one `worldctl` command (`args` without the program name); `Ok` is what it
@@ -149,15 +150,18 @@ fn parse_db(value: &str) -> Result<StoreUrl, String> {
 pub fn parse_forge(args: &[String]) -> Result<(StoreUrl, ForgeParams), String> {
     let mut db = None;
     let mut p = ForgeParams { quiet: false, ..ForgeParams::default() };
+    let (mut width, mut height) = (None, None);
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value\n{USAGE}"));
         match flag.as_str() {
             "--db" => db = Some(parse_db(value()?)?),
             "--size" => {
-                let size: f64 = value()?.parse().map_err(|_| "--size <metres>".to_string())?;
-                (p.width_m, p.height_m) = (size, size);
+                let size = play::size_flag(value()?)?;
+                (width, height) = (Some(size.width_m), Some(size.height_m));
             }
+            "--width" => width = Some(value()?.parse().map_err(|_| "--width <metres>".to_string())?),
+            "--height" => height = Some(value()?.parse().map_err(|_| "--height <metres>".to_string())?),
             "--cell" => p.cell_m = value()?.parse().map_err(|_| "--cell <metres>".to_string())?,
             "--seed" => {
                 let v = value()?;
@@ -185,6 +189,7 @@ pub fn parse_forge(args: &[String]) -> Result<(StoreUrl, ForgeParams), String> {
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
     }
+    (p.width_m, p.height_m) = play::sides_flags(width, height, (p.width_m, p.height_m))?;
     Ok((db.ok_or_else(|| format!("forge needs --db <url>\n{USAGE}"))?, p))
 }
 
