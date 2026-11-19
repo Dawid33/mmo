@@ -82,7 +82,7 @@ locals {
     VOXEL_HOST_NAME           = "__NAME__"
     VOXEL_ADVERTISE_QUIC      = "${var.public_host}:__QUIC_PORT__"
     VOXEL_ADVERTISE_WT        = "https://${var.public_host}:__WT_PORT__/"
-    VOXEL_COORDINATOR_ADDR    = "${local.coordinator_fq}:6480"
+    VOXEL_COORDINATOR_ADDR    = "https://${local.coordinator_fq}:6480"
     VOXEL_BIND_ADDR           = "0.0.0.0"
     VOXEL_SERVER_PORT         = "6466"
     VOXEL_WT_PORT             = "6467"

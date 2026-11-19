@@ -5,10 +5,11 @@
 # on its version, which is the only thing that keeps their writes apart (not this
 # count, the budget or the strategy). The lowest live replica id is the ticker (the
 # timed and lease work; mmo_coordinator_is_ticker). Every replica mounts the same
-# identity Secrets (identities.tf): one pin for all of them, so a host or the login
-# service dialing coordinator.<ns> (the headless Service below resolves to every pod)
-# reaches any replica. Each listens for hosts on 6480/UDP and for the login service on
-# 6490/UDP, and serves /livez, /readyz (200 once its join committed) and /metrics on 9100.
+# identity Secret (identities.tf): one pin for all of them, so a host or the login
+# service dialing https://coordinator.<ns>.svc.cluster.local:6480 (the ClusterIP Service
+# below spreads the connections over the Ready replicas) reaches any replica. Each serves
+# the coordinator's HTTPS API (HTTP/2 over TCP) for hosts and for the login service on
+# 6480, and /livez, /readyz (200 once its join committed) and /metrics on 9100.
 #
 # Recreate: a template change (an image set by a release) stops every replica before
 # the new ones start, so no two builds ever share the row. Releases stop the world
@@ -86,23 +87,14 @@ resource "kubernetes_deployment_v1" "coordinator" {
             default_mode = local.secret_mode
           }
         }
-        volume {
-          name = "login-link-identity"
-          secret {
-            secret_name  = kubernetes_secret_v1.link_identity["login-link"].metadata[0].name
-            default_mode = local.secret_mode
-          }
-        }
         container {
           name              = "coordinator"
           image             = var.images.server
           image_pull_policy = "IfNotPresent"
           dynamic "env" {
             for_each = merge(local.server_env, {
-              VOXEL_ROLE                      = "coordinator"
-              VOXEL_COORDINATOR_BIND          = "0.0.0.0:6480"
-              VOXEL_LOGIN_LINK_BIND           = "0.0.0.0:6490"
-              VOXEL_LOGIN_LINK_CERT_HASH_FILE = "${local.login_link_dir}/${local.link_file}"
+              VOXEL_ROLE             = "coordinator"
+              VOXEL_COORDINATOR_BIND = "0.0.0.0:6480"
               }, local.fleet_env, {
               VOXEL_FLEET_MAX = tostring(var.fleet.max)
             })
@@ -121,14 +113,9 @@ resource "kubernetes_deployment_v1" "coordinator" {
             }
           }
           port {
-            name           = "link"
+            name           = "api"
             container_port = 6480
-            protocol       = "UDP"
-          }
-          port {
-            name           = "login"
-            container_port = 6490
-            protocol       = "UDP"
+            protocol       = "TCP"
           }
           port {
             name           = "health"
@@ -142,11 +129,6 @@ resource "kubernetes_deployment_v1" "coordinator" {
           volume_mount {
             name       = "coordinator-identity"
             mount_path = local.coordinator_dir
-            read_only  = true
-          }
-          volume_mount {
-            name       = "login-link-identity"
-            mount_path = local.login_link_dir
             read_only  = true
           }
           security_context {
@@ -209,11 +191,15 @@ resource "kubernetes_pod_disruption_budget_v1" "coordinator" {
   }
 }
 
-# Headless: hosts (6480) and the login service (6490, output login_link) resolve
-# coordinator.<ns>.svc.cluster.local to every replica pod's own IP at every dial, so no UDP
-# conntrack entry to a Service IP outlives a restart, and an unready coordinator
-# (waiting for its forge) is still reachable. The health port is here for the
-# ServiceMonitor (charts/world-monitor).
+# ClusterIP, one port: hosts and the login service dial
+# https://coordinator.<ns>.svc.cluster.local:6480 (HTTP/2 over TCP; output login_link) and
+# the Service routes each connection to a Ready replica only (the /readyz probe: a replica
+# whose join has not committed, or one waiting for its forge, gets none). A replica that
+# dies breaks its connections; the dialer reconnects through the Service. This was a
+# headless Service before the HTTP API (UDP, published not-ready addresses): Kubernetes
+# cannot change cluster_ip in place, so an apply REPLACES the Service. The health port is
+# here for the ServiceMonitor (charts/world-monitor), which therefore scrapes Ready
+# replicas only.
 resource "kubernetes_service_v1" "coordinator" {
   metadata {
     name      = "coordinator"
@@ -221,20 +207,13 @@ resource "kubernetes_service_v1" "coordinator" {
     labels    = local.coordinator_labels
   }
   spec {
-    cluster_ip                  = "None"
-    publish_not_ready_addresses = true
-    selector                    = local.coordinator_labels
+    type     = "ClusterIP"
+    selector = local.coordinator_labels
     port {
-      name        = "link"
+      name        = "api"
       port        = 6480
-      target_port = "link"
-      protocol    = "UDP"
-    }
-    port {
-      name        = "login"
-      port        = 6490
-      target_port = "login"
-      protocol    = "UDP"
+      target_port = "api"
+      protocol    = "TCP"
     }
     port {
       name        = "health"

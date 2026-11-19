@@ -75,8 +75,8 @@ output "login_link" {
   value = module.world.login_link
 }
 
-output "login_link_cert_pem" {
-  value = module.world.login_link_cert_pem
+output "coordinator_cert_pem" {
+  value = module.world.coordinator_cert_pem
 }
 
 output "client_ports" {

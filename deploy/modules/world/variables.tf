@@ -121,7 +121,7 @@ variable "ownership" {
 }
 
 variable "coordinator_replicas" {
-  description = "Coordinator replicas (Elastic 2b): each one a process of its own with a replica id the store issues, all sharing the same link identities (Secrets coordinator-identity, login-link-identity: one pin for every replica) behind the headless Service. Two keep saves, logins and successions going through a dead coordinator pod; their writes are fenced by the coordinator row's version, never by this count. A PodDisruptionBudget (min_available 1) exists only above 1. world-stop records the count in the Deployment's annotation errantry/replicas and world-start restores it."
+  description = "Coordinator replicas (Elastic 2b): each one a process of its own with a replica id the store issues, all sharing the same link identity (Secret coordinator-identity: one pin for every replica) behind the ClusterIP Service. Two keep saves, logins and successions going through a dead coordinator pod; their writes are fenced by the coordinator row's version, never by this count. A PodDisruptionBudget (min_available 1) exists only above 1. world-stop records the count in the Deployment's annotation errantry/replicas and world-start restores it."
   type        = number
   default     = 2
   validation {

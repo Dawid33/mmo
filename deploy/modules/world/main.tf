@@ -54,7 +54,6 @@ locals {
   # Mount points (the hash files' directories hold the identities' Secrets).
   service_token_dir = "/run/voxel/service"
   coordinator_dir   = "/run/voxel/coordinator"
-  login_link_dir    = "/run/voxel/login-link"
   peer_dir          = "/run/voxel/peer"
   client_cert_dir   = "/run/voxel/client"
 
@@ -72,7 +71,7 @@ locals {
   })
 
   # A changed secret rolls the pods that read it (env and files are read at start):
-  # the coordinator its own two identities, the hosts only the coordinator's
+  # the coordinator its identity, the hosts only the coordinator's
   # certificate. A changed hosts_checksum changes the host template (hosts.tf): the
   # reconciler re-templates each host Deployment at its next stop, no running host
   # restarts (the pods read the Secrets by name at their start in any case). Not the
@@ -82,10 +81,7 @@ locals {
     var.service_token,
     tls_self_signed_cert.coordinator.cert_pem,
   ]))
-  coordinator_checksum = sha256(join(",", [
-    local.hosts_checksum,
-    tls_self_signed_cert.login_link.cert_pem,
-  ]))
+  coordinator_checksum = local.hosts_checksum
 
   # Workload resources: request cpu and memory, limit memory only.
   coordinator_resources = {

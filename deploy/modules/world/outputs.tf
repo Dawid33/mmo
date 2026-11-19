@@ -3,13 +3,13 @@ output "namespace" {
 }
 
 output "login_link" {
-  description = "The coordinator's login link, for the login registry (`login world add <world_id> … --link`). Resolved by name at every dial."
-  value       = "${kubernetes_service_v1.coordinator.metadata[0].name}.${local.ns}.svc.cluster.local:6490"
+  description = "The coordinator's HTTPS API URL, for the login registry (`login world add <world_id> … --link`). Resolved by name at every dial."
+  value       = "https://${kubernetes_service_v1.coordinator.metadata[0].name}.${local.ns}.svc.cluster.local:6480"
 }
 
-output "login_link_cert_pem" {
-  description = "The login link's public certificate. Its pin (`--link-cert`) is the SHA-256 of the DER: `openssl x509 -outform der | sha256sum`."
-  value       = tls_self_signed_cert.login_link.cert_pem
+output "coordinator_cert_pem" {
+  description = "The coordinator's public certificate (hosts and login pin it). Its pin (`--link-cert`) is the SHA-256 of the DER: `openssl x509 -outform der | sha256sum`."
+  value       = tls_self_signed_cert.coordinator.cert_pem
 }
 
 output "client_ports" {

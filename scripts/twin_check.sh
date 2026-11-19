@@ -41,12 +41,12 @@
 #      the login service (an account issued by `login account issue-refresh`, POST /v1/join
 #      through the web proxy) answers 200 before the kill and again within 90 s of it; cuts
 #      commit within 90 s (the counters of the surviving pods grow past the survivor's own);
-#      another replica becomes the ticker; both hosts' coordinator links end up on a live
-#      replica (a host that was on the killed one logs `world coordinator link up` again);
-#      the generation is unchanged; the Deployment brings the replica count back, all Ready.
+#      another replica becomes the ticker; both hosts are Ready again (their HTTP/2 links to
+#      the coordinator Service re-attach: the one on the killed replica broke; no log line is
+#      waited for, the `[world-link]` lines are rate-limited while a link flaps); the generation is unchanged; the Deployment brings the replica count back, all Ready.
 #   7b. Every replica killed and restarted: the coordinator scaled to 0 (no pod left; the
 #      reconciler's /readyz says "stopped"), then back to its count: every host re-attaches
-#      (`world coordinator link up` after the start, both hosts Ready), a cut commits, the
+#      (both hosts Ready again), a cut commits (counters restarted: every host re-attached), the
 #      generation is unchanged.
 #   7c. Land assigned, idle, released, re-assigned (Elastic 3; the twin's hosts run
 #      VOXEL_LAND_IDLE_MS=20000, the module's land_idle_ms): once no super_regions row is owned
@@ -58,6 +58,13 @@
 #      at a higher epoch (re-assigned). The coordinators' mmo_land_assigned_total grew by 2 or
 #      more, the generation is unchanged and no succession row was added. Rows are read with
 #      psql in the CloudNativePG primary (database world_<id>, TWIN_WORLD_DB).
+#   7d. A host cut from the coordinator (Elastic: the HTTP API, plan
+#      docs/superpowers/plans/2026-11-19-coordinator-http-api.md, "Attachment without a link"): a
+#      NetworkPolicy (k3d's k3s enforces them: its embedded controller) denies the second host's pod
+#      egress to the coordinator pods' and Service's TCP 6480 for 30 s while a join is asked: after the
+#      mailbox stall (15 s) a coordinator replica logs that host detached, its /readyz is not 200
+#      (attaching), the join answers 200 (placed on a serving host; the owned land rows are recorded,
+#      not asserted); the policy removed, the host is Ready again and a cut commits; its pod untouched.
 #   8. The web Ingress answers through Traefik; its /login proxy reaches login's key set
 #      and API, and login's /metrics and /healthz are NOT published (404).
 #   9. world-drain <second host> 5 (the recipe): it leaves at the deadline (drained); the
@@ -597,7 +604,7 @@ line=$(printf '%s\n' "$reg" | grep -F "$prefix" || true)
 case "$line" in "$prefix"world\ add\ *) ;; *) fail "world-register printed no '${prefix}world add' command: $reg" ;; esac
 args="${line#"$prefix"}"
 # The only command this script runs from text: checked word by word first.
-printf '%s\n' "$args" | grep -Eq "^world add twin --name 'Twin' --link coordinator\.$ns\.svc\.cluster\.local:6490 --link-cert [0-9a-f]{64}$" ||
+printf '%s\n' "$args" | grep -Eq "^world add twin --name 'Twin' --link https://coordinator\.$ns\.svc\.cluster\.local:6480 --link-cert [0-9a-f]{64}$" ||
     fail "world-register printed an unexpected command: $line"
 eval "set -- $args"
 said=$(kc -n login exec deploy/login -- login "$@" 2>&1) || fail "login world add failed: $said"
@@ -729,17 +736,6 @@ pa=$(host_pod "$ha")
 pb=$(host_pod "$hb")
 ua=$(pod_uid "$pa") ra=$(pod_restarts "$pa")
 ub=$(pod_uid "$pb") rb=$(pod_restarts "$pb")
-# link_ip <host pod>: the coordinator replica IP the host's link is up to, from its last svc-link line
-# about the coordinator (fails when that line is a drop, or there is none).
-link_ip() {
-    local text last
-    text=$(k logs "$1" 2>/dev/null) || return 1
-    last=$(printf '%s\n' "$text" | grep -E '\[svc-link\] (up to|link to) coordinator\.' | tail -1) || return 1
-    case "$last" in
-        *"[svc-link] up to coordinator."*) printf '%s\n' "$last" | sed -n 's/.*(\([0-9.]*\):6480).*/\1/p' ;;
-        *) return 1 ;;
-    esac
-}
 # A join through the login service, as a client makes it: an account's refresh token (issued in the
 # login pod, never printed), POST /v1/join through the web's /login proxy. Each 200 rotates the token.
 tok=$(kc -n login exec deploy/login -- login account issue-refresh twin-check@example.com 2> "$out/issue-refresh.err") ||
@@ -777,12 +773,9 @@ join_or_fail 60 "a join through the login service answers 200 ($coordinators rep
 wait_until 60 "exactly one ticker" one_ticker
 victim=$(ticker_pod)
 victim_uid=$(pod_uid "$victim")
-victim_ip=$(pod_field "$victim" '{.status.podIP}')
 survivors=$(coordinator_pods | grep -vxF "$victim" | tr '\n' ' ' || true)
 [ -n "$survivors" ] || fail "no coordinator replica beside the ticker $victim"
-ip_a=$(link_ip "$pa" || true)
-ip_b=$(link_ip "$pb" || true)
-say "the ticker is $victim ($victim_ip); the others: $survivors; host $ha's link is on ${ip_a:-?}, host $hb's on ${ip_b:-?}"
+say "the ticker is $victim; the others: $survivors"
 # Every replica's whole log until it ends (its `[coordinator] window=` lines: step 11).
 followed=''
 follow_coordinators() {
@@ -820,21 +813,15 @@ new_ticker() {
 wait_until "$(left_of 90)" "another replica is the ticker (within 90 s of the kill)" new_ticker
 say "the ticker is now $(ticker_pod)"
 wait_until "$(left_of 90)" "cuts commit after the kill (above $base, within 90 s of it)" committed_above "$base"
-# links_on_live: both hosts' links are up to a replica pod there now; a host that was on the killed
-# replica logged its link up again since the kill.
-links_on_live() {
-    local ips p ip
-    ips=" $(for p in $(coordinator_pods); do pod_field "$p" '{.status.podIP}'; echo; done | tr '\n' ' ') "
-    for p in "$pa" "$pb"; do
-        ip=$(link_ip "$p") || return 1
-        case "$ips" in *" $ip "*) ;; *) return 1 ;; esac
-    done
-    { [ "$ip_a" != "$victim_ip" ] || log_has_since "$pa" "$killed_at" "world coordinator link up"; } &&
-        { [ "$ip_b" != "$victim_ip" ] || log_has_since "$pb" "$killed_at" "world coordinator link up"; }
-}
-wait_until "$(left_of 90)" "both hosts' coordinator links up on a live replica" links_on_live
+# The hosts' links are HTTP/2 connections through the ClusterIP Service: the one on the killed replica
+# breaks, its POST fails and the host re-attaches through the Service (to any Ready replica). The
+# host's log lines about it (`[world-link] up to <url> (<ip>)`; the ip is the Service's, not a replica's)
+# are rate-limited to one a minute while a link flaps: nothing here waits for a line. A host that is
+# attached and serving is Ready (/readyz 503 `attaching` once it has been detached for a lease); a cut
+# commits only with every live host taking part, so a cut after the kill is a re-attach proven.
+both_hosts_ready() { host_ready "$ha" && host_ready "$hb"; }
+wait_until "$(left_of 90)" "both hosts Ready (attached to a live replica through the Service)" both_hosts_ready
 join_or_fail "$(left_of 90)" "a join answers 200 after the kill (within 90 s of it)"
-say "host $ha's link is on $(link_ip "$pa" || echo '?'), host $hb's on $(link_ip "$pb" || echo '?')"
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed after a replica's death: $gen -> $(coord_gen)"
 [ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host $ha's pod changed or restarted when a coordinator replica died"
 [ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host $hb's pod changed or restarted when a coordinator replica died"
@@ -855,17 +842,11 @@ wait_until 90 "no coordinator pod left" no_pods app.kubernetes.io/component=coor
 # The reconciler sees the coordinator Deployment at 0 within a pass: it creates nothing now.
 fleet_stopped() { [ "$(readyz "$(fleet_pod)")" = stopped ]; }
 wait_until 20 "the fleet reconciler's /readyz says stopped" fleet_stopped
-restarted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 t0=$SECONDS
 k scale deploy/coordinator --replicas="$coordinators" > /dev/null
 wait_until 120 "$coordinators coordinator replicas back, every one Ready" coords_ready
-links_up() {
-    log_has_since "$pa" "$restarted_at" "world coordinator link up" && log_has_since "$pb" "$restarted_at" "world coordinator link up"
-}
-wait_until "$(left_of 120)" "both hosts log 'world coordinator link up' after the start" links_up
-both_hosts_ready() { host_ready "$ha" && host_ready "$hb"; }
 wait_until "$(left_of 120)" "both hosts Ready (attached)" both_hosts_ready
-wait_until "$(left_of 120)" "a cut commits after the restart" committed_above 0
+wait_until "$(left_of 120)" "a cut commits after the restart (the counters restarted with the pods: every host re-attached)" committed_above 0
 wait_until 30 "exactly one ticker" one_ticker
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed after every replica restarted: $gen -> $(coord_gen)"
 [ "$(pod_uid "$pa")" = "$ua" ] && [ "$(pod_restarts "$pa")" = "$ra" ] || fail "host $ha's pod changed or restarted when the coordinator restarted"
@@ -945,6 +926,59 @@ succ1=$(sql "select count(*) from successions") || fail "cannot read the success
 assigned1=$(coord_sum mmo_land_assigned_total) || fail "no coordinator replica answers mmo_land_assigned_total"
 [ "$assigned1" -ge $((assigned0 + 2)) ] || fail "the coordinators' mmo_land_assigned_total grew by less than 2 ($assigned0 -> $assigned1)"
 say "generation $gen unchanged, successions rows $succ1 (unchanged), land assigned $assigned0 -> $assigned1; hosts' land: $(for h in $ha $hb; do printf '%s=%s ' "$h" "$(metric "$(host_pod "$h")" mmo_host_land || echo '?')"; done)"
+
+# ---------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------
+step "7d. host $hb cut from the coordinator's port 6480 for 30 s (NetworkPolicy), a join asked meanwhile"
+pb=$(host_pod "$hb")
+ub=$(pod_uid "$pb") rb=$(pod_restarts "$pb")
+id_b=$(live_id "$hb")
+[ -n "$id_b" ] || fail "host $hb has no single live row"
+cut_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+coord_ips=$(for p in $(coordinator_pods); do pod_field "$p" '{.status.podIP}'; echo; done | grep . | sort -u)
+svc_ip=$(k get svc coordinator -o jsonpath='{.spec.clusterIP}')
+[ -n "$coord_ips" ] && [ -n "$svc_ip" ] || fail "no coordinator pod IPs or Service IP to cut"
+# Egress of host $hb's pod: everything but the coordinator pods and the Service (0.0.0.0/0 except
+# their /32s; a policy has no deny rule). Its pod labels select the host's one pod.
+{
+    echo "apiVersion: networking.k8s.io/v1"
+    echo "kind: NetworkPolicy"
+    echo "metadata: { name: twin-cut-$hb, namespace: $ns }"
+    echo "spec:"
+    echo "  podSelector: { matchLabels: { app.kubernetes.io/component: host, errantry/host: $hb } }"
+    echo "  policyTypes: [Egress]"
+    echo "  egress:"
+    echo "    - to:"
+    echo "        - ipBlock:"
+    echo "            cidr: 0.0.0.0/0"
+    echo "            except:"
+    for ip in $coord_ips $svc_ip; do echo "              - $ip/32"; done
+} | k apply -f - > /dev/null || fail "could not create the NetworkPolicy"
+cut_from=$SECONDS
+say "host $hb ($pb, id $id_b) cut from $(printf '%s ' $coord_ips)and $svc_ip"
+detached_logged() {
+    local p text
+    for p in $(coordinator_pods); do
+        text=$(k logs "$p" --since-time="$cut_at" 2>/dev/null) || continue
+        grep -Eq "host h$id_b .*stalled" <<< "$text" && return 0
+    done
+    return 1
+}
+host_not_serving() { ! pod_ready "$pb"; }
+wait_until 60 "a coordinator replica logs host $hb (id $id_b) stalled: detached (the mailbox stall, 15 s)" detached_logged
+wait_until 30 "host $hb's pod is not Ready (it cannot reach the coordinator)" host_not_serving
+join_or_fail 60 "a join answers 200 while host $hb is cut"
+say "record: owned land rows now: $(owned_rows | tr '\n' ';')"
+while [ $((SECONDS - cut_from)) -lt 30 ]; do sleep 1; done
+k delete networkpolicy "twin-cut-$hb" > /dev/null || fail "could not delete the NetworkPolicy"
+say "policy removed after $((SECONDS - cut_from))s"
+host_b_ready() { host_ready "$hb"; }
+wait_until 90 "host $hb Ready again (re-attached)" host_b_ready
+c1=$(committed)
+wait_until 90 "a cut commits with host $hb back (above $c1)" committed_above "$c1"
+[ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host $hb's pod changed or restarted while cut from the coordinator"
+[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed while host $hb was cut: $gen -> $(coord_gen)"
+say "host $hb detached, a join served meanwhile, re-attached after the policy; pod untouched, generation $gen"
 
 # ---------------------------------------------------------------------------------
 step "8. the web Ingress and its /login proxy (only what login's own Ingress publishes)"
