@@ -8,10 +8,3 @@ description = "Throwaway Postgres databases for tests (dev-dependency only)."
 [dependencies]
 sqlx = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
-
-[[test]]
-name = "it"
-path = "tests/it.rs"

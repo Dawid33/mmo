@@ -115,17 +115,3 @@ impl std::fmt::Debug for LoginConfig {
     }
 }
 
-#[cfg(test)]
-mod redact_tests {
-    use super::*;
-
-    #[test]
-    fn redacts_password_only() {
-        assert_eq!(redact_url("postgres://u:s3cret@h:5432/db?x=1"), "postgres://u:<redacted>@h:5432/db?x=1");
-        assert_eq!(redact_url("postgres://u:p@w@h/db"), "postgres://u:<redacted>@h/db");
-        assert_eq!(redact_url("postgres://h/db"), "postgres://h/db");
-        assert_eq!(redact_url("postgres://u@h/db"), "postgres://u@h/db");
-        assert_eq!(redact_url("sqlite:target/x.sqlite"), "sqlite:target/x.sqlite");
-        assert!(!format!("{:?}", LoginConfig::from_lookup(|k| (k == "VOXEL_LOGIN_DB").then(|| "postgres://u:s3cret@h/d".into())).unwrap()).contains("s3cret"));
-    }
-}

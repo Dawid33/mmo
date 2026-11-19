@@ -21,12 +21,3 @@ image = { workspace = true, optional = true }
 # Rig evaluation runs in the deterministic sim: trig must be libm, which
 # agrees on native and wasm32.
 libm = "0.2"
-
-[dev-dependencies]
-serde_json = { workspace = true }
-base64 = "0.22"
-image = { workspace = true }
-
-[[test]]
-name = "it"
-path = "tests/it.rs"

@@ -61,7 +61,11 @@ def rust_files(paths):
 def find_tests(path):
     """(line, name, doc_lines, body_lines) for each test fn in a Rust file."""
     with open(os.path.join(ROOT, path), encoding="utf-8", errors="replace") as f:
-        lines = f.read().split("\n")
+        return find_tests_text(f.read().split("\n"))
+
+
+def find_tests_text(lines):
+    """find_tests over a file's lines."""
     out = []
     i = 0
     while i < len(lines):

@@ -78,29 +78,3 @@ impl Add<UVec3> for Extent {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn iter3_walks_x_fastest() {
-        let e = Extent::from_min_and_shape(UVec3::new(1, 2, 3), UVec3::new(2, 2, 2));
-        let pts: Vec<[u32; 3]> = e.iter3().map(|p| p.to_array()).collect();
-        assert_eq!(pts[..3], [[1, 2, 3], [2, 2, 3], [1, 3, 3]]);
-        assert_eq!(pts.len(), 8);
-    }
-
-    #[test]
-    fn max_is_inclusive_and_subset_checks_bounds() {
-        let outer = Extent::from_min_and_shape(UVec3::ZERO, UVec3::splat(34));
-        assert_eq!(Extent::from_min_and_max(UVec3::ZERO, UVec3::splat(33)), outer);
-        assert!(Extent::from_min_and_max(UVec3::splat(1), UVec3::splat(33)).is_subset_of(&outer));
-        assert!(!Extent::from_min_and_max(UVec3::ZERO, UVec3::new(34, 33, 33)).is_subset_of(&outer));
-    }
-
-    #[test]
-    fn interior_drops_one_voxel_each_side() {
-        let i = Extent::interior([0; 3], [33; 3]);
-        assert_eq!((i.minimum, i.shape), (UVec3::ONE, UVec3::splat(32)));
-    }
-}

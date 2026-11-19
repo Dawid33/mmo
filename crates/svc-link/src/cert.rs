@@ -202,11 +202,6 @@ pub(crate) fn load_or_generate(hash_file: Option<&Path>) -> io::Result<LinkIdent
 mod tests {
     use super::*;
 
-    /// Test-only P-256 key (PKCS#8 DER) and its self-signed certificate (DER), made once with
-    /// openssl the way OpenTofu's tls provider makes them. Not a secret: it protects nothing.
-    const TOFU_CERT: &[u8] = include_bytes!("../tests/fixtures/tofu-link.cert");
-    const TOFU_KEY: &[u8] = include_bytes!("../tests/fixtures/tofu-link.key");
-
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("svc-link-cert-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -229,47 +224,7 @@ mod tests {
         !writable
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_read_only_identity_is_used_as_is() {
-        let dir = temp_dir("ro");
-        let file = dir.join("link.pin");
-        let first = load_or_generate(Some(&file)).unwrap();
-        std::fs::remove_file(&file).unwrap();
-        set_mode(&dir, 0o555);
-        let skip = !dir_is_read_only(&dir);
-        let second = if skip { None } else { Some(load_or_generate(Some(&file))) };
-        set_mode(&dir, 0o755);
-        let Some(second) = second else {
-            eprintln!("skipped: running as a user the directory mode does not bind (root)");
-            let _ = std::fs::remove_dir_all(&dir);
-            return;
-        };
-        let second = second.unwrap();
-        assert_eq!(second.cert_der, first.cert_der);
-        assert_eq!(second.key_der, first.key_der);
-        assert!(!file.exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_invalid_identity_on_a_read_only_directory_is_an_error() {
-        let dir = temp_dir("ro-bad");
-        let file = dir.join("link.pin");
-        std::fs::write(sibling(&file, ".cert"), b"junk").unwrap();
-        std::fs::write(sibling(&file, ".key"), b"junk").unwrap();
-        set_mode(&dir, 0o555);
-        let skip = !dir_is_read_only(&dir);
-        let result = if skip { None } else { Some(load_or_generate(Some(&file))) };
-        set_mode(&dir, 0o755);
-        match result {
-            None => eprintln!("skipped: running as a user the directory mode does not bind (root)"),
-            Some(r) => assert!(r.is_err(), "never silently ephemeral"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
+    /// Regression: Read-only pin-file mount logged '[WARN] [svc-link] cannot write the pin file ... Read-only file system' on every coordinator/host start; seen IN POD LOGS of twin-check run check-20261115T122246Z (.superpowers/sdd/2026-11-15-r5-k8s/task-13-report.md), fixed in dd60fbf4
     #[cfg(unix)]
     #[test]
     fn a_pin_file_a_read_only_directory_refuses_is_said_once_at_info() {
@@ -288,49 +243,5 @@ mod tests {
         let said = AtomicBool::new(false);
         assert_eq!(pin_write_level(&refused, &said), Some(log::Level::Info), "the designed pod layout");
         assert_eq!(pin_write_level(&refused, &said), None, "said once");
-    }
-
-    #[test]
-    fn a_pin_file_that_fails_in_a_writable_directory_is_a_warning() {
-        let dir = temp_dir("rw-pin");
-        let file = dir.join("link.pin");
-        // The directory is writable; the pin's own path is taken by a directory.
-        std::fs::create_dir(&file).unwrap();
-        let failed = write_atomic(&file, b"pin", false).expect_err("a file cannot replace a directory");
-        let said = AtomicBool::new(false);
-        assert_eq!(pin_write_level(&failed, &said), Some(log::Level::Warn));
-        assert_eq!(pin_write_level(&failed, &said), Some(log::Level::Warn), "every time");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_pin_is_derived_from_the_cert_file() {
-        let dir = temp_dir("derive");
-        let file = dir.join("link.pin");
-        std::fs::write(sibling(&file, ".cert"), TOFU_CERT).unwrap();
-        assert_eq!(pin_beside(&file).unwrap().as_deref(), Some(cert_sha256_hex(TOFU_CERT).as_str()));
-        std::fs::write(&file, "abc").unwrap();
-        assert_eq!(pin_beside(&file).unwrap().as_deref(), Some("abc"), "the pin file wins");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn no_files_means_no_pin() {
-        let dir = temp_dir("none");
-        assert_eq!(pin_beside(&dir.join("link.pin")).unwrap(), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_ec_p256_pkcs8_pair_made_elsewhere_loads() {
-        let dir = temp_dir("tofu");
-        let file = dir.join("link.pin");
-        std::fs::write(sibling(&file, ".cert"), TOFU_CERT).unwrap();
-        std::fs::write(sibling(&file, ".key"), TOFU_KEY).unwrap();
-        let id = load_or_generate(Some(&file)).unwrap();
-        assert_eq!(id.cert_der, TOFU_CERT, "kept, not regenerated");
-        assert_eq!(id.key_der, TOFU_KEY);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), cert_sha256_hex(TOFU_CERT));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

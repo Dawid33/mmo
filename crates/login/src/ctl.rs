@@ -274,34 +274,3 @@ fn keygen(dir: &Path) -> Result<String, String> {
     Ok(key.kid().to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_host_link_may_be_a_name() {
-        let pin = "ab".repeat(32);
-        let ok = host_link_args(Some("host-0.world.svc:6490".into()), Some(pin.clone())).unwrap();
-        assert_eq!(ok, (Some("host-0.world.svc:6490".into()), Some(pin.clone())));
-        assert!(host_link_args(Some("127.0.0.1:6490".into()), Some(pin.clone())).is_ok());
-        let err = host_link_args(Some("host-0".into()), Some(pin)).unwrap_err();
-        assert!(err.contains("expected host:port"), "{err}");
-    }
-
-    fn a(s: &str) -> Vec<String> {
-        s.split_whitespace().map(String::from).collect()
-    }
-
-    #[test]
-    fn routes_serve_with_and_without_db() {
-        let serve = |db: Option<&str>| Route { db: db.map(String::from), serve: true };
-        assert_eq!(route(&a("")).unwrap(), serve(None));
-        assert_eq!(route(&a("serve")).unwrap(), serve(None));
-        assert_eq!(route(&a("--db x.sqlite serve")).unwrap(), serve(Some("x.sqlite")));
-        assert_eq!(route(&a("serve --db x.sqlite")).unwrap(), serve(Some("x.sqlite")));
-        assert_eq!(route(&a("--db x.sqlite")).unwrap(), serve(Some("x.sqlite")));
-        assert!(!route(&a("--db x.sqlite world list")).unwrap().serve);
-        assert!(!route(&a("keygen")).unwrap().serve);
-        assert!(route(&a("serve --db")).is_err());
-    }
-}

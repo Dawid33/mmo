@@ -502,7 +502,6 @@ dependencies = [
  "login-api",
  "rand_core 0.6.4",
  "serde",
- "serde_json",
  "sha2 0.10.9",
 ]
 
@@ -5121,7 +5120,6 @@ dependencies = [
  "jsonwebtoken",
  "log",
  "login-api",
- "pg-test-support",
  "prometheus",
  "rand_core 0.6.4",
  "reqwest",
@@ -5133,7 +5131,6 @@ dependencies = [
  "svc-link",
  "thiserror 2.0.20",
  "tokio",
- "tower",
  "tower-http",
 ]
 
@@ -5142,7 +5139,6 @@ name = "login-api"
 version = "0.1.0"
 dependencies = [
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -8456,7 +8452,6 @@ dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
  "nalgebra",
- "state-hash",
  "state-hash-derive",
 ]
 
