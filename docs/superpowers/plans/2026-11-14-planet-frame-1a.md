@@ -90,7 +90,8 @@ Phase 1b (the stored monthly-climate family) is a separate plan, written after t
   `WorldBlockPos` whose x is folded into `[origin.x · REGION_BLOCKS, (origin.x + width) · REGION_BLOCKS)`.
   Likewise a canonical `WorldChunkPos`. **Every key and every position that is stored, hashed or sent is
   canonical; every conversion into one region's local frame goes through ONE nearest-image helper** (the plain
-  difference with x folded into `[−W/2, W/2)` regions — it accepts canonical and in-frame unwrapped inputs alike).
+  difference with x folded into `(−W/2, W/2]` regions, ties → positive exactly as `MapExtent::delta` — it accepts
+  canonical and in-frame unwrapped inputs alike).
   Unwrapped coordinates exist only transiently: `f64` world positions inside one region's own frame
   (`WorldView`), LOD keys (the client's frame, answered under the same key), and the client's render frame and
   window math.
@@ -216,6 +217,7 @@ Phase 1b (the stored monthly-climate family) is a separate plan, written after t
 
 **Files:**
 - Modify: `crates/game/src/world_map.rs` (`WorldMap`, `MapExtent`, `off_map`), `crates/game/src/path_plan.rs` (`RouteMap` carries the extent, so it carries `wrap_x`)
+- Modify: `crates/game/src/history/grid.rs` (`SocietyGrid::from_world_map`: `world_id` is a crc of the serialized map and is in the history digest that `wasm_determinism` pins — hash the old fields exactly as before and mix in `wrap_x` only when it is true, so the pin does not move; ruled 2026-11-19)
 - Modify: every `WorldMap { .. }` literal — `crates/worldgen/src/tile_map.rs`, `crates/server/tests/common/hosts_rig.rs`, `crates/game/tests/wasm_determinism.rs` (a GATE file: add the field `wrap_x: false` only; its pinned hashes must not change — if one does, BLOCKED), `crates/game/tests/history_handover.rs` — and any `MapExtent { .. }` literal (`grep -rn "MapExtent {" crates`)
 - Modify: `crates/worldgen/src/tile_map.rs` (`WORLD_MAP_VERSION` 2 → 3; `build_world_map` sets `wrap_x: false` until Task 12), `crates/world-store/tests/fixtures/world_map.bin` is referenced by nothing: do not touch it (its uncommitted change is the owner's). No link-protocol bump: `WorldMap` travels only in `ServerPacket::WorldMap` (client and server are one build)
 
@@ -269,7 +271,7 @@ The old plan did not know this code. Regions address their neighbours by plain o
 
 **The rule to implement** (two helpers, not a per-site patch):
 1. **Canonical keys.** Every key of the hashed halo state (`GameData::halo`, `halo_ground`, `halo_piles`, `halo_containers` — also sent in region snapshots and to the client) and every `WorldBlockPos` / `WorldChunkPos` / `RegionCoords` that is stored, hashed or sent is canonical: `canonical_block`, a new `canonical_chunk`, `canonical`. Every `from_local` that builds such a key or a sent position canonicalises.
-2. **One nearest-image local conversion.** Every conversion of a block, chunk or region into a region's local frame (`local_in`, `local_cell`, `halo_block`'s difference, `neighbour_offset`'s difference, the seed offsets) goes through one helper: the plain difference with x folded into `[−W·N/2, W·N/2)` (`N` = blocks or chunks per region). It accepts canonical and in-frame unwrapped inputs, so `WorldView` callers that form positions from a body's world translation keep working (those `f64` positions are transient and may stay unwrapped). It needs a map at least 3 regions wide (the test map is 4; `MIN_WRAP_WIDTH_M` guarantees 16 at the largest region size).
+2. **One nearest-image local conversion.** Every conversion of a block, chunk or region into a region's local frame (`local_in`, `local_cell`, `halo_block`'s difference, `neighbour_offset`'s difference, the seed offsets) goes through one helper: the plain difference with x folded into `(−W·N/2, W·N/2]` (`N` = blocks or chunks per region; ties → positive, built on `MapExtent::delta`'s rule). It accepts canonical and in-frame unwrapped inputs, so `WorldView` callers that form positions from a body's world translation keep working (those `f64` positions are transient and may stay unwrapped). It needs a map at least 3 regions wide (the test map is 4; `MIN_WRAP_WIDTH_M` guarantees 16 at the largest region size).
 3. **The map reaches the sim.** `Region` holds `map_extent`, but halo, pile and intent code runs on the rollback data (`self.data.region` only) and the free functions in `halo.rs` take no map. Put the extent beside `region` in the data — set at construction / `set_map_extent`, and treated by the state hash, snapshots and undo exactly as `region` is — or pass it as an argument; say which in the report and why. Server and client regions must hold the same extent before their first tick.
 4. The manager canonicalises every target it routes as a second line of defence and counts what it had to fix (a debug assertion in tests; a counter `seam_fixed=` on the periodic `[server]` line — never a log line per message).
 
