@@ -50,8 +50,16 @@ use crate::HostId;
 use crate::Reliable;
 
 /// How often a spawn order may be forwarded between hosts before it is refused (a loop of
-/// stale `departed` pointers ends).
-pub const SPAWN_RELAY_MAX_HOPS: u8 = 4;
+/// stale `departed` pointers ends). It must cover the longest chain of stale pointers a walk
+/// can leave (Elastic 4 Task 1 fix round 1): refused short of the chain's end, the order
+/// drops no pointer and every join of that player at that gate is refused the same way.
+/// With `n` pointers, an order goes from its gate along the pointers to the end of the walk,
+/// by its record's region to the land's owner, and — the gate mid-chain — along the pointers
+/// before the gate back to it, which drops its pointer ([`WorldManager::departed_denied`]) and
+/// sends it to the owner once more: at most about `n + 3` hops from any gate (7 for four
+/// pointers from a gate off the chain). Each pointer is on a different host, so this covers
+/// walks over ~28 hosts; the cap still ends any loop, and a hop is one small reliable message.
+pub const SPAWN_RELAY_MAX_HOPS: u8 = 32;
 
 /// How long a spawn order waits for every peer's first sync before it is refused (the
 /// login service has given up by then: `login_api::SPAWN_ACK_TIMEOUT_MS`).
