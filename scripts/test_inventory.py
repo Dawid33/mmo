@@ -3,10 +3,11 @@
 
     test_inventory.py inventory          > TSV of every test: where it is, the commit that added it, its marker
     test_inventory.py check [paths...]   exit 1 listing every test whose doc comment has no `Regression:` /
-                                         `Gate:` line (vendored forks excluded)
+                                         `Gate:` line (Rust `///`, node `//`, python `#` right above the test;
+                                         vendored forks excluded)
 
 Plan: docs/superpowers/plans/2026-11-19-regression-only-tests.md. The rule (CLAUDE.md, Testing): a test is written
-only as a regression for a bug that was actually found.
+only as a regression for a bug seen in play or in a log.
 """
 import os
 import re
@@ -204,10 +205,44 @@ def _glob(d, suffix):
     return [os.path.join(d, f) for f in os.listdir(full) if f.endswith(suffix)]
 
 
+OTHER_TESTS = [
+    # (dir, file suffix, test line, comment prefix) — the marker sits in the comment lines right above the test.
+    ("website/tests", ".test.mjs", re.compile(r"^\s*(test|it)\(\s*['\"`](.+?)['\"`]"), "//"),
+    ("scripts/tests", ".py", re.compile(r"^\s*def (test_\w+)"), "#"),
+]
+
+
+def other_tests(paths):
+    """(path, line, name, marker kind or None) for the website's node tests and the scripts' unittest tests."""
+    for d, suffix, test_re, prefix in OTHER_TESTS:
+        if paths and not any(d.startswith(p.rstrip("/")) or p.startswith(d) for p in paths):
+            continue
+        for path in sorted(_glob(d, suffix)):
+            lines = open(os.path.join(ROOT, path)).read().split("\n")
+            for i, ln in enumerate(lines):
+                m = test_re.match(ln)
+                if not m:
+                    continue
+                kind = None
+                k = i - 1
+                while k >= 0 and lines[k].strip().startswith((prefix, "@")):
+                    mk = re.match(r"^\s*" + re.escape(prefix) + r"\s*(Regression|Gate):", lines[k])
+                    if mk:
+                        kind = mk.group(1)
+                    k -= 1
+                yield path, i + 1, m.group(m.lastindex), kind
+
+
 def check(paths):
     bad = []
     counts = {"Regression": 0, "Gate": 0}
-    for path in sorted(rust_files(paths or RUST_DIRS)):
+    for path, line, name, kind in other_tests(paths):
+        if kind:
+            counts[kind] += 1
+        else:
+            bad.append(f"{path}:{line} {name}")
+    rust_paths = [p for p in paths if not p.startswith(("website", "scripts"))] if paths else RUST_DIRS
+    for path in sorted(rust_files(rust_paths) if rust_paths else []):
         if path.startswith(VENDORED):
             continue
         for line, name, doc, _ in find_tests(path):
@@ -219,7 +254,7 @@ def check(paths):
     if bad:
         print("\n".join(bad))
         print(f"test-audit: {len(bad)} test(s) without a `/// Regression:` or `/// Gate:` line "
-              "(CLAUDE.md, Testing: a test is written only as a regression for a bug that was found)", file=sys.stderr)
+              "(CLAUDE.md, Testing: a test is written only as a regression for a bug seen in play or in a log)", file=sys.stderr)
         return 1
     print(f"test-audit: {counts['Regression']} regression, {counts['Gate']} gate")
     return 0

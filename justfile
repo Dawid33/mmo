@@ -1679,6 +1679,12 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     verdict_rc=${PIPESTATUS[0]}
     exit "$verdict_rc"
 
+# Every test outside the vendored forks carries a `Regression:` (a bug seen in play or in a log)
+# or `Gate:` line right above it (`///` in Rust, `//` node, `#` python) — CLAUDE.md, Testing.
+# Lists every test that does not and fails. `just test-audit crates/game` checks one path.
+test-audit *paths:
+    python3 scripts/test_inventory.py check {{paths}}
+
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
 #   just test-one game "--test it lod_streaming::pristine"
 #   just test-one client "--lib world_scale::"

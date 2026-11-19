@@ -30,20 +30,20 @@ slotmapd 19 (vendored), state-hash 18, auth 11, block-mesh 9, login-api 3, pg-te
 
 ## Decisions — confirm at the Task 2 checkpoint (defaults below)
 
-- **D1 What counts as a regression test.** A test that reproduces a bug that was actually observed: in play, in a
-  review, in a hand check, in a log, or as a failure of another test. Evidence is one of: (a) a comment in or above the
-  test naming the bug ("Regression", "the … desync", "was a bug", a dated live finding), or (b) the test was added by a
-  `fix…` commit whose message describes the bug this test reproduces. A test that only rode along in a fix commit (it
-  covers something else, or the fix's new feature) does not count. Each test is judged on its own.
+- **D1 What counts as a regression test** (owner, 2026-11-19: "just in play or in logs"). A test that reproduces a
+  bug that was actually seen **in play or in a log** (a runtime log, a probe's or a hand check's output — not a test
+  run). The evidence is a comment or commit message saying where the bug was seen. A bug found in a code review, or
+  because another test failed, does **not** count. Neither does a test that only came along in a fix commit.
 - **D2 Gates stay** (marked `Gate:`, not regression tests): they are the determinism and quality contract that
   CLAUDE.md's rules point at, the counterpart of `quest/`'s corpus. The gates are `game` `wasm_determinism`,
   `physics-next` `state_hash_wasm` and `physics_goldens::`, `worldgen` `scene_hash_golden`, the `forge_quality` gate,
   and the `pipeline` `column()` ↔ `#[cfg(test)]` `DensityFn` mirror test (with the `DensityFn` graph it needs). Perf
   gates and `region_load_cost` are **not** gates: classify them like any other test.
-- **D3 Vendored forks are untouched.** `crates/rapier`, `crates/parry` and `crates/slotmapd` carry upstream's tests
-  (`just physics-next-upstream`); a re-import would bring them back. Every `physics-next` test that pins a
-  `// mmo-fork:` hunk stays, marked `Regression:` with the hunk it pins (CLAUDE.md: every marked hunk is pinned by a
-  test).
+- **D3 Vendored forks are untouched** (owner, 2026-11-19). `crates/rapier`, `crates/parry` and `crates/slotmapd`
+  keep all their tests (`just physics-next-upstream`). Every `physics-next` test that pins a `// mmo-fork` hunk stays as
+  a **gate** (`Gate:` naming the hunk), because CLAUDE.md requires every marked hunk to be pinned by a test.
+- **D3b `crates/panel`** is someone's uncommitted work in progress. Its 21 tests are deleted in the working tree
+  (owner, 2026-11-19) and nothing in it is committed by this plan.
 - **D4 The multi-host and seeded harnesses** (`server` `roles`, `hosts`, `takeover`, `threaded_world`, `coordinator_rt`;
   `game` `handoff_schedule`, `peer_schedule`, `peer_journal`) are classified test by test like the rest. Their
   support code (`server`'s `test-hooks` feature, `tests/common/`, `crates/pg-test-support`) stays only while a kept test
