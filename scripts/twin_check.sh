@@ -78,6 +78,19 @@
 #  11. Records (asserts nothing): each pod's memory after the forge and five minutes
 #      after the world-start, any pod log line about a file it could not write, and each
 #      coordinator replica's `[coordinator] window=` lines (transitions, conflicts, assigned).
+#  12. To zero (Elastic 4 Task 8): VOXEL_FLEET_MIN=0 set on the coordinator Deployment (every
+#      replica restarts together, as in 7b). With nobody online the hosts go ONE AT A TIME
+#      (rule 6 drains one while two are wanted, rule 7 the last: each after the module's
+#      host_min_lifetime_ms 60 s and scale_down_after_ms 30 s; never two desired rows draining
+#      at once, never a second drain before the first host's Deployment is gone) and are
+#      removed: no desired row, no host Deployment, no live dirty hosts row; the coordinator
+#      replicas stay Ready; no succession row added, the generation unchanged.
+#  13. The join that starts the world: a join (phase 7's helper) answers 503 world_starting; a
+#      wanted desired row and its host pod appear; the join repeated every second answers 200;
+#      the seconds from the first 503 to the first 200 are RECORDED in cold-start.txt (the cold
+#      start, images already on the node). The repeated joins add no second host (one desired
+#      row, mmo_fleet_added_total grows by exactly 1). The generation is unchanged, no
+#      succession row added. VOXEL_FLEET_MIN is then set back (every replica restarts again).
 # Every wait has a timeout and says what it waited for. Exit 0 = pass, 1 = a check
 # failed (pods, events and logs are dumped and saved under target/twin/check-<time>/).
 # Env: TWIN_CONTEXT (k3d-mmo), TWIN_NAMESPACE (world-twin), TWIN_COORDINATORS (2),
@@ -1131,6 +1144,128 @@ for f in "$out"/coordinator-*.log; do
           if (v["transitions"] + 0 > tmax) tmax = v["transitions"] + 0 }
         END { printf "   %s: %d windows, transitions %d (max %d per window), conflicts %d (max %d per window), write failures %d, assigned %d\n", f, n, t, tmax, c, cmax, w, a }' || true
 done | tee "$out/windows.txt"
+
+# ---------------------------------------------------------------------------------
+step "12. to zero: VOXEL_FLEET_MIN=0, nobody online: the hosts drain one at a time and are removed"
+succ0=$(sql "select count(*) from successions") || fail "cannot read the successions rows of $world_db"
+# coord_pods_with_min <value>: exactly $coordinators replica pods, every one Ready and running
+# VOXEL_FLEET_MIN=<value> (its pod spec: the Deployment's template it was made from).
+coord_pods_with_min() {
+    local p n=0
+    for p in $(coordinator_pods); do
+        [ "$(pod_field "$p" '{.spec.containers[?(@.name=="coordinator")].env[?(@.name=="VOXEL_FLEET_MIN")].value}')" = "$1" ] || return 1
+        pod_ready "$p" || return 1
+        n=$((n + 1))
+    done
+    [ "$n" = "$coordinators" ]
+}
+follow_coordinators
+k set env deploy/coordinator VOXEL_FLEET_MIN=0 > /dev/null || fail "kubectl set env VOXEL_FLEET_MIN=0 on the coordinator failed"
+say "the coordinator Deployment runs VOXEL_FLEET_MIN=0 now (Recreate: every replica restarts together)"
+wait_until 150 "$coordinators coordinator replicas running VOXEL_FLEET_MIN=0, every one Ready" coord_pods_with_min 0
+follow_coordinators
+wait_until 30 "exactly one ticker" one_ticker
+# The land of phase 7c's joins went back long ago (phase 11 waited five minutes); rule 7 also
+# needs 0 running regions on the last host.
+wait_until 210 "no super_regions row owned" no_owned_land
+# desired_counts: `<all> <draining>` rows of desired_hosts (a failed read prints nothing).
+desired_counts() { sql "select count(*), count(*) filter (where state = 1) from desired_hosts" | tr '|' ' '; }
+# live_dirty_rows: the hosts rows live and dirty (state 0, clean 0).
+live_dirty_rows() { sql "select count(*) from hosts where state = 0 and clean = 0"; }
+names0=$(host_names | tr '\n' ' ')
+say "hosts before: $names0; desired (all, draining): $(desired_counts || echo '?')"
+t0=$SECONDS
+drains=''
+# One sample every 2 s until nothing is left: no desired row, no host Deployment, no live dirty
+# hosts row. Each sample checks "one at a time": at most one desired row draining, and a row
+# turns draining only while no other host's Deployment is still being removed.
+while :; do
+    counts=$(desired_counts) || counts=''
+    if [ -n "$counts" ]; then
+        read -r all draining <<< "$counts"
+        [ "$draining" -le 1 ] || fail "$draining desired rows draining at once (one at a time): $(desired | tr '\n' ';')"
+        for n in $(desired | awk '$3 == "draining" { print $1 }'); do
+            case " $drains " in *" $n "*) continue ;; esac
+            # A new drain: every earlier drained name is gone already.
+            for d in $drains; do
+                host_gone "$d" || fail "host $n drains while host $d (drained before it) still has a row or objects: $(objects_of "$d")"
+            done
+            drains="$drains $n"
+            say "host $n drains ($((SECONDS - t0))s); desired (all, draining): $all $draining; hosts: $(host_names | tr '\n' ' ')"
+        done
+        live=$(live_dirty_rows || echo '?')
+        if [ "$all" = 0 ] && [ -z "$(host_names)" ] && [ "$live" = 0 ]; then
+            break
+        fi
+    fi
+    [ $((SECONDS - t0)) -lt 480 ] ||
+        fail "after 480s the world is not at zero hosts: desired (all, draining) '${counts:-?}', Deployments '$(host_names | tr '\n' ' ')', live dirty rows '$(live_dirty_rows || echo '?')', drains so far:$drains"
+    sleep 2
+done
+say "zero hosts after $((SECONDS - t0))s; drained in order:$drains"
+case "$drains" in *' '*' '*) ;; *) fail "the hosts went without two separate drains (drains seen:$drains)" ;; esac
+rows | sed 's/^/   hosts: /'
+coords_ready || fail "a coordinator replica is not Ready with zero hosts"
+[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed going to zero hosts: $gen -> $(coord_gen)"
+succ1=$(sql "select count(*) from successions") || fail "cannot read the successions rows of $world_db"
+[ "$succ1" = "$succ0" ] || fail "a succession row was added going to zero hosts ($succ0 -> $succ1)"
+# Still zero a little later (min 0: nothing adds a host without a login).
+sleep 20
+[ "$(desired_counts || echo '?')" = "0 0" ] && [ -z "$(host_names)" ] || fail "a host came back with nobody joining: desired '$(desired_counts || echo '?')', Deployments '$(host_names | tr '\n' ' ')'"
+say "still zero 20 s later; replicas Ready; generation $gen, successions rows $succ1 (unchanged)"
+
+# ---------------------------------------------------------------------------------
+step "13. a join starts the world: 503 world_starting, a host is added, the join repeated every second gets in"
+added0=$(coord_sum mmo_fleet_added_total) || fail "no coordinator replica answers mmo_fleet_added_total"
+join_ok && fail "a join answered 200 with zero hosts"
+case "$join_said" in
+    503*world_starting*) ;;
+    *) fail "the first join with zero hosts answered '$join_said', not 503 world_starting" ;;
+esac
+first_503=$SECONDS
+say "the first join: $join_said"
+# one_wanted: exactly one desired row, wanted; sets hd.
+hd=''
+one_wanted() {
+    local d
+    d=$(desired)
+    [ "$(printf '%s' "$d" | grep -c .)" = 1 ] || return 1
+    [ "$(printf '%s' "$d" | awk '{ print $3 }')" = wanted ] || return 1
+    hd=$(printf '%s' "$d" | awk '{ print $1 }')
+}
+wait_until 30 "one wanted desired row (the login asked for a host)" one_wanted
+say "host $hd wanted $((SECONDS - first_503))s after the first 503"
+# The join repeated every second (a client's REJOIN_RETRY_MS) until it answers 200; every other
+# answer must be a 503 (world_starting while no host takes logins). Meanwhile: never a second
+# desired row or host Deployment (the repeated joins add no second host).
+answers=''
+until join_ok; do
+    case "$join_said" in
+        503*world_starting*) answers="${answers}s" ;;
+        503*) answers="${answers}u" ;;
+        *) fail "a repeated join answered '$join_said' (only 503 or 200 expected)" ;;
+    esac
+    d=$(desired | grep -c . || true)
+    [ "$d" -le 1 ] || fail "a second desired row while the joins repeated: $(desired | tr '\n' ';')"
+    [ "$(host_names | grep -c . || true)" -le 1 ] || fail "a second host Deployment while the joins repeated: $(host_names | tr '\n' ' ')"
+    [ $((SECONDS - first_503)) -lt 300 ] || fail "no 200 within 300s of the first 503 (last answer: $join_said; host $hd pod '$(host_pod "$hd")')"
+    sleep 1
+done
+cold=$((SECONDS - first_503))
+printf 'cold start (first 503 world_starting -> first 200): %s s; host %s; answers before it: %s (s = world_starting, u = another 503)\n' \
+    "$cold" "$hd" "${answers:-none}" | tee "$out/cold-start.txt" | sed 's/^/   /'
+host_ready "$hd" || say "record: host $hd's pod is not Ready yet at the first 200"
+[ "$(desired | grep -c . || true)" = 1 ] || fail "not exactly one desired row after the join: $(desired | tr '\n' ';')"
+[ "$(host_names | tr '\n' ' ')" = "$hd " ] || fail "the host Deployments are '$(host_names | tr '\n' ' ')', not '$hd '"
+added=$(coord_sum mmo_fleet_added_total) || fail "no coordinator replica answers mmo_fleet_added_total"
+[ "$added" = $((added0 + 1)) ] || fail "the coordinators' mmo_fleet_added_total went $added0 -> $added, not by exactly 1"
+[ "$(coord_gen)" = "$gen" ] || fail "the world generation changed when the world started again: $gen -> $(coord_gen)"
+succ1=$(sql "select count(*) from successions") || fail "cannot read the successions rows of $world_db"
+[ "$succ1" = "$succ0" ] || fail "a succession row was added when the world started again ($succ0 -> $succ1)"
+say "one host ($hd), fleet added $added0 -> $added, generation $gen, successions rows $succ1 (unchanged)"
+# The twin's own dial back (the root's fleet.min); its replicas restart together again.
+k set env deploy/coordinator VOXEL_FLEET_MIN="$fmin" > /dev/null || fail "kubectl set env VOXEL_FLEET_MIN=$fmin on the coordinator failed"
+wait_until 150 "$coordinators coordinator replicas back on VOXEL_FLEET_MIN=$fmin, every one Ready" coord_pods_with_min "$fmin"
 
 echo
 echo "twin-check: PASS in $((SECONDS - started))s (transcript files: $out/)"
