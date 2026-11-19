@@ -1,11 +1,9 @@
 //! Copied from crates/mc-import/tests/common/mod.rs (two crates' tests cannot share a module): the
 //! NBT + gzip fixture writer, without the volume helper.
-#![allow(dead_code)]
 
 use std::io::Write;
 
 pub enum V {
-    Byte(i8),
     Short(i16),
     Int(i32),
     Str(String),
@@ -25,7 +23,6 @@ pub fn s(x: &str) -> V {
 
 fn id(v: &V) -> u8 {
     match v {
-        V::Byte(_) => 1,
         V::Short(_) => 2,
         V::Int(_) => 3,
         V::Bytes(_) => 7,
@@ -43,7 +40,6 @@ fn put_str(out: &mut Vec<u8>, x: &str) {
 
 fn payload(out: &mut Vec<u8>, v: &V) {
     match v {
-        V::Byte(x) => out.push(*x as u8),
         V::Short(x) => out.extend(x.to_be_bytes()),
         V::Int(x) => out.extend(x.to_be_bytes()),
         V::Str(x) => put_str(out, x),
