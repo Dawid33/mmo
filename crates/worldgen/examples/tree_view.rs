@@ -58,13 +58,7 @@ fn voxels(blocks: &[TreeBlock]) -> Vec<([i32; 3], TreePart)> {
         for vz in 0..BV {
             for vy in 0..BV {
                 for vx in 0..BV {
-                    let solid = match &b.chisel {
-                        None => true,
-                        Some(m) => m[(vx + vy * BV + vz * BV * BV) as usize],
-                    };
-                    if solid {
-                        out.push(([base[0] + vx, base[1] + vy, base[2] + vz], b.part));
-                    }
+                    out.push(([base[0] + vx, base[1] + vy, base[2] + vz], b.part));
                 }
             }
         }
@@ -229,12 +223,11 @@ fn main() {
         (v.clone().min().unwrap(), v.max().unwrap())
     };
     println!(
-        "{} seed {seed} age {age}: {} nodes, {} leaf clusters; blocks: {} log ({} chiseled), {} branch, {} leaves; x {:?} y {:?} z {:?}",
+        "{} seed {seed} age {age}: {} nodes, {} leaf clusters; blocks: {} log, {} branch, {} leaves; x {:?} y {:?} z {:?}",
         sp.name,
         sk.nodes.len(),
         sk.leaves.len(),
         count(TreePart::Log),
-        blocks.iter().filter(|b| b.chisel.is_some()).count(),
         count(TreePart::Branch),
         count(TreePart::Leaves),
         ext(0),

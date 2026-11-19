@@ -563,10 +563,9 @@ fn solid_material(mats: &Materials, depth: i32, by: i32, surface: i32, water_top
     }
 }
 
-/// One generated tree block: its block, and its voxel mask if partial.
+/// One generated tree block (always a whole block) and whether it is wood.
 struct PlacedTreeBlock {
     block: Block,
-    chisel: Option<ChiselData>,
     wood: bool,
 }
 
@@ -596,12 +595,7 @@ fn tree_blocks(
                 trees::TreePart::Branch => (blocks.branch, true),
                 trees::TreePart::Leaves => (blocks.leaves, false),
             };
-            let chisel = b.chisel.map(|mask| {
-                ChiselData::from_fn(vec![id], |vx, vy, vz| {
-                    mask[vx + BLOCK_VOXELS * (vy + BLOCK_VOXELS * vz)].then_some(0)
-                })
-            });
-            let placed = PlacedTreeBlock { block: Block::with_tree(id, tree.id, b.limb), chisel, wood };
+            let placed = PlacedTreeBlock { block: Block::with_tree(id, tree.id, b.limb), wood };
             match out.entry(p) {
                 std::collections::btree_map::Entry::Vacant(e) => {
                     e.insert(placed);
@@ -976,9 +970,8 @@ fn columns_from_patch(
                 let bi = BlockIndex::from_xyz(lx, by.rem_euclid(cb) as usize, lz);
                 let (blocks, chisel) = &mut chunks[(by.div_euclid(cb) - base_sub_y) as usize];
                 blocks[bi.linear()] = placed.block;
-                if let Some(c) = placed.chisel {
-                    chisel.insert(bi, c);
-                }
+                // A tree block is whole: drop any chisel already in the cell (a slope's).
+                chisel.remove(&bi);
             }
             // Structures, after terrain and trees, in the source's order (a later one wins).
             if !near.is_empty() {

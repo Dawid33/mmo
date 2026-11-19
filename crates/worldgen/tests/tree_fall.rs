@@ -210,12 +210,7 @@ pub(crate) fn scene(mut ground: Ground, sp: &Species, seed: u64, age: u16) -> Sc
         };
         let chunk = ground.chunks.entry(coords).or_default();
         chunk.set_block(bx, by, bz, Block::with_tree(block_id, TREE, b.limb));
-        if let Some(mask) = &b.chisel {
-            let c = game::ChiselData::from_fn(vec![block_id], |vx, vy, vz| {
-                mask[vx + BLOCK_VOXELS * (vy + BLOCK_VOXELS * vz)].then_some(0)
-            });
-            chunk.chisel.insert(game::BlockIndex::from_xyz(bx, by, bz), c);
-        }
+        chunk.chisel.remove(&game::BlockIndex::from_xyz(bx, by, bz));
         tree.insert(p, b);
     }
     let (send, recv) = crossbeam::channel::unbounded();
@@ -514,9 +509,12 @@ fn clone_ground(g: &Ground) -> Ground {
 }
 
 /// Seconds a mature tree (14–19 blocks of trunk) takes from the chop until
-/// it is down (`Fall::down_after`) at the world's gravity.
+/// it is down (`Fall::down_after`) at the world's gravity. Up to 4 s since
+/// trees are whole blocks (2026-11-19): a one-block trunk under a broad oak
+/// crown can tip onto the crown and roll on it before lying down (oak seed 2:
+/// 3.75 s), which is a real roll, not the weightless spin this guards.
 const MIN_LANDING_SECS: f32 = 0.3;
-const MAX_LANDING_SECS: f32 = 3.0;
+const MAX_LANDING_SECS: f32 = 4.0;
 /// Most the butt may rise above where it started, blocks. The crown is
 /// rigid: a pine lying on its side is a cone on its side, its trunk propped
 /// up by its whorls (measured 2.3–3.3 blocks at the butt), and an oak that
