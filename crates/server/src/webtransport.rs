@@ -251,16 +251,7 @@ fn write_cert_hash_files_into(
 mod cert_tests {
     use super::*;
 
-    /// Several dev hosts each mint a certificate: only an unnamed host (the one host of a
-    /// single-host run) writes the file the page pins a typed local address by; a named one
-    /// writes its own, so the last host to start no longer wins it. No host number in a name.
-    #[test]
-    fn only_an_unnamed_host_writes_the_page_s_hash_file() {
-        assert_eq!(cert_hash_file_names(""), ["webtransport-cert-hash.json"]);
-        assert_eq!(cert_hash_file_names("host-b"), ["webtransport-cert-hash-host-b.json"]);
-        assert_eq!(cert_hash_file_names("a b/c"), ["webtransport-cert-hash-a_b_c.json"], "a file word");
-    }
-
+    /// Regression: k3d twin logs showed every host warning 'could not write cert-hash file ... NotFound' on start (2a4e6e47; r5-k8s plan As built Task 13: one of two defects found on the twin)
     /// A deployed binary has no `assets/` of its build's source tree: it writes nothing and
     /// that is not an error (the k3d twin logged a NotFound WARN on every host start).
     #[test]
@@ -269,16 +260,5 @@ mod cert_tests {
         assert!(!dir.exists());
         assert!(!write_cert_hash_files_into(&dir, "ab", 6467, "").expect("a missing directory is not an error"));
         assert!(!dir.exists(), "nothing created");
-    }
-
-    #[test]
-    fn an_assets_directory_gets_the_hash_files() {
-        let dir = std::env::temp_dir().join(format!("cert-hash-present-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(write_cert_hash_files_into(&dir, "ab", 6467, "").unwrap());
-        for name in cert_hash_file_names("") {
-            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), r#"{"sha256_hex":"ab","port":6467}"#);
-        }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

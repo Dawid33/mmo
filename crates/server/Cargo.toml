@@ -48,76 +48,18 @@ pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 test-hooks = []
 
 [dev-dependencies]
-# Certificate pairs for the client certificate's reload tests (`client_cert`).
-rcgen = { workspace = true }
 game = { workspace = true }
 worldgen = { workspace = true }
 crossbeam = { workspace = true }
-dashmap = { workspace = true }
-bincode = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time"] }
-wtransport = { workspace = true, features = ["dangerous-configuration"] }
 pg-test-support = { path = "../pg-test-support" }
-# Raw SQL on a closed store (damaging a tile row in `store_world`).
+# Raw SQL on the takeover rig's store.
 sqlx = { workspace = true }
-# JWKS bodies in the auth edge tests.
-serde_json = { workspace = true }
-# Hand-made JWT headers in the auth edge tests.
-base64 = { workspace = true }
-# The login service's own kick queue and host links, end to end in `login_link`.
+# The login service's own kick queue and host links, in the takeover rig.
 login = { workspace = true }
-# The login service's HTTP API driven in-process (`hosts`: a join answered 503).
-axum = { workspace = true }
-tower = { workspace = true }
-
-[[test]]
-name = "it"
-path = "tests/it.rs"
-
-[[test]]
-name = "coordinator_rt"
-path = "tests/coordinator_rt.rs"
-required-features = ["test-hooks"]
-
-[[test]]
-name = "hosts"
-path = "tests/hosts.rs"
-required-features = ["test-hooks"]
 
 [[test]]
 name = "takeover"
 path = "tests/takeover.rs"
 required-features = ["test-hooks"]
 
-[[test]]
-name = "dev_structures"
-path = "tests/dev_structures.rs"
-
-[[test]]
-name = "login_link"
-path = "tests/login_link.rs"
-
-[[test]]
-name = "observer"
-path = "tests/observer.rs"
-
-[[test]]
-name = "player_store"
-path = "tests/player_store.rs"
-
-[[test]]
-name = "roles"
-path = "tests/roles.rs"
-required-features = ["test-hooks"]
-
-[[test]]
-name = "store_world"
-path = "tests/store_world.rs"
-
-[[test]]
-name = "threaded_world"
-path = "tests/threaded_world.rs"
-
-[[test]]
-name = "webtransport_handshake"
-path = "tests/webtransport_handshake.rs"

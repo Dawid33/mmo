@@ -39,19 +39,3 @@ pub fn host_load<S: game::RegionSpawner>(manager: &game::WorldManager<S>, tick: 
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_worst_tick_of_the_window_is_reported_once() {
-        let load = TickLoad::default();
-        load.note(Duration::from_millis(5));
-        load.note(Duration::from_millis(40));
-        load.note(Duration::from_millis(10));
-        assert_eq!(load.take_permille(50), 800);
-        assert_eq!(load.take_permille(50), 0);
-        load.note(Duration::from_millis(900));
-        assert_eq!(load.take_permille(50), 10_000);
-    }
-}

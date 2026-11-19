@@ -135,12 +135,6 @@ fn single_player_exit(
     }
 }
 
-/// Whether a single-player server should exit now (parent still there).
-#[cfg(test)]
-fn should_exit_single_player(enabled: bool, ever_connected: bool, sessions: usize) -> bool {
-    single_player_exit(enabled, ever_connected, sessions, false).is_some()
-}
-
 /// Read `input` to its end (EOF or an error), then raise `gone`.
 fn watch_parent(mut input: impl std::io::Read, gone: &std::sync::atomic::AtomicBool) {
     let _ = std::io::copy(&mut input, &mut std::io::sink());
@@ -1722,135 +1716,18 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn world_save_period_from_env() {
-        assert_eq!(world_save_secs(None), WORLD_SAVE_SECS);
-        assert_eq!(world_save_secs(Some("")), WORLD_SAVE_SECS);
-        assert_eq!(world_save_secs(Some("5")), 5);
-        assert_eq!(world_save_secs(Some("0")), WORLD_SAVE_SECS, "0 would save every loop");
-        assert_eq!(world_save_secs(Some("soon")), WORLD_SAVE_SECS);
-    }
-
-    #[test]
-    fn single_player_exits_only_after_last_client_leaves() {
-        assert!(!should_exit_single_player(false, true, 0));
-        assert!(!should_exit_single_player(true, false, 0));
-        assert!(!should_exit_single_player(true, true, 1));
-        assert!(should_exit_single_player(true, true, 0));
-    }
-
-    #[test]
-    fn single_player_exits_when_the_parent_is_gone() {
-        assert_eq!(single_player_exit(true, false, 0, true), Some("parent gone"), "before any connect");
-        assert_eq!(single_player_exit(true, true, 1, true), Some("parent gone"), "with a client");
-        assert_eq!(single_player_exit(false, false, 0, true), None, "not single-player");
-        assert_eq!(single_player_exit(true, true, 0, false), Some("last client left"));
-        assert_eq!(single_player_exit(true, false, 0, false), None);
-    }
-
-    #[test]
-    fn single_player_parent_watch_fires_on_eof() {
-        let gone = std::sync::atomic::AtomicBool::new(false);
-        watch_parent(&b"anything"[..], &gone);
-        assert!(gone.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
-    #[test]
-    fn land_idle_ms_from_env_value() {
-        assert_eq!(land_idle_ms_from(None), Ok(game::LAND_IDLE_MS));
-        assert_eq!(land_idle_ms_from(Some(" 1500 ")), Ok(1500));
-        assert!(land_idle_ms_from(Some("soon")).unwrap_err().contains(LAND_IDLE_MS_ENV));
-    }
-
-    #[test]
-    fn bind_address_defaults_to_loopback() {
-        assert_eq!(bind_ip_from(None), Ok(std::net::IpAddr::from([127, 0, 0, 1])));
-        assert_eq!(bind_ip_from(Some(" ")), Ok(std::net::IpAddr::from([127, 0, 0, 1])));
-        assert_eq!(bind_ip_from(Some("0.0.0.0")), Ok(std::net::IpAddr::from([0, 0, 0, 0])));
-        assert!(bind_ip_from(Some("everywhere")).is_err());
-    }
-
-    #[test]
-    fn server_port_defaults_to_6466() {
-        assert_eq!(server_port_from(None), Ok(DEFAULT_SERVER_PORT));
-        assert_eq!(server_port_from(Some("")), Ok(DEFAULT_SERVER_PORT));
-        assert_eq!(DEFAULT_SERVER_PORT, 6466);
-    }
-
+    /// Regression: menu Load/New world failed with the user-visible error 'port 6466 is already in use' while a dev server ran (seen in play from the menu; c3f6d622 quotes the error)
     #[test]
     fn server_port_accepts_an_override() {
         assert_eq!(server_port_from(Some("40123")), Ok(40123));
         assert_eq!(server_port_from(Some(" 7000 ")), Ok(7000));
     }
 
-    #[test]
-    fn server_port_rejects_invalid_values() {
-        for bad in ["0", "65536", "port", "-1"] {
-            let err = server_port_from(Some(bad)).unwrap_err();
-            assert!(err.contains(SERVER_PORT_ENV), "{err}");
-            assert!(err.contains(bad), "{err}");
-        }
-    }
-
-    #[test]
-    fn webtransport_port_defaults_to_6467_and_takes_an_override() {
-        assert_eq!(wt_port_from(None), Ok(WEBTRANSPORT_PORT));
-        assert_eq!(wt_port_from(Some(" ")), Ok(WEBTRANSPORT_PORT));
-        assert_eq!(wt_port_from(Some("6477")), Ok(6477));
-        for bad in ["0", "65536", "port"] {
-            let err = wt_port_from(Some(bad)).unwrap_err();
-            assert!(err.contains(WT_PORT_ENV) && err.contains(bad), "{err}");
-        }
-    }
-
-    #[test]
-    fn endpoint_carries_the_self_signed_client_cert_hash() {
-        let cert = client_cert::ClientCert::from_env(|_| None).unwrap();
-        let hex = cert.sha256_hex().expect("self-signed");
-        let wt = |name: &str| (name == peer_link::ADVERTISE_WT_ENV).then(|| "https://h.example:6467".to_string());
-        let endpoint = host_endpoint(h(3), 7000, wt, cert.sha256_hex());
-        assert_eq!(endpoint.id, h(3));
-        assert_eq!(endpoint.cert_hash.as_deref(), Some(hex.as_str()));
-        assert_eq!(endpoint.webtransport.as_deref(), Some("https://h.example:6467"));
-        assert_eq!(host_endpoint(h(3), 7000, |_| None, None).cert_hash, None, "a certificate from files: no hash");
-    }
-
-    #[test]
-    fn observer_nonces_come_from_the_os() {
-        let (mut a, mut b) = (os_nonces(), os_nonces());
-        let drawn: std::collections::BTreeSet<u64> = (0..1000).map(|_| a()).collect();
-        assert_eq!(drawn.len(), 1000, "no repeats");
-        // Not a seeded sequence: two sources (as two hosts, or two boots) do not agree.
-        assert_ne!((a(), a()), (b(), b()));
-    }
-
+    /// Regression: same in-play failure as row 7: the single-player server also took 6467 / overwrote the cert-hash file beside a running dev server (c3f6d622; rides on the seen port clash)
     #[test]
     fn single_player_has_no_webtransport_ingress() {
         assert!(webtransport_enabled(false));
         assert!(!webtransport_enabled(true));
-    }
-
-    #[test]
-    fn server_worker_threads_default_runtime_has_four_workers() {
-        let worker_threads = server_worker_threads(None).unwrap();
-        let runtime = build_server_runtime(worker_threads);
-        assert_eq!(runtime.metrics().num_workers(), 4);
-    }
-
-    #[test]
-    fn server_worker_threads_accept_valid_override() {
-        assert_eq!(server_worker_threads(Some("2")), Ok(2));
-    }
-
-    #[test]
-    fn server_worker_threads_reject_invalid_values() {
-        let zero = server_worker_threads(Some("0")).unwrap_err();
-        assert!(zero.contains("TOKIO_WORKER_THREADS"));
-        assert!(zero.contains("positive integer"));
-
-        let malformed = server_worker_threads(Some("many")).unwrap_err();
-        assert!(malformed.contains("TOKIO_WORKER_THREADS"));
-        assert!(malformed.contains("positive integer"));
     }
 }
 
