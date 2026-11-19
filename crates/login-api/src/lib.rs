@@ -21,6 +21,10 @@ pub const PATH_JOIN: &str = "/v1/join";
 pub const PATH_LOGIN_OIDC: &str = "/v1/login/oidc";
 pub const PATH_CONFIG: &str = "/v1/config";
 pub const PATH_JWKS: &str = "/.well-known/jwks.json";
+/// The coordinator's HTTP API (not the login service's own): `POST` a [`LoginToHost`] order.
+pub const PATH_COORD_LOGIN_ORDERS: &str = "/v1/login/orders";
+/// The coordinator's HTTP API: `GET` the [`LoginPage`] of answers after a cursor.
+pub const PATH_COORD_LOGIN_ANSWERS: &str = "/v1/login/answers";
 
 /// The claims of a join JWT (`kid` rides in the header).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +205,14 @@ pub enum HostToLogin {
     /// host — the login service answers the join 503 [`ApiErrorCode::WorldStarting`] at once
     /// and tries no other link (no replica has a gate). Matched by token and epoch.
     Starting { player_token: String, session_epoch: u64 },
+}
+
+/// One page of the coordinator's login answers (`GET` [`PATH_COORD_LOGIN_ANSWERS`]): `(seq,
+/// answer)` in commit order. Bodies are `game::encode_packet` of this type; the `login_outbox`
+/// rows behind it hold `game::encode_packet` of [`HostToLogin`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LoginPage {
+    pub rows: Vec<(u64, HostToLogin)>,
 }
 
 /// What the link messages' `Debug` shows instead of a player token.

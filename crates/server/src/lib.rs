@@ -176,6 +176,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 pub mod auth_edge;
 pub mod client_cert;
 pub mod claims;
+pub mod coordinator_api;
 pub mod coordinator_rt;
 pub mod cuts;
 pub mod dev_structures;

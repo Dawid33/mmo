@@ -80,7 +80,7 @@ pub fn service_token_from_env() -> Result<String, String> {
 }
 
 /// Compare without an early exit on the first differing byte.
-pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = (a.len() ^ b.len()) as u64;
     for i in 0..a.len().max(b.len()) {
         let x = a.get(i).copied().unwrap_or(0);

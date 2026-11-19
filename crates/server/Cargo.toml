@@ -21,7 +21,7 @@ crossbeam = { workspace = true }
 simplelog = { workspace = true }
 log = { workspace = true }
 quinn = { workspace = true }
-tokio = { workspace = true, features = ["macros", "time", "signal"] }
+tokio = { workspace = true, features = ["macros", "time", "signal", "net", "sync", "rt"] }
 lz4_flex = { workspace = true }
 dashmap = { workspace = true }
 wtransport = { workspace = true }
@@ -36,11 +36,17 @@ reqwest = { workspace = true }
 # The fleet reconciler (`VOXEL_ROLE=fleet`, `fleet.rs`): the Kubernetes API, the host template
 # (JSON) and its hash.
 kube-api = { path = "../kube-api" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 # The health and metrics endpoint (`VOXEL_HEALTH_BIND`, `health.rs`).
 axum = { workspace = true }
 prometheus = { workspace = true }
+# The coordinator's HTTP API (`coordinator_api.rs`): HTTPS over HTTP/2, rustls with ring only
+# (aws-lc-rs stays out of the tree: tokio-rustls' defaults would pull it).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+hyper = { version = "1", features = ["http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
 

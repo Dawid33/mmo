@@ -34,7 +34,7 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream, TransportConfig};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-pub use cert::{SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, pin_beside, read_cert_hash, service_token_from_env};
+pub use cert::{SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, ct_eq, pin_beside, read_cert_hash, service_token_from_env};
 pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
 pub use target::LinkTarget;
 
@@ -494,14 +494,37 @@ impl ServerCertVerifier for PinnedCert {
     }
 }
 
-fn client_config(pin: &str) -> io::Result<quinn::ClientConfig> {
+/// A rustls client config that accepts exactly the listener whose certificate hashes to `pin`
+/// (ring provider named explicitly). No ALPN is set: the caller sets its own (the coordinator's
+/// HTTP API dials with `h2`; the QUIC link below with its own).
+pub fn pinned_client_config(pin: &str) -> io::Result<rustls::ClientConfig> {
     let provider = Arc::new(ring::default_provider());
-    let mut crypto = rustls::ClientConfig::builder_with_provider(provider.clone())
+    Ok(rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(io::Error::other)?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedCert { pin: pin.to_string(), provider }))
-        .with_no_client_auth();
+        .with_no_client_auth())
+}
+
+/// A rustls server config for a TLS listener over the identity stored beside `hash_file`
+/// (`<file>.cert` / `.key`, generated when missing, as [`LinkListener::bind`]), ALPN `alpn`, ring
+/// provider. Returns the config and the certificate's SHA-256 pin (hex).
+pub fn pinned_server_config(hash_file: &std::path::Path, alpn: &[&[u8]]) -> io::Result<(Arc<rustls::ServerConfig>, String)> {
+    let id = cert::load_or_generate(Some(hash_file))?;
+    let pin = cert::cert_sha256_hex(&id.cert_der);
+    let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(io::Error::other)?
+        .with_no_client_auth()
+        .with_single_cert(vec![CertificateDer::from(id.cert_der)], PrivatePkcs8KeyDer::from(id.key_der).into())
+        .map_err(io::Error::other)?;
+    crypto.alpn_protocols = alpn.iter().map(|a| a.to_vec()).collect();
+    Ok((Arc::new(crypto), pin))
+}
+
+fn client_config(pin: &str) -> io::Result<quinn::ClientConfig> {
+    let mut crypto = pinned_client_config(pin)?;
     crypto.alpn_protocols = vec![LINK_ALPN.to_vec()];
     let mut config =
         quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).map_err(io::Error::other)?));

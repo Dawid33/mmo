@@ -354,3 +354,28 @@ pub enum CoordMsg {
     /// [`HostMsg::LandNeeded`] of land another host holds or was just assigned).
     LandIs { sr: SuperRegion, owner: HostId, epoch: u64 },
 }
+
+/// One POST of a host to the coordinator's HTTP API (`POST /v1/hosts/{host}/messages`): its
+/// messages in order, under the link identity `(boot, epoch)` its `Attach` set. A batch whose
+/// first message is `HostMsg::Attach` sets that pair.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct HostBatch {
+    pub boot: u64,
+    pub epoch: u64,
+    pub msgs: Vec<HostMsg>,
+}
+
+/// The answer to a [`HostBatch`]: `attached` is false when, after the batch was applied, the
+/// core's attachment of the host is not the batch's `(boot, epoch)` — the host then re-attaches
+/// at `epoch + 1`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchAck {
+    pub attached: bool,
+}
+
+/// One page of a host's mailbox (`GET /v1/hosts/{host}/mailbox`): `(seq, message)` in commit
+/// order; the host drops `seq <=` its cursor and asks past the last one it applied.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MailboxPage {
+    pub rows: Vec<(u64, CoordMsg)>,
+}
