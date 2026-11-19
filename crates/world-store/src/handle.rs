@@ -504,6 +504,33 @@ impl StoreHandle {
         self.ask_later(|r| Request::TakeOutbox(for_hosts, upto, r))
     }
 
+    /// A host's mailbox poll (coordinator HTTP API, `mailbox.rs`): host `host`'s rows at or below
+    /// its cursor `after` deleted (delivered), then at most `limit` of its rows after `after` for
+    /// its boot `boot`, as `(seq, game::encode_packet bytes)` in `seq` (commit) order — one
+    /// statement, no `coordinator` lock. Read-only handles: `ReadOnly`. SQLite: `Unsupported`.
+    pub async fn mailbox_read(&self, host: HostId, boot: u64, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Request::MailboxRead(host, boot, after, limit, Reply::asynch(tx))).map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
+    }
+
+    /// One row per host with unread mailbox rows: `(host, boot, at_ms)` of its oldest — `at_ms`
+    /// the database clock (ms since the epoch) at its insert. SQLite: `Unsupported`.
+    pub async fn mailbox_oldest(&self) -> Result<Vec<(HostId, u64, u64)>, StoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Request::MailboxOldest(Reply::asynch(tx))).map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
+    }
+
+    /// At most `limit` of the coordinator's login answers after `after`, as `(seq,
+    /// game::encode_packet bytes)` in `seq` (commit) order; a read deletes nothing (transitions
+    /// prune them by age, `TransitionWrite::login_prune_before_ms`). SQLite: `Unsupported`.
+    pub async fn login_answers_read(&self, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Request::LoginAnswersRead(after, limit, Reply::asynch(tx))).map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
+    }
+
     /// Test hook: the poll period of this handle's later [`Self::listen_cuts`] (default
     /// [`crate::TERRAIN_POLL_SECS`]). Shared by every clone.
     #[doc(hidden)]

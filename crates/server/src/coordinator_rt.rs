@@ -2720,7 +2720,7 @@ impl CoordinatorRuntime {
                 if let Ok(Some(row)) = self.store.load_coordinator() {
                     let foreign = TransitionWrite {
                         version: row.version,
-                        core: row.core,
+                        core: Some(row.core),
                         history: None,
                         decisions: Vec::new(),
                         replica: game::coordinator::ReplicaId(u64::MAX),
@@ -2739,13 +2739,14 @@ impl CoordinatorRuntime {
             .collect();
         let w = TransitionWrite {
             version: self.core.version(),
-            core: t.core.clone(),
+            core: Some(t.core.clone()),
             history: t.history.clone(),
             decisions: t.decisions.clone(),
             replica: self.core.replica(),
             outbox,
             take_for: self.take_for(),
             discard_for: t.attached_now.clone(),
+            ..Default::default()
         };
         self.writing_take_for = w.take_for.clone();
         let written = self.store.write_transition_later(w);

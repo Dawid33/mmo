@@ -1017,14 +1017,16 @@ macro_rules! engine_rows {
             /// one. Returns the new version and the database clock; no row matched (the version
             /// moved: a second writer, or no row) is [`StoreError::Conflict`]. One statement on the
             /// one `coordinator` row (lock notes: `succession.rs`). Callers hold the writer lock.
+            /// `core` `None` (coordinator HTTP API): the stored one kept, only the version moves
+            /// (the caller passes no `history` with it).
             pub(crate) async fn write_coordinator_cas(
                 pool: &Pool,
                 version: u64,
-                core: Vec<u8>,
+                core: Option<Vec<u8>>,
                 history: Option<Vec<u8>>,
             ) -> Result<(u64, u64), StoreError> {
                 let sql = format!(
-                    "UPDATE coordinator SET core = $1, history = COALESCE($2, history), version = version + 1, \
+                    "UPDATE coordinator SET core = COALESCE($1, core), history = COALESCE($2, history), version = version + 1, \
                      history_version = CASE WHEN $2 IS NULL THEN history_version ELSE version + 1 END, \
                      saved_utc = $3 WHERE id = 1 AND version = $4 RETURNING version, {NOW_MS}"
                 );

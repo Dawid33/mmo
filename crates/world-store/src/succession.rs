@@ -337,8 +337,13 @@
 //!    (`55P03`, a staged part holding a predecessor's rows), a stale generation — is
 //!    `ROLLBACK TO SAVEPOINT` and that decision's answer: nothing of it is written, it is decided
 //!    again later, and the core still commits.
-//! 3. The outbox (Elastic 2b Task 5): `INSERT INTO outbox` of each message for a host linked to
-//!    another replica (a new row each: no existing row locked).
+//!    A transition with no core (coordinator HTTP API) runs `UPDATE coordinator SET version =
+//!    version + 1 WHERE id = 1 AND version = $v RETURNING …` instead: the same one row, the same
+//!    lock, the same `Conflict`.
+//! 3. The mailbox (coordinator HTTP API, `mailbox.rs`), in this order: `DELETE FROM outbox WHERE
+//!    host = ANY($outbox_drop)`; `INSERT INTO outbox (…, at_ms)` of each message (a new row each:
+//!    no existing row locked; the Elastic 2b inserts are these); `INSERT INTO login_outbox` of
+//!    each login answer (new rows); `DELETE FROM login_outbox WHERE at_ms < $before` (the prune).
 //! 4. `DELETE FROM outbox WHERE host = ANY($attached_now)` — the rows of the hosts whose `Attach`
 //!    this transition applied, discarded unsent (BEFORE the take: they are not delivered).
 //! 5. `DELETE FROM outbox WHERE host = ANY($my_hosts) AND version <= $new_version RETURNING …` —
@@ -362,6 +367,23 @@
 //! and nothing is lost: the rows stay until a take commits). Rows of one host are taken
 //! by the one replica linking it (its runtime issues a take only while no transition of its own
 //! is in flight), so a row is delivered at most once.
+//!
+//! **The mailbox reads** (coordinator HTTP API, `mailbox.rs`; none takes `coordinator`):
+//! - A host's poll (`mailbox_read`), ONE statement: `WITH delivered AS (DELETE FROM outbox WHERE
+//!   host = $h AND seq <= $after) SELECT … FROM outbox WHERE host = $h AND boot = $b AND seq >
+//!   $after …` — it locks only that host's delivered `outbox` rows and wants nothing after them.
+//!   A transition's `outbox_drop` (or the Elastic 2b discard and take) meeting one of them waits
+//!   for that one statement and then skips it (gone); the poll meeting a row a transition deleted
+//!   or holds waits for its commit likewise. Only deletes lock `outbox` rows, each a one-scan
+//!   statement holding nothing else on the poll's side: a wait, never a cycle (should two deletes
+//!   ever meet in opposite orders, the `40P01` aborts the poll — the host polls again, its rows
+//!   stay — or the transition — a failed write, retried). The rows it returns are committed ones
+//!   (`seq` is commit order: every insert runs under the `coordinator` row), so a later poll past
+//!   them misses none.
+//! - `mailbox_oldest` (`SELECT DISTINCT ON (host) … FROM outbox`) and `login_answers_read`
+//!   (`SELECT … FROM login_outbox WHERE seq > $after`): plain reads, no locks.
+//! - `login_outbox` rows are written and deleted only by transitions (under `coordinator`): no
+//!   statement waits for another's row there.
 //!
 //! Why no cycle: every statement that locks `coordinator` takes it FIRST (only the coordinator's
 //! transitions, its bootstrap's one-statement insert, the replace path's one-statement epoch raise

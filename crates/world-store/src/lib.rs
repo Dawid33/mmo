@@ -14,6 +14,7 @@ mod fleet;
 mod forged;
 mod handle;
 mod listen;
+mod mailbox;
 mod open;
 mod operator;
 mod replicas;

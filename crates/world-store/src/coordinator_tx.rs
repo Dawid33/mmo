@@ -17,8 +17,13 @@
 //!    `Gone`, a rollback from a generation the world is past, …) or an error inside (a SQL
 //!    error, `40P01`, a lock timeout, a stale generation) rolls back to its savepoint and is
 //!    that decision's answer; the core still commits.
-//! 3. The outbox (Elastic 2b Task 5): the messages for hosts linked to another replica inserted
-//!    (`INSERT INTO outbox`, at the version it commits as); the rows of the hosts whose `Attach`
+//!    A transition with no `core` (the coordinator HTTP API: outputs with nothing durable behind
+//!    them still need their mailbox rows) is `UPDATE coordinator SET version = version + 1 WHERE
+//!    id = 1 AND version = $v`: the same fence, no `core` or `history` written.
+//! 3. The mailbox (coordinator HTTP API, `mailbox.rs`): the rows of `outbox_drop`'s hosts
+//!    deleted, then the `outbox` rows inserted (`at_ms` = the database clock), then the
+//!    `login_outbox` rows, then the login answers older than `login_prune_before_ms` pruned.
+//!    The Elastic 2b take (until the HTTP API replaces it): the rows of the hosts whose `Attach`
 //!    it applied deleted unsent; this replica's own hosts' rows taken (`DELETE … RETURNING`, in
 //!    `seq` order — commit order, as every row is inserted under the row's lock).
 //! 4. `pg_notify('coordinator_row', '<version>')`: the other replicas' caches refresh on it.
@@ -53,16 +58,28 @@ use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 /// replica's own hosts with their links' boots: their rows are taken (deleted and returned, in
 /// commit order — a row of another boot is deleted unsent). Postgres only (SQLite runs one
 /// replica: a transition with an outbox message is `Unsupported` there).
+///
+/// The mailbox (coordinator HTTP API): `core` is `None` for a transition that changed nothing
+/// durable but still carries mailbox rows — its compare-and-set bumps `version` and writes
+/// neither `core` nor `history` (`history` is then ignored). `outbox_drop`: the hosts whose
+/// rows are deleted BEFORE `outbox` is inserted (an applied `Attach`, a detach, an end).
+/// `login_outbox`: the answers to the login service (`game::encode_packet` bytes), inserted
+/// after `outbox`. `login_prune_before_ms`: the `login_outbox` rows inserted before this
+/// database clock (ms since the epoch) are deleted. SQLite: `login_outbox` is `Unsupported`,
+/// `outbox_drop` and the prune have nothing to delete.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TransitionWrite {
     pub version: u64,
-    pub core: Vec<u8>,
+    pub core: Option<Vec<u8>>,
     pub history: Option<Vec<u8>>,
     pub decisions: Vec<StoreDecision>,
     pub replica: ReplicaId,
     pub outbox: Vec<(HostId, u64, Vec<u8>)>,
     pub take_for: Vec<(HostId, u64)>,
     pub discard_for: Vec<HostId>,
+    pub outbox_drop: Vec<HostId>,
+    pub login_outbox: Vec<Vec<u8>>,
+    pub login_prune_before_ms: Option<u64>,
 }
 
 /// A transition committed: the row's new version, the database clock at the write (ms since
@@ -157,18 +174,27 @@ pub(crate) async fn write_pg(
     injected_failures: &[bool],
 ) -> Result<(u64, u64, Vec<Decided>, Vec<OutboxRow>), StoreError> {
     let mut tx = pool.begin().await?;
-    let sql = format!(
-        "UPDATE coordinator SET core = $1, history = COALESCE($2, history), version = version + 1, saved_utc = $3, \
-         history_version = CASE WHEN $2::bytea IS NULL THEN history_version ELSE version + 1 END \
-         WHERE id = 1 AND version = $4 RETURNING version, {PG_NOW_MS}"
-    );
-    let row = sqlx::query(&sql)
-        .bind(&w.core)
-        .bind(&w.history)
-        .bind(crate::open::utc_now())
-        .bind(crate::rows::i(w.version))
-        .fetch_optional(&mut *tx)
-        .await?;
+    let row = match &w.core {
+        Some(core) => {
+            let sql = format!(
+                "UPDATE coordinator SET core = $1, history = COALESCE($2, history), version = version + 1, saved_utc = $3, \
+                 history_version = CASE WHEN $2::bytea IS NULL THEN history_version ELSE version + 1 END \
+                 WHERE id = 1 AND version = $4 RETURNING version, {PG_NOW_MS}"
+            );
+            sqlx::query(&sql)
+                .bind(core)
+                .bind(&w.history)
+                .bind(crate::open::utc_now())
+                .bind(crate::rows::i(w.version))
+                .fetch_optional(&mut *tx)
+                .await?
+        }
+        // Nothing durable changed: the same fence, the row's bytes untouched.
+        None => {
+            let sql = format!("UPDATE coordinator SET version = version + 1 WHERE id = 1 AND version = $1 RETURNING version, {PG_NOW_MS}");
+            sqlx::query(&sql).bind(crate::rows::i(w.version)).fetch_optional(&mut *tx).await?
+        }
+    };
     let Some(row) = row else {
         tx.rollback().await?;
         return Err(StoreError::Conflict);
@@ -189,16 +215,29 @@ pub(crate) async fn write_pg(
         sqlx::query(&end).execute(&mut *tx).await?;
         out.push(decided);
     }
-    // The outbox (Elastic 2b Task 5; lock walk: `succession.rs`'s notes). Its rows are locked
-    // only by coordinator statements, after the `coordinator` row: no edge.
+    // The mailbox (lock walk: `succession.rs`'s notes). Its rows are locked only by coordinator
+    // statements, after the `coordinator` row, and by a host's read of its own rows (holding
+    // nothing else): no edge. The drops first: an `Attach`'s older rows go before its new ones.
+    if !w.outbox_drop.is_empty() {
+        let hosts: Vec<i64> = w.outbox_drop.iter().map(|h| crate::rows::i(h.0)).collect();
+        sqlx::query("DELETE FROM outbox WHERE host = ANY($1)").bind(&hosts).execute(&mut *tx).await?;
+    }
+    let insert = format!("INSERT INTO outbox (version, host, boot, msg, at_ms) VALUES ($1, $2, $3, $4, {PG_NOW_MS})");
     for (host, boot, msg) in &w.outbox {
-        sqlx::query("INSERT INTO outbox (version, host, boot, msg) VALUES ($1, $2, $3, $4)")
+        sqlx::query(&insert)
             .bind(version)
             .bind(crate::rows::i(host.0))
             .bind(crate::rows::i(*boot))
             .bind(msg)
             .execute(&mut *tx)
             .await?;
+    }
+    let insert = format!("INSERT INTO login_outbox (at_ms, msg) VALUES ({PG_NOW_MS}, $1)");
+    for msg in &w.login_outbox {
+        sqlx::query(&insert).bind(msg).execute(&mut *tx).await?;
+    }
+    if let Some(before) = w.login_prune_before_ms {
+        sqlx::query("DELETE FROM login_outbox WHERE at_ms < $1").bind(crate::rows::i(before)).execute(&mut *tx).await?;
     }
     if !w.discard_for.is_empty() {
         // Before the take: the rows of a host whose `Attach` this transition applied were decided
