@@ -1249,17 +1249,23 @@ pub struct WorldManager<S: RegionSpawner> {
     land_idle_since: BTreeMap<crate::SuperRegion, u64>,
     /// When the idle stamps were last made ([`LAND_IDLE_SCAN_MS`]; 0: never).
     idle_scanned_ms: u64,
-    /// Super-regions this host's part of a world cut releases, by that cut: masked
-    /// ([`Self::owner_of`] answers `Unknown`) from its `BeginCut` until it is decided here.
-    releasing: BTreeMap<crate::SuperRegion, CutId>,
+    /// Super-regions this host's part of a world cut releases, each with that cut and the epoch
+    /// the row is released at (its epoch when masked: the store frees it at that epoch + 1):
+    /// masked ([`Self::owner_of`] answers `Unknown`) from its `BeginCut` until it is decided
+    /// here.
+    releasing: BTreeMap<crate::SuperRegion, (CutId, u64)>,
     /// Super-regions this host released, with the free row's epoch, until the directory shows
     /// them owned again.
     recently_released: BTreeMap<crate::SuperRegion, u64>,
     /// Super-regions released since start (the `[server]` line).
     land_released_total: u64,
-    /// Per world cut whose part releases land: the records parked here on that land, as the
-    /// part wrote them (dropped here when it commits, unless parked anew since).
-    released_parked: BTreeMap<CutId, BTreeMap<PlayerId, PlayerRecord>>,
+    /// Per pending world cut: the records parked here on land that is not plainly this host's
+    /// (masked for that part's release, released earlier, another host's, free) as that cut
+    /// writes them — this host's part, or the part of the host that handed the player here
+    /// wrapped in the cut (`park_handed`). Dropped here when the cut commits, unless changed
+    /// since or the land is this host's then (`land.rs`, `drop_stored_parked`): the store is
+    /// their only holder from then on.
+    parked_written: BTreeMap<CutId, BTreeMap<PlayerId, PlayerRecord>>,
     /// An `Unknown` owner was hit: the server reads the directory whole
     /// ([`Self::take_directory_wanted`]).
     directory_wanted: bool,
@@ -1595,7 +1601,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             releasing: BTreeMap::new(),
             recently_released: BTreeMap::new(),
             land_released_total: 0,
-            released_parked: BTreeMap::new(),
+            parked_written: BTreeMap::new(),
             directory_wanted: false,
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
@@ -2622,6 +2628,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // Its releases (the server shrank its fence first): free now, the mask lifts.
         self.land_released(id);
+        // Records the cut wrote that are parked here on land not this host's: the store's now.
+        self.drop_stored_parked(id);
     }
 
     /// The store failed to commit cut `id` (one-phase), or world cut `id` was decided
@@ -3112,19 +3120,25 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.leaving_cut == Some(cut.id) {
             self.leave_release(cut.id, cut.rows.len());
         }
-        // Records parked here on land this part releases, as the part writes them: dropped
-        // here once it commits (`land_released`) — the store holds them then, and whoever
-        // places the player next reads them there.
+        // Records parked here on land that is not plainly this host's — masked for this
+        // part's release (above, or since its `BeginCut`), released earlier, another host's,
+        // free — as this part writes them: dropped here once the cut commits
+        // (`drop_stored_parked`) — the store holds them then, and whoever places the player
+        // next reads them there (never two holders of one record). A world cut under a
+        // directory only (`claim`): a table's land never changes hands.
         let releases = self.releases_of(cut.id);
-        if !releases.is_empty() {
-            let s = self.ownership.1;
+        if self.world_cut_is(cut.id) && self.ownership.0.directory().is_some() {
             let parked: BTreeMap<PlayerId, PlayerRecord> = self
                 .parked_players
                 .iter()
-                .filter(|(p, r)| releases.contains(&crate::super_region_of(r.region, s)) && players.get(*p) == Some(*r))
+                .filter(|(p, r)| players.get(*p) == Some(*r))
+                .filter(|(_, r)| self.parks_on_foreign_land(r))
                 .map(|(p, r)| (*p, r.clone()))
                 .collect();
-            self.released_parked.insert(cut.id, parked);
+            if !parked.is_empty() {
+                // Merged: a record handed here wrapped in this cut is noted already.
+                self.parked_written.entry(cut.id).or_default().extend(parked);
+            }
         }
         let world_cut = WorldCut {
             host: self.ordinal(),

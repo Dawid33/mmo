@@ -20,12 +20,14 @@
 //!   expected peer finished its first sync of the current connection — its backlog came
 //!   before its `Running` on the one ordered stream — so a peer that may hold the player
 //!   live has said so first ("wait, never guess"). Until then the order waits (at most
-//!   [`SPAWN_SYNC_WAIT_MS`], then it is refused). Under `claim` an order for land whose owner
-//!   left cleanly waits the same way while that land is asked for (R4 drain,
-//!   [`crate::HostMsg::LandWanted`]): placed once the heir holds it, else refused at
-//!   [`SPAWN_SYNC_WAIT_MS`] (the coordinator gives that land away at once, but the ask, the
-//!   declaration and the heir's adoption may take longer) — a login there is then answered
-//!   503 and the client retries. An order taken here keeps an online player
+//!   [`SPAWN_SYNC_WAIT_MS`], then it is refused). Under `claim` an order for land with no
+//!   reachable owner — free, or its owner left cleanly — waits the same way while that land is
+//!   asked for ([`crate::HostMsg::LandNeeded`], `land.rs`): placed once a host holds it (an
+//!   assignment; for a leaver that kept its land, the heir of its `Leave` succession), else
+//!   refused at [`SPAWN_SYNC_WAIT_MS`] (the ask, an assignment or a declaration and the heir's
+//!   adoption may take longer) — a login there is then answered 503 and the client retries. A
+//!   `departed` pointer at a host that left owning no land is dropped (`peers.rs`,
+//!   `reroute_held_for_landless_leavers`): the store's record places that player. An order taken here keeps an online player
 //!   here — no hand-off at a host seam — until its new session connects ([`SPAWN_PIN_MS`]).
 //! - **Kick**: applied by the gate host and relayed to every other host; acknowledged to
 //!   the login service by the gate host alone, once every peer applied it (a peer's
@@ -414,6 +416,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// is not handed to another host meanwhile (its body is clamped back at a host seam).
     pub(super) fn spawn_pinned(&self, player: PlayerId) -> bool {
         self.spawn_pins.get(&player).is_some_and(|p| self.clock_ms.saturating_sub(p.at_ms) < SPAWN_PIN_MS)
+    }
+
+    /// Whether a spawn order for `player` is held, taken or placed here and its session has
+    /// not come yet: its parked record stays here meanwhile (`land.rs`, `drop_stored_parked`).
+    pub(super) fn spawn_awaited(&self, player: PlayerId) -> bool {
+        self.spawn_pinned(player)
+            || self.spawn_held.iter().any(|(_, r)| r.player == player)
+            || self.spawn_here.iter().any(|r| r.player == player)
     }
 
     /// `client`'s body was clamped back at a host seam: whether its pin did it (online and

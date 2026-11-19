@@ -24,8 +24,10 @@
 //! ([`WorldManager::assigned`]): they are only QUEUED here — the server takes them
 //! ([`WorldManager::take_assigned`]), grows its fence, and only then tells the manager
 //! ([`WorldManager::claimed`]): fence first. A directory read is never what makes this host treat
-//! land as its own without the fence (the server's directory keeper fences such a row before it
-//! hands the read over: a lost `Assigned`, healed).
+//! land as its own without the fence: the server's directory keeper fences a lost `Assigned`
+//! before it hands the read over (never while a succession is open: such a row may be
+//! INHERITED, which comes only by its order and adoption) and withholds every other row of this
+//! host its fence lacks.
 //!
 //! **Idle land is released** (plan "Decisions settled in planning" 2, Elastic 3 Task 6). Every
 //! [`LAND_IDLE_SCAN_MS`] the upkeep stamps each owned super-region nothing holds
@@ -36,11 +38,16 @@
 //! [`WorldManager::owner_of`] answers `Unknown` for them as for land being inherited — nothing
 //! starts there, a need is recorded without an ask, every arrival takes the unowned path — and
 //! this host's part carries them in `WorldCut::releases`; the store frees those rows with the
-//! part's commit. Committed ([`WorldManager::land_released`], after the server shrank its
-//! fence): each row is free at `epoch + 1` in the directory, the parked blobs of that land are
-//! dropped (the store holds its state now; land assigned back here later starts from the
-//! store), every peer is told ([`crate::Reliable::Released`]; a peer that links later, at its
-//! hello), the mask lifts and what waited asks for an owner. Aborted
+//! part's commit. Each is masked WITH the epoch it is released at. Committed
+//! ([`WorldManager::land_released`], after the server shrank its fence — a row only at its
+//! released epoch): each row is free at that epoch + 1 in the directory, the parked blobs of
+//! that land are dropped (the store holds its state now; land assigned back here later starts
+//! from the store), every peer is told ([`crate::Reliable::Released`]; a peer that links
+//! later, at its hello), the mask lifts and what waited asks for an owner. A row the directory
+//! (or the fence) already knows at a NEWER epoch was assigned again between the commit and this
+//! host's settle — to this host or another: it is kept as it is and nobody is told it is free.
+//! Records parked here that the committed cut wrote and that lie on land not this host's are
+//! dropped ([`WorldManager::drop_stored_parked`]): the store is their only holder. Aborted
 //! ([`WorldManager::release_aborted`]): the mask lifts, the land is this host's, what waited is
 //! delivered here. Nothing is released under `static` / all-in-one, or while any succession run
 //! is open on this host.
@@ -51,12 +58,14 @@
 //! list known) every super-region its directory gives it is masked for that cut and the part
 //! carries them all — unless the part carries an in-flight row or a succession run is open on
 //! this host: then it releases nothing and the land waits for its `Leave` succession (the rows
-//! are keyed to this host id; only a succession's adopting part moves them). The leaver parked
+//! are keyed to this host id; only a succession's adopting part moves them; a leaver that owns
+//! no land and still carries rows gets that succession too, declared without an ask). The leaver parked
 //! everything at its `BeginCut`, so the mask only gates `owner_of`; committed or aborted, the
 //! mask lifts as for an idle release (an aborted leave keeps the land, its retry's part decides
 //! again). Peers learn it from a directory read (`end_leaves` asks for one: the leaver's
 //! `Released` stays in its held sessions), and what they held for the leaver goes on by the
-//! land's next owner ([`WorldManager::reroute_held_for_landless_leavers`]).
+//! land's next owner ([`WorldManager::reroute_held_for_landless_leavers`]); their `departed` /
+//! `redirected` pointers at it are dropped there too (the store places those players).
 
 use std::collections::BTreeSet;
 
@@ -292,20 +301,22 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         let busy = self.busy_land();
-        let idle: Vec<SuperRegion> = self
+        // Each with the epoch it is released at (the row's now: what the fence holds and the
+        // store's release compares).
+        let idle: Vec<(SuperRegion, u64)> = self
             .land_idle_since
             .iter()
             .filter(|(sr, since)| now_ms.saturating_sub(**since) >= self.land_idle_ms && !busy.contains(*sr))
             .filter(|(sr, _)| directory.get(**sr, me) == Owner::Me && !self.releasing.contains_key(*sr))
-            .map(|(sr, _)| *sr)
+            .map(|(sr, _)| (*sr, directory.epoch(*sr).unwrap_or(0)))
             .collect();
         if idle.is_empty() {
             return;
         }
         log::info!("[server] world cut {}: {} idle super-region(s) released in this host's part (masked until it is decided)", cut.0, idle.len());
         log::debug!("[server] world cut {}: releasing {idle:?}", cut.0);
-        for sr in idle {
-            self.releasing.insert(sr, cut);
+        for (sr, epoch) in idle {
+            self.releasing.insert(sr, (cut, epoch));
         }
     }
 
@@ -322,11 +333,23 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// waits for a `Leave` succession. Nothing under `static` / all-in-one. Land assigned to
     /// this host and not yet in its directory (`assigned_rows`, its fence not grown yet) is not
     /// released: it is this host's in the store, and goes by that `Leave` succession.
+    ///
+    /// A leaver that owns NO land and still carries in-flight rows (idle land released earlier,
+    /// then something arrived for free land and waits here) leaves them keyed to its host id:
+    /// the coordinator declares a `Leave` succession for a clean row that holds only in-flight
+    /// rows without waiting for an ask (`coordinator/succession.rs`), and its heir adopts them.
     pub(super) fn leave_release(&mut self, cut: CutId, in_flight_rows: usize) {
         let me = self.ordinal();
         let Some(directory) = self.ownership.0.directory() else { return };
-        let land = directory.owned_by(me);
+        let land: Vec<(SuperRegion, u64)> = directory.owned_by(me).into_iter().map(|sr| (sr, directory.epoch(sr).unwrap_or(0))).collect();
         if land.is_empty() {
+            if in_flight_rows > 0 {
+                log::warn!(
+                    "[server] world cut {}: this host leaves owning no land with {in_flight_rows} in-flight row(s): they stay \
+                     keyed to this host until a Leave succession's heir adopts them (the coordinator declares it)",
+                    cut.0
+                );
+            }
             return;
         }
         if in_flight_rows > 0 {
@@ -348,74 +371,140 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         log::info!("[server] world cut {}: this host leaves: its {} super-region(s) are released in its part", cut.0, land.len());
-        for sr in land {
-            self.releasing.insert(sr, cut);
+        for (sr, epoch) in land {
+            self.releasing.insert(sr, (cut, epoch));
         }
     }
 
-    /// The super-regions masked for cut `cut`'s release (what its part carries; the server
-    /// shrinks its fence by them when that part commits).
+    /// The super-regions masked for cut `cut`'s release (what its part carries).
     pub fn releases_of(&self, cut: CutId) -> Vec<SuperRegion> {
-        self.releasing.iter().filter(|(_, c)| **c == cut).map(|(sr, _)| *sr).collect()
+        self.releasing.iter().filter(|(_, (c, _))| *c == cut).map(|(sr, _)| *sr).collect()
+    }
+
+    /// [`Self::releases_of`], each with the epoch it was masked — and is released — at (the
+    /// server shrinks its fence by them when that part commits, a row only at that epoch).
+    pub fn release_epochs_of(&self, cut: CutId) -> Vec<(SuperRegion, u64)> {
+        self.releasing.iter().filter(|(_, (c, _))| *c == cut).map(|(sr, (_, epoch))| (*sr, *epoch)).collect()
     }
 
     /// Cut `cut` committed — with this host's part, the server's fence already shrunk by its
-    /// releases. Per released super-region: the directory row is free at `epoch + 1` (the
-    /// epoch it held), the parked blobs of its regions and their cached terrain are dropped
-    /// (the store holds that land now: land assigned back here later starts from the store),
-    /// so are their load-retry marks; its idle stamp goes, the row is remembered in
-    /// `recently_released` and counted, every peer is told ([`crate::Reliable::Released`]).
-    /// Then the mask lifts and what waited goes on (it asks for an owner).
+    /// releases. Per released super-region, RELEASED AT the epoch it was masked at
+    /// (`releasing`): the directory row is free at that epoch + 1 — unless the directory
+    /// already knows a newer row (final review, A-F2 / B-I5: the land was assigned again, to
+    /// this host or another, after the release committed and before this host settled the cut;
+    /// its `Assigned` / `Owns` / a read came first): that row is kept, nobody is told it is
+    /// free, and it is not remembered as released. For every released super-region the parked
+    /// blobs of its regions and their cached terrain are dropped (the store holds that land
+    /// now: land assigned back here starts from the store), so are their load-retry marks and
+    /// its idle stamp; it is counted. The rows that are free now are remembered in
+    /// `recently_released` and every peer is told ([`crate::Reliable::Released`]). Then the mask
+    /// lifts and what waited goes on (it asks for an owner, or is delivered to the new one).
     pub(super) fn land_released(&mut self, cut: CutId) {
-        let released = self.releases_of(cut);
+        let released = self.release_epochs_of(cut);
         if released.is_empty() {
             return;
         }
         let s = self.ownership.1;
         let Some(directory) = self.ownership.0.directory_mut() else {
             log::error!("[server] world cut {}: {} super-region(s) released, but this host keeps no directory", cut.0, released.len());
+            for (sr, _) in &released {
+                self.releasing.remove(sr);
+            }
             return;
         };
         let mut rows = Vec::with_capacity(released.len());
-        for &sr in &released {
-            let epoch = directory.epoch(sr).unwrap_or(0) + 1;
-            directory.set(sr, None, epoch);
-            self.recently_released.insert(sr, epoch);
-            rows.push((sr, epoch));
+        for &(sr, was) in &released {
+            let free = was + 1;
+            if let Some(known) = directory.epoch(sr).filter(|known| *known > free) {
+                log::info!(
+                    "[server] world cut {}: super-region {sr:?} was released at epoch {was} and has an owner again at epoch \
+                     {known}: that row is kept",
+                    cut.0
+                );
+                continue;
+            }
+            directory.set(sr, None, free);
+            self.recently_released.insert(sr, free);
+            rows.push((sr, free));
         }
-        let of_released = |rc: &RegionCoords| released.contains(&crate::super_region_of(*rc, s));
+        let of_released = |rc: &RegionCoords| released.iter().any(|(sr, _)| *sr == crate::super_region_of(*rc, s));
         self.parked.retain(|rc, _| !of_released(rc));
         self.terrain_cache.retain(|rc, _| !of_released(rc));
         self.pristine_terrain.retain(|rc, _| !of_released(rc));
         self.unavailable.retain(|rc, _| !of_released(rc));
-        // The records parked here on that land that the part wrote, unchanged since: the store
-        // holds them (whoever places the player next reads them there — never two writers).
-        for (player, written) in self.released_parked.remove(&cut).unwrap_or_default() {
-            if self.parked_players.get(&player) == Some(&written) {
-                self.parked_players.remove(&player);
-                self.parked_bodies.retain(|_, p| *p != player);
-            }
-        }
-        for sr in &released {
+        for (sr, _) in &released {
             self.land_idle_since.remove(sr);
             self.releasing.remove(sr);
         }
         self.land_released_total += released.len() as u64;
-        log::info!("[server] world cut {} committed: {} super-region(s) released (free now)", cut.0, released.len());
+        log::info!("[server] world cut {} committed: {} super-region(s) released ({} free now)", cut.0, released.len(), rows.len());
         // Every peer learns it now (a peer that links later, at its hello): nothing it sends
         // for that land comes here any more — a need asks the coordinator, an arrival waits
-        // on the peer for the land's next owner.
-        let peers: Vec<HostId> = self.peers.keys().copied().collect();
-        for p in peers {
-            self.queue_to_peer(p, crate::Reliable::Released { rows: rows.clone() });
+        // on the peer for the land's next owner. Not a host that left (its session is held).
+        if !rows.is_empty() {
+            let peers: Vec<HostId> = self.peers.keys().copied().filter(|p| !self.left_peers.contains_key(p)).collect();
+            for p in peers {
+                self.queue_to_peer(p, crate::Reliable::Released { rows: rows.clone() });
+            }
         }
         self.flush_unowned();
+    }
+
+    /// Cut `cut` committed with this host's part (after [`Self::land_released`]: the masks of
+    /// its releases are lifted): every record noted for it (`parked_written` — parked here on
+    /// land that was not plainly this host's when the part was built and written by the part
+    /// as it is, or handed here wrapped in the cut, its sender's part writing it) that is
+    /// still parked here unchanged, on land that is not this host's now, is DROPPED: the store
+    /// holds exactly that record, and whoever places the player next reads it there (final
+    /// review, B-I2). Kept here it would be written by every later part of this host while
+    /// the land's next owner places the player from the store — the player twice, two parts
+    /// writing one `players` row. Not dropped: a record changed or taken since (a login, a
+    /// newer park), one a spawn order placed here waits on (its session is coming), and one
+    /// whose land is this host's (again). Under `static` / all-in-one nothing is noted.
+    pub(super) fn drop_stored_parked(&mut self, cut: CutId) {
+        let written = self.parked_written.remove(&cut).unwrap_or_default();
+        // Notes of older cuts were settled with them (a note is made only for a pending cut).
+        self.parked_written.retain(|c, _| *c > cut);
+        let mut dropped = 0usize;
+        for (player, record) in written {
+            if self.parked_only(player) != Some(&record) {
+                continue;
+            }
+            if self.spawn_awaited(player) {
+                continue;
+            }
+            if !self.parks_on_foreign_land(&record) {
+                continue;
+            }
+            self.parked_players.remove(&player);
+            self.parked_bodies.retain(|_, p| *p != player);
+            dropped += 1;
+        }
+        if dropped > 0 {
+            log::info!(
+                "[server] world cut {} committed: {dropped} record(s) parked here on land that is not this host's are the \
+                 store's now (placed by their land's owner)",
+                cut.0
+            );
+        }
+    }
+
+    /// Whether `record`, parked here, lies on land that is not this host's: the region a login
+    /// of it is placed in (`spawn_region`) has another owner, none, or is masked for a release.
+    /// Land this host inherits and has not adopted yet is its own already.
+    pub(super) fn parks_on_foreign_land(&self, record: &crate::PlayerRecord) -> bool {
+        let region = self.spawn_region(Some(record.region));
+        if self.inheriting.contains_key(&crate::super_region_of(region, self.ownership.1)) {
+            return false;
+        }
+        self.owner_of(region) != Owner::Me
     }
 
     /// Cut `cut` was decided aborted (or its part never staged): the mask of its releases lifts,
     /// the land stays this host's, and what waited for it is delivered here.
     pub(super) fn release_aborted(&mut self, cut: CutId) {
-        self.released_parked.remove(&cut);
+        // Nothing of it is in the store: the records noted for it stay parked here.
+        self.parked_written.remove(&cut);
         let kept = self.releases_of(cut);
         if kept.is_empty() {
             return;

@@ -708,10 +708,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// region cannot be loaded; with none, host `from` is told
     /// ([`Self::tell_parked`]). Never announced online here, it is reported offline: the
     /// sending host reported it in transit to this host (`PlayerHandedTo`), not offline.
+    ///
+    /// Handed wrapped in the world cut pending here ([`Reliable::InCut`], `inbound_accounted`):
+    /// the SENDER's part writes this record (here the player is `not_ours`), so it is noted
+    /// under that cut (`parked_written`) and dropped at its commit if it parks on land that is
+    /// not this host's (`drop_stored_parked`: the store is then its only holder).
     fn park_handed(&mut self, from: HostId, client: ClientId, player: PlayerId, record: PlayerRecord, now_ms: u64) {
         let hop = self.hop_here(player);
         self.world_send(HostMsg::PlayerOffline { player, hop });
         self.cut_transit(player, &record);
+        if let Some(cut) = self.inbound_accounted.filter(|c| self.world_cut_is(*c)) {
+            self.parked_written.entry(cut).or_default().insert(player, record.clone());
+        }
         self.parked_players.insert(player, record);
         if self.sessions.contains_key(&client) {
             let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
@@ -1079,6 +1087,22 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// to it once its leave cut began; what was handed before its mark reached it) — if one is,
     /// nothing of that host moves ("wait, never guess"): `log::error!`, kept. Called before
     /// [`Self::forget_landless_leavers`] forgets any departed host (which drops what it holds).
+    ///
+    /// **Its player pointers go first** (final review, B-I3): a `departed` entry naming such a
+    /// host (a player this host handed it) and a `redirected` one (a region a client here was
+    /// sent to it for) would route there for ever — a spawn order is answered `Host(leaver)`,
+    /// held and refused, a session `PLAYER_ELSEWHERE` — until its row is pruned. The leaver
+    /// parked everything at its leave cut and its committed part wrote every player it held, so
+    /// the store places them: the `departed` entries are dropped (the next order reads the
+    /// record's region and goes by its owner) and the `redirected` regions are answered again
+    /// ([`Self::reanswer_redirected_to`]). Not while a player-bearing message is held for it
+    /// (the error above: nothing of that host moves).
+    ///
+    /// The journal entries dropped with the held messages are `Sent` ones only: a pair joined
+    /// by a leave receives nothing wrapped from the leaver after the leave cut's marks, and the
+    /// committed leave cut explained everything received before. A `Received` entry still there
+    /// would be state a report owes somebody: then nothing of that host moves either
+    /// (`log::error!`, `debug_assert!`, kept).
     pub(super) fn reroute_held_for_landless_leavers(&mut self) {
         let hosts: Vec<HostId> = self
             .left_peers
@@ -1087,7 +1111,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|o| !self.leave_pairs.contains_key(o) && !self.returning_peers.contains_key(o))
             .filter(|o| !self.successions.values().any(|r| r.order.predecessor == *o))
             .filter(|o| self.land_of(*o).is_some_and(|l| l.is_empty()))
-            .filter(|o| !self.peer_entries_of(*o).is_empty())
             .collect();
         for o in hosts {
             let entries: Vec<(u64, Reliable)> = self.peer_entries_of(o).into_iter().map(|(id, r)| (id, r.clone())).collect();
@@ -1099,6 +1122,27 @@ impl<S: RegionSpawner> WorldManager<S> {
                      conservation bug: nothing is handed to a leaving host)",
                     reliable_name(r)
                 );
+                continue;
+            }
+            // Players this host sent it: the store places them now (its leave part wrote them).
+            let before = self.departed.len();
+            self.departed.retain(|_, h| *h != o);
+            let dropped = before - self.departed.len();
+            if dropped > 0 {
+                log::info!("[server] host {o} left and owns no land: {dropped} player(s) handed to it are placed from the store from now on");
+            }
+            self.reanswer_redirected_to(o);
+            if entries.is_empty() {
+                continue;
+            }
+            let received = self.journal.received_len(o);
+            if received > 0 {
+                log::error!(
+                    "[server] host {o} left and owns no land, but {received} message(s) received from it are journalled and in \
+                     no committed cut: nothing held for it moves (a conservation bug: a leave pair receives nothing after \
+                     the leave cut's marks)"
+                );
+                debug_assert!(false, "journalled Received entries of landless leaver {o}");
                 continue;
             }
             if let Some(peer) = self.peers.get_mut(&o) {
@@ -1336,7 +1380,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         for &(sr, _) in &rows {
             self.forget_land_need(sr);
         }
-        let peers: Vec<HostId> = self.peers.keys().copied().collect();
+        // Not to a host that left (its session is held; each message queued for it would
+        // re-arm the re-route of what is held for it, `reroute_held_for_landless_leavers`).
+        let peers: Vec<HostId> = self.peers.keys().copied().filter(|p| !self.left_peers.contains_key(p)).collect();
         for p in peers {
             self.queue_to_peer(p, Reliable::Owns { rows: rows.clone() });
         }
@@ -1347,13 +1393,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// and the hosts holding their lease (`live`; this host counts as live): at boot, every
     /// `TERRAIN_POLL_SECS` as a backstop, and when [`Self::take_directory_wanted`] asked.
     /// A row older than what a peer already said is kept as said ([`crate::Directory::replace`]).
-    /// What waited for a super-region that has an owner now goes on.
+    /// What waited for a super-region that has an owner now goes on. The server never hands
+    /// over a row of this host that its fence lacks (`DirectoryKeeper`: inherited land comes by
+    /// its order, assigned land through [`Self::claimed`]).
+    ///
+    /// `directory_wanted` is NOT cleared here: the server takes it at every pass
+    /// ([`Self::take_directory_wanted`]), so a want still set was raised while this read was
+    /// in flight — its rows may predate what was wanted — and asks for the next one.
     pub fn directory_read(&mut self, rows: Vec<(crate::SuperRegion, i64, u64)>, mut live: BTreeSet<HostId>) {
         live.insert(self.ordinal());
         let Some(directory) = self.ownership.0.directory_mut() else { return };
         directory.replace(rows.into_iter().map(|(sr, owner, epoch)| (sr, u64::try_from(owner).ok().map(HostId), epoch)));
         directory.set_live(live);
-        self.directory_wanted = false;
         self.left_land_read();
         self.flush_unowned();
     }

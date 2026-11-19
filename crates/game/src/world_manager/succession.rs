@@ -344,7 +344,7 @@ macro_rules! host_fields {
             recently_despawned, despawn_warned, intent_replies_lost, parked_bodies, items_destroyed,
             incarnation, incarnation_seen, next_incarnation, unowned_waiting, land_needed, land_needed_sent,
             assigned_rows, land_scanned_ms, land_idle_ms, land_idle_since, idle_scanned_ms, releasing,
-            recently_released, land_released_total, released_parked, directory_wanted, journal_always,
+            recently_released, land_released_total, parked_written, directory_wanted, journal_always,
             peer_dropped_for_dead, peer_state_to_forgotten, cut_refused_for, unaccounted_dead, forgotten_hosts, foreign_halo_stale, higher_generation, endpoint,
             asked_elsewhere_answered_ms, observer_orders, nonces, observer_revocations,
             foreign_input_warned_ms, unseeded_warned, world_cut, world_cut_seen, wrapper_seen, marks_queued,

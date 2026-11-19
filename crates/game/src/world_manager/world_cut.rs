@@ -981,6 +981,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// Whether `id` is the world cut pending here (from its `BeginCut` until it is decided).
+    pub(super) fn world_cut_is(&self, id: CutId) -> bool {
+        self.world_cut.as_ref().is_some_and(|r| r.cut == id)
+    }
+
     /// The other participants of world cut `id` (empty for a one-phase cut).
     pub(super) fn world_cut_peers(&self, id: CutId) -> BTreeSet<HostId> {
         self.world_cut.as_ref().filter(|r| r.cut == id).map(|r| r.peers.clone()).unwrap_or_default()

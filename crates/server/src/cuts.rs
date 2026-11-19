@@ -124,7 +124,8 @@ struct WorldPart {
     /// The prepare's answer, while it has not come.
     reply: Option<Answer<CutCommitted>>,
     /// The super-regions the part releases (`WorldCut::releases`, Elastic 3): the fence shrinks
-    /// by them once the part is committed, before the manager hears it.
+    /// by them — each at the epoch `fence` holds for it, the one the store released — once the
+    /// part is committed, before the manager hears it.
     releases: Vec<game::SuperRegion>,
     /// Staged (the prepare answered `Ok`): its region versions.
     versions: Option<Vec<(RegionCoords, u64)>>,
@@ -172,6 +173,10 @@ pub struct CutWriter {
     world: Option<WorldGeneration>,
     /// The world part not settled yet (one at a time: the store refuses another meanwhile).
     part: Option<WorldPart>,
+    /// World cuts the coordinator said COMMITTED that no part here tracks while the manager
+    /// still masks land for their release: each is settled by the store's decision
+    /// ([`Self::settle_world`]) once no other part is in the way — never as a failure.
+    committed_untracked: Vec<CutId>,
     /// When a failing read of a world part's decision was last warned about.
     warned: Option<Instant>,
     /// How long after its prepare a part with no decision stored is aborted by this host
@@ -251,6 +256,7 @@ impl CutWriter {
             failed_in_a_row: 0,
             world: None,
             part: None,
+            committed_untracked: Vec::new(),
             warned: None,
             part_deadline: Duration::from_millis(game::WORLD_CUT_DEADLINE_MS),
             leave_timeout: Duration::from_secs(game::LEAVE_CUT_TIMEOUT_SECS),
@@ -494,11 +500,34 @@ impl CutWriter {
                     part.done = Some(committed);
                     part.polled = None;
                 }
+                // Told committed while the manager masks land this host's part of it releases,
+                // and no part of it is tracked here: the part may be staged and committed (the
+                // store freed the rows). Lifting the mask as for a failure would leave manager
+                // and fence holding land the store gave up (a false fenced exit at the next
+                // load or part): it is settled by the store's decision instead, as a part is.
+                _ if committed && !manager.releases_of(cut).is_empty() => {
+                    log::warn!(
+                        "[server] world cut {} committed and this host masked land for its release, but no part of it is \
+                         tracked here: settled by the store's decision",
+                        cut.0
+                    );
+                    if !self.committed_untracked.contains(&cut) {
+                        self.committed_untracked.push(cut);
+                    }
+                }
                 _ => {
                     log::debug!("[server] world cut {} decided ({committed}); nothing of it staged here", cut.0);
                     manager.cut_failed(cut);
                 }
             }
+        }
+        if self.part.is_none() && !self.committed_untracked.is_empty() {
+            let cut = self.committed_untracked.remove(0);
+            // No tick is known here; it is only what an abort would record, and this cut is
+            // decided.
+            let mut part = WorldPart::new(cut, 0, None);
+            part.done = Some(true);
+            self.part = Some(part);
         }
         self.settle_world(manager);
         self.warn_absent_cuts(manager);
@@ -592,12 +621,20 @@ impl CutWriter {
                         log::warn!("[server] world cut {} committed with this host's part, whose prepare answer was lost", id.0);
                         Vec::new()
                     });
-                    // What the part carried — or, for a part this writer did not stage (a
-                    // `CutPending` of an earlier one), what the manager masked for that cut.
-                    let mut releases = std::mem::take(&mut part.releases);
-                    releases.extend(manager.releases_of(id));
-                    releases.sort_unstable();
-                    releases.dedup();
+                    // What the part carried, each at the epoch its fence held (what the store
+                    // released) — or, for a part this writer did not stage (a `CutPending` of an
+                    // earlier one, a commit with no part tracked), what the manager masked for
+                    // that cut, at the epoch it masked it at.
+                    let fence = part.fence.take();
+                    let mut releases: Vec<(game::SuperRegion, u64)> = std::mem::take(&mut part.releases)
+                        .into_iter()
+                        .filter_map(|sr| fence.as_ref().and_then(|f| f.epochs.get(&sr)).map(|e| (sr, *e)))
+                        .collect();
+                    for (sr, epoch) in manager.release_epochs_of(id) {
+                        if !releases.iter().any(|(q, _)| *q == sr) {
+                            releases.push((sr, epoch));
+                        }
+                    }
                     self.part = None;
                     self.failed_in_a_row = 0;
                     self.world_saved = Instant::now();
@@ -607,7 +644,8 @@ impl CutWriter {
                     game::perf_event!("world_saved", "cut={} world=1", id.0);
                     crate::health::Health::global().world_saved();
                     // The released rows are free in the store: out of the fence BEFORE the
-                    // manager learns it (no later load or part is checked against them).
+                    // manager learns it (no later load or part is checked against them) — but
+                    // only at the released epoch: a row assigned back to this host since stays.
                     self.claims.shrink(&releases);
                     manager.cut_committed(id, versions);
                 }

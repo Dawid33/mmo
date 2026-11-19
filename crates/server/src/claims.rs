@@ -320,17 +320,29 @@ impl HostClaims {
     }
 
     /// Shrinks the fence by `released` (Elastic 3: the super-regions a committed cut part gave
-    /// back, now free at `epoch + 1`): those keys leave it, nothing else changes. Runs before the
-    /// manager learns of the commit, so no later load or part is checked against a row this host
-    /// no longer holds (it would be refused `Fenced`).
-    pub fn shrink(&self, released: &[SuperRegion]) {
+    /// back, each with the epoch it was RELEASED at — the part's fence held it — now free at
+    /// that epoch + 1): a key leaves the fence only while the fence still holds that epoch for
+    /// it; nothing else changes. A key the fence holds at another epoch was assigned to this
+    /// host again after the release committed and before this host settled the cut (its
+    /// `Assigned` came first, [`Self::add`]): it is this host's in the store and stays fenced.
+    /// Runs before the manager learns of the commit, so no later load or part is checked against
+    /// a row this host no longer holds (it would be refused `Fenced`).
+    pub fn shrink(&self, released: &[(SuperRegion, u64)]) {
         if released.is_empty() {
             return;
         }
         let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
         let mut shrunk = (**current).clone();
-        for sr in released {
-            shrunk.epochs.remove(sr);
+        for (sr, epoch) in released {
+            match shrunk.epochs.get(sr) {
+                Some(held) if held == epoch => {
+                    shrunk.epochs.remove(sr);
+                }
+                Some(held) => {
+                    log::info!("[server] super-region {sr:?} was released at epoch {epoch} and is this host's again at epoch {held}: it stays in the fence");
+                }
+                None => {}
+            }
         }
         *current = Arc::new(shrunk);
     }
@@ -448,7 +460,8 @@ pub fn read_directory(
 }
 
 /// After a failed directory read, the next one is not started before this many ms (a read
-/// the manager wants is not put off to the next backstop period).
+/// the manager wants is not put off to the next backstop period). Also the least spacing of
+/// two reads the manager wants ([`DirectoryKeeper`]).
 pub const DIRECTORY_READ_RETRY_MS: u64 = 1_000;
 /// At most one warning per this long about failed directory reads.
 pub const DIRECTORY_WARN_MS: u64 = 10_000;
@@ -495,6 +508,15 @@ impl DirectoryRead {
     }
 }
 
+/// Whether directory row `row` gives host `me` (the fence's owner) a super-region its fence
+/// does not hold AT THAT EPOCH: no entry, or an older one (the row was released by this host
+/// and assigned to it again — the fence still holds the released epoch until the releasing cut
+/// is settled here). A fence entry at the row's epoch or newer covers it (newer: a stale read).
+fn unfenced(fence: &Fence, me: i64, row: &(SuperRegion, i64, u64)) -> bool {
+    let (sr, owner, epoch) = row;
+    *owner == me && fence.epochs.get(sr).is_none_or(|held| held < epoch)
+}
+
 /// A `claim` host's directory and assigned land, driven from its main loop (never blocks).
 /// The land the coordinator assigned this host ([`game::WorldManager::take_assigned`]) goes
 /// into the fence ([`HostClaims::add`]) BEFORE the manager learns it
@@ -503,19 +525,42 @@ impl DirectoryRead {
 /// when the manager wants it ([`game::WorldManager::take_directory_wanted`]) and every
 /// [`world_store::TERRAIN_POLL_SECS`] as a backstop ([`game::WorldManager::directory_read`]).
 ///
+/// A read the manager wants is started at most once per [`DIRECTORY_READ_RETRY_MS`] (a want
+/// raised on every tick — a peer's stale directory sending per-tick intents — would otherwise
+/// read back to back); the want is kept meanwhile.
+///
 /// **A lost `Assigned` is healed by a read** (Elastic 3, the plan's departure 7): a read row
-/// this host owns that its fence lacks, at an epoch above the one the manager knows, is an
-/// assignment whose message never came. It is fenced and handed to the manager as assigned
-/// FIRST, before the read itself — else the read would make the manager treat it as its own
-/// (`Owner::Me`) and load regions the fence refuses (a fenced exit). A row at or below the
-/// epoch the manager knows is not: a read issued before this host gave the row up must not put
-/// it back.
+/// this host owns that its fence lacks at that epoch ([`unfenced`]: no entry, or the older
+/// epoch of a row it released and was assigned again), at an epoch above the one the manager
+/// knows, is an assignment whose message never came. It is fenced and handed to the manager as
+/// assigned FIRST, before the read itself. A row at or below the epoch the manager knows is
+/// not: a read issued before this host gave the row up must not put it back.
+///
+/// **Never while a succession is open** (final review, A-F1): a declaration moves the
+/// predecessor's rows to its heir in the store (`owner = heir`, `epoch + 1`) — to a read they
+/// look exactly like a lost assignment, but they are INHERITED: the heir may use them only
+/// behind its `inheriting` mask, from its order on, and after its adoption read grew the fence
+/// ([`AdoptionReader`]). Fenced and told here they would be plain land of this host: a region
+/// of the dead host's land could start from the store with no drop set, beside the copies the
+/// survivors' journals hold. So while the read's `hosts` rows show any open run (a row
+/// `succeeding`; the owners are read before the hosts on one store thread, so a declaration
+/// the owners show is in the hosts rows too) nothing is healed — a truly lost `Assigned` is
+/// then healed by the coordinator (this host asks, the owners lookup shows it the owner) or by
+/// the first read after the settle.
+///
+/// **The manager never sees an unfenced row as its own**: a read row this host owns in the
+/// store that its fence does not hold at that epoch after the heal (inherited and not adopted
+/// yet, or a stale read of a row it released) is WITHHELD from the rows handed to
+/// [`game::WorldManager::directory_read`] — the directory keeps what it knew of it (the
+/// predecessor's row until the order; `Free`, asked for, if it knew none).
 pub struct DirectoryKeeper {
     claims: HostClaims,
     /// The directory read in flight.
     reading: Option<DirectoryRead>,
     read_wanted: bool,
     next_read: Instant,
+    /// When the latest read was started (the spacing of wanted reads).
+    last_started: Option<Instant>,
     warned: Option<Instant>,
     /// The `hosts` rows of the latest directory read, until taken ([`Self::take_hosts_read`]:
     /// the peer links' discovery, Elastic 1 Task 4).
@@ -584,7 +629,7 @@ impl DirectoryKeeper {
     /// period from now (a boot reads the directory itself, [`read_directory`]).
     pub fn new(claims: HostClaims) -> DirectoryKeeper {
         let next_read = Instant::now() + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
-        DirectoryKeeper { claims, reading: None, read_wanted: false, next_read, warned: None, hosts_read: None }
+        DirectoryKeeper { claims, reading: None, read_wanted: false, next_read, last_started: None, warned: None, hosts_read: None }
     }
 
     /// The `hosts` rows the latest directory read brought (each read once): what the peer links
@@ -609,28 +654,42 @@ impl DirectoryKeeper {
     }
 
     /// One pass, in this order: a directory read that answered is handed to the manager (the
-    /// heal of a lost assignment first, see the type's docs); a read is started when wanted or
-    /// due; the rows the coordinator assigned are fenced, then handed to the manager. Nothing
-    /// is taken once the host is fenced (it is stopping).
+    /// heal of a lost assignment first, unfenced rows of this host withheld: the type's docs);
+    /// a read is started when due, or wanted and spaced; the rows the coordinator assigned are
+    /// fenced, then handed to the manager. Nothing is taken once the host is fenced (it is
+    /// stopping).
     pub fn pump(&mut self, manager: &mut impl ClaimingManager) {
         if let Some(read) = self.reading.as_mut() {
             if let Some(answer) = read.poll() {
                 self.reading = None;
                 match answer {
                     Ok((rows, live, hosts, next_host_id)) => {
-                        // A lost `Assigned`: fenced and told BEFORE the read reaches the manager.
+                        // A lost `Assigned`: fenced and told BEFORE the read reaches the manager
+                        // — never while a succession is open (the rows may be inherited: the
+                        // type's docs).
                         let fence = self.claims.fence();
                         let me = i64::try_from(fence.owner.0).unwrap_or(i64::MAX);
+                        let open_run = hosts.iter().any(|r| r.succeeding);
                         let lost: Vec<(SuperRegion, u64)> = rows
                             .iter()
-                            .filter(|(sr, owner, epoch)| {
-                                *owner == me && !fence.epochs.contains_key(sr) && *epoch > manager.known_epoch(*sr).unwrap_or(0)
-                            })
+                            .filter(|row| unfenced(&fence, me, row) && row.2 > manager.known_epoch(row.0).unwrap_or(0))
                             .map(|(sr, _, epoch)| (*sr, *epoch))
                             .collect();
-                        if !lost.is_empty() && !self.claims.fenced().is_set() {
+                        if !lost.is_empty() && !open_run && !self.claims.fenced().is_set() {
                             log::info!("[server] the directory shows super-region(s) {lost:?} assigned to this host: fenced and taken");
                             self.fence_then_tell(lost, manager);
+                        }
+                        // What the store gives this host and its fence still lacks is withheld:
+                        // the manager never treats an unfenced row as its own.
+                        let fence = self.claims.fence();
+                        let (withheld, rows): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| unfenced(&fence, me, row));
+                        if !withheld.is_empty() {
+                            let why = if open_run { "a succession is open: inherited land comes by its order" } else { "a read older than what this host knows" };
+                            log::info!(
+                                "[server] the directory shows {} super-region(s) as this host's that its fence lacks ({why}): withheld from the read",
+                                withheld.len()
+                            );
+                            log::debug!("[server] withheld directory rows: {withheld:?}");
                         }
                         manager.set_draining(draining_hosts(&hosts));
                         manager.directory_read(rows, live);
@@ -664,9 +723,13 @@ impl DirectoryKeeper {
             self.read_wanted = true;
         }
         let now = Instant::now();
-        if self.reading.is_none() && (self.read_wanted || now >= self.next_read) {
+        // A wanted read waits out the spacing (the want is kept); a due one (the backstop, a
+        // failed read's retry) does not.
+        let spaced = self.last_started.is_none_or(|at| now.duration_since(at) >= Duration::from_millis(DIRECTORY_READ_RETRY_MS));
+        if self.reading.is_none() && ((self.read_wanted && spaced) || now >= self.next_read) {
             self.read_wanted = false;
             self.next_read = now + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
+            self.last_started = Some(now);
             self.reading = Some(DirectoryRead::start(self.claims.store()));
         }
         if self.claims.fenced().is_set() {
