@@ -108,7 +108,8 @@ impl History {
         let mut total = 0u64;
         for (prev, next) in path.iter().zip(path.iter().skip(1)) {
             let mut d = leg_ticks * u64::from(self.grid().step_cost(*next)) / 1000;
-            if prev.x != next.x && prev.z != next.z {
+            let (dx, dz) = self.grid().delta(*prev, *next);
+            if dx != 0 && dz != 0 {
                 d = d * 1414 / 1000;
             }
             total += d.max(1);

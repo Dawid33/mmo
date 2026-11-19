@@ -51,10 +51,6 @@ impl AdventureRefusal {
     }
 }
 
-fn chebyshev(a: crate::RegionCoords, b: crate::RegionCoords) -> u32 {
-    (i64::from(a.x) - i64::from(b.x)).unsigned_abs().max((i64::from(a.z) - i64::from(b.z)).unsigned_abs()) as u32
-}
-
 impl History {
     /// Old age comes for `id`.
     pub(crate) fn on_death(&mut self, id: PersonId) {
@@ -265,11 +261,18 @@ impl History {
     pub fn embark_target(&self, _civ: CivId, from_region: crate::RegionCoords) -> Option<crate::RegionCoords> {
         let r = EMBARK_MAX_SEARCH_REGIONS as i32;
         let mut cands: Vec<(std::cmp::Reverse<u64>, i32, i32)> = Vec::new();
+        // Wrapped: a candidate is its canonical region, visited once (a narrow map's scan
+        // is wider than the map).
+        let mut seen = std::collections::BTreeSet::new();
         for z in from_region.z - r..=from_region.z + r {
             for x in from_region.x - r..=from_region.x + r {
-                let rc = crate::RegionCoords::new(x, z);
+                let rc = self.grid().canonical(crate::RegionCoords::new(x, z));
+                if self.grid().wraps_x() && !seen.insert((rc.z, rc.x)) {
+                    continue;
+                }
+                let (z, x) = (rc.z, rc.x);
                 if self.embark_allowed(rc).is_ok() && self.same_landmass(from_region, rc) {
-                    let score = u64::from(self.grid().capacity(rc)) * 1000 / (u64::from(chebyshev(from_region, rc)) + 1);
+                    let score = u64::from(self.grid().capacity(rc)) * 1000 / (self.grid().distance(from_region, rc) as u64 + 1);
                     cands.push((std::cmp::Reverse(score), z, x));
                 }
             }
@@ -418,7 +421,7 @@ pub fn embark_allowed_in(
     }
     if let Some((id, _, _)) = sites
         .iter()
-        .find(|(_, r, abandoned)| !*abandoned && chebyshev(*r, region) < EMBARK_MIN_DISTANCE_REGIONS)
+        .find(|(_, r, abandoned)| !*abandoned && grid.distance(*r, region) < i64::from(EMBARK_MIN_DISTANCE_REGIONS))
     {
         return Err(EmbarkRefusal::TooClose { site: *id });
     }

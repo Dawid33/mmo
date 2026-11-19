@@ -13,6 +13,7 @@ use super::calendar::CalendarTick;
 use super::records::*;
 use super::rng::{SALT_EDGE, SALT_SPAWN};
 use super::rules::{spawn_spread_blocks, EDGE_SPREAD_PER_MILLE, HELD_TIMEOUT_LEGS, STOPPING_DEFER_DAYS};
+use super::grid::SocietyGrid;
 use super::History;
 use crate::{GameEventKind, Goal, PersonSpawn, RegionCoords, SpawnAt, REGION_BLOCKS};
 
@@ -41,8 +42,9 @@ fn centre_goal(region: RegionCoords) -> Goal {
 /// The edge of `rc` a party coming from `prev` walks in over: `prev` itself when it is
 /// an orthogonal neighbour (or `rc` — no edge), else the orthogonal neighbour between
 /// the two, the one across the x side.
-fn entry_side(prev: RegionCoords, rc: RegionCoords) -> RegionCoords {
-    if prev.x != rc.x && prev.z != rc.z {
+fn entry_side(grid: &SocietyGrid, prev: RegionCoords, rc: RegionCoords) -> RegionCoords {
+    let (dx, dz) = grid.delta(prev, rc);
+    if dx != 0 && dz != 0 {
         RegionCoords::new(prev.x, rc.z)
     } else {
         prev
@@ -278,7 +280,7 @@ impl History {
         }
         let rc = jr.route[idx];
         let last = jr.route.len() - 1;
-        let from = if idx == 0 { rc } else { entry_side(jr.route[idx - 1], rc) };
+        let from = if idx == 0 { rc } else { entry_side(self.grid(), jr.route[idx - 1], rc) };
         let goal = if idx >= last {
             let [x, z] = self.grid().landing(rc).unwrap_or([REGION_BLOCKS as u32 / 2; 2]);
             Goal::local(rc, [x as i32, z as i32], None)

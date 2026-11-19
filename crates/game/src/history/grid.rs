@@ -6,7 +6,7 @@ use std::collections::BinaryHeap;
 
 use super::rules::*;
 use crate::protocol::RegionCoords;
-use crate::WorldMap;
+use crate::{MapExtent, WorldMap};
 
 pub const ROUTE_MAX_NODES: u32 = 20_000;
 
@@ -23,10 +23,12 @@ pub struct SocietyGrid {
     /// Per tile: the world map's landing column (region-local blocks), if any.
     landing: Vec<Option<[u32; 2]>>,
     world_id: u32,
+    /// The map wraps east–west ([`WorldMap::wrap_x`]).
+    wrap_x: bool,
 }
 
 /// Label 8-connected components of `passable` on a `width`-wide grid, in row-major order.
-fn label_components(passable: &[bool], width: u32) -> Vec<u32> {
+fn label_components(passable: &[bool], width: u32, wrap_x: bool) -> Vec<u32> {
     let w = width as usize;
     let n = passable.len();
     let h = if w == 0 { 0 } else { n / w };
@@ -43,7 +45,10 @@ fn label_components(passable: &[bool], width: u32) -> Vec<u32> {
             let (x, z) = ((i % w) as i64, (i / w) as i64);
             for dz in -1i64..=1 {
                 for dx in -1i64..=1 {
-                    let (nx, nz) = (x + dx, z + dz);
+                    let (mut nx, nz) = (x + dx, z + dz);
+                    if wrap_x {
+                        nx = nx.rem_euclid(w as i64);
+                    }
                     if (dx, dz) == (0, 0) || nx < 0 || nz < 0 || nx >= w as i64 || nz >= h as i64 {
                         continue;
                     }
@@ -84,7 +89,7 @@ impl SocietyGrid {
             };
             capacity.push(cap);
         }
-        let component = label_components(&passable, map.width);
+        let component = label_components(&passable, map.width, map.wrap_x);
         let landing = map.tiles.iter().map(|t| t.landing).collect();
         // The id hashes the map's fields as they were before `wrap_x` (same
         // order, so the same bytes): it is in the history digest pinned by
@@ -105,10 +110,38 @@ impl SocietyGrid {
             component,
             landing,
             world_id: crc32fast::hash(&bytes),
+            wrap_x: map.wrap_x,
         }
     }
 
+    /// The regions the grid covers.
+    fn extent(&self) -> MapExtent {
+        MapExtent { origin: self.origin, width: self.width, height: self.height, wrap_x: self.wrap_x }
+    }
+
+    /// Whether x wraps east–west.
+    pub fn wraps_x(&self) -> bool {
+        self.wrap_x
+    }
+
+    /// The region `rc` is, folded onto the grid's columns when x wraps.
+    pub fn canonical(&self, rc: RegionCoords) -> RegionCoords {
+        self.extent().canonical(rc)
+    }
+
+    /// Regions from `from` to `to` (x the shortest way round when it wraps; a tie is east).
+    pub fn delta(&self, from: RegionCoords, to: RegionCoords) -> (i32, i32) {
+        self.extent().delta(from, to)
+    }
+
+    /// Chebyshev distance in regions, wrapped in x.
+    pub fn distance(&self, a: RegionCoords, b: RegionCoords) -> i64 {
+        let (dx, dz) = self.delta(a, b);
+        i64::from(dx).abs().max(i64::from(dz).abs())
+    }
+
     fn index(&self, rc: RegionCoords) -> Option<usize> {
+        let rc = self.canonical(rc);
         let dx = i64::from(rc.x) - i64::from(self.origin.x);
         let dz = i64::from(rc.z) - i64::from(self.origin.z);
         if (0..i64::from(self.width)).contains(&dx) && (0..i64::from(self.height)).contains(&dz) {
@@ -167,15 +200,14 @@ pub fn route(
     to: RegionCoords,
     max_nodes: u32,
 ) -> Option<Vec<RegionCoords>> {
+    let (from, to) = (grid.canonical(from), grid.canonical(to));
     let (fi, ti) = (grid.index(from)?, grid.index(to)?);
     if !grid.passable[fi] || !grid.passable[ti] || grid.component[fi] != grid.component[ti] {
         return None;
     }
     let n = grid.passable.len();
     let h = |rc: RegionCoords| -> u64 {
-        let dx = (i64::from(rc.x) - i64::from(to.x)).unsigned_abs();
-        let dz = (i64::from(rc.z) - i64::from(to.z)).unsigned_abs();
-        dx.max(dz) * 1000
+        grid.distance(rc, to) as u64 * 1000
     };
     let mut g = vec![u64::MAX; n];
     let mut prev = vec![usize::MAX; n];
@@ -214,7 +246,7 @@ pub fn route(
                 if dx == 0 && dz == 0 {
                     continue;
                 }
-                let nb = RegionCoords::new(x + dx, z + dz);
+                let Some(nb) = grid.extent().neighbour(cur, dx, dz) else { continue };
                 let Some(ni) = grid.index(nb) else { continue };
                 if !grid.passable[ni] || closed[ni] {
                     continue;

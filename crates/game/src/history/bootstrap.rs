@@ -43,10 +43,6 @@ impl std::fmt::Display for BootstrapError {
 
 impl std::error::Error for BootstrapError {}
 
-fn chebyshev(a: crate::RegionCoords, b: crate::RegionCoords) -> u32 {
-    (i64::from(a.x) - i64::from(b.x)).unsigned_abs().max((i64::from(a.z) - i64::from(b.z)).unsigned_abs()) as u32
-}
-
 /// Civ home regions: highest capacity first (ties by the history's hashed order), at least `spacing` apart.
 fn place_civs(h: &History, p: &BootstrapParams) -> Vec<crate::RegionCoords> {
     let grid = h.grid();
@@ -64,7 +60,7 @@ fn place_civs(h: &History, p: &BootstrapParams) -> Vec<crate::RegionCoords> {
         if placed.len() as u32 >= p.civs {
             break;
         }
-        if placed.iter().all(|&o| chebyshev(o, rc) >= p.civ_min_spacing_regions) {
+        if placed.iter().all(|&o| grid.distance(o, rc) >= i64::from(p.civ_min_spacing_regions)) {
             placed.push(rc);
         }
     }
