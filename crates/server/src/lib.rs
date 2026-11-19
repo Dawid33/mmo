@@ -194,6 +194,7 @@ pub mod region_threads;
 pub mod roles;
 pub mod webtransport;
 pub mod world_file;
+pub mod world_http;
 
 /// One connected client's outgoing half, transport-agnostic. The router
 /// writes bincode ServerPackets; each transport frames them as one

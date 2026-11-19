@@ -32,7 +32,8 @@ svc-link = { path = "../svc-link" }
 # Login JWTs at the edge (`VOXEL_AUTH=jwt`): the verifier and the JWKS fetch.
 auth = { workspace = true }
 login-api = { workspace = true }
-reqwest = { workspace = true }
+# The host's link to the coordinator's HTTP API (`world_http.rs`) speaks HTTP/2 only.
+reqwest = { workspace = true, features = ["http2"] }
 # The fleet reconciler (`VOXEL_ROLE=fleet`, `fleet.rs`): the Kubernetes API, the host template
 # (JSON) and its hash.
 kube-api = { path = "../kube-api" }
