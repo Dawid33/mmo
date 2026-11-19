@@ -344,35 +344,18 @@
 //!    host = ANY($outbox_drop)`; `INSERT INTO outbox (…, at_ms)` of each message (a new row each:
 //!    no existing row locked; the Elastic 2b inserts are these); `INSERT INTO login_outbox` of
 //!    each login answer (new rows); `DELETE FROM login_outbox WHERE at_ms < $before` (the prune).
-//! 4. `DELETE FROM outbox WHERE host = ANY($attached_now)` — the rows of the hosts whose `Attach`
-//!    this transition applied, discarded unsent (BEFORE the take: they are not delivered).
-//! 5. `DELETE FROM outbox WHERE host = ANY($my_hosts) AND version <= $new_version RETURNING …` —
-//!    this replica's own hosts' rows taken, in `seq` order (a row of another boot than its host's
-//!    link is deleted unsent).
-//!    Steps 4 and 5 lock `outbox` rows only, inserted by earlier transitions that committed
-//!    before this one could hold `coordinator`: no transaction holds them now (only a take between
-//!    transitions may — see below — and it holds nothing else).
-//! 6. `SELECT pg_notify('coordinator_row', '<version>')` (no row lock; delivered at the commit).
-//! 7. The commit.
-//!
-//! **A take between transitions** (`coordinator_tx::take_outbox_pg`, Elastic 2b Task 5): ONE
-//! statement, `DELETE FROM outbox WHERE host = ANY($my_hosts) AND version <= $cache_version
-//! RETURNING …` — the `outbox` rows only, no other lock: it holds them and wants nothing after
-//! them. Bounded by the version of the cache that named `$my_hosts` (final review S-I2): a newer
-//! row may have been decided after its host attached to another replica, whose relay it is. A transition's step 4 or 5
-//! meeting a row it holds waits for its commit (one statement) and then skips it (the row is gone:
-//! READ COMMITTED re-checks the deleted row) — a wait, never a cycle (only these deletes lock
-//! `outbox` rows, each in one scan in the table's one order; should two ever meet in opposite
-//! orders, the `40P01` aborts the take — retried — or the transition — a failed write, retried —
-//! and nothing is lost: the rows stay until a take commits). Rows of one host are taken
-//! by the one replica linking it (its runtime issues a take only while no transition of its own
-//! is in flight), so a row is delivered at most once.
+//!    The `outbox_drop` delete locks `outbox` rows only, inserted by earlier transitions that
+//!    committed before this one could hold `coordinator`: only a host's poll (below) may hold one
+//!    now, and it holds nothing else. (The Elastic 2b take of a replica's own hosts' rows is gone:
+//!    hosts read their mailboxes.)
+//! 4. `SELECT pg_notify('coordinator_row', '<version>')` (no row lock; delivered at the commit).
+//! 5. The commit.
 //!
 //! **The mailbox reads** (coordinator HTTP API, `mailbox.rs`; none takes `coordinator`):
 //! - A host's poll (`mailbox_read`), ONE statement: `WITH delivered AS (DELETE FROM outbox WHERE
 //!   host = $h AND seq <= $after) SELECT … FROM outbox WHERE host = $h AND boot = $b AND seq >
 //!   $after …` — it locks only that host's delivered `outbox` rows and wants nothing after them.
-//!   A transition's `outbox_drop` (or the Elastic 2b discard and take) meeting one of them waits
+//!   A transition's `outbox_drop` meeting one of them waits
 //!   for that one statement and then skips it (gone); the poll meeting a row a transition deleted
 //!   or holds waits for its commit likewise. Only deletes lock `outbox` rows, each a one-scan
 //!   statement holding nothing else on the poll's side: a wait, never a cycle (should two deletes

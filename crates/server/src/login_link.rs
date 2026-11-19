@@ -181,15 +181,16 @@ pub fn order_from(msg: LoginToHost) -> game::LoginOrder {
     }
 }
 
-/// A coordinator replica's answer to `msg` when no host attached to it takes logins
-/// ([`game::Coordinator::gate_host_here`]): the login service tries its next replica.
+/// A coordinator replica's answer to `msg` when no host takes logins
+/// ([`game::Coordinator::gate_host`] is `None`; the gate is world-wide, so no other replica has
+/// one either): the join answers 503, a kick is resent.
 pub fn no_gate(msg: &LoginToHost) -> HostToLogin {
     let (LoginToHost::SpawnPlayer { player_token, session_epoch } | LoginToHost::Kick { player_token, session_epoch, .. }) = msg;
     HostToLogin::NoGate { player_token: player_token.clone(), session_epoch: *session_epoch }
 }
 
-/// A coordinator replica's answer to a spawn order when no host takes logins on ANY live
-/// replica and the world adds its own hosts ([`game::coordinator::Gate::Nobody`], fleet dials
+/// A coordinator replica's answer to a spawn order when no host takes logins and the world adds
+/// its own hosts ([`game::coordinator::Gate::Nobody`], fleet dials
 /// set; Elastic 4): the world is starting — the login service answers the join 503
 /// `world_starting` at once; the replica asks for a host ([`game::coordinator::Input::StartWanted`]).
 pub fn starting(msg: &LoginToHost) -> HostToLogin {

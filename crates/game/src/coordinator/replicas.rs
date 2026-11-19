@@ -10,9 +10,10 @@
 //! is every replica's first input (it adds itself; `alone` — the store found no other row beaten
 //! within [`REPLICA_LEASE_MS`], the total replica crash — drops every other id registered before
 //! it), [`super::Input::ReplicaLapsed`] drops one (its row is marked dead in the same transaction,
-//! [`super::StoreDecision::EndReplica`]). An attachment counts only while its replica is in the
-//! set; a store call another replica handed out is that replica's to answer while it is in the
-//! set, and is looked up once it is not. The ticker is the lowest id of the set
+//! [`super::StoreDecision::EndReplica`]). An attachment names no replica (coordinator HTTP API: a
+//! host's mailbox is read from any), so a replica's lapse detaches nobody; a store call another
+//! replica handed out is that replica's to answer while it is in the set, and is looked up once
+//! it is not. The ticker is the lowest id of the set
 //! (`Coordinator::ticker`).
 //!
 //! A replica not in the set of the core it applies to (a rebase onto a row that ended it) writes
@@ -24,9 +25,8 @@ use serde::{Deserialize, Serialize};
 
 /// A coordinator replica: one process start, never reused, nothing derived from its number
 /// (Elastic 2b replaces Elastic 2a's process boot with it). The store issues it at the
-/// process's start (`register_replica`); tests pick one. An attachment stamped with a replica
-/// that is not live is not counted, and a store call handed out by another replica is not in
-/// flight here.
+/// process's start (`register_replica`); tests pick one. A store call handed out by another
+/// replica is not in flight here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReplicaId(pub u64);
 

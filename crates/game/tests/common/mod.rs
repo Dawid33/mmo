@@ -207,7 +207,8 @@ pub fn h(n: u64) -> game::HostId {
 
 /// The coordinator's inputs as the tests send them, each through
 /// [`game::Coordinator::apply`] — logged as the runtime's are (Elastic 2b): a host's message,
-/// the upkeep, a host's link going down (at store time 0: the core's clock floor lifts it).
+/// the upkeep, a host stalled as the boot it is attached as (its link down; at store time 0: the
+/// core's clock floor lifts it).
 pub trait CoreInputs {
     fn handle(&mut self, host: game::HostId, msg: game::HostMsg, now_ms: u64);
     fn maintain(&mut self, now_ms: u64);
@@ -224,7 +225,9 @@ impl CoreInputs for game::Coordinator {
     }
 
     fn host_detached(&mut self, host: game::HostId) {
-        self.apply(game::coordinator::Input::LinkDown { host }, 0);
+        if let Some(boot) = self.attachment(host) {
+            self.apply(game::coordinator::Input::HostStalled { host, boot }, 0);
+        }
     }
 }
 

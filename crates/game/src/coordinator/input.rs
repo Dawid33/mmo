@@ -19,11 +19,19 @@
 //! successions read owes one, as a loaded core and a new ticker do; the `hosts` read comes every
 //! few seconds; the hosts ask for land again).
 //!
-//! Never logged either: what a host tells the login service ([`crate::HostMsg::Login`], forwarded
-//! at once into the process's login relay: a replay would tell it twice). The answers of the
+//! A host's answer to the login service ([`crate::HostMsg::Login`]) is a logged host message like
+//! any other (coordinator HTTP API): its only effect is a `login_outbox` entry, durable with the
+//! transition holding it and sent (or read by the login service) only after it committed; a
+//! rebase drops the entry and the replay pushes it again. The answers of the
 //! store DECISIONS are logged inputs ([`Input::Decision`], Elastic 2b Task 3), and so is a cut's
 //! stored decision read back ([`Input::CutLookedUp`]: a recorded decision never changes, so a
 //! replay is what applying it there first would have done).
+//!
+//! **A stalled host** ([`Input::HostStalled`], coordinator HTTP API): derived by the ticker from
+//! its `hosts` read's `mailbox_oldest` (a host's oldest unread mailbox row older than
+//! [`super::MAILBOX_STALL_MS`] on the store's clock), and applied by a svc-link runtime when a
+//! host's link drops — logged and replayed, guarded by the boot (it detaches only the attachment
+//! of that boot: a replay after the host attached again as a newer one changes nothing).
 //!
 //! **Any replica's logged inputs** besides the hosts' and the decisions' answers: a replica's
 //! own lifecycle ([`Input::ReplicaJoined`], [`Input::ReplicaLapsed`]) and the ask for the
@@ -51,12 +59,16 @@ use super::{Coordinator, DecisionAnswer, HostMsg, HostSeen, Projection, ReplicaI
 /// replays it at a rebase.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Input {
-    /// A message of host `host` (the host its link is for). Never [`HostMsg::Login`] in the
-    /// log: [`Coordinator::apply`] forwards it to the login relay unlogged.
+    /// A message of host `host` (the host its link is for). [`HostMsg::Login`] too: its effect
+    /// is a login answer that leaves with the transition holding it.
     Host { host: HostId, msg: HostMsg },
-    /// Host `host`'s link to this replica went down: it detaches only an attachment stamped
-    /// with this replica (one to another replica stands).
-    LinkDown { host: HostId },
+    /// Host `host`, attached as boot `boot`, is not reading what the coordinator tells it: its
+    /// oldest mailbox row waited past [`super::MAILBOX_STALL_MS`] (the ticker's derivation from a
+    /// `hosts` read), or its link to a svc-link runtime dropped. It is detached (a cut it takes
+    /// part in aborts, its mailbox rows go) — only while attached as `boot`; it attaches again
+    /// once it reaches a replica. Logged and replayed; ANY replica (a svc-link runtime applies it
+    /// for its own links).
+    HostStalled { host: HostId, boot: u64 },
     /// The upkeep: the calendar, the history's directives and notices, the cuts' and the
     /// successions' timers ([`Coordinator::apply`]). The ticker's only (refused elsewhere, not
     /// logged); a rebase drops it from the log once this replica is not the ticker of the
@@ -84,10 +96,14 @@ pub enum Input {
     /// forgets the ids the read shows pruned; and (Elastic 4) `desired`, every `desired_hosts`
     /// row read with them, the fleet's rules' table (`fleet.rs`). Ticker only; never logged nor
     /// replayed — `desired` neither: a rebase keeps the last read's rows (a process field), the
-    /// next read brings them again.
+    /// next read brings them again. `mailbox_oldest` (coordinator HTTP API): per host with an
+    /// unread mailbox row, `(host, boot, the store ms its oldest row was inserted at)` — part of
+    /// the read, never logged; a row older than [`super::MAILBOX_STALL_MS`] of an attached boot
+    /// is applied as an [`Input::HostStalled`] (logged).
     HostsRead {
         rows: Vec<HostSeen>,
         desired: Vec<super::DesiredHost>,
+        mailbox_oldest: Vec<(HostId, u64, u64)>,
         next_host_id: u64,
         issued_mono: u64,
         received_mono: u64,
@@ -109,7 +125,7 @@ pub enum Input {
     /// or a host named a cut this core does not remember): for host `host`, or (`None`) the
     /// running cut's own decision. Logged and replayed — a recorded decision never changes.
     CutLookedUp { host: Option<HostId>, cut: CutId, committed: bool },
-    /// A login order found no host taking logins on any live replica ([`super::Gate::Nobody`],
+    /// A login order found no host taking logins ([`super::Gate::Nobody`],
     /// Elastic 4 Task 8) and the fleet's dials are set: the world's first host is asked for,
     /// `AddHost { max, expect_wanted: 0 }` ([`Coordinator::login_gate`], `fleet.rs`), at most
     /// once per [`super::WORLD_START_ASK_EVERY_MS`] on this replica. ANY replica (the order
@@ -147,11 +163,6 @@ impl Coordinator {
     /// changed. The ticker's work ([`Input::Maintain`] and the ticker's reads) is refused on a
     /// replica that is not the ticker; the reads are never logged.
     pub fn apply(&mut self, input: Input, now_ms: u64) {
-        if let Input::Host { host, msg: HostMsg::Login(out) } = input {
-            // For the login service, forwarded as it is — never logged, never replayed.
-            self.forward_login(host, out);
-            return;
-        }
         let ticker_work = matches!(input, Input::Maintain) || input.is_ticker_read();
         if ticker_work && !self.ticking_now() {
             log::trace!("coordinator: replica {} is not the ticker: {input:?} refused", self.replica);
@@ -165,9 +176,11 @@ impl Coordinator {
                 Some((*boot, *epoch))
             }
             Input::Host { host, .. } => self.link_attach.get(host).copied(),
-            Input::LinkDown { host } => {
-                // That link carries nothing more (a new one opens with its `Attach`).
-                self.link_attach.remove(host);
+            Input::HostStalled { host, boot } => {
+                // A link of that boot carries nothing more (a new one opens with its `Attach`).
+                if self.link_attach.get(host).is_some_and(|(b, _)| b == boot) {
+                    self.link_attach.remove(host);
+                }
                 None
             }
             _ => None,
@@ -181,6 +194,13 @@ impl Coordinator {
             self.log.push(Logged { now: now_ms, input: input.clone(), link });
         }
         self.apply_logged(input, now_ms, link);
+    }
+
+    /// Host `host`'s next messages come on the link its `Attach` of `(boot, epoch)` opened, though
+    /// that `Attach` was applied elsewhere (a batch posted to another replica names the pair):
+    /// they are logged with it ([`Logged::link`]), as if this replica had seen that `Attach`.
+    pub fn link_opened(&mut self, host: HostId, boot: u64, epoch: u64) {
+        self.link_attach.insert(host, (boot, epoch));
     }
 
     /// Whether `input` is a message of host `h` that came on a link older than the newest
@@ -215,19 +235,22 @@ impl Coordinator {
         let now = now_ms.max(self.clock_floor());
         match input {
             Input::Host { host, msg } => self.on_host(host, msg, now),
-            Input::LinkDown { host } => {
-                if self.is_attached_here(host) {
+            Input::HostStalled { host, boot } => match self.attachment(host) {
+                Some(b) if b == boot => {
+                    log::warn!("coordinator: host {host} (boot {boot:#x}) stalled (its mailbox unread, or its link down): detached");
                     self.detach_host(host);
-                } else {
-                    log::debug!("coordinator: host {host}'s link down: not attached to this replica, nothing to detach");
                 }
-            }
+                other => log::debug!(
+                    "coordinator: host {host} (boot {boot:#x}) stalled, but it is attached as {other:?}: nothing to detach"
+                ),
+            },
             Input::Maintain => self.on_maintain(now),
             Input::Decision(answer) => self.on_decision(answer, now),
             Input::ReplicaJoined { me, alone } => self.on_replica_joined(me, alone),
             Input::ReplicaLapsed(r) => self.on_replica_lapsed(r),
-            Input::HostsRead { rows, desired, next_host_id, issued_mono, received_mono, world_tick } => {
-                self.on_hosts_read(&rows, desired, next_host_id, issued_mono, received_mono, world_tick)
+            Input::HostsRead { rows, desired, mailbox_oldest, next_host_id, issued_mono, received_mono, world_tick } => {
+                self.on_hosts_read(&rows, desired, next_host_id, issued_mono, received_mono, world_tick);
+                self.stalled_mailboxes(&mailbox_oldest, now);
             }
             Input::SuccessionsOpen { list, issued_at_version } => self.on_successions_open(list, issued_at_version, now),
             Input::LandOwners { asked, rows } => self.on_land_read(asked, &rows, now),
@@ -235,6 +258,22 @@ impl Coordinator {
             Input::StartWanted => self.on_start_wanted(now),
         }
         true
+    }
+
+    /// The ticker's read of the hosts' oldest unread mailbox rows (part of [`Input::HostsRead`]):
+    /// each attached boot whose oldest row was inserted more than [`super::MAILBOX_STALL_MS`]
+    /// before `now_ms` (store ms) is stalled — applied as a logged [`Input::HostStalled`].
+    fn stalled_mailboxes(&mut self, oldest: &[(HostId, u64, u64)], now_ms: u64) {
+        for &(host, boot, at_ms) in oldest {
+            if self.attachment(host) == Some(boot) && now_ms.saturating_sub(at_ms) > super::MAILBOX_STALL_MS {
+                log::warn!(
+                    "coordinator: host {host}'s mailbox has a row unread for {} ms (over {} ms): it is stalled",
+                    now_ms.saturating_sub(at_ms),
+                    super::MAILBOX_STALL_MS
+                );
+                self.apply(Input::HostStalled { host, boot }, now_ms);
+            }
+        }
     }
 
     /// The newest store time the projection recorded: the calendar's anchor and last sign of

@@ -124,8 +124,6 @@ pub(crate) enum Request {
     LoadCoordinatorSince(u64, Reply<Option<crate::StoredCoordinator>>),
     /// Elastic 2b Task 4: the row's version.
     RowVersion(Reply<u64>),
-    /// Elastic 2b Task 5: the outbox rows of these hosts (each with its link's boot), taken.
-    TakeOutbox(Vec<(HostId, u64)>, u64, Reply<Vec<crate::OutboxRow>>),
     /// Coordinator HTTP API: a host's mailbox poll — its rows at or below the cursor deleted,
     /// the next ones of its boot read (`mailbox.rs`). host, boot, after, limit.
     MailboxRead(HostId, u64, u64, u32, Reply<Vec<(u64, Vec<u8>)>>),
@@ -418,9 +416,9 @@ async fn serve(
                 tokio::spawn(async move {
                     let written = match &pool {
                         Pool::Pg(p) => match dials {
-                            Some(dials) => coordinator_tx::write_pg(p, &w, dials, &injected).await.map(|(version, store_ms, decided, taken)| {
+                            Some(dials) => coordinator_tx::write_pg(p, &w, dials, &injected).await.map(|(version, store_ms, decided)| {
                                 let (answers, after_commit) = coordinator_tx::answers(&w, version, decided);
-                                crate::TransitionWritten { version, store_ms, answers, after_commit, taken }
+                                crate::TransitionWritten { version, store_ms, answers, after_commit }
                             }),
                             None => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                         },
@@ -428,19 +426,18 @@ async fn serve(
                             "a coordinator transition with store decisions needs Postgres (several hosts)".into(),
                         )),
                         Pool::Sqlite(_) if !w.outbox.is_empty() => Err(StoreError::Unsupported(
-                            "a coordinator transition with outbox messages needs Postgres (several coordinator replicas)".into(),
+                            "a coordinator transition with mailbox rows needs Postgres (the coordinator's HTTP API)".into(),
                         )),
                         Pool::Sqlite(_) if !w.login_outbox.is_empty() => Err(StoreError::Unsupported(
                             "a coordinator transition with login answers needs Postgres (the coordinator's HTTP API)".into(),
                         )),
-                        // SQLite runs one replica: no other replica leaves a row, nothing to take;
-                        // no mailbox row is ever written, so `outbox_drop` and the login prune
-                        // have nothing to delete. Without a core, no history either.
+                        // SQLite: no mailbox row is ever written, so `outbox_drop` and the login
+                        // prune have nothing to delete. Without a core, no history either.
                         Pool::Sqlite(_) => {
                             let _w = writer.lock().await;
                             let history = w.core.as_ref().and(w.history.clone());
                             on_pool!(&pool, write_coordinator_cas(w.version, w.core.clone(), history)).map(|(version, store_ms)| {
-                                crate::TransitionWritten { version, store_ms, answers: Vec::new(), after_commit: Vec::new(), taken: Vec::new() }
+                                crate::TransitionWritten { version, store_ms, answers: Vec::new(), after_commit: Vec::new() }
                             })
                         }
                     };
@@ -612,14 +609,6 @@ async fn serve(
                 tokio::spawn(async move { r.send(on_replicas!(&pool, load_coordinator_since(since))) })
             }
             Request::RowVersion(r) => tokio::spawn(async move { r.send(on_replicas!(&pool, row_version())) }),
-            // No writer lock (as a transition on Postgres: the rows it deletes are only ever
-            // deleted by coordinator statements). SQLite: one replica, no row to take.
-            Request::TakeOutbox(for_hosts, upto, r) => tokio::spawn(async move {
-                r.send(match &pool {
-                    Pool::Pg(p) => coordinator_tx::take_outbox_pg(p, &for_hosts, upto).await,
-                    Pool::Sqlite(_) => Ok(Vec::new()),
-                })
-            }),
             // The mailbox (coordinator HTTP API, `mailbox.rs`): no writer lock — a read's delete
             // touches only its own host's delivered rows, which nothing else writes but a
             // transition (on Postgres, which takes no writer lock either). SQLite: none.
@@ -989,7 +978,7 @@ async fn decide_alone(
         match coordinator_tx::write_pg(p, &w, dials, &[injected]).await {
             Err(StoreError::Conflict) => continue,
             Err(e) => return Err(e),
-            Ok((version, _, mut decided, _)) => {
+            Ok((version, _, mut decided)) => {
                 let decided = decided.pop().expect("one decision");
                 let (_, effects) = coordinator_tx::answers(&w, version, Vec::new());
                 debug_assert!(effects.is_empty());

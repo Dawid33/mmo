@@ -488,22 +488,6 @@ impl StoreHandle {
         }
     }
 
-    /// Takes the outbox rows other replicas left for `for_hosts` (Elastic 2b Task 5: this
-    /// replica's hosts, each with its link's boot) at or below row version `upto` (the version of
-    /// the cache that found them attached to this replica, final review S-I2: a newer row stays
-    /// for the replica its host attached to since) between transitions — one `DELETE … RETURNING`
-    /// of the rows only (`coordinator_tx.rs`), answered on the receiver in `seq` (commit) order; a
-    /// row of another boot is deleted unsent. The caller issues it only while no transition of its
-    /// own is in flight (a transition takes the same rows inside its own transaction). SQLite:
-    /// nothing (one replica).
-    pub fn take_outbox_later(
-        &self,
-        for_hosts: Vec<(HostId, u64)>,
-        upto: u64,
-    ) -> crossbeam::channel::Receiver<Result<Vec<crate::OutboxRow>, StoreError>> {
-        self.ask_later(|r| Request::TakeOutbox(for_hosts, upto, r))
-    }
-
     /// A host's mailbox poll (coordinator HTTP API, `mailbox.rs`): host `host`'s rows at or below
     /// its cursor `after` deleted (delivered), then at most `limit` of its rows after `after` for
     /// its boot `boot`, as `(seq, game::encode_packet bytes)` in `seq` (commit) order — one

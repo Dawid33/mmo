@@ -33,8 +33,9 @@ use crate::history::persist::HistoryLoadError;
 /// still held the fortress claims (site → player); 4 stamped with a process boot and kept the
 /// cut ids' high half out of the projection (Elastic 2b: a [`super::ReplicaId`], and
 /// `WorldCuts.epoch` durable); 5 kept the land lookups as a set of super-regions (Elastic 3:
-/// each with the hosts that asked).
-pub const COORDINATOR_STATE_VERSION: u8 = 6;
+/// each with the hosts that asked); 6 stamped each attachment with the replica it attached to
+/// (the coordinator HTTP API: an attachment is a host's boot only).
+pub const COORDINATOR_STATE_VERSION: u8 = 7;
 
 /// One transition of the core ([`super::Coordinator::take_transition`]): the projection as
 /// bytes — `core`, and `history` when it changed — the messages it released, and the store
@@ -43,11 +44,15 @@ pub const COORDINATOR_STATE_VERSION: u8 = 6;
 /// sends `out` only once that write committed: every output, a store decision included, is
 /// durable before it leaves.
 ///
-/// With several replicas (Elastic 2b Task 5) `out` holds only what this replica sends on its
-/// own links — a message for a host attached to ANOTHER live replica is in `outbox` instead
-/// (the store inserts it in the same transaction; the replica linking that host relays it in
-/// commit order) — and `attached_now` names the hosts whose `Attach` it applied: their outbox
-/// rows, decided before that `Attach`, are discarded in the same transaction.
+/// Its messages leave as the core's [`super::Delivery`] says: [`super::Delivery::Direct`] — all in
+/// `out`, for the runtime to send on its own links; [`super::Delivery::Mailbox`] — `out` is empty
+/// and every message is an `outbox` row (a host's mailbox, at the boot it is attached as), written
+/// in the same transaction. `outbox_drop` names the hosts whose older mailbox rows the transaction
+/// deletes BEFORE it inserts `outbox` (an applied `Attach`, a detach, a host's end).
+/// `login_outbox`: what the hosts told the login service ([`super::HostMsg::Login`]), durable with
+/// this transition. `core_changed`: `core` (or `history`) differs from the last one written — when
+/// `false` the transition carries only rows, decisions or login answers, and the runtime may write
+/// it without a core (the compare-and-set alone).
 #[derive(Debug, Clone)]
 pub struct Transition {
     pub core: Vec<u8>,
@@ -55,12 +60,14 @@ pub struct Transition {
     pub out: Vec<(Target, CoordMsg)>,
     pub decisions: Vec<StoreDecision>,
     pub outbox: Vec<OutboxMsg>,
-    pub attached_now: Vec<HostId>,
+    pub outbox_drop: Vec<HostId>,
+    pub login_outbox: Vec<crate::LoginOut>,
+    pub core_changed: bool,
 }
 
-/// A message a transition decided for host `host` (at its boot `boot`, as its attachment names
-/// it), attached to another live replica than the one writing: it travels through the store's
-/// outbox (Elastic 2b Task 5, [`super::Coordinator::route_out`]).
+/// A message a transition decided for host `host` at its boot `boot` (as its attachment names
+/// it): a row of that host's mailbox, the store's `outbox` ([`super::Delivery::Mailbox`],
+/// [`super::Coordinator::route_out`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutboxMsg {
     pub host: HostId,

@@ -58,7 +58,8 @@ pub struct RigRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RigConflict;
 
-/// A message a transition left in the store's outbox, for the host `host` at its `boot`.
+/// A row of the rig's mailbox (the store's `outbox`): a message a transition committed at
+/// `version` for host `host` at its boot `boot`, inserted at store time `at_ms`.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct RigOutboxRow {
@@ -67,6 +68,7 @@ pub struct RigOutboxRow {
     pub host: HostId,
     pub boot: u64,
     pub msg: CoordMsg,
+    pub at_ms: u64,
 }
 
 /// One transition to write ([`RigStore::write`]), as `world_store`'s `TransitionWrite`.
@@ -74,27 +76,41 @@ pub struct RigOutboxRow {
 pub struct RigWrite {
     /// The row version it was read at.
     pub version: u64,
-    pub core: Vec<u8>,
+    /// `None`: nothing durable changed — the version moves, the row's core and history stay.
+    pub core: Option<Vec<u8>>,
     /// `None` keeps the row's.
     pub history: Option<Vec<u8>>,
     pub decisions: Vec<StoreDecision>,
     pub replica: ReplicaId,
-    /// Messages for hosts linked to another replica.
+    /// Mailbox rows to insert.
     pub outbox: Vec<OutboxMsg>,
-    /// The writer's own hosts, with their links' boots: their rows are taken.
-    pub take_for: Vec<(HostId, u64)>,
-    /// The hosts whose `Attach` it applied: their rows are discarded first.
-    pub discard_for: Vec<HostId>,
+    /// The hosts whose mailbox rows are deleted first.
+    pub outbox_drop: Vec<HostId>,
+    /// The answers to the login service.
+    pub login_outbox: Vec<crate::LoginOut>,
+    /// The store's clock at the write (what the mailbox rows are stamped with).
+    pub at_ms: u64,
 }
 
 impl RigWrite {
-    /// A transition with no outbox message, take or discard.
+    /// A transition with no mailbox row or login answer.
     pub fn of(version: u64, core: Vec<u8>, history: Option<Vec<u8>>, decisions: Vec<StoreDecision>, replica: ReplicaId) -> RigWrite {
-        RigWrite { version, core, history, decisions, replica, outbox: Vec::new(), take_for: Vec::new(), discard_for: Vec::new() }
+        RigWrite {
+            version,
+            core: Some(core),
+            history,
+            decisions,
+            replica,
+            outbox: Vec::new(),
+            outbox_drop: Vec::new(),
+            login_outbox: Vec::new(),
+            at_ms: 0,
+        }
     }
 }
 
-/// The seeded rig's store: one versioned row written by compare-and-set, and an outbox.
+/// The seeded rig's store: one versioned row written by compare-and-set, the hosts' mailboxes
+/// and the login answers.
 #[doc(hidden)]
 #[derive(Default)]
 pub struct RigStore {
@@ -108,47 +124,63 @@ pub struct RigStore {
     /// (`MultiRig`) executes them — as part of the commit, before anything else touches it — and
     /// answers them, or drops the answers (a replica killed after the commit).
     committed: Vec<(CallStamp, StoreDecision)>,
+    /// The login answers committed, in commit order.
+    login_answers: Vec<crate::LoginOut>,
 }
 
 impl RigStore {
     /// Write `w` as `world_store`'s `write_transition` does, in one step: the projection over the
     /// row as read at `w.version` (0 = no row yet) — `Err(RigConflict)` when that is not the row's,
-    /// nothing written, no decision kept, no outbox row inserted or taken; then the decisions kept
-    /// (stamped with the version it commits as), the outbox messages inserted at that version, the
-    /// rows of `discard_for` deleted unsent, the rows of `take_for` taken (in `seq` order; a row of
-    /// another boot than its host's link deleted unsent). The new version and the rows taken.
-    pub fn write(&mut self, w: RigWrite) -> Result<(u64, Vec<RigOutboxRow>), RigConflict> {
+    /// nothing written, no decision kept, no row inserted or deleted; then the decisions kept
+    /// (stamped with the version it commits as), the mailbox rows of `outbox_drop` deleted, the
+    /// mailbox rows inserted at that version, the login answers kept. The new version.
+    pub fn write(&mut self, w: RigWrite) -> Result<u64, RigConflict> {
         let current = self.row.as_ref().map_or(0, |r| r.version);
         if w.version != current {
             return Err(RigConflict);
         }
         let version = current + 1;
-        let history = w.history.unwrap_or_else(|| self.row.take().map(|r| r.history).unwrap_or_default());
-        self.row = Some(RigRow { version, core: w.core, history });
+        let old = self.row.take().unwrap_or_default();
+        self.row = Some(match w.core {
+            Some(core) => RigRow { version, core, history: w.history.unwrap_or(old.history) },
+            None => RigRow { version, ..old },
+        });
         self.writes += 1;
         let stamp = CallStamp { replica: w.replica, version };
         self.committed.extend(w.decisions.into_iter().map(|d| (stamp, d)));
+        self.outbox.retain(|r| !w.outbox_drop.contains(&r.host));
         for m in w.outbox {
-            self.push_outbox(version, m.host, m.boot, m.msg);
+            self.push_outbox(version, m.host, m.boot, m.msg, w.at_ms);
         }
-        self.outbox.retain(|r| !w.discard_for.contains(&r.host));
-        Ok((version, self.take_outbox(&w.take_for, version)))
+        self.login_answers.extend(w.login_outbox);
+        Ok(version)
     }
 
-    /// The outbox rows of `for_hosts` (each with its link's boot) at or below row version `upto`
-    /// (the taker's cache: final review S-I2), taken: in `seq` order; a row of another boot
-    /// deleted unsent.
-    pub fn take_outbox(&mut self, for_hosts: &[(HostId, u64)], upto: u64) -> Vec<RigOutboxRow> {
-        let (mine, rest): (Vec<RigOutboxRow>, Vec<RigOutboxRow>) = std::mem::take(&mut self.outbox)
-            .into_iter()
-            .partition(|r| r.version <= upto && for_hosts.iter().any(|(h, _)| *h == r.host));
-        self.outbox = rest;
-        mine.into_iter().filter(|r| for_hosts.iter().any(|(h, b)| *h == r.host && *b == r.boot)).collect()
+    /// A host's mailbox read (`world_store`'s `mailbox_read`): its rows with `seq <= after`
+    /// deleted (delivered), then its rows of `boot` with `seq > after`, in order.
+    pub fn mailbox_read(&mut self, host: HostId, boot: u64, after: u64) -> Vec<RigOutboxRow> {
+        self.outbox.retain(|r| !(r.host == host && r.seq <= after));
+        self.outbox.iter().filter(|r| r.host == host && r.boot == boot && r.seq > after).cloned().collect()
+    }
+
+    /// Per host and boot, the store time of its oldest row (`world_store`'s `mailbox_oldest`).
+    pub fn mailbox_oldest(&self) -> Vec<(HostId, u64, u64)> {
+        let mut oldest: BTreeMap<(HostId, u64), u64> = BTreeMap::new();
+        for r in &self.outbox {
+            let at = oldest.entry((r.host, r.boot)).or_insert(r.at_ms);
+            *at = (*at).min(r.at_ms);
+        }
+        oldest.into_iter().map(|((h, b), at)| (h, b, at)).collect()
     }
 
     /// The store decisions committed since the last call, with their stamps, in order.
     pub fn take_committed(&mut self) -> Vec<(CallStamp, StoreDecision)> {
         std::mem::take(&mut self.committed)
+    }
+
+    /// The login answers committed since the last call, in order.
+    pub fn take_login_answers(&mut self) -> Vec<crate::LoginOut> {
+        std::mem::take(&mut self.login_answers)
     }
 
     pub fn row(&self) -> Option<&RigRow> {
@@ -160,10 +192,10 @@ impl RigStore {
         self.writes
     }
 
-    /// Leave a message in the outbox, numbered in order; its `seq`.
-    pub fn push_outbox(&mut self, version: u64, host: HostId, boot: u64, msg: CoordMsg) -> u64 {
+    /// Leave a message in the mailbox, numbered in order; its `seq`.
+    pub fn push_outbox(&mut self, version: u64, host: HostId, boot: u64, msg: CoordMsg, at_ms: u64) -> u64 {
         self.seq += 1;
-        self.outbox.push(RigOutboxRow { seq: self.seq, version, host, boot, msg });
+        self.outbox.push(RigOutboxRow { seq: self.seq, version, host, boot, msg, at_ms });
         self.seq
     }
 
@@ -173,21 +205,19 @@ impl RigStore {
 }
 
 /// One coordinator process of the rig: its core (which holds the row version it last read or
-/// wrote), the hosts linked to it with the boots their `Attach`es named, and the outbox rows it
-/// took that its cache is not new enough to relay yet.
+/// wrote) and the hosts linked to it with the boots their `Attach`es named.
 #[doc(hidden)]
 pub struct RigReplica {
     pub core: Coordinator,
     pub hosts: BTreeSet<HostId>,
     pub boots: BTreeMap<HostId, u64>,
-    pub held: VecDeque<RigOutboxRow>,
     /// Its process died ([`RigCluster::kill_replica`]): it handles, writes and sends nothing more.
     pub dead: bool,
 }
 
 impl RigReplica {
     fn of(core: Coordinator) -> RigReplica {
-        RigReplica { core, hosts: BTreeSet::new(), boots: BTreeMap::new(), held: VecDeque::new(), dead: false }
+        RigReplica { core, hosts: BTreeSet::new(), boots: BTreeMap::new(), dead: false }
     }
 }
 
@@ -206,7 +236,7 @@ pub enum RigEvent {
     Release { replica: ReplicaId, version: u64, inputs: Vec<(u64, Input)>, linked: BTreeSet<HostId> },
 }
 
-/// Most passes of one replica's route ([`RigCluster::route`]): writes, refreshes, relays.
+/// Most passes of one replica's route ([`RigCluster::route`]): writes, refreshes.
 const ROUTE_PASSES: usize = 8;
 
 /// The replicas several hosts' inline links share ([`InlineWorldLink::shared`]), the store
@@ -217,19 +247,27 @@ const ROUTE_PASSES: usize = 8;
 /// the replica its link reaches ([`Coordinator::take_transition`]): each is written to the row at
 /// the version that replica last read, as a store that never fails, before its messages are
 /// routed. A write at a stale version (another writer moved the row) rebases the replica onto the
-/// row ([`Coordinator::rebase`]) and writes again, as the runtime does. Several replicas (Elastic
-/// 2b Task 5, [`RigCluster::add_replica`]): a replica's messages reach only the hosts linked to it,
-/// a message for a host attached to another replica goes through the store's outbox and is relayed
-/// by the replica linking that host — taken in its writes, and between them (as on a notice) — once
-/// its cache is at least as new as the row's version; a cache found stale (a version check, a cut
-/// it cannot know) is refreshed from the row. Timed work (the upkeep, the drives of the test
-/// rig) runs on the replica whose core says it is the ticker ([`Coordinator::is_ticker`], Elastic
-/// 2b Task 6). Without a store the core is unstored ([`Coordinator::commit_unstored`]).
+/// row ([`Coordinator::rebase`]) and writes again, as the runtime does. How a host gets its
+/// messages follows the cores' [`super::Delivery`]: `Direct` — a replica's messages reach only the
+/// hosts linked to it (several replicas: a message for a host linked elsewhere is lost, as on a
+/// real link); `Mailbox` — every message is a row of the host's mailbox, which the host's link
+/// reads (from the store, after every pass, from its cursor on) wherever its batches go
+/// ([`InlineWorldLink::switch_to`]). A cache found stale (a version check, a cut it cannot know, a
+/// newer row) is refreshed from the row. Timed work (the upkeep, the drives of the test rig) runs
+/// on the replica whose core says it is the ticker ([`Coordinator::is_ticker`], Elastic 2b Task 6).
+/// Without a store the core is unstored ([`Coordinator::commit_unstored`]).
 #[doc(hidden)]
 pub struct RigCluster {
     replicas: Vec<RigReplica>,
     store: Option<RigStore>,
     boxes: BTreeMap<HostId, VecDeque<(u64, CoordMsg)>>,
+    /// Per host, the boot its link attached as last (whatever replica it reached): the mailbox
+    /// rows its link reads.
+    link_boots: BTreeMap<HostId, u64>,
+    /// Per host, the `seq` of the last mailbox row its link read.
+    cursors: BTreeMap<HostId, u64>,
+    /// The store's clock as the last pump set it (store ms).
+    store_ms: u64,
     /// [`Self::arm_foreign_version`]: before the next write of a replica that may rebase, a
     /// foreign writer moves the row.
     foreign_armed: bool,
@@ -252,6 +290,9 @@ impl RigCluster {
             replicas: vec![RigReplica::of(coordinator)],
             store: None,
             boxes: BTreeMap::new(),
+            link_boots: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            store_ms: 0,
             foreign_armed: false,
             rebases: 0,
             refreshes: 0,
@@ -299,7 +340,8 @@ impl RigCluster {
 
     /// Another replica (Elastic 2b Task 5): `core` — loaded from [`Self::stored`] by the caller, its
     /// version set, its own [`Input::ReplicaJoined`] applied — joins the cluster with no host
-    /// linked yet ([`InlineWorldLink::shared_at`], [`InlineWorldLink::move_to`]). Its index.
+    /// linked yet ([`InlineWorldLink::shared_at`], [`InlineWorldLink::move_to`],
+    /// [`InlineWorldLink::switch_to`]). Its index.
     pub fn add_replica(&mut self, core: Coordinator) -> usize {
         self.replicas.push(RigReplica::of(core));
         self.replicas.len() - 1
@@ -323,6 +365,11 @@ impl RigCluster {
         self.store.as_ref()
     }
 
+    /// The store, to change (a test's foreign row, a read of the login answers).
+    pub fn store_mut(&mut self) -> Option<&mut RigStore> {
+        self.store.as_mut()
+    }
+
     /// The projection as the store holds it: `(core, history)` of the last transition (`None`
     /// without a store, or before the first transition).
     pub fn stored(&self) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -339,6 +386,12 @@ impl RigCluster {
         self.store.as_ref().map_or(0, RigStore::writes)
     }
 
+    /// The store's clock from now on (store ms): what mailbox rows are stamped with. Every link
+    /// pump sets it to the time it pumps at.
+    pub fn set_store_ms(&mut self, now_ms: u64) {
+        self.store_ms = self.store_ms.max(now_ms);
+    }
+
     /// The ticker's pending transition written now (and what may leave routed), as a runtime
     /// pass ends: the store decisions it handed out are committed with it
     /// ([`Self::take_committed`]).
@@ -347,7 +400,7 @@ impl RigCluster {
         self.route(r);
     }
 
-    /// Replica `r`'s pass without a host's input: its transitions written, its relays taken.
+    /// Replica `r`'s pass without a host's input: its transitions written.
     pub fn pump_replica(&mut self, r: usize) {
         self.route(r);
     }
@@ -361,14 +414,12 @@ impl RigCluster {
     }
 
     /// Test hook (Elastic 2b Task 6): replica `r`'s process dies — it handles, writes and sends
-    /// nothing more; what it held (its outgoing queue, the rows it took) and what its links
-    /// carried is lost. The hosts linked to it stay linked to nothing until moved
-    /// ([`InlineWorldLink::move_to`]); the others end it ([`Input::ReplicaLapsed`]) at their
-    /// own pace.
+    /// nothing more; what it held (its outgoing queue) and what its links carried is lost. The
+    /// hosts linked to it stay linked to nothing until moved ([`InlineWorldLink::move_to`]); the
+    /// others end it ([`Input::ReplicaLapsed`]) at their own pace.
     pub fn kill_replica(&mut self, r: usize) {
         let replica = &mut self.replicas[r];
         replica.dead = true;
-        replica.held.clear();
         for h in std::mem::take(&mut replica.hosts) {
             if let Some(b) = self.boxes.get_mut(&h) {
                 b.clear();
@@ -394,12 +445,11 @@ impl RigCluster {
 
     /// A restart of replica 0's process: the core is replaced by `coordinator` (loaded
     /// from [`Self::stored`]), which has read the row as it stands, and whatever the old
-    /// process had not handed to a link yet — its outgoing queue, the hosts' mailboxes, the rows
-    /// it held — is lost with it.
+    /// process had not handed to a link yet — its outgoing queue, the hosts' boxes — is lost
+    /// with it (the mailboxes are the store's: they stay).
     pub fn restart(&mut self, mut coordinator: Coordinator) {
         coordinator.set_version(self.row_version());
         self.replicas[0].core = coordinator;
-        self.replicas[0].held.clear();
         for b in self.boxes.values_mut() {
             b.clear();
         }
@@ -417,7 +467,7 @@ impl RigCluster {
     }
 
     /// From now on every replica's commits and releases (with the inputs they hold) and replica
-    /// 0's world tick are recorded ([`Self::take_events`]), and what each host's mailbox gets
+    /// 0's world tick are recorded ([`Self::take_events`]), and what each host's box gets
     /// ([`Self::delivered`]).
     pub fn start_recording(&mut self) {
         for r in &mut self.replicas {
@@ -433,37 +483,53 @@ impl RigCluster {
         self.events.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
-    /// What each host's mailbox got while recording, with the version that released each.
+    /// What each host's box got while recording, with the version that released each.
     pub fn delivered(&self) -> &BTreeMap<HostId, Vec<(u64, CoordMsg)>> {
         &self.delivered
     }
 
-    /// What was released for each host and has not reached it yet: the store's outbox rows and
-    /// the rows a replica took and holds.
+    /// What was released for each host and has not reached it yet: its mailbox rows.
     pub fn undelivered(&self) -> BTreeMap<HostId, Vec<CoordMsg>> {
         let mut out: BTreeMap<HostId, Vec<CoordMsg>> = BTreeMap::new();
-        let rows = self.store.iter().flat_map(|s| s.outbox().iter()).chain(self.replicas.iter().flat_map(|r| r.held.iter()));
-        for row in rows {
+        for row in self.store.iter().flat_map(|s| s.outbox().iter()) {
             out.entry(row.host).or_default().push(row.msg.clone());
         }
         out
     }
 
     /// Host `host`'s link moves to replica `to` (Elastic 2b Task 5): its link to the replica it
-    /// reached goes down there ([`Input::LinkDown`] at `now_ms`, written with that replica's next
-    /// transition), what that link carried and had not been read is lost, and the host is linked
-    /// to `to` (its next `Attach` goes there). The replica it left.
+    /// reached goes down there ([`Input::HostStalled`] of the boot it attached as there, at
+    /// `now_ms`, written with that replica's next transition), what that link carried and had not
+    /// been read is lost, and the host is linked to `to` (its next `Attach` goes there). The
+    /// replica it left.
     pub fn move_host(&mut self, host: HostId, to: usize, now_ms: u64) -> usize {
         let from = self.replicas.iter().position(|r| r.hosts.contains(&host)).expect("the host is linked");
         self.replicas[from].hosts.remove(&host);
-        self.replicas[from].boots.remove(&host);
+        let boot = self.replicas[from].boots.remove(&host);
         self.replicas[to].hosts.insert(host);
         if let Some(b) = self.boxes.get_mut(&host) {
             b.clear();
         }
-        self.replicas[from].core.apply(Input::LinkDown { host }, now_ms);
+        if let Some(boot) = boot {
+            self.replicas[from].core.apply(Input::HostStalled { host, boot }, now_ms);
+        }
         self.route(from);
         from
+    }
+
+    /// Host `host`'s next messages go to replica `to` (`Mailbox`: a batch posted to another
+    /// replica — nothing is lost, nothing detaches; its mailbox is read from the store whatever
+    /// replica it posts to). The replica `to`'s core applies them as of the link the host's last
+    /// `Attach` opened (`(boot, epoch)`, as a batch names it).
+    pub fn switch_host(&mut self, host: HostId, to: usize, attach: Option<(u64, u64)>) {
+        for r in &mut self.replicas {
+            r.hosts.remove(&host);
+        }
+        self.replicas[to].hosts.insert(host);
+        if let Some((boot, epoch)) = attach {
+            self.replicas[to].boots.insert(host, boot);
+            self.replicas[to].core.link_opened(host, boot, epoch);
+        }
     }
 
     /// Host `host`, linked to a replica whose process died ([`Self::kill_replica`]) — or to none —
@@ -477,19 +543,6 @@ impl RigCluster {
             b.clear();
         }
         self.replicas[to].hosts.insert(host);
-    }
-
-    /// The hosts replica `r` takes outbox rows for: those its core has attached to it and that
-    /// are linked to it, at the boots their links' `Attach`es named.
-    fn take_for(&self, r: usize) -> Vec<(HostId, u64)> {
-        let replica = &self.replicas[r];
-        replica
-            .core
-            .hosts_attached_to(replica.core.replica())
-            .into_iter()
-            .filter(|h| replica.hosts.contains(h))
-            .filter_map(|h| replica.boots.get(&h).map(|b| (h, *b)))
-            .collect()
     }
 
     /// Replica `r` refreshed from the row if the row is newer and its core may be rebased (as
@@ -507,18 +560,9 @@ impl RigCluster {
         moved
     }
 
-    /// Replica `r`'s held rows its cache is new enough for, in order.
-    fn release_held(&mut self, r: usize, out: &mut Vec<(u64, Target, CoordMsg)>) {
-        let replica = &mut self.replicas[r];
-        while replica.held.front().is_some_and(|row| row.version <= replica.core.version()) {
-            let row = replica.held.pop_front().expect("checked");
-            out.push((row.version, Target::Host(row.host), row.msg));
-        }
-    }
-
-    /// What may leave replica `r` goes to the mailboxes of the hosts linked to it (a message
-    /// for a host not linked to it is lost, as on a real link), each tagged with the row version
-    /// that released it.
+    /// What may leave replica `r` goes to the boxes of the hosts linked to it (`Direct`: a
+    /// message for a host not linked to it is lost, as on a real link), each tagged with the row
+    /// version that released it; then every host's link reads its mailbox (`Mailbox`).
     fn route(&mut self, r: usize) {
         if self.replicas[r].dead || self.held_writes.contains(&r) {
             return;
@@ -539,7 +583,7 @@ impl RigCluster {
                     }
                     self.replicas[r].core.refresh_not_newer();
                 }
-                // The version check of what leaves without a write (several replicas).
+                // The version check of what leaves without a write (several replicas, `Direct`).
                 let row_version = self.row_version();
                 if let Some(v) = self.replicas[r].core.version_check_wanted() {
                     if !self.replicas[r].core.version_checked(row_version) {
@@ -555,15 +599,6 @@ impl RigCluster {
                 if self.refresh(r) {
                     continue;
                 }
-                // The rows other replicas left for this replica's hosts (as on a notice).
-                let take_for = self.take_for(r);
-                let upto = self.replicas[r].core.version();
-                let rows = self.store.as_mut().expect("a store").take_outbox(&take_for, upto);
-                self.replicas[r].held.extend(rows);
-                if self.replicas[r].held.iter().any(|row| row.version > self.replicas[r].core.version()) && self.refresh(r) {
-                    continue;
-                }
-                self.release_held(r, &mut out);
                 let core = &mut self.replicas[r].core;
                 let free = core.take_out();
                 let (replica, version) = (core.replica(), core.version());
@@ -580,14 +615,14 @@ impl RigCluster {
         for (version, to, msg) in out {
             self.deliver(r, version, to, msg);
         }
+        self.read_mailboxes();
     }
 
     /// Replica `r`'s pending transitions written (a conflict rebases it and writes again); what
-    /// each commit releases into `out`: the rows it held and took, then its own messages.
+    /// each commit releases into `out` (`Direct`: its messages; `Mailbox`: none — they are rows).
     fn write_all(&mut self, r: usize, out: &mut Vec<(u64, Target, CoordMsg)>) {
         let mut next = self.replicas[r].core.take_transition();
         while let Some(t) = next.take() {
-            let take_for = self.take_for(r);
             let store = self.store.as_mut().expect("a store");
             let core = &mut self.replicas[r].core;
             if self.foreign_armed {
@@ -598,27 +633,27 @@ impl RigCluster {
                 }
             }
             let decisions = t.decisions.clone();
-            // A store that never fails, written at the version this replica read.
+            // A store that never fails, written at the version this replica read (without a core
+            // when nothing durable changed, as the HTTP runtime writes it).
             let w = RigWrite {
                 version: core.version(),
-                core: t.core,
+                core: t.core_changed.then_some(t.core),
                 history: t.history,
                 decisions: t.decisions,
                 replica: core.replica(),
                 outbox: t.outbox,
-                take_for,
-                discard_for: t.attached_now,
+                outbox_drop: t.outbox_drop,
+                login_outbox: t.login_outbox,
+                at_ms: self.store_ms,
             };
             match store.write(w) {
-                Ok((version, taken)) => {
+                Ok(version) => {
                     core.transition_written(version);
                     let inputs = core.take_recorded();
                     let replica = core.replica();
                     if let Some(events) = self.events.as_mut() {
                         events.push(RigEvent::Commit { replica, version, inputs, decisions, linked: self.replicas[r].hosts.clone() });
                     }
-                    self.replicas[r].held.extend(taken);
-                    self.release_held(r, out);
                     out.extend(t.out.into_iter().map(|(to, m)| (version, to, m)));
                     next = self.replicas[r].core.take_transition();
                 }
@@ -633,7 +668,25 @@ impl RigCluster {
         }
     }
 
-    /// `msg`, released at `version` by replica `r`, into the mailboxes it reaches: a host's if it
+    /// Every linked host's mailbox read from its cursor on (at the boot its link attached as),
+    /// into its box, in order.
+    fn read_mailboxes(&mut self) {
+        let Some(store) = self.store.as_mut() else { return };
+        let recording = self.events.is_some();
+        for (&host, &boot) in &self.link_boots {
+            let Some(b) = self.boxes.get_mut(&host) else { continue };
+            let cursor = self.cursors.entry(host).or_default();
+            for row in store.mailbox_read(host, boot, *cursor) {
+                *cursor = row.seq;
+                b.push_back((row.version, row.msg.clone()));
+                if recording {
+                    self.delivered.entry(host).or_default().push((row.version, row.msg));
+                }
+            }
+        }
+    }
+
+    /// `msg`, released at `version` by replica `r`, into the boxes it reaches: a host's if it
     /// is linked to `r`, every host linked to `r` for [`Target::Every`].
     fn deliver(&mut self, r: usize, version: u64, to: Target, msg: CoordMsg) {
         let recording = self.events.is_some();
@@ -661,7 +714,7 @@ impl RigCluster {
 
 impl RigCluster {
     /// An order of the login service, as the coordinator runtime handles one
-    /// ([`Coordinator::login_order`]): into the gate host's mailbox (read at its link's next
+    /// ([`Coordinator::login_order`]): into the gate host's box (read at its link's next
     /// pumps, after what is already there). The gate host, or `None` (dropped: no gate host).
     pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<HostId> {
         let r = self.ticker_index();
@@ -739,6 +792,9 @@ pub struct InlineWorldLink {
     up: bool,
     /// The row version that released each message read so far, in reading order.
     read_versions: Vec<u64>,
+    /// The `(boot, epoch)` of the last `Attach` this link sent through (a shared link's batch
+    /// stamp, [`Self::switch_to`]).
+    attach: Option<(u64, u64)>,
 }
 
 impl InlineWorldLink {
@@ -783,6 +839,7 @@ impl InlineWorldLink {
             sent: 0,
             up: true,
             read_versions: Vec::new(),
+            attach: None,
         }
     }
 
@@ -840,6 +897,15 @@ impl InlineWorldLink {
         self.in_q.clear();
         self.out_q.clear();
         self.up = false;
+    }
+
+    /// Test hook (coordinator HTTP API): this shared link's next messages go to replica `to` —
+    /// a batch posted to another replica: nothing is lost, the link stays up, the host stays
+    /// attached (`Mailbox`: it reads its mailbox from the store, whatever replica it posts to).
+    pub fn switch_to(&mut self, to: usize) {
+        let Core::Shared(core) = &self.core else { panic!("only a shared link switches replicas") };
+        lock(core).switch_host(self.host, to, self.attach);
+        self.replica = to;
     }
 
     /// Test hook (Elastic 2b Task 6): this shared link, whose replica's process died
@@ -954,11 +1020,14 @@ impl WorldLink for InlineWorldLink {
                     self.in_q.clear();
                     return;
                 }
+                cluster.set_store_ms(now_ms);
                 while self.in_q.front().is_some_and(|(due, _)| *due <= step) {
                     let (_, msg) = self.in_q.pop_front().expect("checked");
-                    if let HostMsg::Attach { boot, .. } = &msg {
-                        // The boot this link's host attached as: what its outbox rows are taken for.
+                    if let HostMsg::Attach { boot, epoch, .. } = &msg {
+                        // The boot this link's host attached as: what its mailbox rows are read for.
                         cluster.replicas[r].boots.insert(self.host, *boot);
+                        cluster.link_boots.insert(self.host, *boot);
+                        self.attach = Some((*boot, *epoch));
                     }
                     cluster.replicas[r].core.apply(Input::Host { host: self.host, msg }, now_ms);
                 }

@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{CallStamp, CoordMsg, Coordinator, CutFailure, ReplicaId, StoreDecision, Target};
+use super::{CallStamp, CoordMsg, Coordinator, CutFailure, StoreDecision, Target};
 use crate::HostId;
 use crate::{CutId, SuccessionId, Tick};
 
@@ -201,9 +201,10 @@ pub(super) struct WorldCuts {
     #[serde(skip)]
     expected_known: bool,
     /// The hosts attached (an `Attach` handled, no detach since), each with the boot that
-    /// attached and the replica it attached to: an attachment to another replica is not this
-    /// replica's ([`Coordinator::is_attached`]).
-    attached: BTreeMap<HostId, (u64, ReplicaId)>,
+    /// attached (the coordinator HTTP API: no replica — a host's mailbox is read from any).
+    /// Detached by a stalled mailbox or a dropped link ([`super::Input::HostStalled`]), a newer
+    /// generation's first `Attach`, a rollback; never by a replica's lapse.
+    attached: BTreeMap<HostId, u64>,
     /// The world tick as the runtime last set it.
     #[serde(skip)]
     world_tick: Tick,
@@ -396,12 +397,15 @@ impl Coordinator {
         self.cuts.world_tick = tick;
     }
 
-    /// Host `host` is detached (its link to this replica went down, [`super::Input::LinkDown`];
-    /// a newer generation's first `Attach`; a rollback): a cut it takes part in and not decided
-    /// yet is aborted; a leave request of it not begun is forgotten (it sends it again with its
-    /// `Attach`).
+    /// Host `host` is detached (its mailbox stalled or its link dropped,
+    /// [`super::Input::HostStalled`]; a newer generation's first `Attach`; a rollback): a cut it
+    /// takes part in and not decided yet is aborted; a leave request of it not begun is forgotten
+    /// (it sends it again with its `Attach`); its mailbox rows are deleted with the transition
+    /// holding this (`outbox_drop`).
     pub(super) fn detach_host(&mut self, host: HostId) {
-        self.cuts.attached.remove(&host);
+        if self.cuts.attached.remove(&host).is_some() {
+            self.outbox_drop.insert(host);
+        }
         self.cuts.leave_requests.remove(&host);
         self.abort_for(host, "detached");
     }
@@ -447,8 +451,8 @@ impl Coordinator {
     /// `Attach`es named (`boots_seen`), nor an attachment of an older coordinator process (final
     /// review G2: a crash-looping pod across coordinator restarts never grows the projection).
     /// Kept (Elastic 2b Task 6, audit H7): an id at or above `next_host_id` (registered after the
-    /// read began: the read could not show it), and an id ATTACHED to any live replica — this
-    /// one or another (a zombie still attached stays marked until its link drops).
+    /// read began: the read could not show it), and an id ATTACHED (a zombie still attached stays
+    /// marked until it is detached).
     pub(super) fn forget_absent_hosts(&mut self, present: &BTreeSet<HostId>, next_host_id: u64) {
         let attached: BTreeSet<HostId> = self.attached_hosts().collect();
         let keep = |h: &HostId| present.contains(h) || h.0 >= next_host_id || attached.contains(h);
@@ -736,7 +740,7 @@ impl Coordinator {
     /// decision leave out only a host registered after the cut's begin was recorded
     /// (`world_store` `record_cut_begin`). It is in the next cut.
     pub(super) fn cut_attach(&mut self, host: HostId, pending: Option<CutId>, boot: u64) {
-        self.cuts.attached.insert(host, (boot, self.replica));
+        self.cuts.attached.insert(host, boot);
         self.cuts.boots.insert(host, boot);
         if self.cuts.left.get(&host).is_some_and(|left_as| *left_as != Some(boot)) {
             log::info!("coordinator: host {host} is back (boot {boot}): expected again");
@@ -942,29 +946,19 @@ impl Coordinator {
         self.attached_hosts().filter(|h| !self.cuts.left.contains_key(h) && !self.cuts.succeeded.contains_key(h)).collect()
     }
 
-    /// The hosts attached, by id: to any LIVE replica (Elastic 2b Task 4) — an attachment to a
-    /// replica not in the live set (ended, or dropped by a lone registration) counts detached.
+    /// The hosts attached, by id.
     pub(super) fn attached_hosts(&self) -> impl Iterator<Item = HostId> + '_ {
-        self.cuts.attached.iter().filter(|(_, (_, p))| self.replicas.contains(p)).map(|(h, _)| *h)
+        self.cuts.attached.keys().copied()
     }
 
-    /// Every attachment, whatever its replica: host → (its boot, the replica it attached to).
-    pub(super) fn attachments(&self) -> &BTreeMap<HostId, (u64, ReplicaId)> {
+    /// Every attachment: host → the boot it attached as.
+    pub(super) fn attachments(&self) -> &BTreeMap<HostId, u64> {
         &self.cuts.attached
     }
 
-    /// Every attachment's host, whatever its replica (a newer generation's first `Attach`
-    /// detaches them all).
-    pub(super) fn attachments_any(&self) -> Vec<HostId> {
-        self.cuts.attached.keys().copied().collect()
-    }
-
-    /// The hosts attached to replica `r` while it is live (none once it is not).
-    pub fn hosts_attached_to(&self, r: ReplicaId) -> BTreeSet<HostId> {
-        if !self.replicas.contains(&r) {
-            return BTreeSet::new();
-        }
-        self.cuts.attached.iter().filter(|(_, (_, p))| *p == r).map(|(h, _)| *h).collect()
+    /// The boot host `host` is attached as (`None`: not attached).
+    pub fn attachment(&self, host: HostId) -> Option<u64> {
+        self.cuts.attached.get(&host).copied()
     }
 
     /// Whether a message of `host` comes from a succeeded boot of it (`boot`: the boot an
@@ -974,15 +968,9 @@ impl Coordinator {
         boot.or_else(|| self.cuts.boots.get(&host).copied()) == Some(dead)
     }
 
-    /// Whether `host` is attached to a live replica (any: Elastic 2b Task 4).
+    /// Whether `host` is attached.
     pub(super) fn is_attached(&self, host: HostId) -> bool {
-        self.cuts.attached.get(&host).is_some_and(|(_, p)| self.replicas.contains(p))
-    }
-
-    /// Whether `host`'s attachment is to THIS replica (its link here: only this replica's link
-    /// going down detaches it, [`super::Input::LinkDown`]).
-    pub(super) fn is_attached_here(&self, host: HostId) -> bool {
-        self.cuts.attached.get(&host).is_some_and(|(_, p)| *p == self.replica)
+        self.cuts.attached.contains_key(&host)
     }
 
     /// The boot host `host`'s latest `Attach` named (`None`: it never attached).
@@ -1017,6 +1005,8 @@ impl Coordinator {
     pub(super) fn note_succeeded(&mut self, host: HostId, boot: u64) {
         self.cuts.succeeded.insert(host, boot);
         self.cuts.leave_requests.remove(&host);
+        // Its mailbox goes with it (a zombie of it reads nothing it could act on).
+        self.outbox_drop.insert(host);
     }
 
     /// A running cut `host` takes part in, not decided yet, is aborted (`why`, for the log).

@@ -23,9 +23,8 @@
 //! 3. The mailbox (coordinator HTTP API, `mailbox.rs`): the rows of `outbox_drop`'s hosts
 //!    deleted, then the `outbox` rows inserted (`at_ms` = the database clock), then the
 //!    `login_outbox` rows, then the login answers older than `login_prune_before_ms` pruned.
-//!    The Elastic 2b take (until the HTTP API replaces it): the rows of the hosts whose `Attach`
-//!    it applied deleted unsent; this replica's own hosts' rows taken (`DELETE … RETURNING`, in
-//!    `seq` order — commit order, as every row is inserted under the row's lock).
+//!    Nothing is taken: a host reads its own mailbox (the Elastic 2b relay between replicas is
+//!    gone).
 //! 4. `pg_notify('coordinator_row', '<version>')`: the other replicas' caches refresh on it.
 //! 5. The commit. Its error is the write's (whether it committed is then not known: the core
 //!    looks its decisions up, never issues them again).
@@ -51,15 +50,10 @@ use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 /// as read at `version`, and the store decisions it issues, run in the same transaction.
 /// `replica`: the replica writing, which the answers' stamps name.
 ///
-/// The outbox (Elastic 2b Task 5): `outbox` = the messages the transition decided for hosts
-/// linked to ANOTHER replica, `(host, its boot, game::encode_packet of the message)`, inserted
-/// at the version it commits as; `discard_for` = the hosts whose `Attach` it applied: their rows
-/// (decided before that `Attach`, which reconciles them) are deleted unsent; `take_for` = this
-/// replica's own hosts with their links' boots: their rows are taken (deleted and returned, in
-/// commit order — a row of another boot is deleted unsent). Postgres only (SQLite runs one
-/// replica: a transition with an outbox message is `Unsupported` there).
-///
-/// The mailbox (coordinator HTTP API): `core` is `None` for a transition that changed nothing
+/// The mailbox (coordinator HTTP API): `outbox` = the messages the transition decided for hosts,
+/// `(host, its boot, game::encode_packet of the message)`, inserted at the version it commits
+/// as — Postgres only (a transition with an outbox message is `Unsupported` on SQLite). `core` is
+/// `None` for a transition that changed nothing
 /// durable but still carries mailbox rows — its compare-and-set bumps `version` and writes
 /// neither `core` nor `history` (`history` is then ignored). `outbox_drop`: the hosts whose
 /// rows are deleted BEFORE `outbox` is inserted (an applied `Attach`, a detach, an end).
@@ -75,37 +69,20 @@ pub struct TransitionWrite {
     pub decisions: Vec<StoreDecision>,
     pub replica: ReplicaId,
     pub outbox: Vec<(HostId, u64, Vec<u8>)>,
-    pub take_for: Vec<(HostId, u64)>,
-    pub discard_for: Vec<HostId>,
     pub outbox_drop: Vec<HostId>,
     pub login_outbox: Vec<Vec<u8>>,
     pub login_prune_before_ms: Option<u64>,
 }
 
 /// A transition committed: the row's new version, the database clock at the write (ms since
-/// the epoch), each decision's answer (stamped `replica` at `version`, in order), the
-/// post-commit effects the runtime is to run, and the outbox rows it took for this replica's
-/// hosts (in `seq` order: commit order) — sent BEFORE the transition's own messages.
+/// the epoch), each decision's answer (stamped `replica` at `version`, in order), and the
+/// post-commit effects the runtime is to run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransitionWritten {
     pub version: u64,
     pub store_ms: u64,
     pub answers: Vec<DecisionAnswer>,
     pub after_commit: Vec<AfterCommit>,
-    pub taken: Vec<OutboxRow>,
-}
-
-/// One `outbox` row (Elastic 2b Task 5): a message a transition committed at `version` decided
-/// for host `host` at its boot `boot`, linked to another replica than the writer — `msg` is
-/// `game::encode_packet` of the [`game::CoordMsg`]. `seq` orders the rows by commit (they are
-/// inserted only inside a transition, under the `coordinator` row's lock).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OutboxRow {
-    pub seq: u64,
-    pub version: u64,
-    pub host: HostId,
-    pub boot: u64,
-    pub msg: Vec<u8>,
 }
 
 /// What a committed transition leaves to do after its commit
@@ -163,16 +140,16 @@ fn injected() -> StoreError {
 }
 
 /// The transition `w` (Postgres): the compare-and-set, each decision in a savepoint, then the
-/// outbox — its messages inserted, the rows of the hosts it attached discarded, its own hosts'
-/// rows taken — and the notice of the new version (see the module docs). `injected[i]`:
-/// decision `i` fails without running (a test hook). Returns the new version, the database
-/// clock, each decision's outcome and the rows taken.
+/// mailbox — the rows of `outbox_drop` deleted, its messages inserted, its login answers — and
+/// the notice of the new version (see the module docs). `injected[i]`: decision `i` fails
+/// without running (a test hook). Returns the new version, the database clock and each
+/// decision's outcome.
 pub(crate) async fn write_pg(
     pool: &PgPool,
     w: &TransitionWrite,
     dials: DecisionDials,
     injected_failures: &[bool],
-) -> Result<(u64, u64, Vec<Decided>, Vec<OutboxRow>), StoreError> {
+) -> Result<(u64, u64, Vec<Decided>), StoreError> {
     let mut tx = pool.begin().await?;
     let row = match &w.core {
         Some(core) => {
@@ -239,76 +216,13 @@ pub(crate) async fn write_pg(
     if let Some(before) = w.login_prune_before_ms {
         sqlx::query("DELETE FROM login_outbox WHERE at_ms < $1").bind(crate::rows::i(before)).execute(&mut *tx).await?;
     }
-    if !w.discard_for.is_empty() {
-        // Before the take: the rows of a host whose `Attach` this transition applied were decided
-        // before it (any later one would have met this transition's compare-and-set): its
-        // `Attach` reconciles what they carried — discarded, never delivered.
-        let hosts: Vec<i64> = w.discard_for.iter().map(|h| crate::rows::i(h.0)).collect();
-        let gone = sqlx::query("DELETE FROM outbox WHERE host = ANY($1)").bind(&hosts).execute(&mut *tx).await?.rows_affected();
-        if gone > 0 {
-            log::debug!("[world-store] {gone} outbox row(s) older than their hosts' Attach discarded");
-        }
-    }
-    // Under the compare-and-set this transaction IS the row's newest version: every row is at or
-    // below it.
-    let taken = take_in(&mut tx, &w.take_for, version as u64).await?;
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(crate::listen::COORDINATOR_ROW_CHANNEL)
         .bind(version.to_string())
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok((version as u64, store_ms as u64, out, taken))
-}
-
-/// The outbox rows of `for_hosts` (each host with its link's boot) at or below row version
-/// `upto`, taken on `conn` — one `DELETE … RETURNING` of the rows only (no other lock): returned
-/// in `seq` order (commit order); a row whose boot is not its link's is deleted unsent (that boot
-/// is gone). `upto` is the version of the cache that decided `for_hosts` are attached to the
-/// taker (final review S-I2): a row newer than that cache may have been decided after its host
-/// attached to another replica, whose relay it is — it stays in the table.
-pub(crate) async fn take_in(
-    conn: &mut sqlx::PgConnection,
-    for_hosts: &[(HostId, u64)],
-    upto: u64,
-) -> Result<Vec<OutboxRow>, StoreError> {
-    if for_hosts.is_empty() {
-        return Ok(Vec::new());
-    }
-    let hosts: Vec<i64> = for_hosts.iter().map(|(h, _)| crate::rows::i(h.0)).collect();
-    let rows = sqlx::query("DELETE FROM outbox WHERE host = ANY($1) AND version <= $2 RETURNING seq, version, host, boot, msg")
-        .bind(&hosts)
-        .bind(crate::rows::i(upto))
-        .fetch_all(&mut *conn)
-        .await?;
-    let mut taken = Vec::with_capacity(rows.len());
-    let mut stale = 0;
-    for r in rows {
-        let row = OutboxRow {
-            seq: r.try_get::<i64, _>(0)? as u64,
-            version: r.try_get::<i64, _>(1)? as u64,
-            host: HostId(r.try_get::<i64, _>(2)? as u64),
-            boot: r.try_get::<i64, _>(3)? as u64,
-            msg: r.try_get(4)?,
-        };
-        if for_hosts.iter().any(|(h, b)| *h == row.host && *b == row.boot) {
-            taken.push(row);
-        } else {
-            stale += 1;
-        }
-    }
-    if stale > 0 {
-        log::debug!("[world-store] {stale} outbox row(s) of another boot than their host's link deleted unsent");
-    }
-    taken.sort_by_key(|r| r.seq);
-    Ok(taken)
-}
-
-/// [`take_in`] on its own (between transitions: a replica relaying what other replicas left for
-/// its hosts).
-pub(crate) async fn take_outbox_pg(pool: &PgPool, for_hosts: &[(HostId, u64)], upto: u64) -> Result<Vec<OutboxRow>, StoreError> {
-    let mut conn = pool.acquire().await?;
-    take_in(&mut conn, for_hosts, upto).await
+    Ok((version as u64, store_ms as u64, out))
 }
 
 /// Decision `d` refused with `e` before it ran.

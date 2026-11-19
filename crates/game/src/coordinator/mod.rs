@@ -18,9 +18,15 @@
 //! **Replicas over one row (Elastic 2b, `input.rs`):** every input arrives through
 //! [`Coordinator::apply`], which logs it until its transition commits; a write that meets a
 //! newer row is followed by [`Coordinator::rebase`]: the newer projection, the log applied
-//! again onto it. Attachments are stamped with the [`ReplicaId`], store calls with a
-//! [`CallStamp`]: every store decision runs inside the transaction of the transition that
-//! decided it (`decisions.rs`), its answer an input of the next pass. ONE replica, the ticker
+//! again onto it. Store calls are stamped with a [`CallStamp`]: every store decision runs inside
+//! the transaction of the transition that decided it (`decisions.rs`), its answer an input of the
+//! next pass. An attachment is a host's boot only — no replica (the coordinator HTTP API): a host
+//! reads its mailbox from any replica.
+//!
+//! **Delivery** ([`Delivery`], [`Coordinator::set_delivery`]): `Direct` — the runtime sends the
+//! messages on its own links (role `all`, the svc-link listener, the inline link); `Mailbox` —
+//! every message for a host is a row of its mailbox (the store's `outbox`), written with the
+//! transition that decided it, at the boot the host is attached as. ONE replica, the ticker
 //! ([`Coordinator::is_ticker`]: the lowest live id), runs the timed and lease work — the upkeep,
 //! the `hosts` and successions reads, every store-call hand-out (Elastic 2b Task 6, `input.rs`).
 //!
@@ -203,10 +209,13 @@ pub struct Coordinator {
     /// The generation of the last world rollback this coordinator ordered: a host attaching
     /// with an older one is told it ([`CoordMsg::Generation`]) and not applied.
     rolled_back_to: Option<u64>,
-    /// What the hosts told the login service ([`HostMsg::Login`]), in arrival order, for the
-    /// runtime to forward ([`Self::take_login_out`]). Nothing about an order is kept.
-    login_out: Vec<crate::LoginOut>,
-    /// This replica: what its attachments and store calls are stamped with.
+    /// What the hosts told the login service ([`HostMsg::Login`], a logged input), in order: it
+    /// leaves with the next transition ([`Transition::login_outbox`]), durable before the login
+    /// service sees it. Nothing about an order is kept.
+    login_outbox: Vec<crate::LoginOut>,
+    /// How messages for hosts leave ([`Delivery`]): the runtime's configuration.
+    delivery: Delivery,
+    /// This replica: what its store calls are stamped with.
     replica: ReplicaId,
     /// Every input applied since the last commit, with the store time it was applied at
     /// (`input.rs`): what a rebase applies again onto a newer row.
@@ -261,8 +270,8 @@ pub struct Coordinator {
     /// The stamp of the transition in flight: the row version it commits as, by this replica.
     /// The marks it carries hold it ([`Self::transition_failed`] resolves them).
     writing_stamp: Option<CallStamp>,
-    /// The live coordinator replicas (Elastic 2b Task 4, `replicas.rs`): an attachment counts
-    /// only while its replica is here; the lowest is the ticker ([`Self::ticker`]).
+    /// The live coordinator replicas (Elastic 2b Task 4, `replicas.rs`): the lowest is the ticker
+    /// ([`Self::ticker`]).
     replicas: BTreeSet<ReplicaId>,
     /// This replica's own [`Input::ReplicaJoined`] was applied: from then on a core lacking its
     /// id is [`Self::evicted`].
@@ -270,15 +279,13 @@ pub struct Coordinator {
     /// The version check of the outputs free to leave with several live replicas (Elastic 2b
     /// departs 5): handed out ([`Self::version_check_wanted`]), confirmed or not.
     version_check: Option<VersionCheck>,
-    /// Messages for hosts attached to another live replica ([`Self::route_out`]), in order: they
-    /// leave with the next transition, through the store's outbox (Elastic 2b Task 5).
+    /// Mailbox rows ([`Delivery::Mailbox`], [`Self::route_out`]), in order: they leave with the
+    /// next transition, written in its transaction.
     outbox: Vec<OutboxMsg>,
-    /// How many of `out`'s first messages [`Self::route_out`] routed already (a transition handed
-    /// back: its `Every`s were fanned out to `outbox` once — never twice).
-    routed: usize,
-    /// The hosts whose `Attach` was applied since the last transition was taken: that transition
-    /// discards their outbox rows (decided before the `Attach`, which reconciles them).
-    attached_now: BTreeSet<HostId>,
+    /// The hosts whose older mailbox rows the next transition deletes before it inserts its own:
+    /// an `Attach` applied (its rows decided before it are reconciled by it), a detach, a host's
+    /// end.
+    outbox_drop: BTreeSet<HostId>,
     /// Hosts' messages about a world cut this cache cannot know yet — an id above its last one
     /// ([`Self::take_refresh_wanted`]): the row moved past this cache (a host got the `BeginCut`
     /// of a transition another replica committed). Never looked up while the cache may be stale
@@ -334,6 +341,25 @@ pub struct Coordinator {
     /// ([`Input::StartWanted`]): the next ask waits [`fleet::WORLD_START_ASK_EVERY_MS`].
     start_asked_ms: Option<u64>,
 }
+
+/// How a transition's messages for hosts leave the coordinator ([`Coordinator::set_delivery`]):
+/// the runtime's configuration, the same for every replica of a world.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Delivery {
+    /// The runtime sends them on its own links (role `all`, the svc-link listener, the inline
+    /// link): [`Transition::out`], or [`Coordinator::take_out`] when nothing durable changed.
+    #[default]
+    Direct,
+    /// Each is a row of its host's mailbox (the store's `outbox`), at the boot the host is
+    /// attached as, written by the transition that decided it ([`Transition::outbox`]); a host
+    /// reads its mailbox from any replica. Nothing leaves by [`Coordinator::take_out`].
+    Mailbox,
+}
+
+/// How long (store ms) a host's oldest unread mailbox row may wait before the ticker detaches the
+/// host ([`Input::HostStalled`], derived from [`Input::HostsRead`]'s `mailbox_oldest`): the time
+/// a dead link took to be noticed (svc-link's idle timeout). It re-attaches once it reads again.
+pub const MAILBOX_STALL_MS: u64 = 15_000;
 
 /// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
 /// then, and how many outputs and logged inputs it covers (those decided before it was asked).
@@ -425,7 +451,8 @@ projection! {
             memo_warned_ms = None,
             clock_ms = now_ms,
             leases = LeaseWatch::default(),
-            login_out = Vec::new(),
+            // The runtime's configuration (set again after a load: `set_delivery`).
+            delivery = Delivery::Direct,
             replica = replica,
             log = Vec::new(),
             link_attach = BTreeMap::new(),
@@ -479,8 +506,9 @@ projection! {
             writing_stamp = None,
             version_check = None,
             outbox = Vec::new(),
-            routed = 0,
-            attached_now = BTreeSet::new(),
+            outbox_drop = BTreeSet::new(),
+            // What the replayed `HostMsg::Login`s push again (they are logged inputs).
+            login_outbox = Vec::new(),
             stale_cuts = Vec::new(),
             stale_seen = false,
             refresh_covers = None,
@@ -536,7 +564,8 @@ impl Coordinator {
             leases: LeaseWatch::default(),
             successions: SuccessionRuns::default(),
             rolled_back_to: None,
-            login_out: Vec::new(),
+            login_outbox: Vec::new(),
+            delivery: Delivery::Direct,
             replica,
             log: Vec::new(),
             link_attach: BTreeMap::new(),
@@ -562,8 +591,7 @@ impl Coordinator {
             joined: false,
             version_check: None,
             outbox: Vec::new(),
-            routed: 0,
-            attached_now: BTreeSet::new(),
+            outbox_drop: BTreeSet::new(),
             stale_cuts: Vec::new(),
             stale_seen: false,
             refresh_covers: None,
@@ -593,12 +621,12 @@ impl Coordinator {
     /// anchor: a quick restart skips no day and repeats no day turn; a longer silence than
     /// [`CALENDAR_GAP_MS`] is downtime, re-anchored at the load where the calendar last stood,
     /// never earlier than a host was told — [`Self::calendar_resume`]), but:
-    /// - an attachment counts only while its replica is in the stored live set (Elastic 2b Task
-    ///   4): the runtime's first input is this replica's [`Input::ReplicaJoined`] — `alone`, the
-    ///   total replica crash, it drops every replica registered before it, whose hosts attach
-    ///   again; each `Attach` corrects what the projection holds of its host (its unlisted
-    ///   regions park, its unlisted players go offline); a host that never comes back is ended by
-    ///   its succession;
+    /// - the attachments stand as stored (a mailbox outlives a replica): the runtime's first
+    ///   input is this replica's [`Input::ReplicaJoined`] — `alone`, the total replica crash, it
+    ///   drops every replica registered before it, and under [`Delivery::Direct`] (whose links
+    ///   died with those processes) detaches every host, each attaching again; each `Attach`
+    ///   corrects what the projection holds of its host (its unlisted regions park, its unlisted
+    ///   players go offline); a host that never comes back is ended by its succession;
     /// - a store decision a replica that is not in the live set handed out (its mark,
     ///   `decisions.rs`) committed with the transition holding it, and its answer died with that
     ///   process: it is LOOKED UP, never issued again ([`Self::orphan_marks`]); a live replica's
@@ -738,16 +766,6 @@ impl Coordinator {
         now_ms.saturating_sub(self.calendar_seen_ms) > CALENDAR_GAP_MS
     }
 
-    /// What host `host` tells the login service ([`HostMsg::Login`]): into the process's login
-    /// relay as it is — never logged — unless it comes from a succeeded boot (a zombie: dropped).
-    fn forward_login(&mut self, host: HostId, out: crate::LoginOut) {
-        if self.from_succeeded_boot(host, None) {
-            log::debug!("coordinator: a login message of host {host}'s succeeded boot dropped: {out:?}");
-            return;
-        }
-        self.login_out.push(out);
-    }
-
     /// Apply one message of host `host` (the ordinal its link is for): [`Input::Host`].
     fn on_host(&mut self, host: HostId, msg: HostMsg, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
@@ -760,16 +778,18 @@ impl Coordinator {
         if self.from_succeeded_boot(host, attach_boot) {
             return self.zombie_message(host, msg);
         }
-        // A host of a generation older than the coordinator's rollback: told, not applied.
-        if let HostMsg::Attach { generation, .. } = &msg {
+        // A host of a generation older than the coordinator's rollback: told, not applied (it
+        // is not attached: told at the boot its `Attach` named).
+        if let HostMsg::Attach { generation, boot, .. } = &msg {
             if let Some(g) = self.rolled_back_to.filter(|g| generation < g) {
                 log::warn!("coordinator: host {host} attaches with generation {generation}, the world rolled back to {g}");
-                return self.push(Target::Host(host), CoordMsg::Generation(g));
+                return self.push_to_boot(host, *boot, CoordMsg::Generation(g));
             }
         }
-        // For the login service, forwarded as it is.
+        // For the login service, unchanged: durable with this input's transition (a logged input,
+        // replayed by a rebase), sent only once that committed.
         if let HostMsg::Login(out) = msg {
-            self.login_out.push(out);
+            self.login_outbox.push(out);
             return;
         }
         match msg {
@@ -811,8 +831,9 @@ impl Coordinator {
                 self.attach(host, epoch, running, online, handed);
                 self.cut_attach(host, pending_cut, boot);
                 self.succession_attach(host, successions);
-                // Its outbox rows, decided before this `Attach`, go with the transition holding it.
-                self.attached_now.insert(host);
+                // Its mailbox rows, decided before this `Attach` (which reconciles them), are
+                // deleted by the transition holding it, before its `Attached` row.
+                self.outbox_drop.insert(host);
             }
             HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
@@ -967,6 +988,9 @@ impl Coordinator {
     /// [`Self::version_check_wanted`] handed the check out, after [`Self::version_checked`]
     /// confirmed it; until then nothing leaves (a check that found the row moved: the runtime
     /// rebases first). An evicted core ([`Self::evicted`]) releases nothing.
+    ///
+    /// Under [`Delivery::Mailbox`] nothing leaves here: every message is a mailbox row, so any
+    /// message makes a transition due (written without a core when nothing durable changed).
     pub fn take_out(&mut self) -> Vec<(Target, CoordMsg)> {
         if !self.unstored {
             if self.writing || self.evicted() {
@@ -982,6 +1006,7 @@ impl Coordinator {
                 return Vec::new();
             }
             debug_assert!(self.decisions.is_empty(), "a store decision waits, yet nothing durable is pending");
+            debug_assert!(self.delivery == Delivery::Direct || self.out.is_empty(), "a mailbox message waits outside a transition");
             if self.replicas.len() > 1 && !self.out.is_empty() {
                 let Some(check) = self.version_check.filter(|c| c.confirmed && c.version == self.version) else {
                     return Vec::new();
@@ -992,68 +1017,86 @@ impl Coordinator {
                 let drained: Vec<input::Logged> = self.log.drain(..logged).collect();
                 self.record(drained);
                 self.reads_committed = self.reads_applied;
-                self.routed = self.routed.saturating_sub(n);
                 return self.out.drain(..n).collect();
             }
         } else {
             // No store: nothing to decide in (an unstored core runs no world cut nor succession),
-            // and no other replica (nothing routed through an outbox).
+            // no mailbox, and no login service behind it (the inline link serves none).
             self.decisions.clear();
-            self.attached_now.clear();
+            self.outbox_drop.clear();
+            if !self.login_outbox.is_empty() {
+                log::debug!("coordinator: {} login answers with no login service behind this core: dropped", self.login_outbox.len());
+                self.login_outbox.clear();
+            }
         }
         let drained = std::mem::take(&mut self.log);
         self.record(drained);
         self.reads_committed = self.reads_applied;
-        self.routed = 0;
         std::mem::take(&mut self.out)
     }
 
-    /// Split what waits in `out` by attachment (Elastic 2b Task 5): a message for a host attached
-    /// to this replica (or to none: its link, if any, is here) stays in `out`, sent on this
-    /// replica's links; one for a host attached to ANOTHER live replica goes to the outbox, with
-    /// that host's boot (the store inserts it with the transition; the replica linking the host
-    /// relays it in commit order); one for a host attached to a replica no longer live is dropped
-    /// — as a detached host's: its next `Attach` (to a live replica) reconciles what it would
-    /// have carried. [`Target::Every`] stays in `out` for this replica's links and is fanned out
-    /// to the outbox once per host attached to another live replica. An answer to an `Attach`
-    /// on this replica's link ([`CoordMsg::Attached`], [`CoordMsg::Generation`]) always stays.
-    /// One live replica, every host attached to it (or to none): nothing changes. Run by
-    /// [`Self::take_transition`] over everything decided since the last one, at the attachments
-    /// its compare-and-set commits with.
+    /// How messages for hosts leave from now on ([`Delivery`]; the runtime's configuration, set
+    /// before its first input and after every load — a rebase keeps it).
+    pub fn set_delivery(&mut self, delivery: Delivery) {
+        self.delivery = delivery;
+    }
+
+    /// The delivery set ([`Self::set_delivery`]).
+    pub fn delivery(&self) -> Delivery {
+        self.delivery
+    }
+
+    /// `msg` for host `host` at its boot `boot`, which it is not attached as (yet): an answer to
+    /// an `Attach` refused before it was applied ([`CoordMsg::Generation`]). Directly a mailbox row
+    /// at that boot under [`Delivery::Mailbox`] (no attachment routes it); in `out` otherwise.
+    fn push_to_boot(&mut self, host: HostId, boot: u64, msg: CoordMsg) {
+        match self.delivery {
+            Delivery::Mailbox if !self.unstored => self.outbox.push(OutboxMsg { host, boot, msg }),
+            _ => self.push(Target::Host(host), msg),
+        }
+    }
+
+    /// `msg` for every host attached NOW, right before they are all detached (a rollback): under
+    /// [`Delivery::Mailbox`] a row at each one's boot (a broadcast routed after the detach would
+    /// reach nobody); otherwise [`Target::Every`] in `out` (the runtime's links reach them).
+    pub(super) fn push_to_attached_now(&mut self, msg: CoordMsg) {
+        match self.delivery {
+            Delivery::Mailbox if !self.unstored => {
+                let rows: Vec<OutboxMsg> =
+                    self.attachments().iter().map(|(&host, &boot)| OutboxMsg { host, boot, msg: msg.clone() }).collect();
+                self.outbox.extend(rows);
+            }
+            _ => self.push(Target::Every, msg),
+        }
+    }
+
+    /// [`Delivery::Mailbox`]: everything waiting in `out` becomes mailbox rows, in order — a
+    /// message for [`Target::Host`] one row at the boot that host is attached as (not attached:
+    /// dropped, as on a detached link — its next `Attach` reconciles what it would have carried),
+    /// [`Target::Every`] one row per attached host (a zombie's or a leaver's too: rows it never
+    /// reads stall it, and [`Input::HostStalled`] detaches it — a dead process's attachment is
+    /// not kept for ever); `out` ends empty.
+    /// Run by [`Self::take_transition`] over everything decided since the last one, at the
+    /// attachments its compare-and-set commits with. [`Delivery::Direct`] (or no store): nothing
+    /// changes, the runtime sends `out` on its links.
     fn route_out(&mut self) {
-        let me = self.replica;
-        let from = self.routed.min(self.out.len());
-        self.routed = self.out.len();
-        if self.unstored || self.attachments().values().all(|(_, r)| *r == me) {
+        if self.unstored || self.delivery == Delivery::Direct {
             return;
         }
-        let elsewhere: BTreeMap<HostId, u64> = self
-            .attachments()
-            .iter()
-            .filter(|(_, (_, r))| *r != me && self.replicas.contains(r))
-            .map(|(h, (boot, _))| (*h, *boot))
-            .collect();
-        let out = self.out.split_off(from);
-        for (to, msg) in out {
-            let answers_link = matches!(msg, CoordMsg::Attached { .. } | CoordMsg::Generation(_));
+        for (to, msg) in std::mem::take(&mut self.out) {
             match to {
-                Target::Host(h) if !answers_link => match self.attachments().get(&h).copied() {
-                    Some((boot, r)) if r != me && self.replicas.contains(&r) => self.outbox.push(OutboxMsg { host: h, boot, msg }),
-                    Some((_, r)) if r != me => {
-                        log::debug!("coordinator: host {h} is attached to replica {r}, not live: a message for it dropped");
-                    }
-                    _ => self.out.push((to, msg)),
+                Target::Host(h) => match self.attachment(h) {
+                    Some(boot) => self.outbox.push(OutboxMsg { host: h, boot, msg }),
+                    None => log::debug!("coordinator: host {h} is not attached: a message for it dropped"),
                 },
-                Target::Host(_) => self.out.push((to, msg)),
                 Target::Every => {
-                    for (&host, &boot) in &elsewhere {
+                    let hosts: Vec<(HostId, u64)> = self.attachments().iter().map(|(h, b)| (*h, *b)).collect();
+                    for (host, boot) in hosts {
                         self.outbox.push(OutboxMsg { host, boot, msg: msg.clone() });
                     }
-                    self.out.push((to, msg));
                 }
             }
         }
-        self.routed = self.out.len();
     }
 
     /// Whether a host spoke of a world cut this cache cannot know yet: it is stale (the row moved
@@ -1128,7 +1171,8 @@ impl Coordinator {
     /// (`SELECT version`) and answer with [`Self::version_checked`]. It covers the outputs
     /// decided so far. `None`: no check wanted (one replica: none at all).
     pub fn version_check_wanted(&mut self) -> Option<u64> {
-        if self.unstored || self.writing || self.evicted() || self.replicas.len() <= 1 || self.out.is_empty() || self.is_stale() {
+        // Under `Mailbox` nothing leaves without a transition: its compare-and-set is the check.
+        if self.unstored || self.delivery == Delivery::Mailbox || self.writing || self.evicted() || self.replicas.len() <= 1 || self.out.is_empty() || self.is_stale() {
             return None;
         }
         if self.version_check.is_some_and(|c| c.version == self.version) || self.durable_pending() {
@@ -1183,6 +1227,15 @@ impl Coordinator {
                 log::warn!("coordinator: replica {me} registered alone: replica {r} is gone");
                 self.drop_replica(r);
             }
+            if self.delivery == Delivery::Direct {
+                // Every host's link was to a replica that is gone (a total crash, or role `all`'s
+                // restart): each attaches again. A mailbox outlives its replicas (`Mailbox`: kept).
+                let attached: Vec<HostId> = self.attached_hosts().collect();
+                for h in attached {
+                    log::info!("coordinator: replica {me} registered alone: host {h}'s link died with its replica: detached");
+                    self.detach_host(h);
+                }
+            }
         }
         if self.replicas.insert(me) {
             log::info!("coordinator: replica {me} joined; live {:?}", self.replicas);
@@ -1204,30 +1257,20 @@ impl Coordinator {
         }
     }
 
-    /// Replica `r` is no longer live: the hosts attached to it count detached from here on (their
-    /// attachments stay in the projection, as a restart's did, until each host attaches again or
-    /// a `hosts` read no longer shows it — a cut they take part in aborts at their re-`Attach` or
-    /// its deadline), the store calls it handed out and never answered are looked up.
+    /// Replica `r` is no longer live: the store calls it handed out and never answered are looked
+    /// up. No host is detached (an attachment names no replica: a host's mailbox is read from any;
+    /// a host whose mailbox stalls is detached by [`Input::HostStalled`]).
     fn drop_replica(&mut self, r: ReplicaId) {
         self.replicas.remove(&r);
         self.orphan_marks(|s| s.replica == r, "its replica is no longer live");
     }
 
-    /// The world's gate host: the lowest host attached to any live replica that neither left
-    /// nor was succeeded, and is neither leaving nor draining ([`Self::takes_logins`]). `None`:
-    /// no such host (none attached, or every one draining). A replica relays the login
-    /// service's orders to its OWN gate host, [`Self::gate_host_here`] (Elastic 2b Task 8).
+    /// The world's gate host: the lowest attached host that neither left nor was succeeded, and
+    /// is neither leaving nor draining ([`Self::takes_logins`]). `None`: no such host (none
+    /// attached, or every one draining). World-wide: every replica relays the login service's
+    /// orders to it ([`Self::login_order`]).
     pub fn gate_host(&self) -> Option<HostId> {
         self.attached_live().into_iter().filter(|h| self.takes_logins(*h)).min()
-    }
-
-    /// This replica's gate host (Elastic 2b Task 8): [`Self::gate_host`] among the hosts
-    /// attached to THIS replica only — the one its login orders go to ([`Self::login_order`]).
-    /// `None`: none of its hosts takes logins (another replica's may): the runtime answers the
-    /// login service `NoGate` at once, and it tries its next link.
-    pub fn gate_host_here(&self) -> Option<HostId> {
-        let here = self.hosts_attached_to(self.replica());
-        self.attached_live().into_iter().filter(|h| here.contains(h) && self.takes_logins(*h)).min()
     }
 
     /// Whether attached live host `host` may be the gate host: not leaving (its leave asked
@@ -1238,25 +1281,16 @@ impl Coordinator {
         !self.leave_asked(host) && !self.draining.contains(&host)
     }
 
-    /// An order of the login service: for this replica's gate host of this moment
-    /// ([`Self::gate_host_here`]), as the message to send it — the runtime sends it; nothing is
+    /// An order of the login service: for the world's gate host of this moment
+    /// ([`Self::gate_host`]), as the message to send it — the runtime sends it; nothing is
     /// stored or logged here (process-local, never replayed: a resend of the order, or of a
     /// kick, goes to the gate host of ITS moment, and the hosts' answers come back as
-    /// [`HostMsg::Login`]). `None`: this replica has no gate host — the runtime answers the
-    /// login service `NoGate`, and it tries another replica (none: the join answers 503; a kick
-    /// is resent).
+    /// [`HostMsg::Login`]). `None`: no gate host anywhere ([`fleet::Gate::Nobody`]) — the
+    /// runtime answers the login service `Starting` (a spawn, fleet dials set, with
+    /// [`Input::StartWanted`]) or `NoGate` (the join answers 503; a kick is resent).
     pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<(HostId, CoordMsg)> {
-        // `Elsewhere` and `Nobody` (Elastic 4): the runtime tells them apart with
-        // [`Self::login_gate`] — `Starting` and [`Input::StartWanted`] for a spawn with no host
-        // serving anywhere and fleet dials set, else `NoGate`.
-        let fleet::Gate::Here(gate) = self.login_gate() else { return None };
+        let fleet::Gate::Host(gate) = self.login_gate() else { return None };
         Some((gate, CoordMsg::Login(order)))
-    }
-
-    /// What the hosts told the login service since the last call ([`HostMsg::Login`]), in
-    /// order, untouched: the runtime forwards it.
-    pub fn take_login_out(&mut self) -> Vec<crate::LoginOut> {
-        std::mem::take(&mut self.login_out)
     }
 
     /// Whether the projection differs from the one last handed out (or loaded), or the
@@ -1264,7 +1298,9 @@ impl Coordinator {
     fn durable_pending(&self) -> bool {
         !self.decisions.is_empty()
             || !self.outbox.is_empty()
-            || !self.attached_now.is_empty()
+            || !self.outbox_drop.is_empty()
+            || !self.login_outbox.is_empty()
+            || (self.delivery == Delivery::Mailbox && !self.out.is_empty())
             || self.history.content_dirty()
             || raw_core(&self.projection()) != self.committed_raw
     }
@@ -1293,16 +1329,17 @@ impl Coordinator {
         // all, as the next version of the row it was read at (the compare-and-set).
         let stamp = CallStamp { replica: self.replica, version: self.version + 1 };
         self.stamp_pending_marks(stamp);
-        // Routed at the attachments this transition commits with (Elastic 2b Task 5): a message
-        // for another replica's host leaves through the outbox, written with it.
+        // Routed at the attachments this transition commits with: under `Mailbox` every message
+        // is a row of its host's mailbox, written with it.
         self.route_out();
         let raw = raw_core(&self.projection());
         let history_changed = self.history.content_dirty();
-        if !history_changed
-            && raw == self.committed_raw
+        let core_changed = history_changed || raw != self.committed_raw;
+        if !core_changed
             && self.decisions.is_empty()
             && self.outbox.is_empty()
-            && self.attached_now.is_empty()
+            && self.outbox_drop.is_empty()
+            && self.login_outbox.is_empty()
         {
             self.clean_checked = true;
             return None;
@@ -1318,14 +1355,15 @@ impl Coordinator {
         self.reads_taken = self.reads_applied;
         // Every output leaves with this transition: its compare-and-set is their version check.
         self.version_check = None;
-        self.routed = 0;
         Some(Transition {
             core,
             history,
             out: std::mem::take(&mut self.out),
             decisions: std::mem::take(&mut self.decisions),
             outbox: std::mem::take(&mut self.outbox),
-            attached_now: std::mem::take(&mut self.attached_now).into_iter().collect(),
+            outbox_drop: std::mem::take(&mut self.outbox_drop).into_iter().collect(),
+            login_outbox: std::mem::take(&mut self.login_outbox),
+            core_changed,
         })
     }
 
@@ -1414,13 +1452,14 @@ impl Coordinator {
             self.history.mark_content_dirty();
         }
         self.committed_raw.clear();
-        self.routed = t.out.len();
         let later = std::mem::replace(&mut self.out, t.out);
         self.out.extend(later);
         // Routed already (an `Every` fanned out): back as they were, ahead of anything routed since.
         let later = std::mem::replace(&mut self.outbox, t.outbox);
         self.outbox.extend(later);
-        self.attached_now.extend(t.attached_now);
+        self.outbox_drop.extend(t.outbox_drop);
+        let later = std::mem::replace(&mut self.login_outbox, t.login_outbox);
+        self.login_outbox.extend(later);
         t.decisions
     }
 
@@ -1589,20 +1628,11 @@ impl Coordinator {
     /// Forget every message for `host` matching `drops` not yet handed out (waiting or
     /// free to leave), superseded by its attach (`what` names them in the log).
     fn drop_unsent(&mut self, host: HostId, what: &str, drops: impl Fn(&CoordMsg) -> bool) {
-        let before = self.out.len();
-        let routed = self.routed;
-        let mut i = 0;
-        let mut routed_dropped = 0;
-        self.out.retain(|(to, m)| {
-            let keep = !(*to == Target::Host(host) && drops(m));
-            if !keep && i < routed {
-                routed_dropped += 1;
-            }
-            i += 1;
-            keep
-        });
-        self.routed -= routed_dropped;
-        let dropped = before - self.out.len();
+        let before = self.out.len() + self.outbox.len();
+        self.out.retain(|(to, m)| !(*to == Target::Host(host) && drops(m)));
+        // Rows of a transition handed back (`Mailbox`): not written yet either.
+        self.outbox.retain(|o| !(o.host == host && drops(&o.msg)));
+        let dropped = before - self.out.len() - self.outbox.len();
         if dropped > 0 {
             log::info!("coordinator: {dropped} unsent {what} for host {host} superseded by its attach");
         }
@@ -1648,7 +1678,7 @@ impl Coordinator {
     /// generation is gone — its processes are fenced and exit, and a restarted process is a
     /// new host. Each one the projection still names (running a region, holding a player) is
     /// taken out as a predecessor is: its regions park, its players go offline; and each one
-    /// still attached (its link not dropped yet), to any replica, is detached — never the gate host, an heir, or
+    /// still attached (not detached yet) is detached — never the gate host, an heir, or
     /// a host a cut waits for (Elastic 2a final review, I2; as [`Self::rolled_back`] detaches
     /// every host). What a restart of this coordinator used to undo by forgetting every host
     /// (before Elastic 2a its view of the hosts was never saved) is undone here, where the
@@ -1661,8 +1691,7 @@ impl Coordinator {
             log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is gone");
             self.host_succeeded(h);
         }
-        // Every replica's attachments (Elastic 2b Task 4), not only the live ones' counted ones.
-        let attached: Vec<HostId> = self.attachments_any().into_iter().filter(|h| *h != host).collect();
+        let attached: Vec<HostId> = self.attached_hosts().filter(|h| *h != host).collect();
         for h in attached {
             log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is detached");
             self.detach_host(h);

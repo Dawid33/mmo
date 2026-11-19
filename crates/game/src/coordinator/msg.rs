@@ -218,8 +218,9 @@ pub enum HostMsg {
     CutPeerCount { cut: CutId, peer: HostId, received_through: u64, boot: u64 },
     /// What this host tells the login service (Elastic 1 Task 6): the gate host's answer to a
     /// [`CoordMsg::Login`] order (a `SpawnAck`, or a `KickAck` once every peer applied the
-    /// kick), or the end of a login session that left the world here. The coordinator forwards
-    /// it to the login service unchanged and keeps nothing of it.
+    /// kick), or the end of a login session that left the world here. A logged input of the
+    /// coordinator: it reaches the login service unchanged once the transition holding it
+    /// committed (`Transition::login_outbox`); nothing else of it is kept.
     Login(crate::LoginOut),
     /// Something on this host needs a region of super-region `sr`, and the host knows no
     /// reachable owner of it (Elastic 3): free, unknown, or owned by a host that left. The

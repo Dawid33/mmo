@@ -1248,7 +1248,17 @@ impl MultiRig {
         desired.sort_by_key(|d| d.slot);
         let next_host_id = self.hosts.len() as u64;
         let tick = self.hosts.iter_mut().map(|r| r.manager.spawner_mut().world_tick()).max().unwrap_or(0);
-        let read = game::coordinator::Input::HostsRead { rows, desired, next_host_id, issued_mono: now, received_mono: now, world_tick: tick };
+        // The mailboxes' oldest rows (none under `Direct`, the rig's delivery).
+        let mailbox_oldest = self.core().store().map(|s| s.mailbox_oldest()).unwrap_or_default();
+        let read = game::coordinator::Input::HostsRead {
+            rows,
+            desired,
+            mailbox_oldest,
+            next_host_id,
+            issued_mono: now,
+            received_mono: now,
+            world_tick: tick,
+        };
         self.core().apply(read, now);
     }
 

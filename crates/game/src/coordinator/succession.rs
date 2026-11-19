@@ -1167,9 +1167,10 @@ impl super::Coordinator {
         // host at the new generation; an old one's `Attach` is answered with the generation):
         // none counts as attached from here — none may be an heir or the gate, and no cut
         // begins — however long its `Generation` takes to leave (Elastic 2a: after its
-        // transition is written) or its link to drop.
+        // transition is written) or its link to drop. Told first, at the boots attached now (a
+        // mailbox row routed after the detach would reach nobody).
+        self.push_to_attached_now(CoordMsg::Generation(generation));
         self.detach_all();
-        self.push(Target::Every, CoordMsg::Generation(generation));
     }
 
     /// How many successions are open (declared or read back, not yet settled or abandoned).

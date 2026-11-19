@@ -51,7 +51,7 @@
 //!
 //! **The scale gates** (rules 5, 6 and 7): no desired row draining, no succession run open (or being
 //! declared, a rollback in flight, or the open runs not known yet), and every wanted name has a
-//! **serving** host — its live host, attached to a live replica, taking logins (not leaving, not
+//! **serving** host — its live host, attached, taking logins (not leaving, not
 //! marked). **The timers** (`fleet_up_since`, `fleet_down_since`, `fleet_zero_since`, on the
 //! lease watch's clock) move
 //! only on a NEW `hosts` read (a read is the evidence; an upkeep between two reads moves
@@ -65,10 +65,9 @@
 //! run only under [`crate::CrashPolicy::Succession`]; rule 4 runs under `static` too (min = max
 //! = 1); rules 5, 6 and 7 need `Succession` as well.
 //!
-//! **A login when no host takes logins** (decision 5; [`Coordinator::login_gate`]): a replica
-//! with a gate host of its own relays the order ([`Gate::Here`]); one whose world has a serving
-//! host on ANOTHER live replica answers `NoGate` and the login service tries its next link
-//! ([`Gate::Elsewhere`]); with no serving host anywhere ([`Gate::Nobody`]) and fleet dials set,
+//! **A login when no host takes logins** (decision 5; [`Coordinator::login_gate`]): the world's
+//! gate host takes the order ([`Gate::Host`], whichever replica it reached — the gate is
+//! world-wide); with no serving host ([`Gate::Nobody`]) and fleet dials set,
 //! the replica answers `Starting` and applies [`super::Input::StartWanted`]: ANY replica (login
 //! orders reach whichever replica the login service dialled), logged and replayed, it issues
 //! [`super::AddHost`] `{ max, expect_wanted: 0 }` itself — at most once per
@@ -107,7 +106,7 @@ pub const HOST_MIN_LIFETIME_MS: u64 = 600_000;
 /// At most one fleet decision per this many store ms.
 pub const SCALE_DECISION_EVERY_MS: u64 = 10_000;
 /// A replica asks for the world's first host ([`super::Input::StartWanted`]: a login found no
-/// host taking logins on any live replica) at most once per this many store ms; the clients
+/// host taking logins) at most once per this many store ms; the clients
 /// retry their join every second meanwhile.
 pub const WORLD_START_ASK_EVERY_MS: u64 = 5_000;
 
@@ -169,7 +168,7 @@ impl FleetWhy {
 /// The scale gates' view of one `hosts` read (rules 5, 6 and 7): the serving host of every wanted
 /// name, or `None` when a gate fails (the module docs).
 struct Serving<'a> {
-    /// One per wanted name, its live host (attached to a live replica, taking logins).
+    /// One per wanted name, its live host (attached, taking logins).
     hosts: Vec<&'a HostSeen>,
 }
 
@@ -198,14 +197,10 @@ impl Serving<'_> {
 /// Where a login order of the login service goes ([`Coordinator::login_gate`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gate {
-    /// This replica's gate host ([`Coordinator::gate_host_here`]): the order is relayed to it.
-    Here(HostId),
-    /// No host attached to this replica takes logins, but one attached to another live replica
-    /// does: answered `NoGate`, the login service tries its next link.
-    Elsewhere,
-    /// No attached live host takes logins on ANY live replica (none attached, every one leaving
-    /// or draining): with fleet dials, `Starting` and [`super::Input::StartWanted`]; without,
-    /// `NoGate`.
+    /// The world's gate host ([`Coordinator::gate_host`]): the order is relayed to it.
+    Host(HostId),
+    /// No attached live host takes logins (none attached, every one leaving or draining): with
+    /// fleet dials, `Starting` and [`super::Input::StartWanted`]; without, `NoGate`.
     Nobody,
 }
 
@@ -386,12 +381,11 @@ impl Coordinator {
         None
     }
 
-    /// Where a login order goes (decision 5; the module docs): this replica's gate host, a
-    /// serving host on another live replica, or nobody serving anywhere.
+    /// Where a login order goes (decision 5; the module docs): the world's gate host, or nobody
+    /// serving.
     pub fn login_gate(&self) -> Gate {
-        match self.gate_host_here() {
-            Some(h) => Gate::Here(h),
-            None if self.gate_host().is_some() => Gate::Elsewhere,
+        match self.gate_host() {
+            Some(h) => Gate::Host(h),
             None => Gate::Nobody,
         }
     }

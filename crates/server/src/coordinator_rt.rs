@@ -26,17 +26,15 @@
 //! (`mmo_coordinator_*` in `/metrics`, the periodic `[coordinator] window=…` line): transitions
 //! written, their bytes, conflicts.
 //!
-//! **Several replicas: the outbox** (Elastic 2b Task 5). A message a transition decides for a
-//! host attached to ANOTHER replica leaves through the store's `outbox`, inserted in the same
-//! transaction ([`Coordinator::route_out`]); a transition also discards the rows of the hosts whose
-//! `Attach` it applied, and takes its own hosts' rows. What one write released goes out in commit
-//! order: the rows this replica held, the rows it took, then its own messages. Between writes the
-//! replica relays the rows other replicas left for its hosts: on a `coordinator_row` notice of a
-//! newer version (the row listener, `listen_channel`) its cache is refreshed and the rows taken,
-//! with a backstop every [`world_store::COORDINATOR_POLL_MS`] while more than one replica is
-//! live; a row newer than the cache is held until a refresh reaches it. The take, the write and
-//! the version read are one store call at a time. A host message about a cut the cache cannot
-//! know yet asks a refresh ([`Coordinator::take_refresh_wanted`]), never a lookup.
+//! **Several replicas** (Elastic 2b). Every replica is a cache of the row: on a `coordinator_row`
+//! notice of a newer version (the row listener, `listen_channel`) its cache is refreshed. The
+//! core runs in [`Delivery::Direct`]: what a transition released is sent on THIS replica's own
+//! links. The Elastic 2b relay between replicas through the store's `outbox` is gone (the
+//! coordinator HTTP API replaces it with per-host mailboxes, `Delivery::Mailbox`, plan
+//! `2026-11-19-coordinator-http-api.md`): until hosts reach the coordinator over HTTP, a message
+//! for a host linked to another replica is lost — hosts are served by ONE replica. A host message
+//! about a cut the cache cannot know yet asks a refresh ([`Coordinator::take_refresh_wanted`]),
+//! never a lookup.
 //!
 //! Login orders are the exception (decision 1: a process-local relay of the login service's
 //! own state): each is relayed at once to the gate host chosen from the core's attachment state,
@@ -75,7 +73,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, RecvTimeoutError, Select, Sender, TryRecvError};
-use game::coordinator::{Gate, Input, Target};
+use game::coordinator::{Delivery, Gate, Input, Target};
 use game::{CoordMsg, Coordinator, HostMsg, WorldLink};
 use login_api::{HostToLogin, LoginToHost};
 use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
@@ -161,6 +159,8 @@ pub struct HostEnd {
     gone: bool,
     /// The host's ordinal, as its `Attach` names it (0 before one).
     ordinal: HostId,
+    /// The boot its latest `Attach` named (what its link's end detaches: `Input::HostStalled`).
+    boot: Option<u64>,
 }
 
 /// A connected pair: the host's [`ChannelWorldLink`] (up) and the coordinator's [`HostEnd`].
@@ -171,7 +171,7 @@ pub fn channel_link() -> (ChannelWorldLink, HostEnd) {
     let up = Arc::new(AtomicBool::new(true));
     (
         ChannelWorldLink { tx: host_tx, rx: coord_rx, up: up.clone(), wake: wake_rx },
-        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false, ordinal: HostId::SOLO },
+        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false, ordinal: HostId::SOLO, boot: None },
     )
 }
 
@@ -206,7 +206,7 @@ pub struct LoginListen {
 pub struct LoginCounts {
     /// Orders of a connected login service received.
     pub orders: u64,
-    /// Of those, not relayed: no gate host attached to this replica (answered `NoGate`).
+    /// Of those, not relayed: no gate host (answered `NoGate`, or `Starting`).
     pub orders_dropped: u64,
     /// `SessionEnded` dropped past [`LOGIN_ENDS_HELD_MAX`].
     pub ends_dropped: u64,
@@ -230,10 +230,11 @@ impl LoginTally {
     }
 }
 
-/// The coordinator's login listener: every order of a connected login service goes to this
-/// replica's gate host of its moment ([`Coordinator::login_order`]), or is answered `NoGate`
-/// when it has none; every host's answer ([`HostMsg::Login`]) goes to every connected login
-/// service, unchanged. No order is kept. Held `SessionEnded`s are this replica's own.
+/// The coordinator's login listener: every order of a connected login service goes to the
+/// world's gate host of its moment ([`Coordinator::login_order`]), or is answered `NoGate` (or
+/// `Starting`) when there is none; every host's answer ([`HostMsg::Login`]) goes to every
+/// connected login service, unchanged, once the transition holding it committed. No order is
+/// kept. Held `SessionEnded`s are this replica's own.
 struct LoginSide {
     listener: Option<LinkListener>,
     events: Receiver<(PeerId, LinkEvent<LoginToHost>)>,
@@ -292,8 +293,7 @@ impl LoginSide {
             return;
         }
         log::warn!(
-            "[coordinator] login relay: {} orders answered NoGate with no host of this replica taking logins (the login \
-             service tries another replica), {} session \
+            "[coordinator] login relay: {} orders answered NoGate or Starting with no host taking logins, {} session \
              ends dropped past {LOGIN_ENDS_HELD_MAX} held, since the last report (total {} / {})",
             new.0,
             new.1,
@@ -1076,8 +1076,6 @@ pub struct CoordinatorRuntime {
     /// their cores' hashes: one of them may have committed with its answer lost. While any is
     /// remembered a rebase could apply that write's inputs twice: none is done.
     unacked: VecDeque<Unacked>,
-    /// The hosts (with their links' boots) the write in flight takes outbox rows for.
-    writing_take_for: Vec<(HostId, u64)>,
     /// Conflicts rebased through since the last commit (or the last wait,
     /// [`COORDINATOR_CONFLICT_RETRIES`]).
     conflicts_in_a_row: u32,
@@ -1141,13 +1139,9 @@ pub struct CoordinatorRuntime {
     joined: bool,
     /// The `coordinator_row` notices (a split coordinator on Postgres; Elastic 2b Task 5).
     notices: Option<Receiver<world_store::Notice>>,
-    /// The outbox take in flight between transitions (one store call at a time with the write).
-    outbox_rx: Option<Answer<Vec<world_store::OutboxRow>>>,
-    /// Outbox rows taken and not sent yet, in commit order: every one at or below the cache's
-    /// version (a take is bounded by it, final review S-I2).
-    relay: VecDeque<world_store::OutboxRow>,
-    /// A take between transitions is due (a notice, the backstop, a refresh).
-    take_wanted: bool,
+    /// What the hosts told the login service, from committed transitions
+    /// ([`game::coordinator::Transition::login_outbox`]), not forwarded yet ([`Self::forward_login`]).
+    login_ready: Vec<game::LoginOut>,
     /// A refresh of the cache is due (a notice of a newer version, a held row, a stale cut).
     refresh_wanted: bool,
     /// The notices may have been missed (`Notice::Resync`, Task 5 review m1): the row's version is
@@ -1160,11 +1154,6 @@ pub struct CoordinatorRuntime {
     /// that no refresh issued since covers; the refresh in flight covers one.
     stale_refresh: bool,
     refresh_for_stale: bool,
-    /// A confirmed version check waits for a take before what it covers leaves (a row older than
-    /// the cache must reach the host before them).
-    check_take: bool,
-    /// The monotonic ms of the next backstop take (only while several replicas are live).
-    poll_next_mono: u64,
     /// Test hook ([`CoordinatorThread::hold_main_loop`]).
     #[cfg(feature = "test-hooks")]
     hold_main_loop: Arc<AtomicBool>,
@@ -1206,8 +1195,6 @@ struct WriteTally {
     history_bytes: u64,
     conflicts: u64,
     failures: u64,
-    /// Host links closed after a lost commit answer took their outbox rows (final review S-I3).
-    relinks: u64,
     /// Land assignments (`Assigned::Done` answers) this replica applied (Elastic 3).
     assigned: u64,
     /// Fleet decisions that wrote (Elastic 4): hosts added (`HostAdded::Done`), drained
@@ -1229,7 +1216,6 @@ impl WriteTally {
             history_bytes: 0,
             conflicts: 0,
             failures: 0,
-            relinks: 0,
             assigned: 0,
             added: 0,
             drained: 0,
@@ -1286,12 +1272,9 @@ const HOOK_REFUSED: &str = "test hook: coordinator writes fail (refused before t
 struct Unacked {
     /// [`core_hash`] of its core.
     hash: u64,
-    /// How many outbox messages it carried: in the row already if it committed — the head of the
+    /// How many mailbox rows it carried: in the row already if it committed — the head of the
     /// core's outbox then (a write handed back puts its outbox first), not written again.
     outbox: usize,
-    /// The hosts (and their links' boots) whose outbox rows it took: if it committed, those rows
-    /// left the table with its lost answer.
-    took_for: Vec<(HostId, u64)>,
 }
 
 /// A hash of a written core: what a re-read row is compared with ([`CoordinatorRuntime::unacked`]).
@@ -1359,6 +1342,11 @@ impl CoordinatorRuntime {
         // was set once, at the bootstrap (`world_file::ensure_coordinator_state`).
         let mut core = start.coordinator;
         core.set_version(start.version);
+        // Every message leaves on this replica's own links (role `all`'s channel, the svc-link
+        // listener). Until hosts reach the coordinator over HTTP (`Delivery::Mailbox`, plan
+        // `2026-11-19-coordinator-http-api.md` Task 5) there is no relay between replicas: a split
+        // world serves its hosts from ONE coordinator replica (an accepted regression window).
+        core.set_delivery(Delivery::Direct);
         // Its first input: this replica registered (Elastic 2b Task 4) — live from its first
         // transition on; alone, every replica registered before it is gone.
         let me = core.replica();
@@ -1390,7 +1378,6 @@ impl CoordinatorRuntime {
             store,
             writing: None,
             unacked: VecDeque::new(),
-            writing_take_for: Vec::new(),
             conflicts_in_a_row: 0,
             tally: WriteTally::new(),
             #[cfg(feature = "test-hooks")]
@@ -1423,16 +1410,12 @@ impl CoordinatorRuntime {
             refresh_rx: None,
             joined: false,
             notices,
-            outbox_rx: None,
-            relay: VecDeque::new(),
-            take_wanted: false,
+            login_ready: Vec::new(),
             refresh_wanted: false,
             resync_wanted: false,
             resync_rx: None,
             stale_refresh: false,
             refresh_for_stale: false,
-            check_take: false,
-            poll_next_mono: 0,
             #[cfg(feature = "test-hooks")]
             hold_main_loop: hold_main_loop.clone(),
         };
@@ -1596,9 +1579,6 @@ impl CoordinatorRuntime {
         if let Some(notices) = &self.notices {
             sel.recv(notices);
         }
-        if let Some(taken) = &self.outbox_rx {
-            sel.recv(taken);
-        }
         let _ = sel.ready_timeout(Duration::from_millis(COORDINATOR_TICK_MS));
     }
 
@@ -1610,8 +1590,9 @@ impl CoordinatorRuntime {
                     while !host.gone {
                         match host.rx.try_recv() {
                             Ok(msg) => {
-                                if let HostMsg::Attach { host: ordinal, .. } = &msg {
+                                if let HostMsg::Attach { host: ordinal, boot, .. } = &msg {
                                     host.ordinal = *ordinal;
+                                    host.boot = Some(*boot);
                                 }
                                 self.core.apply(Input::Host { host: host.ordinal, msg }, now)
                             }
@@ -1619,7 +1600,9 @@ impl CoordinatorRuntime {
                             Err(TryRecvError::Disconnected) => {
                                 log::info!("[coordinator] a host closed its link");
                                 host.gone = true;
-                                self.core.apply(Input::LinkDown { host: host.ordinal }, now);
+                                if let Some(boot) = host.boot {
+                                    self.core.apply(Input::HostStalled { host: host.ordinal, boot }, now);
+                                }
                             }
                         }
                     }
@@ -1640,11 +1623,14 @@ impl CoordinatorRuntime {
                                         "[coordinator] host {ordinal} connected (peer {}, boot {boot:#x}, registration {reg})",
                                         peer.0
                                     );
-                                    l.routes.boots.insert(peer, boot);
                                     if let Some(old) = replaced {
                                         l.senders.close(old);
-                                        self.core.apply(Input::LinkDown { host: ordinal }, now);
+                                        // The replaced link's boot (its hello's) is detached.
+                                        if let Some(old_boot) = l.routes.boots.get(&old).copied() {
+                                            self.core.apply(Input::HostStalled { host: ordinal, boot: old_boot }, now);
+                                        }
                                     }
+                                    l.routes.boots.insert(peer, boot);
                                 }
                                 Admit::Refused => {
                                     l.senders.close(peer);
@@ -1680,7 +1666,7 @@ impl CoordinatorRuntime {
                                                     l.senders.close(peer);
                                                 }
                                             }
-                                            self.core.apply(Input::LinkDown { host: ordinal }, now);
+                                            self.core.apply(Input::HostStalled { host: ordinal, boot: *boot }, now);
                                             continue;
                                         }
                                     }
@@ -1688,7 +1674,7 @@ impl CoordinatorRuntime {
                                         log::error!("[coordinator] host {ordinal}'s Attach is refused: {why}");
                                         l.routes.refuse(peer);
                                         l.senders.close(peer);
-                                        self.core.apply(Input::LinkDown { host: ordinal }, now);
+                                        self.core.apply(Input::HostStalled { host: ordinal, boot: *boot }, now);
                                         continue;
                                     }
                                 }
@@ -1701,9 +1687,14 @@ impl CoordinatorRuntime {
                             None => log::warn!("[coordinator] a message from non-host peer {} ignored", peer.0),
                         },
                         LinkEvent::Down(why) => {
+                            let boot = l.routes.boots.get(&peer).copied();
                             if let Some(ordinal) = l.routes.gone(peer) {
                                 log::warn!("[coordinator] host {ordinal} (peer {}) left: {why}", peer.0);
-                                self.core.apply(Input::LinkDown { host: ordinal }, now);
+                                // Its link's boot detached (a newer boot attached since stands).
+                                match boot.or_else(|| self.core.attachment(ordinal)) {
+                                    Some(boot) => self.core.apply(Input::HostStalled { host: ordinal, boot }, now),
+                                    None => log::debug!("[coordinator] host {ordinal}'s link had no boot: nothing to detach"),
+                                }
                             }
                         }
                     }
@@ -1747,8 +1738,8 @@ impl CoordinatorRuntime {
                     let spawn = matches!(msg, LoginToHost::SpawnPlayer { .. });
                     match self.core.login_order(crate::login_link::order_from(msg)) {
                         Some((gate, msg)) => relay.push((Target::Host(gate), msg)),
-                        // No host serves anywhere and the world adds its own hosts (Elastic 4
-                        // Task 8): a spawn is answered `Starting` at once (the join answers 503
+                        // No host serves and the world adds its own hosts (Elastic 4 Task 8): a
+                        // spawn is answered `Starting` at once (the join answers 503
                         // `world_starting`, the client waits) and this replica asks for a host —
                         // a logged input, written with its next transition. A kick is resent
                         // anyway: `NoGate`.
@@ -1757,8 +1748,8 @@ impl CoordinatorRuntime {
                             login.senders.send(peer, starting);
                             self.core.apply(Input::StartWanted, now);
                         }
-                        // No host attached to THIS replica takes logins: answered at once, so
-                        // the login service tries its next replica (Elastic 2b Task 8).
+                        // No host takes logins (the gate is world-wide: no other replica has one
+                        // either): answered at once, the join answers 503 (a kick is resent).
                         // Counted; reported once per period below.
                         None => {
                             login.tally.orders_dropped.fetch_add(1, Ordering::SeqCst);
@@ -1773,10 +1764,11 @@ impl CoordinatorRuntime {
         self.send(relay);
     }
 
-    /// What the hosts told the login service ([`HostMsg::Login`]) to every connected login
-    /// service, unchanged ([`LoginSide::tell`]).
+    /// What the hosts told the login service ([`HostMsg::Login`]), from the transitions that
+    /// committed, to every connected login service, unchanged ([`LoginSide::tell`]). Never written
+    /// as `login_outbox` rows here (`Delivery::Direct`: login still dials this listener).
     fn forward_login(&mut self) {
-        let out = self.core.take_login_out();
+        let out = std::mem::take(&mut self.login_ready);
         match self.links.login.as_mut() {
             Some(login) => {
                 for answer in out {
@@ -1864,7 +1856,16 @@ impl CoordinatorRuntime {
                         let draining = desired.iter().filter(|d| d.draining).count() as u64;
                         crate::health::Health::global().fleet_rows(desired.len() as u64 - draining, draining);
                     }
-                    let read = Input::HostsRead { rows: seen, desired, next_host_id, issued_mono, received_mono, world_tick };
+                    // No mailbox under `Delivery::Direct` (Task 5 reads `mailbox_oldest` here).
+                    let read = Input::HostsRead {
+                        rows: seen,
+                        desired,
+                        mailbox_oldest: Vec::new(),
+                        next_host_id,
+                        issued_mono,
+                        received_mono,
+                        world_tick,
+                    };
                     self.core.apply(read, now);
                 }
                 Ok(Err(e)) => {
@@ -2306,12 +2307,10 @@ impl CoordinatorRuntime {
                 Settled::End(end) => return Err(end),
             }
         }
-        self.pump_outbox(&mut out);
         // Every pass, whatever is in flight: the notices only set what is due, and one left in
         // its channel would wake every wait at once (a busy loop while a write retries).
         self.pump_notices();
-        // One store call at a time among the write and the take (their rows come in order).
-        if self.writing.is_some() || self.outbox_rx.is_some() || now < self.retry_at_ms {
+        if self.writing.is_some() || now < self.retry_at_ms {
             return Ok(out);
         }
         if !self.write_next() {
@@ -2319,104 +2318,13 @@ impl CoordinatorRuntime {
                 self.joined();
             }
             self.pump_version_check(now)?;
-            let idle = self.version_rx.is_none() && self.refresh_rx.is_none() && self.resync_rx.is_none();
-            if idle && (self.take_wanted || self.check_take) {
-                // The rows other replicas left for this replica's hosts, between transitions.
-                self.take_wanted = false;
-                // Bounded by this cache's version (final review S-I2): a newer row may have been
-                // decided after its host attached elsewhere — it waits for a refreshed cache.
-                self.outbox_rx = Some(self.store.take_outbox_later(self.take_for(), self.core.version()));
-            }
-            if self.outbox_rx.is_none() && !self.check_take {
-                out.extend(self.core.take_out());
-            }
+            out.extend(self.core.take_out());
         }
         Ok(out)
     }
 
-    /// This replica's own hosts with their links' boots (Elastic 2b Task 5): those its core has
-    /// attached to it and linked here now — what a take relays (a row of another boot is deleted
-    /// unsent). In-process (one host, one replica): none.
-    fn take_for(&self) -> Vec<(HostId, u64)> {
-        let Links::Listener(l) = &self.links.links else { return Vec::new() };
-        let mine = self.core.hosts_attached_to(self.core.replica());
-        l.routes
-            .live
-            .iter()
-            .filter(|(h, _)| mine.contains(h))
-            .filter_map(|(h, (peer, _))| l.routes.boots.get(peer).map(|boot| (*h, *boot)))
-            .collect()
-    }
-
-    /// The take in flight answered: its rows join the relay, in order. Then every held row leaves
-    /// (into `out`, ahead of anything decided later) — none is newer than the cache: a take is
-    /// bounded by the version of the cache that issued it (final review S-I2), a transition's own
-    /// take by its new version.
-    fn pump_outbox(&mut self, out: &mut Vec<(Target, CoordMsg)>) {
-        if let Some(rx) = &self.outbox_rx {
-            match rx.try_recv() {
-                Err(TryRecvError::Empty) => {}
-                Ok(Ok(rows)) => {
-                    self.outbox_rx = None;
-                    self.check_take = false;
-                    self.relay.extend(rows);
-                }
-                Ok(Err(e)) => {
-                    self.outbox_rx = None;
-                    self.take_wanted = true;
-                    log::warn!("[coordinator] the outbox could not be taken ({e}); trying again");
-                }
-                Err(TryRecvError::Disconnected) => {
-                    self.outbox_rx = None;
-                    self.take_wanted = true;
-                }
-            }
-        }
-        out.extend(self.release_relay());
-    }
-
-    /// The held outbox rows, in order, as messages for their hosts (`game::decode_packet`; an
-    /// undecodable row is an error, dropped). Dropped unsent: a row for a host the core does not
-    /// attach to THIS replica (any more: final review S-I2 — the host attached elsewhere since
-    /// the take, and its `Attach` there reconciles what the row said), and a row for another boot
-    /// than the one the host's link here is of now (Task 5 review m3: the host reconnected while
-    /// the row was held). Every row is at or below the cache's version (`pump_outbox`).
-    fn release_relay(&mut self) -> Vec<(Target, CoordMsg)> {
-        let mut out = Vec::new();
-        let mine = self.core.hosts_attached_to(self.core.replica());
-        while let Some(row) = self.relay.pop_front() {
-            debug_assert!(row.version <= self.core.version(), "outbox row {} at version {} above the cache's {}", row.seq, row.version, self.core.version());
-            if !mine.contains(&row.host) && matches!(self.links.links, Links::Listener(_)) {
-                log::debug!(
-                    "[coordinator] outbox row {} for host {}: the host is not attached to this replica any more; dropped unsent",
-                    row.seq,
-                    row.host
-                );
-                continue;
-            }
-            if let Links::Listener(l) = &self.links.links {
-                let linked = l.routes.peer_of(row.host).and_then(|peer| l.routes.boots.get(&peer).copied());
-                if linked != Some(row.boot) {
-                    log::debug!(
-                        "[coordinator] outbox row {} for host {} (boot {:#x}): its link here is {linked:?} now; dropped unsent",
-                        row.seq,
-                        row.host,
-                        row.boot
-                    );
-                    continue;
-                }
-            }
-            match game::decode_packet::<CoordMsg>(&row.msg) {
-                Ok(msg) => out.push((Target::Host(row.host), msg)),
-                Err(e) => log::error!("[coordinator] outbox row {} for host {} does not decode ({e:?}); dropped", row.seq, row.host),
-            }
-        }
-        out
-    }
-
-    /// The `coordinator_row` notices (a newer version: refresh, then take), the backstop take
-    /// (while several replicas are live), and the core's own finding of a stale cache (a cut it
-    /// cannot know).
+    /// The `coordinator_row` notices (a newer version: a refresh) and the core's own finding of a
+    /// stale cache (a cut it cannot know).
     fn pump_notices(&mut self) {
         let version = self.core.version();
         if let Some(rx) = &self.notices {
@@ -2430,7 +2338,7 @@ impl CoordinatorRuntime {
             };
             if gone {
                 // Its listener ended: a disconnected receiver would wake every wait at once (a
-                // busy loop). Without notices the backstop take and a resync read stand in.
+                // busy loop). Without notices a resync read stands in.
                 log::warn!("[coordinator] the coordinator_row listener stopped; relying on the backstop poll");
                 self.notices = None;
                 notices.push(world_store::Notice::Resync);
@@ -2438,31 +2346,17 @@ impl CoordinatorRuntime {
             for n in notices {
                 match n {
                     world_store::Notice::Payload(p) => match p.trim().parse::<u64>() {
-                        Ok(v) if v > version => {
-                            self.refresh_wanted = true;
-                            self.take_wanted = true;
-                        }
+                        Ok(v) if v > version => self.refresh_wanted = true,
                         Ok(_) => {}
                         Err(_) => log::debug!("[coordinator] a malformed coordinator_row notice ({p:?}) ignored"),
                     },
                     world_store::Notice::Resync => {
                         // Notices may have been missed: the row's version read (a refresh if it
-                        // moved), and a take.
+                        // moved).
                         self.resync_wanted = true;
-                        self.take_wanted = true;
                     }
                 }
             }
-        }
-        let several = self.core.replicas_live().len() > 1;
-        let mono = self.mono_ms();
-        if several && mono >= self.poll_next_mono {
-            self.poll_next_mono = mono + world_store::COORDINATOR_POLL_MS;
-            self.take_wanted = true;
-        }
-        if !several && self.relay.is_empty() {
-            // One replica: nobody else writes rows for its hosts, nor the row.
-            self.take_wanted = false;
         }
         if self.core.take_refresh_wanted() {
             self.stale_refresh = true;
@@ -2506,8 +2400,6 @@ impl CoordinatorRuntime {
                         self.stale_refresh |= for_stale;
                     } else {
                         self.refresh_onto(row)?;
-                        // The rows up to the refreshed version are taken now.
-                        self.take_wanted = true;
                     }
                 }
                 Ok(_) => {
@@ -2532,9 +2424,8 @@ impl CoordinatorRuntime {
             };
             self.version_rx = None;
             match answer {
-                // Confirmed: a take first (Elastic 2b Task 5), so that the rows older than the
-                // cache reach their hosts before what the check covers.
-                Ok(v) if self.core.version_checked(v) => self.check_take = true,
+                // Confirmed: what the check covers leaves with the core's `take_out`.
+                Ok(v) if self.core.version_checked(v) => {}
                 Ok(v) => {
                     log::info!(
                         "[coordinator] version check: the row is at {v}, this cache at {}: refreshing before anything leaves",
@@ -2569,9 +2460,6 @@ impl CoordinatorRuntime {
                     self.resync_wanted = true;
                 }
             }
-            return Ok(());
-        }
-        if self.outbox_rx.is_some() {
             return Ok(());
         }
         if self.resync_wanted {
@@ -2693,10 +2581,8 @@ impl CoordinatorRuntime {
     fn write_next(&mut self) -> bool {
         debug_assert!(self.writing.is_none());
         let Some(t) = self.core.take_transition() else { return false };
-        self.writing_take_for.clear();
         // The transition carries every output (its compare-and-set is their check): a version
         // check or a refresh asked before it answers about an older cache — dropped (fix round 1).
-        // Its own take relays the rows a check would have waited for (Elastic 2b Task 5).
         self.version_rx = None;
         // A write meets any commit a missed notice was about (its compare-and-set conflicts).
         self.resync_rx = None;
@@ -2705,7 +2591,6 @@ impl CoordinatorRuntime {
             // Asked again after the write (if still needed: the write's conflict refreshes anyway).
             self.stale_refresh |= std::mem::take(&mut self.refresh_for_stale);
         }
-        self.check_take = false;
         #[cfg(feature = "test-hooks")]
         {
             self.kill_at_commit = self.hooks.kill_after_commit.load(Ordering::SeqCst);
@@ -2731,7 +2616,10 @@ impl CoordinatorRuntime {
                 }
             }
         }
-        // Messages for other replicas' hosts as `game::encode_packet` bytes (the wire's framing).
+        // Mailbox rows as `game::encode_packet` bytes (the wire's framing): none under
+        // `Delivery::Direct`. The core is always written (a core-less transition — nothing durable
+        // changed, `t.core_changed` false — comes with `Delivery::Mailbox`, Task 5); the login
+        // answers are sent on the login listener once it committed, never written as rows.
         let outbox = t
             .outbox
             .iter()
@@ -2744,11 +2632,9 @@ impl CoordinatorRuntime {
             decisions: t.decisions.clone(),
             replica: self.core.replica(),
             outbox,
-            take_for: self.take_for(),
-            discard_for: t.attached_now.clone(),
+            outbox_drop: t.outbox_drop.clone(),
             ..Default::default()
         };
-        self.writing_take_for = w.take_for.clone();
         let written = self.store.write_transition_later(w);
         #[cfg(feature = "test-hooks")]
         let written = if self.hooks.hold_answers.load(Ordering::SeqCst) {
@@ -2846,12 +2732,9 @@ impl CoordinatorRuntime {
                     self.core.apply(Input::Decision(a), now);
                 }
                 self.after.extend(w.after_commit.into_iter().map(|a| AfterJob { a, rx: None, retry_at: now }));
-                // In commit order (Elastic 2b Task 5): the rows held from an earlier take, the rows
-                // this transaction took (every one older than it), then its own messages.
-                self.relay.extend(w.taken);
-                let mut released = self.release_relay();
-                released.extend(t.out);
-                Settled::Released(released)
+                // Durable now: the login answers it holds go to the login service.
+                self.login_ready.extend(t.login_outbox);
+                Settled::Released(t.out)
             }
             Err(StoreError::Fenced { .. }) => Settled::End(End::Fenced),
             Err(StoreError::Conflict) => {
@@ -2876,14 +2759,13 @@ impl CoordinatorRuntime {
                         // Its entry stays remembered (as every failed write's, until a commit): the
                         // log still holds that write's inputs, so a rebase now would apply them twice.
                         let hash = core_hash(&row.core);
-                        let committed = self.unacked.iter_mut().find(|u| u.hash == hash).map(|u| {
-                            (std::mem::take(&mut u.outbox), std::mem::take(&mut u.took_for))
-                        });
+                        let committed = self.unacked.iter_mut().find(|u| u.hash == hash).map(|u| std::mem::take(&mut u.outbox));
                         self.core.set_version(row.version);
                         self.history_version = row.history_version;
                         self.core.transition_refused(t);
-                        if let Some((outbox, took_for)) = committed {
-                            self.lost_commit_recognised(outbox, took_for);
+                        if let Some(outbox) = committed {
+                            // Its mailbox rows are in the store already: not written twice.
+                            self.core.outbox_committed(outbox);
                         }
                         self.retry_at_ms = now;
                         Settled::Held { now: true }
@@ -2944,34 +2826,6 @@ impl CoordinatorRuntime {
         }
     }
 
-    /// A write of this process that failed proves to be in the row (lost-commit recognition; final
-    /// review S-I3): the `outbox` messages it carried are in the table already — dropped from the
-    /// core, never inserted twice — and the outbox rows it took for `took_for` left the table with
-    /// its lost answer. Those cannot be read back: each such host still linked here at that boot
-    /// has its link closed, so it re-`Attach`es — its `Attach` reconciles everything an outbox
-    /// message could have carried (orders not listed are sent again, a pending cut is answered,
-    /// the view is sent) — and the loss is counted (`lost_answer_relinks=` on the window line).
-    /// Ruling (final fix wave): healed by a re-attach, never read back (a read-back needs the taken
-    /// rows kept until acknowledged: a schema change).
-    fn lost_commit_recognised(&mut self, outbox: usize, took_for: Vec<(HostId, u64)>) {
-        self.core.outbox_committed(outbox);
-        if took_for.is_empty() {
-            return;
-        }
-        let Links::Listener(l) = &mut self.links.links else { return };
-        for (host, boot) in took_for {
-            let Some(peer) = l.routes.peer_of(host) else { continue };
-            if l.routes.boots.get(&peer) == Some(&boot) {
-                log::warn!(
-                    "[coordinator] host {host}: outbox rows a write took for it were lost with that write's answer; its link \
-                     is closed so that it attaches again (its Attach reconciles them)"
-                );
-                l.senders.close(peer);
-                self.tally.relinks += 1;
-            }
-        }
-    }
-
     /// A write of `t` that failed with `why` and may have committed (not fenced, not a
     /// conflict): remembered by its core's hash (a later conflict may find it in the row), `t`
     /// back in the core (its decisions looked up, never issued again), the next write after
@@ -2980,11 +2834,7 @@ impl CoordinatorRuntime {
         if self.unacked.len() == COORDINATOR_UNACKED_MAX {
             self.unacked.pop_front();
         }
-        self.unacked.push_back(Unacked {
-            hash: core_hash(&t.core),
-            outbox: t.outbox.len(),
-            took_for: std::mem::take(&mut self.writing_take_for),
-        });
+        self.unacked.push_back(Unacked { hash: core_hash(&t.core), outbox: t.outbox.len() });
         self.core.transition_failed(t);
         self.held_back(why, now)
     }
@@ -3033,7 +2883,7 @@ impl CoordinatorRuntime {
         }
         log::info!(
             "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={} \
-             lost_answer_relinks={} assigned={} added={} drained={} removed={} scale={}",
+             assigned={} added={} drained={} removed={} scale={}",
             window.as_secs_f32(),
             t.transitions,
             t.core_bytes,
@@ -3041,7 +2891,6 @@ impl CoordinatorRuntime {
             t.conflicts,
             t.failures,
             self.core.version(),
-            t.relinks,
             t.assigned,
             t.added,
             t.drained,
@@ -3110,6 +2959,7 @@ impl CoordinatorRuntime {
         // Nothing durable pending (all written): what was decided with no durable change leaves too.
         out.extend(self.core.take_out());
         self.send(out);
+        self.forward_login();
         self.down();
         ServerExit::Clean
     }
