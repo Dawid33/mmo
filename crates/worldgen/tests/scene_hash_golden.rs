@@ -119,6 +119,7 @@ fn script() -> Vec<GameEventKind> {
     events
 }
 
+/// Gate: same-engine golden of a canonical generated scene
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn canonical_scene_state_hash() {

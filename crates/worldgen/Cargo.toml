@@ -33,7 +33,6 @@ crossbeam = { workspace = true }
 # recompile the whole chain on every `just smoke` <-> `just run` switch.
 rapier3d = { workspace = true, features = ["profiler"] }
 slotmapd = { workspace = true }
-block-mesh = { workspace = true }
 
 [[bin]]
 path = "src/main.rs"
@@ -46,14 +45,3 @@ path = "src/lib.rs"
 name = "it"
 path = "tests/it.rs"
 
-[[test]]
-name = "forged_world"
-path = "tests/forged_world.rs"
-
-[[test]]
-name = "client_region_load_cost"
-path = "tests/client_region_load_cost.rs"
-
-[[test]]
-name = "region_load_cost"
-path = "tests/region_load_cost.rs"

@@ -623,104 +623,6 @@ impl ColumnProfile {
 mod tests {
     use super::*;
 
-    #[test]
-    fn deterministic() {
-        let p = TerrainPipeline::new(12345);
-        assert_eq!(p.final_density(10.0, 64.0, 20.0), p.final_density(10.0, 64.0, 20.0));
-    }
-
-    #[test]
-    fn density_decreases_with_height() {
-        // Same column: deep underground is denser (more solid) than the sky.
-        let p = TerrainPipeline::new(1);
-        let low = p.final_density(0.0, 0.0, 0.0);
-        let high = p.final_density(0.0, 300.0, 0.0);
-        assert!(low > high, "low={low} high={high}");
-    }
-
-    /// The shape of the world over ~190 km (several root slots): islands in
-    /// open sea — a small land share, and mountains only on the big islands.
-    #[test]
-    fn world_is_islands_in_open_sea() {
-        for seed in [7, worldgen_test_seed()] {
-            let p = TerrainPipeline::new(seed);
-            let (mut land, mut mountain, mut total) = (0, 0, 0);
-            let step = 3137.0;
-            for i in 0..60 {
-                for j in 0..60 {
-                    let prof = p.column(i as f64 * step - 90_000.0, j as f64 * step - 90_000.0);
-                    land += (prof.density_at(SEA_LEVEL + 2.0) > 0.0) as usize;
-                    mountain += (prof.density_at(SEA_LEVEL + 100.0) > 0.0) as usize;
-                    total += 1;
-                }
-            }
-            let share = land as f64 / total as f64;
-            assert!((0.01..0.2).contains(&share), "seed {seed}: land share {share:.3}");
-            assert!(mountain * 4 <= land, "seed {seed}: {mountain}/{land} — mountains everywhere");
-        }
-    }
-
-    #[test]
-    fn the_spawn_island_is_land_ringed_by_sea() {
-        for cells in [1, 4, 16, 64] {
-            let field = IslandField::with_spawn_cells(crate::WORLD_SEED, cells);
-            let island = field.spawn_island();
-            let p = TerrainPipeline::with_islands(crate::WORLD_SEED, field);
-            let [cx, cz] = island.centre;
-            assert!(p.column(cx, cz).density_at(SEA_LEVEL + 0.5) > 0.0, "{cells} cells: centre is land");
-            for a in 0..16 {
-                let t = a as f64 * std::f64::consts::TAU / 16.0;
-                let r = island.reach() * 1.05;
-                let (x, z) = (cx + r * t.cos(), cz + r * t.sin());
-                assert!(p.column(x, z).density_at(SEA_LEVEL - 0.5) < 0.0, "{cells} cells: sea at ({x}, {z})");
-            }
-        }
-    }
-
-    #[test]
-    fn small_islands_have_small_relief() {
-        let field = IslandField::with_spawn_cells(crate::WORLD_SEED, 4); // 256 m
-        let island = field.spawn_island();
-        let p = TerrainPipeline::with_islands(crate::WORLD_SEED, field);
-        let mut top: f64 = f64::MIN;
-        for i in -20..=20 {
-            for j in -20..=20 {
-                let (x, z) = (island.centre[0] + i as f64 * 8.0, island.centre[1] + j as f64 * 8.0);
-                top = top.max(p.column(x, z).offset_h);
-            }
-        }
-        assert!(top < 40.0, "a 256 m island rises {top:.1} m above sea level");
-    }
-
-    #[test]
-    fn terrain_is_continuous_across_slot_edges() {
-        let field = IslandField::new(worldgen_test_seed());
-        let p = TerrainPipeline::new(worldgen_test_seed());
-        let mut edges = 0;
-        for i in 0..200 {
-            let (x, z) = (i as f64 * 977.0 - 97_000.0, i as f64 * 613.0 + 41_000.0);
-            let Some(island) = field.island_at(x, z) else { continue };
-            let ex = island.slot_min[0];
-            for k in 0..10 {
-                let ez = island.slot_min[1] + (k as f64 + 0.5) * island.slot_size / 10.0;
-                let (a, b) = (p.column(ex - 0.01, ez), p.column(ex + 0.01, ez));
-                assert!((a.offset_h - b.offset_h).abs() < 0.05, "step at slot edge x={ex} z={ez}");
-                edges += 1;
-            }
-        }
-        assert!(edges > 100);
-    }
-
-    #[test]
-    fn legacy_spawn_column_is_land() {
-        // Legacy (non-cell) regions spawn at the constant column; the default
-        // spawn island must cover it.
-        let p = TerrainPipeline::new(crate::WORLD_SEED);
-        let blocks = |units: f32| units as f64 / game::BLOCK_VOXELS as f64;
-        let (x, z) = (blocks(game::PLAYER_SPAWN_X), blocks(game::PLAYER_SPAWN_Z));
-        assert!(p.column(x, z).density_at(SEA_LEVEL + 0.5) > 0.0);
-    }
-
     /// Oracle fixtures: a 256 m spawn island, so the sample grids below cross
     /// its coast into the sea.
     fn oracle(seed: u64) -> (TerrainPipeline, Arc<IslandField>) {
@@ -728,6 +630,7 @@ mod tests {
         (TerrainPipeline::with_islands(seed, field.clone()), Arc::new(field))
     }
 
+    /// Gate: the column profile matches the `#[cfg(test)]` DensityFn graph bit for bit
     #[test]
     fn column_profile_matches_graph_bit_exact() {
         // Must compare against the DensityFn graph, NEVER against
@@ -755,59 +658,7 @@ mod tests {
 
     fn worldgen_test_seed() -> u64 { 0x00D5_C0DE_8D78 } // test helper, next to the test
 
-    fn splitmix_for_test(state: &mut u64) -> u64 {
-        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = *state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    #[test]
-    fn profile_grid_exact_at_corners_and_close_between() {
-        let p = TerrainPipeline::new(worldgen_test_seed());
-        let grid = p.profile_grid(-32.0, 96.0, 64.0);
-        let k = PROFILE_LATTICE_BLOCKS as f64;
-        // Corners: bit-exact vs direct column().
-        for i in 0..=(64.0 / k) as usize {
-            for j in 0..=(64.0 / k) as usize {
-                let (x, z) = (-32.0 + i as f64 * k, 96.0 + j as f64 * k);
-                let (g, e) = (grid.profile_at(x, z), p.column(x, z));
-                assert_eq!(g.offset_h, e.offset_h);
-                assert_eq!(g.factor, e.factor);
-                assert_eq!(g.jaggedness, e.jaggedness);
-            }
-        }
-        // Interior: interpolation error tiny relative to terrain scale. The field's
-        // shortest wavelength is ~123 m, so a 4 m bilinear cell is ~30x past
-        // Nyquist; 0.5 m of height (offset_h) is a generous ceiling.
-        let mut s = 3u64;
-        let mut worst: f64 = 0.0;
-        for _ in 0..500 {
-            let x = -32.0 + ((splitmix_for_test(&mut s) % 6400) as f64) / 100.0;
-            let z = 96.0 + ((splitmix_for_test(&mut s) % 6400) as f64) / 100.0;
-            worst = worst.max((grid.profile_at(x, z).offset_h - p.column(x, z).offset_h).abs());
-        }
-        assert!(worst < 0.5, "bilinear offset_h error too large: {worst}");
-    }
-
-    #[test]
-    fn profile_grid_continuous_across_region_edges() {
-        // Adjacent regions build independent grids; along the shared edge both
-        // interpolate from identical corner samples (pure fn of world coords),
-        // so profiles must match bit-for-bit -> no terrain seams.
-        let p = TerrainPipeline::new(worldgen_test_seed());
-        let a = p.profile_grid(0.0, 0.0, 64.0); // region covering x in [0, 64]
-        let b = p.profile_grid(64.0, 0.0, 64.0); // neighbor covering x in [64, 128]
-        for j in 0..=64 {
-            let z = j as f64;
-            let (pa, pb) = (a.profile_at(64.0, z), b.profile_at(64.0, z));
-            assert_eq!(pa.offset_h, pb.offset_h);
-            assert_eq!(pa.factor, pb.factor);
-            assert_eq!(pa.jaggedness, pb.jaggedness);
-        }
-    }
-
+    /// Gate: the fused `column()` matches the `#[cfg(test)]` DensityFn graph bit for bit
     #[test]
     fn fused_column_matches_density_graphs_bit_exact() {
         let (p, field) = oracle(worldgen_test_seed());

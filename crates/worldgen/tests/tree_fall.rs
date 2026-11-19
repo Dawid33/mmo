@@ -446,6 +446,7 @@ fn settled(fall: &Fall) -> bool {
     fall.settled_after < SETTLE_TIMEOUT_TICKS
 }
 
+/// Regression: felled trees sank a quarter to half a block into the ground on landing — described as observed tree felling in 504ae0cb (trees work, 2026-10-30); weak evidence, no log/doc
 /// Chops each young tree (all species, low ages) on real terrain at its
 /// base and at mid-trunk: no colliding voxel of the body — wood or leaves —
 /// goes into the ground at its column past its tolerance (one voxel; a half
@@ -524,6 +525,7 @@ const MAX_LANDING_SECS: f32 = 3.0;
 /// m/s², the same trees measured 0–3.5 blocks, with up to 119° of turn).
 const MAX_BUTT_RISE_BLOCKS: f32 = 3.5;
 
+/// Regression: felled trees spun about their centre of mass, swung the butt up and flipped over — visual description in 504ae0cb ('looked weightless', flipped); weak evidence, no log/doc
 /// A mature oak and pine chopped at the base on flat ground fall like trees:
 /// they pivot about the butt onto their side or crown (no more than ~110° of
 /// turn, the butt never lifting more than its crown props it), are down

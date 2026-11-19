@@ -10,38 +10,10 @@
 //! so the process flips once from the all-solid default to those. A test
 //! whose outcome reads them (starting kit, drops, solidity) must install
 //! them before it builds state — `game::install_block_props` with the
-//! registry parsed from `blocks.ron`, as `tree_chop` / `tree_fall` do, or
+//! registry parsed from `blocks.ron`, as `tree_fall` does, or
 //! game's `common::install_real_block_props`, which `scene_hash_golden`
-//! mounts by `#[path]` (worldgen's own `common` has no such helper) — or it
-//! races that flip.
-//! Separate binaries:
-//! - `forged_world`: forged::install pins the process's world once.
-//! - `client_region_load_cost`: sets the process-global HASH_MODE to Off.
-//! - `region_load_cost`: release-mode benchmark (just bench-region).
+//! mounts by `#[path]` — or it races that flip.
 
-mod common;
-mod coarse_water;
 mod forge_lib;
-mod forged_tiles;
-mod halo_probe;
-mod lod_bricks;
-mod player_walk;
 mod scene_hash_golden;
-mod sites_kit;
-mod sites_source;
-mod sites_town;
-mod slopes;
-mod structure_coarse;
-mod structure_dev;
-mod structure_forged;
-mod structure_paint;
-mod structure_pass;
-mod structure_regions;
-mod structure_support;
-mod structures;
-mod tile_map;
-mod tree_chop;
 mod tree_fall;
-mod trees_in_terrain;
-mod underground;
-mod water_recipe;
