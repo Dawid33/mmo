@@ -1,4 +1,4 @@
-use crate::bounding_volume::Aabb;
+use crate::bounding_volume::{Aabb, BoundingVolume};
 use crate::math::{Pose, Real, Vector};
 use crate::query::details::{
     CanonicalVoxelShape, VoxelsShapeContactManifoldsWorkspace, VoxelsShapeSubDetector,
@@ -82,7 +82,12 @@ pub fn contact_manifolds_voxels_composite_shape<ManifoldData, ContactData>(
     let radius1 = voxels1.voxel_size() / 2.0;
 
     let aabb1 = voxels1.local_aabb();
-    let aabb2_1 = shape2.bvh().root_aabb().transform_by(pos12);
+    // mmo-fork: loosen by `prediction` (as `contact_manifolds_voxels_shape` does) so that
+    // speculative contacts within the prediction distance are generated too. Unloosened, a
+    // compound resting a hair above the voxels' top face enumerated no voxel at all: no
+    // contact, so the CCD clamp (which keeps velocities) froze the body while gravity piled
+    // up its speed, until a step the sweep let through sank it deep into the ground.
+    let aabb2_1 = shape2.bvh().root_aabb().transform_by(pos12).loosened(prediction);
     let domain2_1 = Aabb {
         mins: aabb2_1.mins - radius1 * 10.0,
         maxs: aabb2_1.maxs + radius1 * 10.0,
@@ -269,7 +274,11 @@ pub fn contact_manifolds_voxels_composite_shape<ManifoldData, ContactData>(
                 });
             };
 
-            let canon_aabb1_2 = canonical_shape1.compute_aabb(&canonical_pose12.inverse());
+            // mmo-fork: loosened by `prediction` too (see `aabb2_1`), or a part of shape2 a
+            // hair away from this voxel is never paired with it.
+            let canon_aabb1_2 = canonical_shape1
+                .compute_aabb(&canonical_pose12.inverse())
+                .loosened(prediction);
 
             for leaf_id in bvh2.intersect_aabb(&canon_aabb1_2) {
                 detect_hit(leaf_id);

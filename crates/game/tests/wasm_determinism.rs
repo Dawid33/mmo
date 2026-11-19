@@ -98,10 +98,13 @@ const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x4472_2ECB);
 /// Re-recorded for Task 7.5 (voxel bodies cross seams): the body is now an
 /// `EntityKind::Body` with an `EntityId` (`Ecs.kind` / `id`, `id_index`,
 /// `next_entity_serial`) and `VoxelBody` gained `drops` — state layout only,
-/// the same detach and fall (16-block values only).
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xC0F3_B295);
+/// the same detach and fall (16-block values only). Re-recorded 2026-11-19
+/// (16-block values only): parry's voxels-vs-compound contacts now look
+/// `prediction` ahead (`contact_manifolds_voxels_composite_shape`, mmo-fork),
+/// which changes the body's contacts with the terrain during its fall.
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x4F4C_35F6);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x1842_10DF);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x566F_DF76);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;
