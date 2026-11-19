@@ -206,12 +206,16 @@ additionalPrometheusRulesMap:
             # A host that hangs between its registration and its first loop pass stays live and Ready
             # for Kubernetes (/livez judges only from the first pass): the coordinator's count of live
             # hosts is what shows it. One Deployment host-<name> of 1 replica per host: the right side
-            # counts the host Deployments that want a pod. Silent with one host (mmo_hosts_live is set
+            # counts the host Deployments that want a pod (made by the fleet reconciler from
+            # desired_hosts since Elastic 4). Silent with one host (mmo_hosts_live is set
             # only while world cuts run — never under `static`, but a lone `claim` host sets it: hence
             # the `> 1`, on the count — written in parentheses, since comparisons bind left to right) and while the world is stopped
             # (every host Deployment at 0). A drained host keeps its Deployment at 1 but is no live
-            # host: this fires until it is removed from var.hosts. The ticker replica's count only
-            # (it alone reads the hosts; another replica's value is stale).
+            # host: the coordinator removes its desired row once it owns nothing and the reconciler
+            # deletes the Deployment, so this fires only when that takes longer than 5 minutes (a last
+            # leaver that kept in-flight rows waits for the next host to inherit them; the reconciler
+            # down is WorldFleetDown). The ticker replica's count only (it alone reads the hosts;
+            # another replica's value is stale).
             expr: |
               max by (namespace) (mmo_hosts_live{role="coordinator"} and on (namespace, pod) (mmo_coordinator_is_ticker{role="coordinator"} == 1))
               < on (namespace)
@@ -222,7 +226,57 @@ additionalPrometheusRulesMap:
               cluster: ${cluster}
             annotations:
               summary: "World {{ $labels.namespace }} has fewer live hosts than its host Deployments want"
-              description: "The coordinator of {{ $labels.namespace }} has counted {{ $value }} live host(s) for 5 minutes, fewer than its host Deployments that want a pod (a host down, hung at its start, not yet forged, or drained: a drained host stays until its name is removed from var.hosts and applied — this alert is the cue; one-host worlds never fire)."
+              description: "The coordinator of {{ $labels.namespace }} has counted {{ $value }} live host(s) for 5 minutes, fewer than its host Deployments that want a pod (a host down, hung or crash-looping at its start, or drained and not removed yet: the coordinator removes a drained host's desired row once it owns nothing and the fleet reconciler deletes its Deployment — nothing to apply; a last leaver holding in-flight rows stays until the next host inherits them; see `just world-status` and WorldFleetDown; one-host worlds never fire)."
+
+          - alert: WorldFleetDown
+            # The fleet reconciler (Deployment fleet, VOXEL_ROLE=fleet) is wanted and not Ready. It is
+            # unready while the world waits for its forge (/readyz `forge`), while the coordinator is
+            # at 0 (`stopped`) and after a pass with a failed read or action (`failing`). world-stop
+            # scales it to 0 first, so a stopped world is silent. Nothing running breaks, but no host
+            # Deployment is created or deleted meanwhile: no scale-up, no new host below the minimum
+            # or for a login at zero hosts, a drained host's pod stays.
+            expr: |
+              (max by (namespace) (kube_deployment_spec_replicas{namespace=~"world-.*", deployment="fleet"}) > 0)
+              unless on (namespace)
+              (max by (namespace) (kube_deployment_status_replicas_ready{namespace=~"world-.*", deployment="fleet"}) > 0)
+            for: 10m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "The fleet reconciler of {{ $labels.namespace }} is not Ready"
+              description: "The Deployment fleet of {{ $labels.namespace }} wants a pod and none has been Ready for 10 minutes (its /readyz body says why: forge, stopped or failing; `just world-logs fleet`). The running hosts are untouched, but the world adds and removes no host Deployment until it is back."
+
+          - alert: WorldFleetBehind
+            # The reconciler's last read showed a different number of desired_hosts rows than host
+            # Deployments labelled for the world, or its reads / actions keep failing (each is retried
+            # by the next pass, every 2 s). A row is normally matched within a pass or two.
+            expr: |
+              (mmo_fleet_desired{role="fleet"} != mmo_fleet_deployments{role="fleet"})
+              or
+              (rate(mmo_fleet_errors_total{role="fleet"}[5m]) > 0)
+            for: 10m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "The fleet reconciler of {{ $labels.namespace }} does not match desired_hosts"
+              description: "For 10 minutes pod {{ $labels.pod }} of {{ $labels.namespace }} has either seen a number of desired hosts different from its host Deployments, or kept failing reads or actions (mmo_fleet_errors_total rising): a template it cannot render, an API call refused (its Role), the database or the API server unreachable. Its log lines `[fleet] …` say which (`just world-logs fleet`); `just world-status` shows the desired rows and the Deployments."
+
+          - alert: WorldFleetFull
+            # The coordinator wanted one more host (below the minimum, under load, or for a login when
+            # no host takes logins) and the store answered Full: every one of fleet.max slots is held,
+            # draining hosts included. A drain holding the last slot answers Full for a few minutes
+            # (the ticker asks again every ~10 s): only a lasting run fires. Summed over the replicas.
+            expr: |
+              sum by (namespace) (increase(mmo_fleet_full_total{role="coordinator"}[10m])) > 0
+            for: 20m
+            labels:
+              severity: warning
+              cluster: ${cluster}
+            annotations:
+              summary: "World {{ $labels.namespace }} wants more hosts than fleet.max allows"
+              description: "The coordinator of {{ $labels.namespace }} has kept wanting another host for 20 minutes while every slot of its fleet (fleet.max) was held. Capacity, for the owner: raise fleet.max in the world root (and open the larger UDP node port range, output client_ports), or find the draining host that holds a slot (`just world-hosts`)."
 
           - alert: WorldHostNotReady
             # A drained host (mmo_waiting{why="drained"}) is unregistered on purpose until it is
