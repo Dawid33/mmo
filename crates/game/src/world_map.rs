@@ -3,7 +3,7 @@
 //! `ForgedWorld` rasters, the client builds the picture.
 
 use crate::biome::{Biome, RegionType};
-use crate::protocol::RegionCoords;
+use crate::protocol::{RegionCoords, WorldBlockPos, REGION_BLOCKS};
 
 /// What one region looks like from above, summarised from the forged rasters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -59,12 +59,15 @@ pub struct WorldMap {
     pub rock_names: Vec<String>,
     /// The type of every forge region, by id ([`TileSummary::region`]).
     pub region_types: Vec<RegionType>,
+    /// The map wraps east–west: the region east of the last column is the
+    /// first column ([`MapExtent::wrap_x`]).
+    pub wrap_x: bool,
 }
 
 impl WorldMap {
     /// The regions the map covers.
     pub fn extent(&self) -> MapExtent {
-        MapExtent { origin: self.origin, width: self.width, height: self.height }
+        MapExtent { origin: self.origin, width: self.width, height: self.height, wrap_x: self.wrap_x }
     }
 
     /// Whether `rc` is one of the map's regions.
@@ -72,8 +75,10 @@ impl WorldMap {
         self.extent().contains(rc)
     }
 
-    /// The tile of `rc`, or `None` outside the map.
+    /// The tile of `rc` (folded east–west on a wrapping map), or `None`
+    /// outside the map.
     pub fn tile(&self, rc: RegionCoords) -> Option<&TileSummary> {
+        let rc = self.extent().canonical(rc);
         if !self.contains(rc) {
             return None;
         }
@@ -97,25 +102,111 @@ impl WorldMap {
 /// (`RegionInput::SetRouteMap`) and the client from its `WorldMap`, so both
 /// sides hold bodies and walks at that seam alike (`Region::set_route_map`).
 /// A world without one (procedural) is unbounded.
+///
+/// With `wrap_x` the map is a cylinder: x wraps east–west (the region east of
+/// the last column is the first column) and only z ends at an outer seam. A
+/// **canonical** region has its x folded into `[origin.x, origin.x + width)`;
+/// without `wrap_x` every region is its own canonical form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapExtent {
     /// Min-x, min-z region.
     pub origin: RegionCoords,
     pub width: u32,
     pub height: u32,
+    /// x wraps east–west.
+    pub wrap_x: bool,
 }
 
 impl MapExtent {
+    /// Whether x wraps (a zero-width map never folds anything).
+    fn wraps(&self) -> bool {
+        self.wrap_x && self.width > 0
+    }
+
+    /// `rc` with x folded onto the map's columns when it wraps; z untouched
+    /// (an off-map z stays off the map).
+    pub fn canonical(&self, rc: RegionCoords) -> RegionCoords {
+        if !self.wraps() {
+            return rc;
+        }
+        let ox = i64::from(self.origin.x);
+        let x = ox + (i64::from(rc.x) - ox).rem_euclid(i64::from(self.width));
+        RegionCoords::new(x as i32, rc.z)
+    }
+
+    /// Whether `rc` is one of the map's regions (wrapped: any x, z in range).
     pub fn contains(&self, rc: RegionCoords) -> bool {
+        let rc = self.canonical(rc);
         let dx = i64::from(rc.x) - i64::from(self.origin.x);
         let dz = i64::from(rc.z) - i64::from(self.origin.z);
         (0..i64::from(self.width)).contains(&dx) && (0..i64::from(self.height)).contains(&dz)
+    }
+
+    /// The canonical region `(dx, dz)` from `rc`, or `None` off the map.
+    pub fn neighbour(&self, rc: RegionCoords, dx: i32, dz: i32) -> Option<RegionCoords> {
+        let n = RegionCoords::new(rc.x.checked_add(dx)?, rc.z.checked_add(dz)?);
+        self.contains(n).then(|| self.canonical(n))
+    }
+
+    /// Regions from `from` to `to`: z the plain difference; x the plain
+    /// difference, or — wrapped — its shortest signed representative modulo
+    /// `width` (in `(-width/2, width/2]`: a tie is positive, east).
+    pub fn delta(&self, from: RegionCoords, to: RegionCoords) -> (i32, i32) {
+        let mut dx = i64::from(to.x) - i64::from(from.x);
+        if self.wraps() {
+            let w = i64::from(self.width);
+            dx = dx.rem_euclid(w);
+            if dx > w / 2 {
+                dx -= w;
+            }
+        }
+        (dx as i32, to.z.wrapping_sub(from.z))
+    }
+
+    /// `pos` with x folded into the map's blocks
+    /// (`[origin.x · REGION_BLOCKS, (origin.x + width) · REGION_BLOCKS)`) when
+    /// it wraps; y and z untouched.
+    pub fn canonical_block(&self, pos: WorldBlockPos) -> WorldBlockPos {
+        if !self.wraps() {
+            return pos;
+        }
+        let n = REGION_BLOCKS as i64;
+        let lo = i64::from(self.origin.x) * n;
+        let span = i64::from(self.width) * n;
+        WorldBlockPos { x: lo + (pos.x - lo).rem_euclid(span), ..pos }
     }
 }
 
 /// Whether `rc` lies outside `map` (never, with no map: an unbounded world).
 pub fn off_map(map: Option<MapExtent>, rc: RegionCoords) -> bool {
     map.is_some_and(|m| !m.contains(rc))
+}
+
+/// [`MapExtent::canonical`]; with no map (an unbounded plane) `rc` itself.
+pub fn canonical(map: Option<MapExtent>, rc: RegionCoords) -> RegionCoords {
+    map.map_or(rc, |m| m.canonical(rc))
+}
+
+/// [`MapExtent::neighbour`]; with no map the plain neighbour (`None` only
+/// past the coordinate range).
+pub fn region_neighbour(map: Option<MapExtent>, rc: RegionCoords, dx: i32, dz: i32) -> Option<RegionCoords> {
+    match map {
+        Some(m) => m.neighbour(rc, dx, dz),
+        None => Some(RegionCoords::new(rc.x.checked_add(dx)?, rc.z.checked_add(dz)?)),
+    }
+}
+
+/// [`MapExtent::delta`]; with no map the plain difference.
+pub fn region_delta(map: Option<MapExtent>, from: RegionCoords, to: RegionCoords) -> (i32, i32) {
+    match map {
+        Some(m) => m.delta(from, to),
+        None => (to.x.wrapping_sub(from.x), to.z.wrapping_sub(from.z)),
+    }
+}
+
+/// [`MapExtent::canonical_block`]; with no map `pos` itself.
+pub fn canonical_block(map: Option<MapExtent>, pos: WorldBlockPos) -> WorldBlockPos {
+    map.map_or(pos, |m| m.canonical_block(pos))
 }
 
 /// Why the server refused a `ClientPacket::PlayRegion`.

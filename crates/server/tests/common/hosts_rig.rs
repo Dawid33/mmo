@@ -465,7 +465,7 @@ fn land_map() -> game::WorldMap {
             });
         }
     }
-    game::WorldMap { origin: RegionCoords::new(0, 0), width: 48, height: 48, tiles, rock_names: vec![], region_types: vec![] }
+    game::WorldMap { origin: RegionCoords::new(0, 0), width: 48, height: 48, tiles, rock_names: vec![], region_types: vec![], wrap_x: false }
 }
 
 /// Runs `sql` on its own connection: the first column of every row.

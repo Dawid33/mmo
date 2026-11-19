@@ -389,7 +389,7 @@ fn history_scene() -> u32 {
             });
         }
     }
-    let map = WorldMap { origin: RegionCoords::new(0, 0), width: w, height: h, tiles, rock_names: vec![], region_types: vec![] };
+    let map = WorldMap { origin: RegionCoords::new(0, 0), width: w, height: h, tiles, rock_names: vec![], region_types: vec![], wrap_x: false };
     let params = BootstrapParams { seed: 0x5EED, civs: 2, founders_per_civ: 20, years: 20, civ_min_spacing_regions: 6, ..BootstrapParams::default() };
     let history = bootstrap(&map, &params).expect("the scene bootstraps");
     assert!(history.log().len() > 40, "the scene must have happened: {} events", history.log().len());

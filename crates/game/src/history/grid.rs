@@ -86,7 +86,15 @@ impl SocietyGrid {
         }
         let component = label_components(&passable, map.width);
         let landing = map.tiles.iter().map(|t| t.landing).collect();
-        let bytes = bincode::serialize(map).expect("world map serialises");
+        // The id hashes the map's fields as they were before `wrap_x` (same
+        // order, so the same bytes): it is in the history digest pinned by
+        // `wasm_determinism` and must not move for a non-wrapping map. A
+        // wrapping map is a different world: one more byte.
+        let mut bytes = bincode::serialize(&(map.origin, map.width, map.height, &map.tiles, &map.rock_names, &map.region_types))
+            .expect("world map serialises");
+        if map.wrap_x {
+            bytes.push(1);
+        }
         SocietyGrid {
             origin: map.origin,
             width: map.width,

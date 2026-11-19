@@ -45,6 +45,7 @@ pub fn land_map(width: u32, height: u32) -> WorldMap {
         tiles: vec![tile; (width * height) as usize],
         rock_names: vec![],
         region_types: vec![],
+        wrap_x: false,
     }
 }
 

@@ -66,7 +66,8 @@ fn block_m() -> f64 {
 /// stored map is otherwise served silently.
 ///
 /// v2: width x height worlds (the tiles span `width_m` by `height_m`).
-pub const WORLD_MAP_VERSION: u32 = 2;
+/// v3: `WorldMap::wrap_x` (east–west wrap).
+pub const WORLD_MAP_VERSION: u32 = 3;
 
 /// The map of every engine region tile intersecting `world`'s artifact, row-major
 /// by z then x. See [`summarize_tile`] for what each tile holds.
@@ -95,6 +96,7 @@ pub fn build_world_map(world: &ForgedWorld) -> WorldMap {
         tiles,
         rock_names: a.rock_names.clone(),
         region_types: a.regions.iter().map(|r| r.kind).collect(),
+        wrap_x: false,
     }
 }
 
