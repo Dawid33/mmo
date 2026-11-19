@@ -54,7 +54,17 @@
 //! new join with the kept refresh token — one call at a time, the next
 //! [`REJOIN_RETRY_MS`] after the previous answer, for up to [`REJOIN_MAX_MS`]
 //! ([`LoginSession::rejoin_answer`] says what each answer does). Its ticket
-//! starts a new session the usual way (the rotated token kept first). The
+//! starts a new session the usual way (the rotated token kept first).
+//!
+//! **A world that is starting** (Elastic 4): with no host taking logins the
+//! service answers a join 503 `world_starting` (the world asked for a host).
+//! A first join from the world list ([`FirstJoin`], [`LoginSession::tick_first_join`])
+//! and a rejoin alike then repeat the join every [`REJOIN_RETRY_MS`] with the
+//! kept refresh token (re-read before every call), for up to
+//! [`WORLD_START_WAIT_MS`] from the first such answer; meanwhile the status
+//! line says [`WORLD_STARTING_STATUS`] and the error line stays empty; after
+//! it the ordinary error. A `world_unavailable` on a first join still shows
+//! its error at once. The
 //! [`Rejoin`] lives in the login, which outlives sessions; it ends when the new
 //! session is in the world ([`rejoin_arrived`]), when it gives up (the world
 //! list, with why), on a revoked token (the sign-in screen; it never starts a
@@ -121,6 +131,15 @@ pub const JOIN_ANSWER_MAX_SECS: f64 = super::api::REQUEST_TIMEOUT.as_secs() as f
 pub const JOIN_ANSWER_MAX_SECS: f64 = super::api::WASM_REQUEST_TIMEOUT_SECS as f64 + 1.0;
 /// The starting screen's line while a session rejoins.
 pub const REJOIN_STATUS: &str = "The server was replaced \u{2014} reconnecting\u{2026}";
+/// Longest a join keeps repeating while the login service answers
+/// `world_starting` (the world has no host taking logins and is starting one:
+/// a pod's cold start, images on the node), from the first such answer; then
+/// the ordinary error. Provisional until the cold start is measured.
+pub const WORLD_START_WAIT_MS: u64 = 180_000;
+/// The status line (the world list's, or the starting screen's during a
+/// rejoin) while the world is starting.
+pub const WORLD_STARTING_STATUS: &str = "The world is starting\u{2026}";
+const _: () = assert!(WORLD_START_WAIT_MS > REJOIN_MAX_MS);
 
 /// A join call must wait longer than the service waits for the host's spawn
 /// ack: a slow 503 (the token not spent) must not look like a lost answer.
@@ -170,6 +189,47 @@ pub struct Rejoin {
     pub connect_started: f64,
     /// The world list's line if it gives up: the last thing that went wrong.
     pub why: String,
+    /// When the service first answered `world_starting` (the clock, seconds;
+    /// `None`: never): it then gives up no earlier than
+    /// [`WORLD_START_WAIT_MS`] after it.
+    pub starting_since: Option<f64>,
+    /// The last join answer was `world_starting` (the starting screen says
+    /// [`WORLD_STARTING_STATUS`] until the next answer or a ticket).
+    pub starting_now: bool,
+}
+
+impl Rejoin {
+    /// When it gives up (the clock, seconds): [`REJOIN_MAX_MS`] after it
+    /// started, or [`WORLD_START_WAIT_MS`] after the world was first said to
+    /// be starting, whichever is later.
+    pub fn deadline(&self) -> f64 {
+        let rejoin = self.started + REJOIN_MAX_MS as f64 / 1000.0;
+        self.starting_since.map_or(rejoin, |since| rejoin.max(since + WORLD_START_WAIT_MS as f64 / 1000.0))
+    }
+}
+
+/// A join from the world list ([`LoginIntent::JoinWorld`]) not answered with a
+/// ticket yet. Holds no secret.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FirstJoin {
+    /// The world joined.
+    pub world: String,
+    /// When the service first answered `world_starting` (the clock, seconds;
+    /// `None`: not yet — no waiting, the first answer decides as before).
+    pub starting_since: Option<f64>,
+    /// The earliest time of the next join call (while starting).
+    pub next_call: f64,
+    /// A join call is on its way: no second one until it answers.
+    pub calling: bool,
+    /// The line shown when it gives up: the last `world_starting` answer's.
+    pub why: String,
+}
+
+impl FirstJoin {
+    /// Waiting for the world to start (the status line says so).
+    pub fn starting(&self) -> bool {
+        self.starting_since.is_some()
+    }
 }
 
 /// How the last rejoin ended without a session (the `debug online` launch
@@ -492,6 +552,9 @@ pub struct LoginSession {
     /// How the last rejoin ended, if it ended without a session (cleared when
     /// a rejoin or a join starts).
     pub rejoin_ended: Option<RejoinEnd>,
+    /// The join from the world list on its way, or repeating while the world
+    /// starts (see the module docs).
+    pub first_join: Option<FirstJoin>,
     /// An abandoned join still on its way (its generation, and the clock
     /// time its answer is given up on): the screens stay busy until it is
     /// recorded, so no new join presents a token it may have rotated.
@@ -529,6 +592,7 @@ impl LoginSession {
             joined_world: None,
             rejoin: None,
             rejoin_ended: None,
+            first_join: None,
             abandoned_join: None,
             clock: 0.0,
             in_flight: 0,
@@ -548,6 +612,7 @@ impl LoginSession {
     /// the device sign-in is dropped (no more polls) and the screens are
     /// usable again.
     pub fn back(&mut self) {
+        self.abandon_first_join();
         self.generation += 1;
         self.in_flight = 0;
         self.pending_device = None;
@@ -555,9 +620,35 @@ impl LoginSession {
 
     /// A request is in flight: the screens' buttons are disabled. A device
     /// sign-in's waiting is not "busy" ([`Self::waiting_for_sign_in`]); its
-    /// start and the final token trade are.
+    /// start and the final token trade are. A first join waiting for its world
+    /// to start is (between its calls too).
     pub fn busy(&self) -> bool {
-        self.in_flight > 0 || self.abandoned_join.is_some()
+        self.in_flight > 0 || self.abandoned_join.is_some() || self.waiting_for_world()
+    }
+
+    /// A first join waiting for its world to start stops (Back, or the world
+    /// list left); a call of it on its way keeps the screens busy until it is
+    /// recorded (it may rotate the token), as an abandoned rejoin's does — its
+    /// answer comes as an older generation only after a [`Self::back`], so
+    /// that is where it is abandoned for good.
+    fn abandon_first_join(&mut self) {
+        if let Some(first) = self.first_join.take() {
+            if first.calling && first.starting() {
+                info!("[login] the join of world {:?} stops waiting for it to start", first.world);
+                self.abandoned_join = Some((self.generation, self.clock + JOIN_ANSWER_MAX_SECS));
+            }
+        }
+    }
+
+    /// A first join is repeating while its world starts.
+    pub fn waiting_for_world(&self) -> bool {
+        self.first_join.as_ref().is_some_and(FirstJoin::starting)
+    }
+
+    /// The world list's status line ("" = none): [`WORLD_STARTING_STATUS`]
+    /// while a first join waits for its world to start.
+    pub fn status(&self) -> &'static str {
+        if self.waiting_for_world() { WORLD_STARTING_STATUS } else { "" }
     }
 
     /// A device sign-in is waiting for the player to confirm it at the
@@ -604,6 +695,7 @@ impl LoginSession {
         self.pending_device = None;
         self.joined_world = None;
         self.rejoin = None;
+        self.first_join = None;
     }
 
     /// The browser's startup step ([`REFRESH_AT_STARTUP`]): a kept refresh
@@ -667,7 +759,16 @@ impl LoginSession {
                 self.error.clear();
                 self.rejoin_ended = None;
                 match self.refresh.clone() {
-                    Some(token) => Step::call(LoginCall::Join { token, world }),
+                    Some(token) => {
+                        self.first_join = Some(FirstJoin {
+                            world: world.clone(),
+                            starting_since: None,
+                            next_call: 0.0,
+                            calling: true,
+                            why: String::new(),
+                        });
+                        Step::call(LoginCall::Join { token, world })
+                    }
                     None => Step::goto(AppState::Login),
                 }
             }
@@ -696,9 +797,12 @@ impl LoginSession {
             if matches!(reply, LoginReply::Joined(_)) && self.abandoned_join.is_some_and(|(g, _)| g == generation) {
                 self.abandoned_join = None; // recorded below: the screens may join again
             }
+            // Nor does it touch the join from the world list of this generation.
             let line = std::mem::take(&mut self.error);
+            let first = self.first_join.take();
             let step = self.apply(reply, AppState::MainMenu);
             self.error = line;
+            self.first_join = first;
             return step;
         }
         if !matches!(reply, LoginReply::LoggedOut | LoginReply::DevicePolled { .. }) {
@@ -776,8 +880,15 @@ impl LoginSession {
                 self.error = failure.to_string();
                 Step::none()
             }
-            LoginReply::Joined(Ok(joined)) => self.joined(joined, state),
+            LoginReply::Joined(Ok(joined)) => {
+                self.first_join = None;
+                self.joined(joined, state)
+            }
             LoginReply::Joined(Err(failure)) => {
+                if self.first_join_starting(&failure, state) {
+                    return Step::none();
+                }
+                self.first_join = None;
                 self.error = failure.to_string();
                 if matches!(&failure, LoginFailure::Api(e) if e.code == ApiErrorCode::Revoked) {
                     self.sign_out();
@@ -787,6 +898,73 @@ impl LoginSession {
             }
             LoginReply::LoggedOut => Step::none(),
         }
+    }
+
+    /// A first join's answer `failure`, on screen `state`: whether it is the
+    /// world starting and the join repeats ([`Self::tick_first_join`] sends
+    /// the next call), with an empty error line. Not while a rejoin runs, nor
+    /// off the world list, nor past [`WORLD_START_WAIT_MS`] after the first
+    /// such answer (the ordinary error then).
+    fn first_join_starting(&mut self, failure: &LoginFailure, state: AppState) -> bool {
+        let now = self.clock;
+        let starting = matches!(failure, LoginFailure::Api(e) if e.code == ApiErrorCode::WorldStarting);
+        let Some(first) = self.first_join.as_mut().filter(|_| starting && state == AppState::Worlds && self.rejoin.is_none())
+        else {
+            return false;
+        };
+        first.calling = false;
+        let since = *first.starting_since.get_or_insert(now);
+        if now >= since + WORLD_START_WAIT_MS as f64 / 1000.0 {
+            warn!("[login] world {:?} did not start within {WORLD_START_WAIT_MS} ms", first.world);
+            return false;
+        }
+        if since == now {
+            info!("[login] world {:?} is starting a host; joining again every {REJOIN_RETRY_MS} ms", first.world);
+        }
+        first.why = failure.to_string();
+        first.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
+        self.error.clear();
+        true
+    }
+
+    /// Every frame, with the clock `now` on screen `state`: a first join
+    /// waiting for its world to start sends its next join call when it is due
+    /// and none is on its way, the kept token re-read first (`kept`, as a
+    /// rejoin does); past [`WORLD_START_WAIT_MS`] the ordinary error. Off the
+    /// world list it stops.
+    pub fn tick_first_join(&mut self, now: f64, state: AppState, kept: impl FnOnce() -> Option<String>) -> Step {
+        self.clock = now;
+        let Some(first) = self.first_join.as_mut().filter(|f| f.starting()) else { return Step::none() };
+        if state != AppState::Worlds {
+            self.back();
+            return Step::none();
+        }
+        if first.calling {
+            return Step::none();
+        }
+        let since = first.starting_since.unwrap_or(now);
+        if now >= since + WORLD_START_WAIT_MS as f64 / 1000.0 {
+            warn!("[login] world {:?} did not start within {WORLD_START_WAIT_MS} ms", first.world);
+            let why = std::mem::take(&mut first.why);
+            self.first_join = None;
+            self.error = why;
+            return Step::none();
+        }
+        if now < first.next_call {
+            return Step::none();
+        }
+        let world = first.world.clone();
+        // Re-read before EVERY join call (see `tick_rejoin`): another client on this
+        // machine may have rotated the kept token since.
+        self.adopt_kept(kept());
+        let Some(token) = self.refresh.clone() else {
+            self.sign_out();
+            return Step::goto(AppState::Login);
+        };
+        if let Some(first) = self.first_join.as_mut() {
+            first.calling = true;
+        }
+        Step::call(LoginCall::Join { token, world })
     }
 
     /// A device sign-in's start: it becomes the pending one (from the login
@@ -926,6 +1104,13 @@ impl LoginSession {
         self.rejoin.is_some()
     }
 
+    /// The starting screen's line for the rejoin in progress, if it has one
+    /// to say beyond [`REJOIN_STATUS`]: [`WORLD_STARTING_STATUS`] while it
+    /// waits for its ticket and the world is starting.
+    pub fn rejoin_status(&self) -> Option<&'static str> {
+        self.rejoin.as_ref().filter(|r| r.starting_now && !r.connecting).map(|_| WORLD_STARTING_STATUS)
+    }
+
     /// An online session ended (`reason`: why, `None` = the player left) on
     /// screen `state` at `now` (seconds). A session in the world that ended
     /// for a [`rejoinable`] reason starts a rejoin; one lost again while a
@@ -944,7 +1129,7 @@ impl LoginSession {
                 warn!("[login] a session end while the rejoin has no session: ignored");
                 return AfterSession::Rejoin;
             }
-            if online && rejoinable(reason) && now < rejoin.started + REJOIN_MAX_MS as f64 / 1000.0 {
+            if online && rejoinable(reason) && now < rejoin.deadline() {
                 info!("[login] the rejoined session was lost before it was in the world; joining again");
                 rejoin.connecting = false;
                 rejoin.calling = false;
@@ -970,6 +1155,8 @@ impl LoginSession {
                     connecting: false,
                     connect_started: now,
                     why: reason.unwrap_or_default().to_string(),
+                    starting_since: None,
+                    starting_now: false,
                 });
                 AfterSession::Rejoin
             }
@@ -1047,7 +1234,7 @@ impl LoginSession {
         }
         // The deadline holds while a session connects too (leaving the
         // starting screen tears that session down).
-        if now >= rejoin.started + REJOIN_MAX_MS as f64 / 1000.0 {
+        if now >= rejoin.deadline() {
             let why = std::mem::take(&mut rejoin.why);
             self.give_up_rejoin(why);
             return Step::goto(AppState::Worlds);
@@ -1102,6 +1289,9 @@ impl LoginSession {
     /// - a ticket: the rotated token is kept, then the new session connects;
     /// - 503 `WorldUnavailable` (the host did not take the join yet; the
     ///   service did not spend the token): again, with the same token;
+    /// - 503 `WorldStarting` (no host takes logins; the world is starting
+    ///   one): again, with the same token, and the deadline moves to
+    ///   [`WORLD_START_WAIT_MS`] after the first such answer;
     /// - a transport error, a timeout, an answer we cannot read, or the
     ///   service's own failure: the answer may have been lost after the
     ///   rotation, so again, adopting the kept token first;
@@ -1111,6 +1301,7 @@ impl LoginSession {
         let now = self.clock;
         let Some(rejoin) = self.rejoin.as_mut() else { return Step::none() };
         rejoin.calling = false;
+        rejoin.starting_now = matches!(&result, Err(LoginFailure::Api(e)) if e.code == ApiErrorCode::WorldStarting);
         let failure = match result {
             Ok(joined) => {
                 self.refresh = Some(joined.refresh_token.clone());
@@ -1135,6 +1326,14 @@ impl LoginSession {
         rejoin.why = failure.to_string();
         match &failure {
             LoginFailure::Api(e) if e.code == ApiErrorCode::WorldUnavailable => {
+                rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
+                Step::none()
+            }
+            LoginFailure::Api(e) if e.code == ApiErrorCode::WorldStarting => {
+                if rejoin.starting_since.is_none() {
+                    info!("[login] rejoin: the world is starting a host; waiting up to {WORLD_START_WAIT_MS} ms");
+                    rejoin.starting_since = Some(now);
+                }
                 rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
                 Step::none()
             }
@@ -1281,6 +1480,7 @@ pub fn poll_login(
     login: Option<ResMut<LoginSession>>,
     state: Res<State<AppState>>,
     time: Res<Time<Real>>,
+    starting_status: Option<ResMut<crate::session::StartingStatus>>,
     mut commands: Commands,
     mut next: ResMut<NextState<AppState>>,
 ) {
@@ -1307,6 +1507,15 @@ pub fn poll_login(
     perform_step(step, &mut login, &mut commands, &mut next);
     let step = login.tick_rejoin(now, *state.get(), store::load_refresh);
     perform_step(step, &mut login, &mut commands, &mut next);
+    let step = login.tick_first_join(now, *state.get(), store::load_refresh);
+    perform_step(step, &mut login, &mut commands, &mut next);
+    // A rejoin waiting for its world to start says so on the starting screen
+    // (its ticket's connect sets the screen's line again, `session::begin_join`).
+    if let (Some(line), Some(mut status)) = (login.rejoin_status(), starting_status) {
+        if status.0 != line {
+            status.0 = line.into();
+        }
+    }
 }
 
 /// `OnEnter(InWorld)`: a rejoined session is in the world: the rejoin is

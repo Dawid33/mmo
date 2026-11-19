@@ -18,6 +18,9 @@ export component WorldsScreen {
     // The signed-in account's display name (its email when the name is unknown).
     in property <string> account;
     in property <string> error;
+    // A status line ("" = none) shown when there is no error, e.g. while a
+    // join waits for its world to start (the list stays busy meanwhile).
+    in property <string> status;
     in property <bool> busy;
     callback join(string);
     callback logout();
@@ -84,6 +87,7 @@ export component WorldsScreen {
             height: root.line-height;
             style: root.error != "" ? Styles.bold-red-label : Styles.caption-label;
             text: root.error != "" ? root.error
+                : root.status != "" ? root.status
                 : root.busy && root.worlds.length > 0 ? "Talking to the login server\u{2026}"
                 : "";
         }

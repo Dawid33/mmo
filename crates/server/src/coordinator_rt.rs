@@ -75,7 +75,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, RecvTimeoutError, Select, Sender, TryRecvError};
-use game::coordinator::{Input, Target};
+use game::coordinator::{Gate, Input, Target};
 use game::{CoordMsg, Coordinator, HostMsg, WorldLink};
 use login_api::{HostToLogin, LoginToHost};
 use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
@@ -1743,8 +1743,20 @@ impl CoordinatorRuntime {
                 LinkEvent::Msg(msg) if login.peers.contains(&peer) => {
                     login.tally.orders.fetch_add(1, Ordering::SeqCst);
                     let no_gate = crate::login_link::no_gate(&msg);
+                    let starting = crate::login_link::starting(&msg);
+                    let spawn = matches!(msg, LoginToHost::SpawnPlayer { .. });
                     match self.core.login_order(crate::login_link::order_from(msg)) {
                         Some((gate, msg)) => relay.push((Target::Host(gate), msg)),
+                        // No host serves anywhere and the world adds its own hosts (Elastic 4
+                        // Task 8): a spawn is answered `Starting` at once (the join answers 503
+                        // `world_starting`, the client waits) and this replica asks for a host —
+                        // a logged input, written with its next transition. A kick is resent
+                        // anyway: `NoGate`.
+                        None if spawn && self.core.fleet_dials().is_some() && self.core.login_gate() == Gate::Nobody => {
+                            login.tally.orders_dropped.fetch_add(1, Ordering::SeqCst);
+                            login.senders.send(peer, starting);
+                            self.core.apply(Input::StartWanted, now);
+                        }
                         // No host attached to THIS replica takes logins: answered at once, so
                         // the login service tries its next replica (Elastic 2b Task 8).
                         // Counted; reported once per period below.

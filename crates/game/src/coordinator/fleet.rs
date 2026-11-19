@@ -41,27 +41,44 @@
 //!    showed `Σ tick_permille ≤ (n − 1) · (1000 − SCALE_DOWN_SPARE_PERMILLE)` over the `n`
 //!    serving hosts → [`super::DrainHost`] of the victim: fewest players, then fewest running
 //!    regions, then the highest host id (the youngest); notice 0 with no players, else
-//!    [`DRAIN_WARNING_SECS`].
+//!    [`DRAIN_WARNING_SECS`];
+//! 7. **to zero** (only with `min == 0`): the scale gates hold, ONE wanted name is left, its
+//!    serving host known for ≥ `min_lifetime_ms`, and for `down_after_ms` without a break every
+//!    read showed it with 0 players and 0 running regions → [`super::DrainHost`] of that host
+//!    (notice 0). A host added for a login is as old as any: not drained before its lifetime.
 //!
-//! **The scale gates** (rules 5 and 6): no desired row draining, no succession run open (or being
+//! **The scale gates** (rules 5, 6 and 7): no desired row draining, no succession run open (or being
 //! declared, a rollback in flight, or the open runs not known yet), and every wanted name has a
 //! **serving** host — its live host, attached to a live replica, taking logins (not leaving, not
-//! marked). **The timers** (`fleet_up_since`, `fleet_down_since`, on the lease watch's clock) move
+//! marked). **The timers** (`fleet_up_since`, `fleet_down_since`, `fleet_zero_since`, on the
+//! lease watch's clock) move
 //! only on a NEW `hosts` read (a read is the evidence; an upkeep between two reads moves
 //! nothing): a read that shows a rule's condition starts its count if none runs, a read that
 //! breaks it (or a failed read) clears it, and so does every fleet decision's answer. A new
-//! ticker starts both at `None` (its watch counts from zero: delayed, never hastened). After a
+//! ticker starts all three at `None` (its watch counts from zero: delayed, never hastened). After a
 //! scale-down the remaining `n − 1` hosts sit at ≤ 300 ‰ on average, half the scale-up
 //! threshold: the two rules cannot chase each other.
 //!
 //! Rules 1–3 follow drains, which only `claim` hosts heed (a `static` host ignores a mark): they
 //! run only under [`crate::CrashPolicy::Succession`]; rule 4 runs under `static` too (min = max
-//! = 1); rules 5 and 6 need `Succession` as well. Rule 7 (to zero) is a later task.
+//! = 1); rules 5, 6 and 7 need `Succession` as well.
+//!
+//! **A login when no host takes logins** (decision 5; [`Coordinator::login_gate`]): a replica
+//! with a gate host of its own relays the order ([`Gate::Here`]); one whose world has a serving
+//! host on ANOTHER live replica answers `NoGate` and the login service tries its next link
+//! ([`Gate::Elsewhere`]); with no serving host anywhere ([`Gate::Nobody`]) and fleet dials set,
+//! the replica answers `Starting` and applies [`super::Input::StartWanted`]: ANY replica (login
+//! orders reach whichever replica the login service dialled), logged and replayed, it issues
+//! [`super::AddHost`] `{ max, expect_wanted: 0 }` itself — at most once per
+//! [`WORLD_START_ASK_EVERY_MS`] per replica. Two replicas asking at once add ONE row: the store
+//! adds only while no row is wanted (`NotNeeded` otherwise), and the two transitions are
+//! serialised by the row's compare-and-set. Without dials, `Nobody` is `NoGate`, as before.
+//! With zero hosts no cut begins (no expected host), the calendar runs on, free land stays free.
 
 use serde::{Deserialize, Serialize};
 
 use super::{AddHost, Coordinator, DecisionAnswer, DrainHost, HostAdded, HostDrained, HostRemoved, HostSeen, RemoveHost, StoreDecision};
-use crate::{CrashPolicy, DRAIN_WARNING_SECS, HOST_LIVE};
+use crate::{CrashPolicy, HostId, DRAIN_WARNING_SECS, HOST_LIVE};
 
 /// One `desired_hosts` row: a host the coordinator wants to exist.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +104,10 @@ pub const SCALE_DOWN_AFTER_MS: u64 = 300_000;
 pub const HOST_MIN_LIFETIME_MS: u64 = 600_000;
 /// At most one fleet decision per this many store ms.
 pub const SCALE_DECISION_EVERY_MS: u64 = 10_000;
+/// A replica asks for the world's first host ([`super::Input::StartWanted`]: a login found no
+/// host taking logins on any live replica) at most once per this many store ms; the clients
+/// retry their join every second meanwhile.
+pub const WORLD_START_ASK_EVERY_MS: u64 = 5_000;
 
 /// Scale up (rule 5) when the LEAST-loaded serving host's worst tick stays at or above this, in
 /// permille of the tick period: every host is busy, not one crowded super-region. Assignment
@@ -127,6 +148,8 @@ pub enum FleetWhy {
     ScaleUp,
     /// Rule 6: scale down, the load fits in fewer.
     ScaleDown,
+    /// Rule 7: the last host goes, nobody online (`min == 0`).
+    ToZero,
 }
 
 impl FleetWhy {
@@ -135,12 +158,13 @@ impl FleetWhy {
         match self {
             FleetWhy::ScaleUp => Some("up"),
             FleetWhy::ScaleDown => Some("down"),
+            FleetWhy::ToZero => Some("zero"),
             _ => None,
         }
     }
 }
 
-/// The scale gates' view of one `hosts` read (rules 5 and 6): the serving host of every wanted
+/// The scale gates' view of one `hosts` read (rules 5, 6 and 7): the serving host of every wanted
 /// name, or `None` when a gate fails (the module docs).
 struct Serving<'a> {
     /// One per wanted name, its live host (attached to a live replica, taking logins).
@@ -167,6 +191,20 @@ impl Serving<'_> {
             .collect();
         parts.join(", ")
     }
+}
+
+/// Where a login order of the login service goes ([`Coordinator::login_gate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// This replica's gate host ([`Coordinator::gate_host_here`]): the order is relayed to it.
+    Here(HostId),
+    /// No host attached to this replica takes logins, but one attached to another live replica
+    /// does: answered `NoGate`, the login service tries its next link.
+    Elsewhere,
+    /// No attached live host takes logins on ANY live replica (none attached, every one leaving
+    /// or draining): with fleet dials, `Starting` and [`super::Input::StartWanted`]; without,
+    /// `NoGate`.
+    Nobody,
 }
 
 /// The fleet's dials (decision 8; parsed by the server from `VOXEL_FLEET_MIN`,
@@ -215,8 +253,8 @@ impl Coordinator {
             return;
         }
         let Some((why, decision)) = self.fleet_rule(dials, desired) else { return };
-        // Rules 2b, 5 and 6 logged their evidence already, with the decision.
-        if !matches!(why, FleetWhy::LeftMarked | FleetWhy::ScaleUp | FleetWhy::ScaleDown) {
+        // Rules 2b, 5, 6 and 7 logged their evidence already, with the decision.
+        if !matches!(why, FleetWhy::LeftMarked | FleetWhy::ScaleUp | FleetWhy::ScaleDown | FleetWhy::ToZero) {
             log::info!("coordinator: fleet: {why:?}: {decision:?}");
         }
         self.fleet_pending = true;
@@ -224,7 +262,7 @@ impl Coordinator {
         self.push_decision(decision);
     }
 
-    /// The first of rules 1–6 that applies to the latest read's `desired` rows and `hosts` rows
+    /// The first of rules 1–7 that applies to the latest read's `desired` rows and `hosts` rows
     /// (the lease watch's), if any, with the rule it came from.
     fn fleet_rule(&self, dials: FleetDials, desired: &[DesiredHost]) -> Option<(FleetWhy, StoreDecision)> {
         if self.crash_policy() == CrashPolicy::Succession {
@@ -274,7 +312,7 @@ impl Coordinator {
         if wanted < dials.min {
             return Some((FleetWhy::Minimum, StoreDecision::AddHost(AddHost { max: dials.max, expect_wanted: wanted })));
         }
-        // 5 and 6 need the scale gates (and `Succession`, checked by `fleet_serving`), checked
+        // 5, 6 and 7 need the scale gates (and `Succession`, checked by `fleet_serving`), checked
         // again here: the attachments and the succession runs may have moved since the read.
         let serving = self.fleet_serving(desired)?;
         let watch_now = self.leases.latest_received_ms();
@@ -322,10 +360,59 @@ impl Coordinator {
                 return Some((FleetWhy::ScaleDown, StoreDecision::DrainHost(drain)));
             }
         }
+        // 7. To zero (`min == 0` only): the one wanted name's serving host had nobody and ran
+        // nothing for `down_after_ms`, and is older than the minimum lifetime.
+        if let Some(since) = self.fleet_zero_since {
+            let held = watch_now.saturating_sub(since);
+            if let [last] = serving.hosts[..] {
+                let known = self.leases.known_for(last.ordinal, watch_now);
+                if dials.min == 0 && wanted == 1 && idle(last) && held >= dials.down_after_ms && known >= dials.min_lifetime_ms {
+                    log::info!(
+                        "[coordinator] fleet: to zero: the last host {} (host {}) had 0 players and 0 running regions for {held} ms \
+                         (known for {known} ms, min 0): it drains",
+                        last.name,
+                        last.ordinal
+                    );
+                    let drain = DrainHost { name: last.name.clone(), host: Some((last.ordinal, last.boot)), in_ms: drain_notice_ms(last) };
+                    return Some((FleetWhy::ToZero, StoreDecision::DrainHost(drain)));
+                }
+            }
+        }
         None
     }
 
-    /// The scale gates (rules 5 and 6; the module docs) over the latest read: the serving host
+    /// Where a login order goes (decision 5; the module docs): this replica's gate host, a
+    /// serving host on another live replica, or nobody serving anywhere.
+    pub fn login_gate(&self) -> Gate {
+        match self.gate_host_here() {
+            Some(h) => Gate::Here(h),
+            None if self.gate_host().is_some() => Gate::Elsewhere,
+            None => Gate::Nobody,
+        }
+    }
+
+    /// [`super::Input::StartWanted`]: a login found [`Gate::Nobody`] — the world's first host is
+    /// asked for, `AddHost { max, expect_wanted: 0 }`, at most once per
+    /// [`WORLD_START_ASK_EVERY_MS`] on this replica (any replica; logged and replayed: a replay
+    /// whose ask a rebase dropped asks again — the pacing is a reset field — and the store
+    /// answers `NotNeeded` once a wanted row exists). Nothing without fleet dials, or once a
+    /// host serves again (a replay after the first host attached).
+    pub(super) fn on_start_wanted(&mut self, now_ms: u64) {
+        let Some(dials) = self.fleet_dials else { return };
+        if self.login_gate() != Gate::Nobody {
+            log::debug!("coordinator: a start was wanted, and a host takes logins now: nothing asked");
+            return;
+        }
+        if self.start_asked_ms.is_some_and(|at| now_ms.saturating_sub(at) < WORLD_START_ASK_EVERY_MS) {
+            return;
+        }
+        self.start_asked_ms = Some(now_ms);
+        let add = AddHost { max: dials.max, expect_wanted: 0 };
+        log::info!("[coordinator] fleet: a login found no host taking logins on any replica: the world starts ({add:?})");
+        self.push_decision(StoreDecision::AddHost(add));
+    }
+
+    /// The scale gates (rules 5, 6 and 7; the module docs) over the latest read: the serving host
     /// of every wanted name, or `None` — not `Succession`, a desired row draining, a succession
     /// run open (or being declared, a rollback in flight, the open runs not known yet), no wanted
     /// name, or a wanted name without a serving host (its pod starting or crash-looping).
@@ -358,19 +445,21 @@ impl Coordinator {
     /// runs; a read that breaks it clears it.
     pub(super) fn fleet_observe_load(&mut self) {
         let Some(dials) = self.fleet_dials else { return };
-        let (up, down) = match self.fleet_desired.as_deref().and_then(|d| self.fleet_serving(d).map(|s| (d, s))) {
+        let (up, down, zero) = match self.fleet_desired.as_deref().and_then(|d| self.fleet_serving(d).map(|s| (d, s))) {
             Some((desired, serving)) => {
                 let wanted = u32::try_from(desired.len()).unwrap_or(u32::MAX);
                 (
                     wanted < dials.max && serving.least() >= SCALE_UP_LOAD_PERMILLE,
                     wanted > dials.min.max(1) && serving.sum() <= serving.fits_fewer(),
+                    dials.min == 0 && wanted == 1 && matches!(serving.hosts[..], [last] if idle(last)),
                 )
             }
-            None => (false, false),
+            None => (false, false, false),
         };
         let at = self.leases.latest_received_ms();
         self.fleet_up_since = if up { Some(self.fleet_up_since.unwrap_or(at)) } else { None };
         self.fleet_down_since = if down { Some(self.fleet_down_since.unwrap_or(at)) } else { None };
+        self.fleet_zero_since = if zero { Some(self.fleet_zero_since.unwrap_or(at)) } else { None };
     }
 
     /// The rule of the fleet decision handed out and not answered yet (the runtime reads it
@@ -428,6 +517,7 @@ impl Coordinator {
         // Any fleet decision restarts the load counts: its effect comes with the next reads.
         self.fleet_up_since = None;
         self.fleet_down_since = None;
+        self.fleet_zero_since = None;
         self.fleet_last_ms = Some(self.fleet_last_ms.map_or(now_ms, |at| at.max(now_ms)));
         self.fleet_read_after = Some(self.leases.reads().saturating_add(1));
     }
@@ -439,7 +529,13 @@ impl Coordinator {
         self.fleet_desired = None;
         self.fleet_up_since = None;
         self.fleet_down_since = None;
+        self.fleet_zero_since = None;
     }
+}
+
+/// Whether `host` reported nobody and nothing running (rule 7).
+fn idle(host: &HostSeen) -> bool {
+    host.load.players == 0 && host.load.regions == 0
 }
 
 /// A drain's notice for `host`: none when it reports no players, else [`DRAIN_WARNING_SECS`].

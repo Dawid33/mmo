@@ -59,7 +59,9 @@ pub use target::LinkTarget;
 /// whose own hosts take no logins answers an order `HostToLogin::NoGate`.
 /// 10: Elastic 3 — the coordinator assigns land: `HostMsg::LandNeeded`, `CoordMsg::Assigned`,
 /// `CoordMsg::LandIs`.
-pub const LINK_PROTOCOL_VERSION: u32 = 10;
+/// 11: Elastic 4 — a world adds and removes its own hosts: a replica with no host taking logins
+/// anywhere answers a spawn order `HostToLogin::Starting` (and asks for a host).
+pub const LINK_PROTOCOL_VERSION: u32 = 11;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

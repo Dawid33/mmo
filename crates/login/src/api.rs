@@ -147,6 +147,11 @@ impl Fail {
     fn world_unavailable() -> Fail {
         Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable, WORLD_UNAVAILABLE_MSG)
     }
+    /// No host of the world takes logins and it is starting one (Elastic 4): the client repeats
+    /// the join.
+    fn world_starting() -> Fail {
+        Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldStarting, login_api::WORLD_STARTING_MESSAGE)
+    }
     fn identity_refused() -> Fail {
         Fail::new(StatusCode::UNAUTHORIZED, ApiErrorCode::IdentityRefused, IDENTITY_REFUSED_MSG)
     }
@@ -377,6 +382,7 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
     match &result {
         Ok(_) => s.metrics.join(JoinOutcome::Ok),
         Err(f) if f.code == ApiErrorCode::WorldUnavailable => s.metrics.join(JoinOutcome::WorldUnavailable),
+        Err(f) if f.code == ApiErrorCode::WorldStarting => s.metrics.join(JoinOutcome::WorldStarting),
         Err(f) if f.code != ApiErrorCode::Internal => s.metrics.join(JoinOutcome::Refused),
         Err(_) => {}
     }
@@ -414,6 +420,16 @@ async fn join_inner(s: &AppState, req: JoinRequest) -> Result<Json<JoinResponse>
     // ticket names the addresses its ack gave (else the world row's).
     let place = match s.host_links.spawn(&world, &player_token, session_epoch).await {
         Ok(place) => place,
+        // No host takes logins and the world is starting one: the client waits and repeats the
+        // join (with the same, unspent refresh token).
+        Err(crate::host_link::SpawnError::Starting) => {
+            log::info!(
+                "[login] join: account {} world {} epoch {session_epoch}: the world is starting a host",
+                account.account_id,
+                world.world_id
+            );
+            return Err(Fail::world_starting());
+        }
         Err(e) => {
             log::warn!(
                 "[login] join: account {} world {} epoch {session_epoch}: {e}",

@@ -426,6 +426,9 @@ fn push_login_state(ui: &FrontendUi, login: Option<Res<LoginSession>>, shown_wor
     if ui.get_login_busy() != login.busy() {
         ui.set_login_busy(login.busy());
     }
+    if ui.get_login_status() != login.status() {
+        ui.set_login_status(login.status().into());
+    }
     // The worlds screen's "Signed in as": the display name, else the email.
     let account = if login.account_name.is_empty() {
         login.account.as_deref().unwrap_or("")

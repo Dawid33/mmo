@@ -76,6 +76,9 @@ impl fmt::Display for LoginFailure {
                 ApiErrorCode::IdentityConflict => f.write_str("That email already belongs to another game account."),
                 ApiErrorCode::BadRequest => f.write_str(&e.message),
                 ApiErrorCode::Internal => f.write_str("The login server had a problem \u{2014} try again later"),
+                ApiErrorCode::WorldStarting => {
+                    f.write_str("That world is still starting \u{2014} try again in a minute")
+                }
             },
             LoginFailure::Protocol(_) => f.write_str("The login server sent an answer we do not understand"),
             LoginFailure::NoSignIn => f.write_str(NO_SIGN_IN),

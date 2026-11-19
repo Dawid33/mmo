@@ -44,6 +44,8 @@ pub enum JoinOutcome {
     Ok,
     Refused,
     WorldUnavailable,
+    /// 503 `world_starting` (Elastic 4): no host took logins and the world is starting one.
+    WorldStarting,
 }
 
 impl JoinOutcome {
@@ -52,6 +54,7 @@ impl JoinOutcome {
             Self::Ok => "ok",
             Self::Refused => "refused",
             Self::WorldUnavailable => "world_unavailable",
+            Self::WorldStarting => "world_starting",
         }
     }
 }

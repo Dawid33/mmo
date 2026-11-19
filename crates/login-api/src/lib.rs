@@ -142,7 +142,14 @@ pub enum ApiErrorCode {
     /// The identity cannot be tied to one account (it clashes with an existing one).
     IdentityConflict,
     Internal,
+    /// No host of the world takes logins and the world is starting one (Elastic 4: the world
+    /// went to zero hosts, or every host drains): the client repeats the join every second for
+    /// a bounded time. HTTP 503. Appended: the codes' order is the wire's.
+    WorldStarting,
 }
+
+/// The message of a 503 [`ApiErrorCode::WorldStarting`].
+pub const WORLD_STARTING_MESSAGE: &str = "the world is starting; this can take a minute";
 
 /// How long `/v1/join` waits for the world host's [`HostToLogin::SpawnAck`].
 pub const SPAWN_ACK_TIMEOUT_MS: u64 = 3000;
@@ -189,6 +196,11 @@ pub enum HostToLogin {
     /// takes logins (Elastic 2b): it relayed nothing — the login service tries its next link
     /// (another replica). Matched by token and epoch, as the acks are.
     NoGate { player_token: String, session_epoch: u64 },
+    /// A coordinator replica's answer to a spawn order when no host takes logins on ANY live
+    /// replica and the world adds its own hosts (Elastic 4): it relayed nothing and asked for a
+    /// host — the login service answers the join 503 [`ApiErrorCode::WorldStarting`] at once
+    /// and tries no other link (no replica has a gate). Matched by token and epoch.
+    Starting { player_token: String, session_epoch: u64 },
 }
 
 /// What the link messages' `Debug` shows instead of a player token.
@@ -238,6 +250,11 @@ impl std::fmt::Debug for HostToLogin {
                 .finish(),
             HostToLogin::NoGate { player_token: _, session_epoch } => f
                 .debug_struct("NoGate")
+                .field("player_token", &hidden)
+                .field("session_epoch", session_epoch)
+                .finish(),
+            HostToLogin::Starting { player_token: _, session_epoch } => f
+                .debug_struct("Starting")
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
                 .finish(),

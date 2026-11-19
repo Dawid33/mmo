@@ -65,6 +65,9 @@ export component FrontendUi inherits Window {
     in property <bool> login-waiting <=> login.waiting;
     in property <string> login-error;
     in property <bool> login-busy;
+    // The world list's status line ("" = none; under `login-error`, which wins),
+    // e.g. while a join waits for its world to start.
+    in property <string> login-status <=> online-worlds.status;
     // The signed-in account's display name (its email when the name is unknown).
     in property <string> login-account;
     in property <[OnlineWorldRow]> worlds;

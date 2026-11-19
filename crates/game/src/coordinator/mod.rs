@@ -328,6 +328,11 @@ pub struct Coordinator {
     fleet_up_since: Option<u64>,
     /// Since when every `hosts` read showed the scale-down condition (rule 6), as above.
     fleet_down_since: Option<u64>,
+    /// Since when every `hosts` read showed the last wanted host idle (rule 7, to zero), as above.
+    fleet_zero_since: Option<u64>,
+    /// When (store ms) this replica last asked for the world's first host
+    /// ([`Input::StartWanted`]): the next ask waits [`fleet::WORLD_START_ASK_EVERY_MS`].
+    start_asked_ms: Option<u64>,
 }
 
 /// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
@@ -452,6 +457,8 @@ projection! {
             // replays the upkeep, which finds the count still standing and issues it again.
             fleet_up_since = None,
             fleet_down_since = None,
+            // Elastic 4 Task 8: rule 7's timer, as the two above.
+            fleet_zero_since = None,
         }
         reset {
             out = Vec::new(),
@@ -477,6 +484,13 @@ projection! {
             fleet_pending = false,
             // Goes with `fleet_pending`: the rule of a decision that never reached the store.
             fleet_why = None,
+            // Elastic 4 Task 8: the pacing of `Input::StartWanted` is set when the ask is ISSUED
+            // (any replica, no answer awaited), so an ask a rebase dropped (the transition that
+            // met the conflict, or `decisions`, reset above) must not pace its own replay out:
+            // reset, the replayed `StartWanted` asks again, once — the store answers `NotNeeded`
+            // if a wanted row exists by then. Kept, the replayed ask would be paced out and the
+            // world would start only at the client's next retry after the pacing.
+            start_asked_ms = None,
         }
     }
 }
@@ -565,6 +579,8 @@ impl Coordinator {
             fleet_why: None,
             fleet_up_since: None,
             fleet_down_since: None,
+            fleet_zero_since: None,
+            start_asked_ms: None,
         };
         c.push_view(Target::Every);
         c
@@ -1229,7 +1245,10 @@ impl Coordinator {
     /// login service `NoGate`, and it tries another replica (none: the join answers 503; a kick
     /// is resent).
     pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<(HostId, CoordMsg)> {
-        let gate = self.gate_host_here()?;
+        // `Elsewhere` and `Nobody` (Elastic 4): the runtime tells them apart with
+        // [`Self::login_gate`] — `Starting` and [`Input::StartWanted`] for a spawn with no host
+        // serving anywhere and fleet dials set, else `NoGate`.
+        let fleet::Gate::Here(gate) = self.login_gate() else { return None };
         Some((gate, CoordMsg::Login(order)))
     }
 

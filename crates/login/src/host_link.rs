@@ -10,7 +10,10 @@
 //!
 //! An order goes out on ONE link (the first up one, in the row's order). A replica with no
 //! gate host of its own answers [`HostToLogin::NoGate`] at once, and the order moves to the
-//! next link; every link `NoGate` = no host takes logins (the join answers 503). Acks are
+//! next link; every link `NoGate` = no host takes logins (the join answers 503). A replica
+//! whose world has no host taking logins on ANY replica, and adds its own hosts, answers
+//! [`HostToLogin::Starting`] (Elastic 4): the join ends at once with [`SpawnError::Starting`]
+//! (503 `world_starting`; no other link is tried — none has a gate). Acks are
 //! matched by `(player_token, session_epoch)` on ANY link of the world (an order's answer may
 //! come back through another replica): epochs only grow, so a late ack for an epoch that
 //! already answered 503 never completes a later join.
@@ -69,6 +72,9 @@ pub enum SpawnError {
     /// No ack within [`SPAWN_ACK_TIMEOUT_MS`] (the links are down or the host is slow), or
     /// every replica answered `NoGate` (no host of the world takes logins).
     Timeout,
+    /// A replica answered `Starting` (Elastic 4): no host of the world takes logins and it
+    /// asked for one — the join answers 503 `world_starting` and the client repeats it.
+    Starting,
 }
 
 impl std::fmt::Display for SpawnError {
@@ -78,6 +84,7 @@ impl std::fmt::Display for SpawnError {
             SpawnError::BadLink(why) => write!(f, "bad host link: {why}"),
             SpawnError::Refused => write!(f, "the host refused the spawn order"),
             SpawnError::Timeout => write!(f, "no ack within {SPAWN_ACK_TIMEOUT_MS} ms (or no replica has a gate host)"),
+            SpawnError::Starting => write!(f, "the world is starting a host (no host takes logins)"),
         }
     }
 }
@@ -104,6 +111,8 @@ enum Answer {
     Ack(bool, SpawnPlace),
     /// The replica at this address has no gate host: it relayed nothing.
     NoGate(SocketAddr),
+    /// No host takes logins on any replica, and the world is starting one (Elastic 4).
+    Starting,
 }
 
 /// Where a pending kick goes next ([`Linked::kick_link`]): the links that answered it
@@ -480,7 +489,8 @@ impl HostLinks {
     /// Push `SpawnPlayer` to `world`'s replicas — one link at a time, the next after a
     /// `NoGate` — and wait (at most [`SPAWN_ACK_TIMEOUT_MS`]) for its ack on any link: where the
     /// client connects, as the ack named it. `Ok` with no address at once for a world without
-    /// a host link; [`SpawnError::Timeout`] at once when every replica answered `NoGate`.
+    /// a host link; [`SpawnError::Timeout`] at once when every replica answered `NoGate`;
+    /// [`SpawnError::Starting`] at once when one answered `Starting` (Elastic 4).
     pub async fn spawn(&self, world: &WorldRow, player_token: &str, session_epoch: u64) -> Result<SpawnPlace, SpawnError> {
         let Some(linked) = self.world_links(world).await? else { return Ok(SpawnPlace::default()) };
         let key = (player_token.to_string(), session_epoch);
@@ -500,7 +510,8 @@ impl HostLinks {
                     // No open link is up: wait for one (an earlier send's ack may come meanwhile).
                     tokio::select! {
                         a = answers.recv() => match a {
-                            Some(Answer::Ack(ok, place)) => return Some((ok, place)),
+                            Some(Answer::Ack(ok, place)) => return Some(Some((ok, place))),
+                            Some(Answer::Starting) => return Some(None),
                             Some(Answer::NoGate(from)) => { said_no.insert(from); }
                             None => return None,
                         },
@@ -518,7 +529,9 @@ impl HostLinks {
                 loop {
                     tokio::select! {
                         a = answers.recv() => match a {
-                            Some(Answer::Ack(ok, place)) => return Some((ok, place)),
+                            Some(Answer::Ack(ok, place)) => return Some(Some((ok, place))),
+                            // No replica has a gate: no other link is tried.
+                            Some(Answer::Starting) => return Some(None),
                             Some(Answer::NoGate(from)) => {
                                 said_no.insert(from);
                                 if from == link.addr {
@@ -535,8 +548,9 @@ impl HostLinks {
         .await;
         linked.shared.waiters.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
         match answer {
-            Ok(Some((true, place))) => Ok(place),
-            Ok(Some((false, _))) => Err(SpawnError::Refused),
+            Ok(Some(Some((true, place)))) => Ok(place),
+            Ok(Some(Some((false, _)))) => Err(SpawnError::Refused),
+            Ok(Some(None)) => Err(SpawnError::Starting),
             Ok(None) | Err(_) => Err(SpawnError::Timeout),
         }
     }
@@ -617,6 +631,11 @@ impl Pump {
                     }
                     if !join && !kick {
                         log::debug!("[login] world {world}: NoGate from {addr} for epoch {session_epoch} nobody waits for");
+                    }
+                }
+                LinkEvent::Msg(HostToLogin::Starting { player_token, session_epoch }) => {
+                    if !self.answer(&(player_token, session_epoch), Answer::Starting) {
+                        log::debug!("[login] world {world}: Starting from {addr} for epoch {session_epoch} nobody waits for");
                     }
                 }
                 LinkEvent::Msg(HostToLogin::KickAck { player_token, session_epoch }) => {

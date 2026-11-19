@@ -188,6 +188,15 @@ pub fn no_gate(msg: &LoginToHost) -> HostToLogin {
     HostToLogin::NoGate { player_token: player_token.clone(), session_epoch: *session_epoch }
 }
 
+/// A coordinator replica's answer to a spawn order when no host takes logins on ANY live
+/// replica and the world adds its own hosts ([`game::coordinator::Gate::Nobody`], fleet dials
+/// set; Elastic 4): the world is starting — the login service answers the join 503
+/// `world_starting` at once; the replica asks for a host ([`game::coordinator::Input::StartWanted`]).
+pub fn starting(msg: &LoginToHost) -> HostToLogin {
+    let (LoginToHost::SpawnPlayer { player_token, session_epoch } | LoginToHost::Kick { player_token, session_epoch, .. }) = msg;
+    HostToLogin::Starting { player_token: player_token.clone(), session_epoch: *session_epoch }
+}
+
 /// A host's answer, as the coordinator forwards it to the login service.
 pub fn answer_from(out: game::LoginOut) -> HostToLogin {
     match out {

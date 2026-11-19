@@ -25,6 +25,12 @@
 //! stored decision read back ([`Input::CutLookedUp`]: a recorded decision never changes, so a
 //! replay is what applying it there first would have done).
 //!
+//! **Any replica's logged inputs** besides the hosts' and the decisions' answers: a replica's
+//! own lifecycle ([`Input::ReplicaJoined`], [`Input::ReplicaLapsed`]) and the ask for the
+//! world's first host a login order with no gate anywhere makes ([`Input::StartWanted`],
+//! Elastic 4 Task 8: replayed — the store's `expect_wanted: 0` makes a second ask, a replay or a
+//! second replica's ask add nothing). The login order that made it is never logged.
+//!
 //! **A superseded link's messages** (final review G-I1): a replica applies a host's `Attach`
 //! (and what follows it on that link), its write is held up, the host's link drops and it
 //! attaches to another replica, which commits first — the replay would put the OLD `Attach` (and
@@ -103,6 +109,15 @@ pub enum Input {
     /// or a host named a cut this core does not remember): for host `host`, or (`None`) the
     /// running cut's own decision. Logged and replayed — a recorded decision never changes.
     CutLookedUp { host: Option<HostId>, cut: CutId, committed: bool },
+    /// A login order found no host taking logins on any live replica ([`super::Gate::Nobody`],
+    /// Elastic 4 Task 8) and the fleet's dials are set: the world's first host is asked for,
+    /// `AddHost { max, expect_wanted: 0 }` ([`Coordinator::login_gate`], `fleet.rs`), at most
+    /// once per [`super::WORLD_START_ASK_EVERY_MS`] on this replica. ANY replica (the order
+    /// reached whichever one the login service dialled); logged and replayed — a replay onto a
+    /// row whose world has a serving host by then asks nothing, and one whose ask a rebase
+    /// dropped asks again (the store answers `NotNeeded` once a wanted row exists). The order
+    /// itself is never logged.
+    StartWanted,
 }
 
 /// The `(boot, epoch)` of a host's `Attach`: what a link to a replica opened with.
@@ -217,6 +232,7 @@ impl Coordinator {
             Input::SuccessionsOpen { list, issued_at_version } => self.on_successions_open(list, issued_at_version, now),
             Input::LandOwners { asked, rows } => self.on_land_read(asked, &rows, now),
             Input::CutLookedUp { host, cut, committed } => self.on_cut_looked_up(host, cut, committed),
+            Input::StartWanted => self.on_start_wanted(now),
         }
         true
     }
