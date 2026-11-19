@@ -151,7 +151,7 @@ Claude's calls (each is a proposal until this document is approved):
 
    | Name | Width × height | Cells at 16 m | Cells at 32 m | Per degree of latitude |
    |---|---|---|---|---|
-   | Tiny | 25,088 × 12,544 m | 1.2 M | 0.3 M | 70 m |
+   | Tiny | 25,600 × 12,800 m (amended 2026-11-19: 12,544 is not a whole number of 512 m regions) | 1.3 M | 0.3 M | 71 m |
    | Small | 50,176 × 25,088 m | 4.9 M | 1.2 M | 139 m |
    | Medium (default) | 100,352 × 50,176 m | 19.7 M | 4.9 M | 279 m |
    | Large | 200,704 × 100,352 m | 78.7 M | 19.7 M | 558 m |

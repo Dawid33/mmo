@@ -166,7 +166,7 @@ simulation, LOD, history, the forge grid, noise and geometry, the runtime sample
 wrapping world refused outside role `all`; then the old layouts, presets and their knobs deleted; climate
 lengths in degrees of latitude; every size measured.
 
-- Sizes (all 2:1, both sides multiples of 512 m): Tiny 25,088 × 12,544; Small 50,176 × 25,088; Medium
+- Sizes (all 2:1, both sides multiples of 512 m): Tiny 25,600 × 12,800 (ruled 2026-11-19 in Task 3: the 25,088 × 12,544 first written here is not a multiple of 512 m in height); Small 50,176 × 25,088; Medium
   100,352 × 50,176 (default); Large 200,704 × 100,352; a development size 16,384 × 8,192. The forge cell
   (16 m or 32 m) stays a separate choice; no size is hidden for being slow.
 - Evidence: `forge_proto --report` on a development-size Planet for 8 seeds — rows 0 and `nz−1` all sea;
