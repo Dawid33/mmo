@@ -75,8 +75,18 @@ pub enum Input {
     /// read's issue and receipt on the process's MONOTONIC clock (the lease watch's,
     /// [`super::LeaseWatch`]), and the world tick. It feeds the lease watch, the hosts a cut
     /// needs (the dirty live rows), the boots a departed host came back as, the drain marks, and
-    /// forgets the ids the read shows pruned. Ticker only; never logged nor replayed.
-    HostsRead { rows: Vec<HostSeen>, next_host_id: u64, issued_mono: u64, received_mono: u64, world_tick: Tick },
+    /// forgets the ids the read shows pruned; and (Elastic 4) `desired`, every `desired_hosts`
+    /// row read with them, the fleet's rules' table (`fleet.rs`). Ticker only; never logged nor
+    /// replayed — `desired` neither: a rebase keeps the last read's rows (a process field), the
+    /// next read brings them again.
+    HostsRead {
+        rows: Vec<HostSeen>,
+        desired: Vec<super::DesiredHost>,
+        next_host_id: u64,
+        issued_mono: u64,
+        received_mono: u64,
+        world_tick: Tick,
+    },
     /// The ticker's read of the store's open successions, issued when this cache stood at row
     /// version `issued_at_version` ([`Coordinator::take_successions_reread`]): a run it does not
     /// list is abandoned only if it opened at or before that version (audit H5). Ticker only;
@@ -201,8 +211,8 @@ impl Coordinator {
             Input::Decision(answer) => self.on_decision(answer, now),
             Input::ReplicaJoined { me, alone } => self.on_replica_joined(me, alone),
             Input::ReplicaLapsed(r) => self.on_replica_lapsed(r),
-            Input::HostsRead { rows, next_host_id, issued_mono, received_mono, world_tick } => {
-                self.on_hosts_read(&rows, next_host_id, issued_mono, received_mono, world_tick)
+            Input::HostsRead { rows, desired, next_host_id, issued_mono, received_mono, world_tick } => {
+                self.on_hosts_read(&rows, desired, next_host_id, issued_mono, received_mono, world_tick)
             }
             Input::SuccessionsOpen { list, issued_at_version } => self.on_successions_open(list, issued_at_version, now),
             Input::LandOwners { asked, rows } => self.on_land_read(asked, &rows, now),
@@ -315,8 +325,10 @@ impl Coordinator {
             self.leases = self.leases.restarted();
             self.cuts_unread();
             self.successions_owed();
+            self.fleet_unread();
         } else if !ticker && self.ticking {
             log::info!("coordinator: replica {} is no longer the ticker", self.replica);
+            self.fleet_unread();
         }
         self.ticking = ticker;
         ticker

@@ -391,6 +391,9 @@ pub struct MultiRig {
     pub desired: BTreeMap<String, (u32, bool, u64)>,
     /// The rig store's `world.next_desired_host`.
     pub next_desired_host: u64,
+    /// The `hosts.name` of each host [`Self::start`] started under a name (`VOXEL_HOST_NAME`;
+    /// Elastic 4: the desired row it runs for); the others' is empty.
+    pub names: BTreeMap<HostId, String>,
     /// Rows the rig store ended (Elastic 2a, [`Self::end_landless_in_store`]): `(host, boot)`,
     /// dead with no succession.
     pub ended: BTreeSet<(HostId, u64)>,
@@ -547,6 +550,7 @@ impl MultiRig {
                 begins: BTreeMap::new(),
                 desired: BTreeMap::new(),
                 next_desired_host: 1,
+                names: BTreeMap::new(),
                 ended: BTreeSet::new(),
                 coordinator_starts: 0,
                 decide_executions: BTreeMap::new(),
@@ -1212,6 +1216,7 @@ impl MultiRig {
                 let state = if declared_dead.contains(&(h, boot)) && !clean { game::HOST_DEAD } else { game::HOST_LIVE };
                 game::coordinator::HostSeen {
                     ordinal: h,
+                    name: self.names.get(&h).cloned().unwrap_or_default(),
                     boot,
                     clean,
                     state,
@@ -1222,6 +1227,25 @@ impl MultiRig {
                 }
             })
             .collect()
+    }
+
+    /// The ticker's `hosts` read as the runtime feeds it (`Input::HostsRead`, Elastic 4): the
+    /// rows of [`Self::hosts_seen`] at the rig's latest host time, with the rig store's
+    /// `desired_hosts` rows by slot, issued and received at that time. Refused on a replica that
+    /// is not the ticker (as the core refuses it).
+    pub fn read_hosts(&mut self) {
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let rows = self.hosts_seen(now);
+        let mut desired: Vec<game::coordinator::DesiredHost> = self
+            .desired
+            .iter()
+            .map(|(name, &(slot, draining, created_ms))| game::coordinator::DesiredHost { name: name.clone(), slot, draining, created_ms })
+            .collect();
+        desired.sort_by_key(|d| d.slot);
+        let next_host_id = self.hosts.len() as u64;
+        let tick = self.hosts.iter_mut().map(|r| r.manager.spawner_mut().world_tick()).max().unwrap_or(0);
+        let read = game::coordinator::Input::HostsRead { rows, desired, next_host_id, issued_mono: now, received_mono: now, world_tick: tick };
+        self.core().apply(read, now);
     }
 
     /// The ticker's land lookups ([`game::Coordinator::take_land_lookups`]), when it has any:
@@ -1353,8 +1377,11 @@ impl MultiRig {
             self.world_hold_orders.push(Arc::default());
         }
         self.dead.insert(h);
-        // The name labels a process for people (`VOXEL_HOST_NAME`); it is never a key.
-        let _ = name;
+        // The name labels a process for people (`VOXEL_HOST_NAME`), and the desired row it runs
+        // for (Elastic 4); it is never a key.
+        if !name.is_empty() {
+            self.names.insert(h, name.to_string());
+        }
         self.start_process(h, boot);
         // Every live host learns the new one is live at its next directory read (claim on demand).
         if self.claim_store.is_some() {

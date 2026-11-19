@@ -307,6 +307,20 @@ pub struct Coordinator {
     /// process's own observations of the store (clean rows read, cuts it applied the commit
     /// of), kept by a rebase — they are facts of the store, not of the projection replaced.
     leave_gate: succession::LeaveGate,
+    /// The fleet's dials the runtime set (Elastic 4, `fleet.rs`; `None`: no fleet decision).
+    fleet_dials: Option<FleetDials>,
+    /// The `desired_hosts` rows of the ticker's latest successful `hosts` read — the same read
+    /// the lease watch's rows are of (`None`: none since this replica became the ticker, or the
+    /// last read failed: no fleet rule runs).
+    fleet_desired: Option<Vec<DesiredHost>>,
+    /// A fleet decision is handed out and not answered yet: no other is decided.
+    fleet_pending: bool,
+    /// When (store ms) the last fleet decision was answered or lost: the next waits
+    /// [`SCALE_DECISION_EVERY_MS`].
+    fleet_last_ms: Option<u64>,
+    /// After a fleet decision's answer, no rule runs until the lease watch has counted more
+    /// successful `hosts` reads than this: the first read whose issue followed the answer.
+    fleet_read_after: Option<u64>,
 }
 
 /// A version check handed out ([`Coordinator::version_check_wanted`]): the cache's `version`
@@ -416,6 +430,14 @@ projection! {
             assign_askers = BTreeMap::new(),
             assign_warned_ms = None,
             leave_gate = succession::LeaveGate::default(),
+            // Elastic 4 (`fleet.rs`): the runtime's configuration; the latest read's desired
+            // rows (an observation like the lease watch's, re-derived by the next read — never
+            // logged); the pacing of the next decision (a fact of this process's answers, which
+            // a rebase replays without moving it backwards).
+            fleet_dials = None,
+            fleet_desired = None,
+            fleet_last_ms = None,
+            fleet_read_after = None,
         }
         reset {
             out = Vec::new(),
@@ -433,6 +455,12 @@ projection! {
             stale_cuts = Vec::new(),
             stale_seen = false,
             refresh_covers = None,
+            // Elastic 4: a fleet decision handed out and not answered belongs to the transition
+            // that met the conflict (dropped: it never committed) or to `decisions` (reset just
+            // above) — a decision pending at a rebase never reached the store. Reset, so the
+            // replayed upkeep issues it again, once (its pacing, `fleet_last_ms`, moves only
+            // with an answer). Kept, it would wait for an answer that never comes.
+            fleet_pending = false,
         }
     }
 }
@@ -513,6 +541,11 @@ impl Coordinator {
             assign_askers: BTreeMap::new(),
             assign_warned_ms: None,
             leave_gate: succession::LeaveGate::default(),
+            fleet_dials: None,
+            fleet_desired: None,
+            fleet_pending: false,
+            fleet_last_ms: None,
+            fleet_read_after: None,
         };
         c.push_view(Target::Every);
         c
@@ -876,6 +909,7 @@ impl Coordinator {
         self.drain_listed_early();
         self.maintain_successions(now_ms);
         self.maintain_cuts(now_ms);
+        self.maintain_fleet(now_ms);
     }
 
     /// The messages free to leave now, in order, each with the host(s) it is for: everything
@@ -1287,8 +1321,13 @@ impl Coordinator {
         let stamp = self.writing_stamp;
         // An end of a replica's row carries no mark (no lookup would find it lost) and is
         // idempotent: issued again with the next transition (Elastic 2b Task 4).
-        let ends: Vec<StoreDecision> =
-            self.hand_back(t).into_iter().filter(|d| matches!(d, StoreDecision::EndReplica(_))).collect();
+        let decisions = self.hand_back(t);
+        // A fleet decision (Elastic 4) carries no mark either, and its answer is lost: the next
+        // read (issued after now) shows what it did — the next one is decided from that.
+        if decisions.iter().any(|d| matches!(d, StoreDecision::AddHost(_) | StoreDecision::DrainHost(_) | StoreDecision::RemoveHost(_))) {
+            self.fleet_settled(self.clock_ms);
+        }
+        let ends: Vec<StoreDecision> = decisions.into_iter().filter(|d| matches!(d, StoreDecision::EndReplica(_))).collect();
         let later = std::mem::replace(&mut self.decisions, ends);
         self.decisions.extend(later);
         if let Some(stamp) = stamp {
@@ -1421,10 +1460,10 @@ impl Coordinator {
             DecisionAnswer::RolledBack { stamp, outcome } => self.rollback_answered(stamp, outcome, now_ms),
             DecisionAnswer::ReplicaEnded { replica } => log::info!("coordinator: replica {replica}'s row is ended"),
             DecisionAnswer::Assigned { assign, outcome, .. } => self.assign_answered(assign, outcome, now_ms),
-            // Elastic 4 Task 2: nothing durable yet (Task 3 acts on them).
-            DecisionAnswer::HostAdded { add, outcome, .. } => log::debug!("coordinator: add host {add:?}: {outcome:?}"),
-            DecisionAnswer::HostDrained { drain, outcome, .. } => log::debug!("coordinator: drain host {drain:?}: {outcome:?}"),
-            DecisionAnswer::HostRemoved { remove, outcome, .. } => log::debug!("coordinator: remove host {remove:?}: {outcome:?}"),
+            // Elastic 4: nothing durable; the next fleet decision is paced (`fleet.rs`).
+            DecisionAnswer::HostAdded { .. } | DecisionAnswer::HostDrained { .. } | DecisionAnswer::HostRemoved { .. } => {
+                self.fleet_answered(&answer, now_ms)
+            }
         }
     }
 

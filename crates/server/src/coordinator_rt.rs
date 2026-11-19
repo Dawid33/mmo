@@ -1210,11 +1210,28 @@ struct WriteTally {
     relinks: u64,
     /// Land assignments (`Assigned::Done` answers) this replica applied (Elastic 3).
     assigned: u64,
+    /// Fleet decisions that wrote (Elastic 4): hosts added (`HostAdded::Done`), drained
+    /// (`Marked` / `RowOnly`), removed (`HostRemoved::Done`).
+    added: u64,
+    drained: u64,
+    removed: u64,
 }
 
 impl WriteTally {
     fn new() -> Self {
-        WriteTally { since: Instant::now(), transitions: 0, core_bytes: 0, history_bytes: 0, conflicts: 0, failures: 0, relinks: 0, assigned: 0 }
+        WriteTally {
+            since: Instant::now(),
+            transitions: 0,
+            core_bytes: 0,
+            history_bytes: 0,
+            conflicts: 0,
+            failures: 0,
+            relinks: 0,
+            assigned: 0,
+            added: 0,
+            drained: 0,
+            removed: 0,
+        }
     }
 }
 
@@ -1762,13 +1779,28 @@ impl CoordinatorRuntime {
     /// ([`Coordinator::expected_hosts_unknown`]) and makes the watch forget what it saw. A
     /// replica that is not the ticker reads nothing (Elastic 2b Task 6): a read in flight is
     /// dropped, and a new ticker's watch counts from zero.
+    ///
+    /// Elastic 4: the read also carries the `desired_hosts` rows (the fleet's rules' table), and
+    /// runs whenever fleet dials are set — under `static` too, which has no world cuts (its world
+    /// tick is then not the core's to know: 0, which nothing reads without cuts).
     fn feed_cuts(&mut self, now: u64) {
-        let Some(cuts) = &self.cuts else { return };
-        let world_tick = (cuts.tick)();
-        self.core.set_world_tick(world_tick);
+        let fleet = self.core.fleet_dials().is_some();
+        let world_tick = match &self.cuts {
+            Some(cuts) => {
+                let world_tick = (cuts.tick)();
+                self.core.set_world_tick(world_tick);
+                world_tick
+            }
+            None if fleet => 0,
+            None => return,
+        };
         if !self.core.is_ticker() {
             self.hosts_rx = None;
             self.hosts_read_ms = None;
+            if fleet {
+                // Only the ticker reads the table: another replica's gauges say nothing.
+                crate::health::Health::global().fleet_rows(0, 0);
+            }
             return;
         }
         #[cfg(feature = "test-hooks")]
@@ -1779,8 +1811,7 @@ impl CoordinatorRuntime {
             let issued_mono = *issued_mono;
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                // `desired` (Elastic 4): not the core's input yet.
-                Ok(Ok(world_store::HostsRead { rows, store_ms, next_host_id, desired: _ })) => {
+                Ok(Ok(world_store::HostsRead { rows, store_ms, next_host_id, desired })) => {
                     // The lease watch's receipt stamp: the monotonic clock, taken before the
                     // sample below (a forward step of the store's clock never reaches the watch).
                     let received_mono = self.mono_ms();
@@ -1796,6 +1827,7 @@ impl CoordinatorRuntime {
                         .iter()
                         .map(|r| game::coordinator::HostSeen {
                             ordinal: r.id,
+                            name: r.name.clone(),
                             boot: r.boot,
                             clean: r.clean,
                             state: r.state,
@@ -1812,7 +1844,11 @@ impl CoordinatorRuntime {
                     // own lapse check at the declaration stays the second gate. A host that
                     // left and registered again (another boot) is expected again; a row marked
                     // dead runs nothing (`decide_in` reads the same predicate).
-                    let read = Input::HostsRead { rows: seen, next_host_id, issued_mono, received_mono, world_tick };
+                    if fleet {
+                        let draining = desired.iter().filter(|d| d.draining).count() as u64;
+                        crate::health::Health::global().fleet_rows(desired.len() as u64 - draining, draining);
+                    }
+                    let read = Input::HostsRead { rows: seen, desired, next_host_id, issued_mono, received_mono, world_tick };
                     self.core.apply(read, now);
                 }
                 Ok(Err(e)) => {
@@ -2134,7 +2170,22 @@ impl CoordinatorRuntime {
                     self.tally.assigned += 1;
                 }
                 DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } | DecisionAnswer::Assigned { .. } => {}
-                // Elastic 4: no side effect of the runtime's yet.
+                // Elastic 4: the fleet's decisions that wrote, counted.
+                DecisionAnswer::HostAdded { outcome: Ok(game::coordinator::HostAdded::Done { .. }), .. } => {
+                    crate::health::Health::global().fleet_added();
+                    self.tally.added += 1;
+                }
+                DecisionAnswer::HostDrained {
+                    outcome: Ok(game::coordinator::HostDrained::Marked | game::coordinator::HostDrained::RowOnly),
+                    ..
+                } => {
+                    crate::health::Health::global().fleet_drained();
+                    self.tally.drained += 1;
+                }
+                DecisionAnswer::HostRemoved { outcome: Ok(game::coordinator::HostRemoved::Done), .. } => {
+                    crate::health::Health::global().fleet_removed();
+                    self.tally.removed += 1;
+                }
                 DecisionAnswer::HostAdded { .. } | DecisionAnswer::HostDrained { .. } | DecisionAnswer::HostRemoved { .. } => {}
                 DecisionAnswer::Declared { outcome, .. } => {
                     let Some(p) = self.successions.as_mut() else { continue };
@@ -2943,19 +2994,20 @@ impl CoordinatorRuntime {
     /// The periodic `[coordinator] window=…` line (every [`game::METRICS_REPORT_INTERVAL`], only
     /// when anything was written or failed): the transitions written in the window, their core
     /// and history bytes, the conflicts and failed writes (Elastic 2a, decision 8: E2b's measure),
-    /// and the land assignments applied (`assigned=`, Elastic 3).
+    /// the land assignments applied (`assigned=`, Elastic 3) and the fleet's decisions that wrote
+    /// (`added=`, `drained=`, `removed=`, Elastic 4).
     fn report_writes(&mut self) {
         let window = self.tally.since.elapsed();
         if window < game::METRICS_REPORT_INTERVAL {
             return;
         }
         let t = std::mem::replace(&mut self.tally, WriteTally::new());
-        if t.transitions == 0 && t.conflicts == 0 && t.failures == 0 && t.assigned == 0 {
+        if t.transitions == 0 && t.conflicts == 0 && t.failures == 0 && t.assigned == 0 && t.added + t.drained + t.removed == 0 {
             return;
         }
         log::info!(
             "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={} \
-             lost_answer_relinks={} assigned={}",
+             lost_answer_relinks={} assigned={} added={} drained={} removed={}",
             window.as_secs_f32(),
             t.transitions,
             t.core_bytes,
@@ -2964,7 +3016,10 @@ impl CoordinatorRuntime {
             t.failures,
             self.core.version(),
             t.relinks,
-            t.assigned
+            t.assigned,
+            t.added,
+            t.drained,
+            t.removed
         );
     }
 

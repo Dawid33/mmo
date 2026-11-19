@@ -122,6 +122,9 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostSeen {
     pub ordinal: HostId,
+    /// Its `hosts.name` (`VOXEL_HOST_NAME`; Elastic 4: the `desired_hosts` row it runs for — a
+    /// crash-looping pod is many ids under one name). Never a key of anything else.
+    pub name: String,
     pub boot: u64,
     pub clean: bool,
     /// `HOST_LIVE` or `HOST_DEAD`.
@@ -229,6 +232,12 @@ impl LeaseWatch {
     /// Host `ordinal`'s row as the latest successful read showed it.
     pub fn row(&self, ordinal: HostId) -> Option<&HostSeen> {
         self.rows.get(&ordinal).map(|w| &w.row)
+    }
+
+    /// Every row the latest successful read showed (none after a failed read or a restart of
+    /// the watch), by ordinal.
+    pub fn rows(&self) -> impl Iterator<Item = &HostSeen> {
+        self.rows.values().map(|w| &w.row)
     }
 
     /// Successful reads observed so far.
@@ -1619,14 +1628,25 @@ impl super::Coordinator {
     /// The ticker's read of every `hosts` row ([`super::Input::HostsRead`]): the boots a
     /// departed host came back as, the hosts a cut needs (the dirty live rows: a row marked dead
     /// runs nothing — `decide_in` reads the same predicate), the world tick, and the leases
-    /// ([`Self::observe_leases`]).
-    pub(super) fn on_hosts_read(&mut self, rows: &[HostSeen], next_host_id: u64, issued_mono: u64, received_mono: u64, world_tick: crate::Tick) {
+    /// ([`Self::observe_leases`]); and (Elastic 4) the `desired_hosts` rows read with them, which
+    /// the fleet's rules decide from together with these rows (`fleet.rs`).
+    pub(super) fn on_hosts_read(
+        &mut self,
+        rows: &[HostSeen],
+        desired: Vec<super::DesiredHost>,
+        next_host_id: u64,
+        issued_mono: u64,
+        received_mono: u64,
+        world_tick: crate::Tick,
+    ) {
         let boots: BTreeMap<HostId, u64> = rows.iter().map(|r| (r.ordinal, r.boot)).collect();
         self.set_host_boots_inner(&boots);
         let expected: BTreeSet<HostId> = rows.iter().filter(|r| !r.clean && r.state == HOST_LIVE).map(|r| r.ordinal).collect();
         self.set_expected_hosts(expected);
         self.set_world_tick(world_tick);
         self.observe_leases_inner(rows, next_host_id, issued_mono, received_mono);
+        // After the watch took the rows: both come from this read (`fleet_unread` clears both).
+        self.fleet_desired = Some(desired);
     }
 
     /// A successful read of the `hosts` rows, issued at `issued_ms` and received at
@@ -1725,6 +1745,8 @@ impl super::Coordinator {
     /// A failed read of the `hosts` rows ([`LeaseWatch::observe_failed`]).
     pub fn leases_unread(&mut self) {
         self.leases.observe_failed();
+        // The fleet's rules stand on the rows the watch just forgot (Elastic 4).
+        self.fleet_unread();
     }
 
     /// The lease watch (Task 8 declares successions from [`LeaseWatch::lapsed`]).

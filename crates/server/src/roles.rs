@@ -160,7 +160,6 @@ pub fn unix_ms_now() -> u64 {
 pub fn start_clock(
     role: Role,
     store: Option<&world_store::StoreHandle>,
-    postgres: bool,
     world_tick: game::Tick,
 ) -> Result<(game::WorldClock, u64), String> {
     match (role, store) {
@@ -190,7 +189,6 @@ pub fn start_clock(
 pub fn check_before_registration(
     role: Role,
     store: Option<&world_store::StoreHandle>,
-    postgres: bool,
     ownership_word: &str,
     claim_on_demand: bool,
     super_region_regions: u32,
@@ -201,7 +199,7 @@ pub fn check_before_registration(
         crate::claims::HostClaims::check_side(store, super_region_regions)?;
     }
     if role == Role::Host {
-        start_clock(role, store, postgres, world_tick)?;
+        start_clock(role, store, world_tick)?;
     }
     Ok(())
 }
@@ -568,16 +566,30 @@ pub fn run_coordinator() -> ServerExit {
     check_two_phase(policy, &store).unwrap_or_else(|e| fatal(e));
     // Before it claims the coordinator row: the world cut parts a crash left staged.
     recover_staged_cuts(&store).unwrap_or_else(|e| fatal(e));
-    let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
+    let (clock, phase) = start_clock(Role::Coordinator, Some(&store), opened.world_tick).unwrap_or_else(|e| fatal(e));
     let clock = CoordinatorClock::new(clock, phase);
     log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
     let bind = coordinator_addr_from(COORDINATOR_BIND_ENV, std::env::var(COORDINATOR_BIND_ENV).ok().as_deref())
         .unwrap_or_else(|e| fatal(e));
     // Registered as a replica first (Elastic 2b Task 4: an id issued by the store), then the row.
-    let start = match world_file::ensure_coordinator_state_at(&store, &map, None, &bind.to_string()).unwrap_or_else(|e| fatal(e)) {
+    let mut start = match world_file::ensure_coordinator_state_at(&store, &map, None, &bind.to_string()).unwrap_or_else(|e| fatal(e)) {
         Some(start) => start,
         None => fatal("this world has no history (nobody can live in it): there is nothing to coordinate".into()),
     };
+    // Elastic 4: how many hosts the world wants (`VOXEL_FLEET_MAX` unset: no fleet decision).
+    let fleet = fleet_dials_from(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(e));
+    match fleet {
+        Some(d) => log::info!(
+            "[coordinator] fleet: {} to {} hosts (scale up after {} ms, down after {} ms, a host lives at least {} ms)",
+            d.min,
+            d.max,
+            d.up_after_ms,
+            d.down_after_ms,
+            d.min_lifetime_ms
+        ),
+        None => log::info!("[coordinator] fleet: {FLEET_MAX_ENV} is unset: the coordinator adds, drains and removes no host"),
+    }
+    start.coordinator.set_fleet(fleet);
     let token = svc_link::service_token_from_env().unwrap_or_else(|e| fatal(format!("the service link's token: {e}")));
     let cert_file = cert_hash_file_from(std::env::var(COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
     if let Some(dir) = cert_file.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -638,6 +650,59 @@ pub fn run_coordinator() -> ServerExit {
         return ServerExit::Fenced;
     }
     exit
+}
+
+/// The most desired hosts (Elastic 4; unset or empty: no fleet decision at all).
+pub const FLEET_MAX_ENV: &str = "VOXEL_FLEET_MAX";
+/// The fewest desired hosts (unset or empty: 1; 0 lets the last host go when idle).
+pub const FLEET_MIN_ENV: &str = "VOXEL_FLEET_MIN";
+/// The pace dials of the load rules, ms (unset or empty: [`game::coordinator::SCALE_UP_AFTER_MS`],
+/// [`game::coordinator::SCALE_DOWN_AFTER_MS`], [`game::coordinator::HOST_MIN_LIFETIME_MS`]).
+pub const SCALE_UP_AFTER_MS_ENV: &str = "VOXEL_SCALE_UP_AFTER_MS";
+pub const SCALE_DOWN_AFTER_MS_ENV: &str = "VOXEL_SCALE_DOWN_AFTER_MS";
+pub const HOST_MIN_LIFETIME_MS_ENV: &str = "VOXEL_HOST_MIN_LIFETIME_MS";
+
+/// The fleet's dials from the environment (`var` reads one variable; Elastic 4, plan decision 8):
+/// `None` while [`FLEET_MAX_ENV`] is unset or empty. A dial that is not a number, a maximum or a
+/// pace dial of 0, or a minimum above the maximum refuses the start; the minimum alone may be 0.
+/// The pace dials are read (and refused) only with a maximum set.
+pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<game::coordinator::FleetDials>, String> {
+    let read = |name: &str| var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let number = |name: &str, value: &str, zero_ok: bool| -> Result<u64, String> {
+        match value.parse::<u64>() {
+            Ok(n) if n > 0 || zero_ok => Ok(n),
+            _ => Err(format!(
+                "invalid {name} value `{value}` (expected a number{})",
+                if zero_ok { "" } else { " above 0" }
+            )),
+        }
+    };
+    let Some(max) = read(FLEET_MAX_ENV) else { return Ok(None) };
+    let count = |name: &str, value: &str, zero_ok: bool| -> Result<u32, String> {
+        let n = number(name, value, zero_ok)?;
+        u32::try_from(n).map_err(|_| format!("invalid {name} value `{value}` (too large)"))
+    };
+    let max = count(FLEET_MAX_ENV, &max, false)?;
+    let min = match read(FLEET_MIN_ENV) {
+        Some(v) => count(FLEET_MIN_ENV, &v, true)?,
+        None => 1,
+    };
+    if min > max {
+        return Err(format!("{FLEET_MIN_ENV} ({min}) is above {FLEET_MAX_ENV} ({max})"));
+    }
+    let pace = |name: &str, default: u64| -> Result<u64, String> {
+        match read(name) {
+            Some(v) => number(name, &v, false),
+            None => Ok(default),
+        }
+    };
+    Ok(Some(game::coordinator::FleetDials {
+        min,
+        max,
+        up_after_ms: pace(SCALE_UP_AFTER_MS_ENV, game::coordinator::SCALE_UP_AFTER_MS)?,
+        down_after_ms: pace(SCALE_DOWN_AFTER_MS_ENV, game::coordinator::SCALE_DOWN_AFTER_MS)?,
+        min_lifetime_ms: pace(HOST_MIN_LIFETIME_MS_ENV, game::coordinator::HOST_MIN_LIFETIME_MS)?,
+    }))
 }
 
 /// The crash policy of a coordinator of a world whose ownership is `ownership`

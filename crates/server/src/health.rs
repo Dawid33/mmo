@@ -83,6 +83,11 @@ pub struct Health {
     host_land: AtomicU64,
     land_released: AtomicU64,
     land_assigned: AtomicU64,
+    fleet_wanted: AtomicU64,
+    fleet_draining: AtomicU64,
+    fleet_added: AtomicU64,
+    fleet_drained: AtomicU64,
+    fleet_removed: AtomicU64,
     coordinator_transitions: AtomicU64,
     coordinator_core_bytes: AtomicU64,
     coordinator_history_bytes: AtomicU64,
@@ -116,6 +121,11 @@ impl Health {
             host_land: AtomicU64::new(0),
             land_released: AtomicU64::new(0),
             land_assigned: AtomicU64::new(0),
+            fleet_wanted: AtomicU64::new(0),
+            fleet_draining: AtomicU64::new(0),
+            fleet_added: AtomicU64::new(0),
+            fleet_drained: AtomicU64::new(0),
+            fleet_removed: AtomicU64::new(0),
             coordinator_transitions: AtomicU64::new(0),
             coordinator_core_bytes: AtomicU64::new(0),
             coordinator_history_bytes: AtomicU64::new(0),
@@ -260,6 +270,28 @@ impl Health {
         self.land_assigned.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The ticker's last `hosts` read showed this many `desired_hosts` rows wanted and draining
+    /// (Elastic 4; 0 and 0 on a replica that is not the ticker).
+    pub fn fleet_rows(&self, wanted: u64, draining: u64) {
+        self.fleet_wanted.store(wanted, Ordering::Relaxed);
+        self.fleet_draining.store(draining, Ordering::Relaxed);
+    }
+
+    /// A coordinator replica applied a fleet decision's `HostAdded::Done` answer (Elastic 4).
+    pub fn fleet_added(&self) {
+        self.fleet_added.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A coordinator replica applied a fleet decision's `HostDrained::Marked` / `RowOnly` answer.
+    pub fn fleet_drained(&self) {
+        self.fleet_drained.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A coordinator replica applied a fleet decision's `HostRemoved::Done` answer.
+    pub fn fleet_removed(&self) {
+        self.fleet_removed.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The coordinator committed a transition: its row's `core` and `history` (0: not written)
     /// bytes (Elastic 2a, decision 8).
     pub fn coordinator_written(&self, core_bytes: u64, history_bytes: u64) {
@@ -363,6 +395,15 @@ impl Health {
         counter("mmo_land_released_total", "Super-regions this host released (idle land given back) since it started.", load(&self.land_released));
         counter("mmo_land_assigned_total", "Land assignments (Assigned::Done answers) this coordinator replica applied.", load(&self.land_assigned));
         gauge("mmo_hosts_live", "Hosts whose `hosts` row is dirty and live at the coordinator's last read.", load(&self.hosts_live));
+        gauge("mmo_fleet_wanted", "Desired hosts wanted at the ticker's last hosts read (0 on a replica that is not the ticker).", load(&self.fleet_wanted));
+        gauge(
+            "mmo_fleet_draining",
+            "Desired hosts draining at the ticker's last hosts read (0 on a replica that is not the ticker).",
+            load(&self.fleet_draining),
+        );
+        counter("mmo_fleet_added_total", "Desired hosts this coordinator replica added (HostAdded::Done answers).", load(&self.fleet_added));
+        counter("mmo_fleet_drained_total", "Desired hosts this coordinator replica marked draining (HostDrained answers that wrote).", load(&self.fleet_drained));
+        counter("mmo_fleet_removed_total", "Desired hosts this coordinator replica removed (HostRemoved::Done answers).", load(&self.fleet_removed));
         counter(
             "mmo_coordinator_transitions_total",
             "Coordinator transitions written (each one compare-and-set of the coordinator row).",
