@@ -46,12 +46,13 @@
 //! passed) with whether the host is still attached as that pair. The inline link
 //! ([`game::InlineWorldLink`]) stays for tests and wasm single-player.
 //!
-//! Login orders (until the login service reaches the coordinator over HTTP too, plan
-//! `2026-11-19-coordinator-http-api.md` Task 6, it dials the replica's service-link login
-//! listener): each order is queued for the gate host of its moment and leaves as a row of its
-//! mailbox with the next transition — never logged (a rebase drops it: the login service's retry).
-//! The hosts' answers ([`HostMsg::Login`]) go to the login service over that listener once the
-//! transition holding them committed.
+//! **The login service** calls the same API ([`ApiCall::LoginOrder`]): each order is queued for
+//! the world's gate host of its moment and leaves as a row of its mailbox with the next
+//! transition; it is held in the runtime — never logged — until that transition commits (then its
+//! POST is answered 202), and issued again (the gate chosen again) after a rebase or a refresh
+//! dropped it ([`HeldOrder`]). The hosts' answers ([`HostMsg::Login`], logged inputs) are
+//! `login_outbox` rows of the transition holding them, which the login service long-polls from
+//! any replica; the ticker prunes those older than [`LOGIN_ANSWER_TTL_MS`].
 //!
 //! **World cuts** (`claim` hosts, any number of them; R3 Task 13; [`WorldCuts`]): the core picks the tick and
 //! collects the hosts' parts; the runtime feeds it the world tick and the hosts the cut
@@ -82,8 +83,6 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{Receiver, RecvTimeoutError, Select, Sender, TryRecvError};
 use game::coordinator::{BatchAck, Delivery, Gate, Input, Target};
 use game::{CoordMsg, Coordinator, HostMsg, WorldLink};
-use login_api::{HostToLogin, LoginToHost};
-use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
 use world_store::{AfterCommit, StoreError, StoreHandle, TransitionWrite, TransitionWritten};
 
 use crate::coordinator_api::{ApiCall, ApiListener, ApiRefusal};
@@ -211,6 +210,9 @@ struct ApiHosts {
     /// The version check of the batches that changed nothing durable (with more than one live
     /// replica): the batches it covers, and the row's version on its way.
     clean_check: Option<(u64, Answer<u64>)>,
+    /// The login orders waiting for the transition carrying their row ([`HeldOrder`]), in
+    /// arrival order; at most [`LOGIN_ORDERS_HELD_MAX`].
+    login_held: Vec<HeldOrder>,
 }
 
 /// A host's batch whose inputs were applied, waiting for its answer: once the transition covering
@@ -236,10 +238,13 @@ impl ApiHosts {
         }
     }
 
-    /// Every waiter refused with `why` (the thread ends).
+    /// Every waiter and every held login order refused with `why` (the thread ends).
     fn refuse_all(&mut self, why: ApiRefusal) {
         for w in self.waiters.drain(..) {
             let _ = w.done.send(Err(why));
+        }
+        for held in self.login_held.drain(..) {
+            let _ = held.done.send(Err(why));
         }
     }
 }
@@ -250,126 +255,29 @@ fn attached_as(core: &Coordinator, host: HostId, boot: u64, epoch: u64) -> bool 
     core.attachment(host) == Some(boot) && core.newest_attach(host) == Some((boot, epoch))
 }
 
-/// At most this many `SessionEnded` wait at the coordinator while no login service is KNOWN to
-/// be linked (an ack is not kept: the login service resends its order or kick; one sent onto a
-/// connection that drops right after is lost with it); beyond it the oldest is dropped and
-/// counted ([`LoginCounts::ends_dropped`]; the login service then lists that session as open,
-/// as a lost `SessionEnded` always did).
-pub const LOGIN_ENDS_HELD_MAX: usize = 4096;
+/// At most this many login orders wait in a replica for the transition carrying their mailbox
+/// row ([`HeldOrder`]); one more is answered 503 `not_ready` at once (the login service answers
+/// the join 503, a kick is resent by its sweeper).
+pub const LOGIN_ORDERS_HELD_MAX: usize = 4096;
 
-/// Where the coordinator listens for the login service ([`start_listening_as`]): the address
-/// (`VOXEL_LOGIN_LINK_BIND`), the service token, the pin file
-/// (`VOXEL_LOGIN_LINK_CERT_HASH_FILE`).
-pub struct LoginListen {
-    pub bind: std::net::SocketAddr,
-    pub token: String,
-    pub cert_hash_file: Option<std::path::PathBuf>,
-}
+/// How long a login answer (`login_outbox`) is kept: the ticker's transitions prune the rows
+/// older than this. A login service that starts reads every answer still kept (its cursor starts
+/// at 0): each kind is idempotent there.
+pub const LOGIN_ANSWER_TTL_MS: u64 = 600_000;
 
-/// What the coordinator's login relay counted since it started
-/// ([`ListeningCoordinator::login_counts`]); the drops are logged as counts, at most once per
-/// [`WORLD_CUT_RETRY_LOG_MS`], never one line per message.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LoginCounts {
-    /// Orders of a connected login service received.
-    pub orders: u64,
-    /// Of those, not relayed: no gate host (answered `NoGate`, or `Starting`).
-    pub orders_dropped: u64,
-    /// `SessionEnded` dropped past [`LOGIN_ENDS_HELD_MAX`].
-    pub ends_dropped: u64,
-}
+/// The ticker prunes the login answers with at most one transition per this period.
+pub const LOGIN_ANSWER_PRUNE_EVERY_MS: u64 = 60_000;
 
-/// [`LoginCounts`], shared with the [`ListeningCoordinator`] handle.
-#[derive(Default)]
-struct LoginTally {
-    orders: std::sync::atomic::AtomicU64,
-    orders_dropped: std::sync::atomic::AtomicU64,
-    ends_dropped: std::sync::atomic::AtomicU64,
-}
-
-impl LoginTally {
-    fn counts(&self) -> LoginCounts {
-        LoginCounts {
-            orders: self.orders.load(Ordering::SeqCst),
-            orders_dropped: self.orders_dropped.load(Ordering::SeqCst),
-            ends_dropped: self.ends_dropped.load(Ordering::SeqCst),
-        }
-    }
-}
-
-/// The coordinator's login listener: every order of a connected login service goes to the
-/// world's gate host of its moment ([`Coordinator::login_order`]), or is answered `NoGate` (or
-/// `Starting`) when there is none; every host's answer ([`HostMsg::Login`]) goes to every
-/// connected login service, unchanged, once the transition holding it committed. No order is
-/// kept. Held `SessionEnded`s are this replica's own.
-struct LoginSide {
-    listener: Option<LinkListener>,
-    events: Receiver<(PeerId, LinkEvent<LoginToHost>)>,
-    senders: PeerSenders<HostToLogin>,
-    /// The connected login services (peers whose hello said `PeerRole::Login`).
-    peers: BTreeSet<PeerId>,
-    /// `SessionEnded` held while no login service is connected ([`LOGIN_ENDS_HELD_MAX`]).
-    held: VecDeque<HostToLogin>,
-    tally: Arc<LoginTally>,
-    /// The drops as last logged, and when ([`Self::report`]).
-    logged: LoginCounts,
-    logged_ms: Option<u64>,
-}
-
-impl LoginSide {
-    fn new(listener: LinkListener, events: Receiver<(PeerId, LinkEvent<LoginToHost>)>, senders: PeerSenders<HostToLogin>) -> Self {
-        LoginSide {
-            listener: Some(listener),
-            events,
-            senders,
-            peers: BTreeSet::new(),
-            held: VecDeque::new(),
-            tally: Arc::default(),
-            logged: LoginCounts::default(),
-            logged_ms: None,
-        }
-    }
-
-    /// `msg` to every connected login service; none: a `SessionEnded` is held, an ack dropped.
-    fn tell(&mut self, msg: HostToLogin) {
-        if self.peers.is_empty() {
-            match msg {
-                HostToLogin::SessionEnded { .. } => {
-                    if self.held.len() >= LOGIN_ENDS_HELD_MAX {
-                        self.held.pop_front();
-                        self.tally.ends_dropped.fetch_add(1, Ordering::SeqCst);
-                    }
-                    self.held.push_back(msg);
-                }
-                // `HostToLogin`'s `Debug` hides the player token.
-                other => log::debug!("[coordinator] no login service is linked: {other:?} dropped"),
-            }
-            return;
-        }
-        for peer in &self.peers {
-            self.senders.send(*peer, msg.clone());
-        }
-    }
-
-    /// The drops since the last report, as one warning, at most once per
-    /// [`WORLD_CUT_RETRY_LOG_MS`] (`now_ms`).
-    fn report(&mut self, now_ms: u64) {
-        let c = self.tally.counts();
-        let new = (c.orders_dropped - self.logged.orders_dropped, c.ends_dropped - self.logged.ends_dropped);
-        if new == (0, 0) || self.logged_ms.is_some_and(|at| now_ms < at + WORLD_CUT_RETRY_LOG_MS) {
-            return;
-        }
-        log::warn!(
-            "[coordinator] login relay: {} orders answered NoGate or Starting with no host taking logins, {} session \
-             ends dropped past {LOGIN_ENDS_HELD_MAX} held, since the last report (total {} / {})",
-            new.0,
-            new.1,
-            c.orders_dropped,
-            c.ends_dropped
-        );
-        self.logged = c;
-        self.logged_ms = Some(now_ms);
-    }
+/// A login order of the API ([`ApiCall::LoginOrder`]) whose row is queued for the gate host of
+/// its moment: held in the runtime — never in the core's input log — until the transition
+/// carrying that row commits (then `done` is answered `Ok`: the order is durable in the gate's
+/// mailbox). A rebase or a refresh drops what the core had queued: the order is issued again,
+/// the gate chosen again from the new core (a host takes a repeated epoch as the same order).
+struct HeldOrder {
+    order: game::LoginOrder,
+    done: tokio::sync::oneshot::Sender<Result<(), ApiRefusal>>,
+    /// Its row is in the transition being written.
+    in_write: bool,
 }
 
 /// A coordinator message's kind and region, for logs (a `SpawnPeople` or `View` can be
@@ -830,21 +738,13 @@ pub struct ListeningCoordinator {
     pub thread: CoordinatorThread,
     /// Where its HTTPS API listens ([`Self::url`]).
     pub addr: std::net::SocketAddr,
-    /// The API certificate's SHA-256 (also written to the cert-hash file).
+    /// The API certificate's SHA-256 (also written to the cert-hash file): what hosts and the
+    /// login service pin (the registry's `host_link_cert`).
     pub cert_sha256: String,
-    /// Where the login service dials and with which pin (the registry's `host_link` /
-    /// `host_link_cert`), if it listens for one ([`LoginListen`]).
-    pub login: Option<(std::net::SocketAddr, String)>,
-    login_tally: Option<Arc<LoginTally>>,
 }
 
 impl ListeningCoordinator {
-    /// What its login relay counted so far (`None`: it does not listen for the login service).
-    pub fn login_counts(&self) -> Option<LoginCounts> {
-        self.login_tally.as_ref().map(|t| t.counts())
-    }
-
-    /// The URL hosts reach its API at (`VOXEL_COORDINATOR_ADDR`'s form).
+    /// The URL hosts and the login service reach its API at (`VOXEL_COORDINATOR_ADDR`'s form).
     pub fn url(&self) -> String {
         format!("https://{}", self.addr)
     }
@@ -853,12 +753,10 @@ impl ListeningCoordinator {
 /// The coordinator for a `VOXEL_ROLE=coordinator` process (its row read or bootstrapped at
 /// [`CoordinatorStart::version`]): serves the coordinator's HTTP API on `bind` to callers
 /// presenting `token` and naming world `world` (its identity `<cert_hash_file>.cert` / `.key`,
-/// the pin written to `cert_hash_file`), and runs `start` on its thread in
-/// [`Delivery::Mailbox`]. With world cuts `cuts` (`claim` hosts); under
+/// the pin written to `cert_hash_file`) — the hosts and the login service alike — and runs
+/// `start` on its thread in [`Delivery::Mailbox`]. With world cuts `cuts` (`claim` hosts); under
 /// `CrashPolicy::Succession` (`claim`, any number of hosts) the coordinator declares and runs
-/// successions ([`CoordinatorRuntime`]'s succession pump), under `Rollback` it never does. With
-/// `login` it also listens for the login service on the service link (until Task 6 of the
-/// coordinator HTTP API plan) and relays its orders to the gate host.
+/// successions ([`CoordinatorRuntime`]'s succession pump), under `Rollback` it never does.
 #[allow(clippy::too_many_arguments)]
 pub fn start_listening_as(
     store: StoreHandle,
@@ -870,28 +768,7 @@ pub fn start_listening_as(
     cuts: Option<WorldCuts>,
     policy: game::CrashPolicy,
     world: &str,
-    login: Option<LoginListen>,
 ) -> Result<ListeningCoordinator, String> {
-    let login = match login {
-        Some(l) => {
-            if let Some(dir) = l.cert_hash_file.as_deref().and_then(std::path::Path::parent).filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            }
-            let (listener, events, senders) =
-                LinkListener::bind::<LoginToHost, HostToLogin>(l.bind, l.token, world.to_string(), l.cert_hash_file.clone())
-                    .map_err(|e| format!("the coordinator's login link on {}: {e}", l.bind))?;
-            log::info!(
-                "[coordinator] the login service dials {} (pin {}{})",
-                listener.local_addr(),
-                listener.cert_sha256(),
-                l.cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
-            );
-            Some(LoginSide::new(listener, events, senders))
-        }
-        None => None,
-    };
-    let login_at = login.as_ref().and_then(|l| l.listener.as_ref()).map(|l| (l.local_addr(), l.cert_sha256().to_string()));
-    let login_tally = login.as_ref().map(|l| l.tally.clone());
     if let Some(dir) = cert_hash_file.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -916,9 +793,10 @@ pub fn start_listening_as(
         applied: 0,
         writing_covers: 0,
         clean_check: None,
+        login_held: Vec::new(),
     });
-    let thread = CoordinatorRuntime::spawn_as(store, start, hosts, login, fenced, cuts, policy);
-    Ok(ListeningCoordinator { thread, addr, cert_sha256, login: login_at, login_tally })
+    let thread = CoordinatorRuntime::spawn_as(store, start, hosts, fenced, cuts, policy);
+    Ok(ListeningCoordinator { thread, addr, cert_sha256 })
 }
 
 /// The coordinator core with its store (see the module docs).
@@ -941,10 +819,8 @@ pub struct CoordinatorRuntime {
     /// The write in flight was taken with [`CoordinatorThread::kill_after_commit_before_send`] armed.
     #[cfg(feature = "test-hooks")]
     kill_at_commit: bool,
-    /// The hosts it serves (a channel link, or its HTTP API).
+    /// The hosts it serves (a channel link, or its HTTP API — the login service's too).
     hosts: Hosts,
-    /// The login service's listener (role `coordinator`, Elastic 1 Task 6; `None`: no login).
-    login: Option<LoginSide>,
     /// How the core delivers to hosts (`Mailbox` with the API, `Direct` with a channel link): set
     /// on the core loaded at the start, kept by every rebase and refresh (`kept` in the core's
     /// `projection!`); checked before every write.
@@ -1005,9 +881,8 @@ pub struct CoordinatorRuntime {
     joined: bool,
     /// The `coordinator_row` notices (a split coordinator on Postgres; Elastic 2b Task 5).
     notices: Option<Receiver<world_store::Notice>>,
-    /// What the hosts told the login service, from committed transitions
-    /// ([`game::coordinator::Transition::login_outbox`]), not forwarded yet ([`Self::forward_login`]).
-    login_ready: Vec<game::LoginOut>,
+    /// `now_ms` of the last transition that pruned the login answers ([`LOGIN_ANSWER_PRUNE_EVERY_MS`]).
+    login_pruned_ms: Option<u64>,
     /// A refresh of the cache is due (a notice of a newer version, a held row, a stale cut).
     refresh_wanted: bool,
     /// The notices may have been missed (`Notice::Resync`, Task 5 review m1): the row's version is
@@ -1155,6 +1030,12 @@ struct Unacked {
 /// is the same order), the generation told a refused `Attach` (`Generation`), and the world's
 /// snapshots (`View`, `Calendar`, `Sites`, `SiteMarkers`). Anything else (a `SpawnPeople`, a
 /// `Directive`, an `Attached`, a cut's or a succession's order) comes with a durable change.
+///
+/// A core-less transition may also carry `login_outbox` rows (a host's [`HostMsg::Login`] changes
+/// no core): written twice the same way, each kind is idempotent at the login service — a second
+/// `SpawnAck` of an epoch finds no join waiting for it (ignored), a `KickAck` deletes the pending
+/// kicks up to its epoch (gone already), a `SessionEnded` ends the session of exactly that epoch
+/// (ended already; a newer login has a newer epoch).
 fn core_less_kind(msg: &CoordMsg) -> bool {
     matches!(
         msg,
@@ -1201,7 +1082,7 @@ impl CoordinatorRuntime {
     /// channel link: no world cuts, no successions), saving into `store` under its fence. A
     /// migrated or bootstrapped state is written by its first transition.
     fn spawn(store: StoreHandle, start: CoordinatorStart, hosts: Hosts, fenced: Fenced) -> CoordinatorThread {
-        Self::spawn_as(store, start, hosts, None, fenced, None, game::CrashPolicy::Rollback)
+        Self::spawn_as(store, start, hosts, fenced, None, game::CrashPolicy::Rollback)
     }
 
     /// [`Self::spawn`] for a world whose hosts' crashes cost `policy`: `Succession` with
@@ -1214,7 +1095,6 @@ impl CoordinatorRuntime {
         store: StoreHandle,
         start: CoordinatorStart,
         hosts: Hosts,
-        login: Option<LoginSide>,
         fenced: Fenced,
         cuts: Option<WorldCuts>,
         policy: game::CrashPolicy,
@@ -1295,7 +1175,6 @@ impl CoordinatorRuntime {
             #[cfg(feature = "test-hooks")]
             kill_at_commit: false,
             hosts,
-            login,
             delivery,
             fenced,
             #[cfg(feature = "test-hooks")]
@@ -1324,7 +1203,7 @@ impl CoordinatorRuntime {
             refresh_rx: None,
             joined: false,
             notices,
-            login_ready: Vec::new(),
+            login_pruned_ms: None,
             refresh_wanted: false,
             resync_wanted: false,
             resync_rx: None,
@@ -1421,7 +1300,6 @@ impl CoordinatorRuntime {
             }
             self.drain_hosts(now);
             self.drain_api(now);
-            self.drain_login(now);
             #[cfg(feature = "test-hooks")]
             for f in inspect.try_iter() {
                 f(&mut self.core);
@@ -1461,7 +1339,6 @@ impl CoordinatorRuntime {
                 return ServerExit::CoordinatorFailed;
             }
             self.send(out);
-            self.forward_login();
             if let Some(timeout) = stopping {
                 return self.finish(timeout);
             }
@@ -1487,9 +1364,6 @@ impl CoordinatorRuntime {
                     sel.recv(rx);
                 }
             }
-        }
-        if let Some(login) = &self.login {
-            sel.recv(&login.events);
         }
         if let Some((_, written)) = &self.writing {
             sel.recv(written);
@@ -1534,11 +1408,11 @@ impl CoordinatorRuntime {
     /// (the host's idle post, or its probe after a drop) applies nothing and is answered at once:
     /// whether the core holds the host attached as that pair. A batch opening with an `Attach` is
     /// admitted first ([`Self::admit_attach`]); one refused is answered `attached: false` at once
-    /// and nothing of it applied. A batch of an attachment this core holds DETACHED (a stalled
-    /// mailbox; the pair is exactly the newest `Attach`'s, so no newer row can hold it attached) is
-    /// answered `attached: false` at once, nothing applied: the host attaches again.
+    /// and nothing of it applied. A batch of an attachment the core holds DETACHED (a stalled
+    /// mailbox) is applied as any other: the core drops its messages (`superseded`, at apply and at
+    /// replay) and its answer says `attached: false` — the host attaches again.
     fn drain_api(&mut self, now: u64) {
-        let Hosts::Api(api) = &mut self.hosts else { return };
+        let Hosts::Api(api) = &self.hosts else { return };
         let calls: Vec<ApiCall> = api.calls.try_iter().collect();
         for call in calls {
             match call {
@@ -1563,25 +1437,23 @@ impl CoordinatorRuntime {
                             self.apply_batch(host, b, e, msgs, done, now);
                         }
                         _ => {
-                            if self.core.newest_attach(host) == Some((boot, epoch)) && self.core.attachment(host) != Some(boot) {
-                                log::debug!(
-                                    "[coordinator] host {host}'s batch of attach {epoch} (boot {boot:#x}): that attachment is detached; {} message(s) not applied",
-                                    msgs.len()
-                                );
-                                let _ = done.send(Ok(BatchAck { attached: false }));
-                                continue;
-                            }
-                            // Its messages come on the link that `Attach` opened, wherever it was
+                            // A batch of an attachment the core holds detached is dropped by the
+                            // core itself (its superseded rule, at apply and at replay) and
+                            // answered `attached: false` with the others. Its messages come on the link that `Attach` opened, wherever it was
                             // applied (another replica, or an earlier pass here).
                             self.core.link_opened(host, boot, epoch);
                             self.apply_batch(host, boot, epoch, msgs, done, now);
                         }
                     }
                 }
-                // The login service reaches the coordinator over HTTP only from Task 6 of the
-                // coordinator HTTP API plan; until then it dials the service-link login listener.
-                ApiCall::LoginOrder { done, .. } => {
-                    let _ = done.send(Err(ApiRefusal::NotReady));
+                ApiCall::LoginOrder { order, done } => {
+                    let Hosts::Api(api) = &self.hosts else { return };
+                    if api.login_held.len() >= LOGIN_ORDERS_HELD_MAX {
+                        log::warn!("[coordinator] {LOGIN_ORDERS_HELD_MAX} login orders wait for their transition: one more answered not_ready");
+                        let _ = done.send(Err(ApiRefusal::NotReady));
+                        continue;
+                    }
+                    self.issue_login_order(HeldOrder { order, done, in_write: false }, now);
                 }
             }
         }
@@ -1644,87 +1516,86 @@ impl CoordinatorRuntime {
         if refused.is_none() {
             return true;
         }
-        if let Some((b, e)) = self.core.newest_attach(host).filter(|(b, _)| *b == boot) {
+        // Only an `Attach` at least as new as the newest applied detaches it: a late POST of an
+        // older one must not end the host's current attachment.
+        if let Some((b, e)) = self.core.newest_attach(host).filter(|(b, e)| *b == boot && epoch >= *e) {
             self.core.apply(Input::HostStalled { host, boot: b, epoch: e }, now);
         }
         false
     }
 
-    /// The login service's connections and orders: an order goes to the gate host of this
-    /// moment ([`Coordinator::relay_login_order`]: a row of its mailbox with the next transition)
-    /// or, with none, is answered at once (the login service
-    /// answers 503 at its ack timeout and the client retries; a kick is resent). Only a peer
-    /// whose hello said `PeerRole::Login` is served; any other is closed.
-    fn drain_login(&mut self, now: u64) {
-        let Some(login) = self.login.as_mut() else { return };
-        while let Ok((peer, event)) = login.events.try_recv() {
-            match event {
-                LinkEvent::Up(hello) if hello.role == PeerRole::Login => {
-                    log::info!("[coordinator] the login service connected (peer {})", peer.0);
-                    login.peers.insert(peer);
-                    if !login.held.is_empty() {
-                        log::info!("[coordinator] {} login session ends held for the login service: sent", login.held.len());
-                    }
-                    for msg in std::mem::take(&mut login.held) {
-                        login.senders.send(peer, msg);
-                    }
+    /// A login order of the API, for the world's gate host of this moment
+    /// ([`Coordinator::relay_login_order`]: a row of its mailbox with the next transition), HELD
+    /// until that transition commits ([`HeldOrder`]). With no gate host anywhere it is answered at
+    /// once: a spawn, with fleet dials set, `Starting` (the join answers 503 `world_starting`, the
+    /// client waits) and this replica asks for a host ([`Input::StartWanted`], logged: written with
+    /// its next transition); otherwise `NoGate` (the join answers 503; a kick is resent by the
+    /// login service's sweeper).
+    fn issue_login_order(&mut self, held: HeldOrder, now: u64) {
+        let spawn = matches!(held.order, game::LoginOrder::Spawn { .. });
+        match self.core.relay_login_order(held.order.clone()) {
+            Some(_gate) => {
+                if let Hosts::Api(api) = &mut self.hosts {
+                    api.login_held.push(HeldOrder { in_write: false, ..held });
                 }
-                LinkEvent::Up(hello) => {
-                    log::warn!("[coordinator] login link peer {} is {:?}, not the login service: closed", peer.0, hello.role);
-                    login.senders.close(peer);
-                }
-                LinkEvent::Down(why) => {
-                    if login.peers.remove(&peer) {
-                        log::info!("[coordinator] the login service (peer {}) left: {why}", peer.0);
-                    }
-                }
-                LinkEvent::Msg(msg) if login.peers.contains(&peer) => {
-                    login.tally.orders.fetch_add(1, Ordering::SeqCst);
-                    let no_gate = crate::login_link::no_gate(&msg);
-                    let starting = crate::login_link::starting(&msg);
-                    let spawn = matches!(msg, LoginToHost::SpawnPlayer { .. });
-                    // A row of the gate host's mailbox with the next transition (never logged).
-                    match self.core.relay_login_order(crate::login_link::order_from(msg)) {
-                        Some(_gate) => {}
-                        // No host serves and the world adds its own hosts (Elastic 4 Task 8): a
-                        // spawn is answered `Starting` at once (the join answers 503
-                        // `world_starting`, the client waits) and this replica asks for a host —
-                        // a logged input, written with its next transition. A kick is resent
-                        // anyway: `NoGate`.
-                        None if spawn && self.core.fleet_dials().is_some() && self.core.login_gate() == Gate::Nobody => {
-                            login.tally.orders_dropped.fetch_add(1, Ordering::SeqCst);
-                            login.senders.send(peer, starting);
-                            self.core.apply(Input::StartWanted, now);
-                        }
-                        // No host takes logins (the gate is world-wide: no other replica has one
-                        // either): answered at once, the join answers 503 (a kick is resent).
-                        // Counted; reported once per period below.
-                        None => {
-                            login.tally.orders_dropped.fetch_add(1, Ordering::SeqCst);
-                            login.senders.send(peer, no_gate);
-                        }
-                    }
-                }
-                LinkEvent::Msg(_) => log::warn!("[coordinator] a message from login link peer {} that is not the login service: ignored", peer.0),
+            }
+            None if spawn && self.core.fleet_dials().is_some() && self.core.login_gate() == Gate::Nobody => {
+                let _ = held.done.send(Err(ApiRefusal::Starting));
+                self.core.apply(Input::StartWanted, now);
+            }
+            None => {
+                log::debug!("[coordinator] a login order with no host taking logins: answered no_gate");
+                let _ = held.done.send(Err(ApiRefusal::NoGate));
             }
         }
-        login.report(now);
     }
 
-    /// What the hosts told the login service ([`HostMsg::Login`]), from the transitions that
-    /// committed, to every connected login service, unchanged ([`LoginSide::tell`]). Never written
-    /// as `login_outbox` rows yet: login still dials this listener (until Task 6 of the
-    /// coordinator HTTP API plan).
-    fn forward_login(&mut self) {
-        let out = std::mem::take(&mut self.login_ready);
-        match self.login.as_mut() {
-            Some(login) => {
-                for answer in out {
-                    login.tell(crate::login_link::answer_from(answer));
+    /// The core this replica holds was rebased or refreshed: what it had queued is gone, the
+    /// held login orders' rows with it (those of the dropped transition too). Each is issued again
+    /// for the gate host of the new core's moment ([`Self::issue_login_order`]).
+    fn reissue_login_orders(&mut self, now: u64) {
+        let Hosts::Api(api) = &mut self.hosts else { return };
+        let held = std::mem::take(&mut api.login_held);
+        if !held.is_empty() {
+            log::debug!("[coordinator] {} login order(s) issued again after a rebase", held.len());
+        }
+        for h in held {
+            self.issue_login_order(h, now);
+        }
+    }
+
+    /// The transition just taken carries every held order's row (each was queued before it was
+    /// taken: `take_transition` routes the whole queue).
+    fn login_orders_in_write(&mut self) {
+        if let Hosts::Api(api) = &mut self.hosts {
+            for h in &mut api.login_held {
+                h.in_write = true;
+            }
+        }
+    }
+
+    /// The transition being written committed: the held orders it carried are answered `Ok` (their
+    /// rows are in the gate's mailbox).
+    fn login_orders_committed(&mut self) {
+        if let Hosts::Api(api) = &mut self.hosts {
+            for h in std::mem::take(&mut api.login_held) {
+                if h.in_write {
+                    let _ = h.done.send(Ok(()));
+                } else {
+                    api.login_held.push(h);
                 }
             }
-            None if !out.is_empty() => log::debug!("[coordinator] {} answers for a login service this coordinator does not serve: dropped", out.len()),
-            None => {}
+        }
+    }
+
+    /// The transition being written was handed back to the core (a failed or refused write, our
+    /// own lost commit met by a conflict): its rows go with the next transition, the held orders'
+    /// too.
+    fn login_orders_handed_back(&mut self) {
+        if let Hosts::Api(api) = &mut self.hosts {
+            for h in &mut api.login_held {
+                h.in_write = false;
+            }
         }
     }
 
@@ -2445,7 +2316,7 @@ impl CoordinatorRuntime {
                         self.refresh_wanted = true;
                         self.stale_refresh |= for_stale;
                     } else {
-                        self.refresh_onto(row)?;
+                        self.refresh_onto(row, now)?;
                     }
                 }
                 Ok(_) => {
@@ -2530,7 +2401,7 @@ impl CoordinatorRuntime {
     /// rebased onto it — its history kept unless the row's is newer — under the same condition
     /// as after a conflict (a write that may be in the row cannot be rebased through: its inputs
     /// would apply twice — the process stops as fenced, the next start loads the row).
-    fn refresh_onto(&mut self, row: world_store::StoredCoordinator) -> Result<(), End> {
+    fn refresh_onto(&mut self, row: world_store::StoredCoordinator, now: u64) -> Result<(), End> {
         if row.version <= self.core.version() {
             // Read before this cache's own later commit: older, never rebased onto (fix round 1).
             return Ok(());
@@ -2545,10 +2416,16 @@ impl CoordinatorRuntime {
             return Err(End::Conflict);
         }
         let history = (!row.history.is_empty()).then_some(row.history.as_slice());
-        if let Err(e) = self.core.refresh(&row.core, history, row.version) {
-            log::error!("[coordinator] the row at version {} does not load ({e}); stopping as fenced", row.version);
-            return Err(End::Conflict);
+        match self.core.refresh(&row.core, history, row.version) {
+            Ok(true) => self.reissue_login_orders(now),
+            Ok(false) => {}
+            Err(e) => {
+                log::error!("[coordinator] the row at version {} does not load ({e}); stopping as fenced", row.version);
+                return Err(End::Conflict);
+            }
         }
+        // The API's waiting mailbox polls read what the row now holds.
+        self.note_row_version(row.version);
         if history.is_some() {
             self.history_version = row.history_version;
         }
@@ -2628,6 +2505,7 @@ impl CoordinatorRuntime {
         debug_assert!(self.writing.is_none());
         debug_assert_eq!(self.core.delivery(), self.delivery, "the core's delivery is the runtime's (a rebase keeps it)");
         let Some(t) = self.core.take_transition() else { return false };
+        self.login_orders_in_write();
         if let Hosts::Api(api) = &mut self.hosts {
             // Every batch applied so far is in this transition's inputs: its commit answers them.
             api.writing_covers = api.applied;
@@ -2673,8 +2551,11 @@ impl CoordinatorRuntime {
         // `Delivery::Direct`. Under `Delivery::Mailbox` a transition that changed nothing durable
         // (`t.core_changed` false: rows, drops, login answers or unmarked decisions only) is
         // written WITHOUT a core — the compare-and-set bumps the version, the row's core stays.
-        // The login answers are sent on the login listener once it committed, never written as
-        // rows (until Task 6 of the coordinator HTTP API plan).
+        // The login answers are `login_outbox` rows (`login_api::HostToLogin`, encoded), read by
+        // the login service from any replica — under `Mailbox` only: role `all` serves the login
+        // service itself (`login_link.rs`; its host sends no `HostMsg::Login`), and SQLite has no
+        // `login_outbox`. The ticker's transitions prune the answers older than
+        // [`LOGIN_ANSWER_TTL_MS`], at most once per [`LOGIN_ANSWER_PRUNE_EVERY_MS`].
         //
         // Rows are inserted in this vector's order, after every drop (the store deletes the drops'
         // hosts' rows first). A transition handed back after a failed write puts its rows ahead of
@@ -2691,6 +2572,26 @@ impl CoordinatorRuntime {
             .iter()
             .map(|o| (o.host, o.boot, game::encode_packet(&o.msg).expect("a coordinator message encodes")))
             .collect();
+        let mailbox = self.delivery == Delivery::Mailbox;
+        let login_outbox: Vec<Vec<u8>> = if mailbox {
+            t.login_outbox
+                .iter()
+                .map(|o| game::encode_packet(&crate::login_link::answer_from(o.clone())).expect("a login answer encodes"))
+                .collect()
+        } else {
+            if !t.login_outbox.is_empty() {
+                log::debug!("[coordinator] {} login answer(s) with no login service reading this coordinator: dropped", t.login_outbox.len());
+            }
+            Vec::new()
+        };
+        let now = self.now_ms();
+        let login_prune_before_ms = (mailbox
+            && self.core.is_ticker()
+            && self.login_pruned_ms.is_none_or(|at| now >= at + LOGIN_ANSWER_PRUNE_EVERY_MS))
+        .then(|| {
+            self.login_pruned_ms = Some(now);
+            now.saturating_sub(LOGIN_ANSWER_TTL_MS)
+        });
         let w = TransitionWrite {
             version: self.core.version(),
             core: (!core_less).then(|| t.core.clone()),
@@ -2699,6 +2600,8 @@ impl CoordinatorRuntime {
             replica: self.core.replica(),
             outbox,
             outbox_drop: t.outbox_drop.clone(),
+            login_outbox,
+            login_prune_before_ms,
             ..Default::default()
         };
         let written = self.store.write_transition_later(w);
@@ -2801,8 +2704,9 @@ impl CoordinatorRuntime {
                     self.core.apply(Input::Decision(a), now);
                 }
                 self.after.extend(w.after_commit.into_iter().map(|a| AfterJob { a, rx: None, retry_at: now }));
-                // Durable now: the login answers it holds go to the login service.
-                self.login_ready.extend(t.login_outbox);
+                // Durable now: the login orders whose rows it carried are answered (the login
+                // answers it held are `login_outbox` rows, read by the login service).
+                self.login_orders_committed();
                 // The API's batches it covers are answered (from the core as it stands now, its
                 // decisions' answers applied), and the waiting mailbox polls read its rows.
                 self.note_row_version(w.version);
@@ -2839,12 +2743,11 @@ impl CoordinatorRuntime {
                         self.core.set_version(row.version);
                         self.history_version = row.history_version;
                         self.core.transition_refused(t);
+                        self.login_orders_handed_back();
                         if let Some(shape) = committed {
-                            // Its mailbox rows and drops are in the store already: not applied
-                            // twice. Its login answers committed: sent now (never written as rows
-                            // until Task 6 of the coordinator HTTP API plan).
-                            let answers = self.core.outbox_committed(shape);
-                            self.login_ready.extend(answers);
+                            // Its mailbox rows, drops and login answers are in the store already:
+                            // not written twice.
+                            let _ = self.core.outbox_committed(shape);
                         }
                         self.retry_at_ms = now;
                         Settled::Held { now: true }
@@ -2888,6 +2791,8 @@ impl CoordinatorRuntime {
             log::error!("[coordinator] write conflict: the row at version {} does not load ({e}); stopping as fenced", row.version);
             return Settled::End(End::Conflict);
         }
+        // The dropped transition's login order rows, and those queued since, are decided again.
+        self.reissue_login_orders(now);
         self.history_version = row.history_version;
         self.conflicts_in_a_row += 1;
         log::warn!(
@@ -2917,6 +2822,7 @@ impl CoordinatorRuntime {
             // did commit: only messages a host takes twice without harm are core-less,
             // [`core_less_kind`]). Its unmarked decisions are idempotent in the store.
             self.core.transition_failed(t);
+            self.login_orders_handed_back();
             return self.held_back(why, now);
         }
         if self.unacked.len() == COORDINATOR_UNACKED_MAX {
@@ -2924,6 +2830,7 @@ impl CoordinatorRuntime {
         }
         self.unacked.push_back(Unacked { hash: core_hash(&t.core), shape: t.shape() });
         self.core.transition_failed(t);
+        self.login_orders_handed_back();
         self.held_back(why, now)
     }
 
@@ -2932,6 +2839,7 @@ impl CoordinatorRuntime {
     /// in the row; the next write after [`COORDINATOR_SAVE_RETRY_MS`].
     fn refused(&mut self, t: game::coordinator::Transition, why: &str, now: u64) -> Settled {
         self.core.transition_refused(t);
+        self.login_orders_handed_back();
         self.held_back(why, now)
     }
 
@@ -3047,7 +2955,6 @@ impl CoordinatorRuntime {
         // Nothing durable pending (all written): what was decided with no durable change leaves too.
         out.extend(self.core.take_out());
         self.send(out);
-        self.forward_login();
         self.down(ApiRefusal::NotReady);
         ServerExit::Clean
     }
@@ -3085,8 +2992,8 @@ impl CoordinatorRuntime {
     }
 
     /// Every host's link goes down: a channel link's end says so; the API refuses everything
-    /// with `why` (`Fenced` for a fenced end, `NotReady` for a stop), every batch still waiting
-    /// is answered so, and the listener stops (its port freed). The login listener stops too.
+    /// with `why` (`Fenced` for a fenced end, `NotReady` for a stop), every batch and held login
+    /// order still waiting is answered so, and the listener stops (its port freed).
     fn down(&mut self, why: ApiRefusal) {
         match &mut self.hosts {
             Hosts::Channels(hosts) => {
@@ -3112,9 +3019,6 @@ impl CoordinatorRuntime {
                 }
                 drop(api.listener.take());
             }
-        }
-        if let Some(login) = self.login.as_mut() {
-            drop(login.listener.take());
         }
     }
 }

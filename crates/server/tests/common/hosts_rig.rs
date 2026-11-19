@@ -585,9 +585,9 @@ impl World {
     }
 }
 
-/// A coordinator process as `run_coordinator` starts it: serving its HTTP API to hosts (its pin
-/// in `cert`) and listening for the login service (Elastic 1 Task 6: its pin beside, `login-link.cert-sha256`;
-/// `ListeningCoordinator::login` names where to dial), world cuts `cuts`, crash policy `policy`.
+/// A coordinator process as `run_coordinator` starts it: serving its HTTP API to hosts and the
+/// login service (its pin in `cert`; `ListeningCoordinator::url` names where to call), world
+/// cuts `cuts`, crash policy `policy`.
 fn listening_coordinator(
     store: StoreHandle,
     start: server::world_file::CoordinatorStart,
@@ -596,11 +596,6 @@ fn listening_coordinator(
     fenced: server::claims::Fenced,
     policy: game::CrashPolicy,
 ) -> server::coordinator_rt::ListeningCoordinator {
-    let login = server::coordinator_rt::LoginListen {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        token: TOKEN.into(),
-        cert_hash_file: Some(cert.with_file_name("login-link.cert-sha256")),
-    };
     server::coordinator_rt::start_listening_as(
         store,
         start,
@@ -611,7 +606,6 @@ fn listening_coordinator(
         Some(cuts),
         policy,
         RIG_WORLD,
-        Some(login),
     )
     .expect("the coordinator listens")
 }

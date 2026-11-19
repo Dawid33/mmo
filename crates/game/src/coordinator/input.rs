@@ -51,7 +51,11 @@
 //! link up of a host process), every logged host message carries the `(boot, epoch)` of the
 //! `Attach` its link opened with on this replica ([`Logged::link`]), and a message of an older
 //! link of the same boot is dropped — at its first apply and at a replay, and out of the log: the
-//! newer `Attach` re-reported everything, and the host resends what was never answered.
+//! newer `Attach` re-reported everything, and the host resends what was never answered. So is a
+//! message of the newest link itself while that attachment is DETACHED (a stall, an end, an older
+//! generation's): a detached pair is never attached again (a re-`Attach` raises the epoch), so
+//! the rule reads the same at the first apply and at a replay — a batch posted to a replica whose
+//! cache had not seen the detach is dropped where the replay meets it.
 
 use crate::{CutId, HostId, Succession, Tick};
 use crate::history::persist::HistoryLoadError;
@@ -211,9 +215,12 @@ impl Coordinator {
 
     /// Whether `input` is a message of host `h` that came on a link older than the newest
     /// `Attach` of the same boot the projection holds (`link`: the `Attach` its link opened with;
-    /// an `Attach` is its own): dropped, with a log line (final review G-I1, the module notes). A
-    /// message of another boot is never dropped here (host ids are never reused: only the solo
-    /// host's process restarts under one id, with one replica).
+    /// an `Attach` is its own), or — not an `Attach` — on exactly that newest link while the host
+    /// is DETACHED (a stall, an end, an older generation: a detached pair is never attached again,
+    /// a re-`Attach` raises the epoch): dropped, with a log line (final review G-I1, the module
+    /// notes). Both hold at the first apply and at a replay. A message of another boot is never
+    /// dropped here (host ids are never reused: only the solo host's process restarts under one
+    /// id, with one replica).
     pub(super) fn superseded(&self, input: &Input, link: Option<LinkStamp>) -> bool {
         let Input::Host { host, msg } = input else { return false };
         let Some((boot, newest)) = self.newest_attach(*host) else { return false };
@@ -226,8 +233,15 @@ impl Coordinator {
                 "coordinator: host {host}'s message of its link opened by attach {:?} is superseded by its attach {newest} (boot {boot}): dropped",
                 link.map(|(_, e)| e)
             );
+            return true;
         }
-        older
+        let detached = !matches!(msg, HostMsg::Attach { .. })
+            && link == Some((boot, newest))
+            && self.attachment(*host) != Some(boot);
+        if detached {
+            log::debug!("coordinator: host {host}'s message of its attach {newest} (boot {boot:#x}): that attachment is detached: dropped");
+        }
+        detached
     }
 
     /// One input, applied (first, or again at a rebase) at `now_ms` lifted to the projection's

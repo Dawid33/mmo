@@ -1,79 +1,88 @@
-//! The login service's side of the worlds' service links (`svc-link`, role `Login`):
-//! [`HostLinks`] keeps, per world whose registry row names a `host_link`, one [`LinkDialer`]
-//! per address that link names — a world's coordinator replicas (split roles; each relays to
-//! a gate host of its own and back; Elastic 2b), or a role-`all` server. `host_link` may name
-//! several (a comma list, or a DNS name with several answers); it is re-resolved at every join
-//! and every kick sweep: a new address is dialled, a gone one's link retired. Each hello names
-//! the row's `world_id`. The service pushes [`LoginToHost::SpawnPlayer`] on a join (and waits
-//! for its ack) and [`LoginToHost::Kick`] on revocation, and records
-//! [`HostToLogin::SessionEnded`].
+//! The login service's side of the worlds' coordinator API (HTTPS, HTTP/2; the coordinator's
+//! `coordinator_api.rs`, or a role-`all` server's own login routes): [`WorldClients`] keeps, per
+//! world whose registry row names a `host_link`, ONE pinned client and ONE standing poll of the
+//! world's answers.
 //!
-//! An order goes out on ONE link (the first up one, in the row's order). A replica with no
-//! gate host of its own answers [`HostToLogin::NoGate`] at once, and the order moves to the
-//! next link; every link `NoGate` = no host takes logins (the join answers 503). A replica
-//! whose world has no host taking logins on ANY replica, and adds its own hosts, answers
-//! [`HostToLogin::Starting`] (Elastic 4): the join ends at once with [`SpawnError::Starting`]
-//! (503 `world_starting`; no other link is tried — none has a gate). Acks are
-//! matched by `(player_token, session_epoch)` on ANY link of the world (an order's answer may
-//! come back through another replica): epochs only grow, so a late ack for an epoch that
-//! already answered 503 never completes a later join.
+//! - `host_link` is a URL or a comma list of URLs (`https://coordinator.<ns>.svc.cluster.local:6480`;
+//!   a dev world with several coordinator replicas lists each); `host_link_cert` is the
+//!   coordinator's pin (`svc_link::pinned_http2_client`). A failed request moves to the next URL.
+//! - **Orders**: a join POSTs [`LoginToHost::SpawnPlayer`] to [`PATH_COORD_LOGIN_ORDERS`] — 202
+//!   once its row is committed in the gate host's mailbox — and waits for the
+//!   [`HostToLogin::SpawnAck`] matched by `(player_token, session_epoch)`, all within
+//!   [`SPAWN_ACK_TIMEOUT_MS`]. A 503 [`COORD_REFUSED_STARTING`] ends it at once with
+//!   [`SpawnError::Starting`] (503 `world_starting`), a 503 [`COORD_REFUSED_NO_GATE`] with
+//!   [`SpawnError::NoGate`] (503); a transport failure is tried once more on the next URL. Epochs
+//!   only grow, so a late ack for an epoch that already answered 503 never completes a later join.
+//! - **Answers**: one task per world long-polls [`PATH_COORD_LOGIN_ANSWERS`] from a cursor kept in
+//!   memory, starting at 0 when the world's client is made (first use, or the kick sweeper for a
+//!   world with pending kicks): the coordinator keeps its answers (`login_outbox`) for ten
+//!   minutes, and every login pod reads all of them — an answer may come back through another
+//!   replica, and another login pod may have sent the order. A restarted pod reads them all
+//!   again, so every kind is idempotent here: a `SpawnAck` nobody waits for is ignored, a
+//!   [`HostToLogin::KickAck`] deletes the pending kicks up to its epoch (deleted already: nothing),
+//!   a [`HostToLogin::SessionEnded`] ends the session of exactly that epoch (ended already:
+//!   nothing; a newer login has a newer epoch). The poll never ends while the world's client
+//!   lives: a failure waits [`ANSWERS_RETRY_MIN_MS`] … [`ANSWERS_RETRY_MAX_MS`] (doubling) and
+//!   tries the next URL.
 //!
-//! The dialers are crossbeam (sync); the HTTP handlers are async. Each link has a pump thread
-//! that turns the dialer's events into a `watch` of "up" and answers for the waiting joins, so
-//! no handler ever blocks the runtime.
+//! Delivery is at-least-once: the hosts treat a repeated epoch as the same order (re-ack,
+//! nothing parked again).
 //!
-//! Delivery is at-least-once around reconnects (`svc-link`): a join resends its spawn order
-//! when its link drops before the ack (on whichever link is up then), and the hosts treat a
-//! repeated epoch as the same order (re-ack, nothing parked again).
-//!
-//! **Kicks are durable** (revocation must not fail open): a logout-everywhere / password
-//! reset queues them in `pending_kicks` in the revocation's own transaction
-//! ([`LoginStore::revoke_account_with_kicks`]), and the kick sweeper ([`HostLinks::start`])
-//! sends every pending kick on each link `Up`, and again every [`KICK_RESEND_MS`] while up,
-//! until a [`HostToLogin::KickAck`] (on any link of its world) deletes it. Each kick goes on one
-//! up link: the first that has not answered it `NoGate` (a `NoGate` wakes the sweeper, so it
-//! moves to the next at once; once every up link said `NoGate`, a new round starts at most every
-//! [`KICK_RESEND_MS`]). Which link is only in memory: the kick itself stays in the store. A kick
-//! revokes up to an epoch, so a resend is harmless (the host applies it once, and never to a
-//! newer login). The sweeper also dials the links of worlds with pending kicks, so kicks queued
-//! by the admin ctl (another process) or before a restart go out too.
-//!
-//! `SessionEnded` is best effort: a replica holds the ones its hosts send while no login
-//! service is linked to IT (a bounded queue), and one lost past that leaves the session open in
-//! the registry (a later kick for it is a no-op on the host).
+//! **Kicks are durable** (revocation must not fail open): a logout-everywhere queues them in
+//! `pending_kicks` in the revocation's own transaction
+//! ([`LoginStore::revoke_account_with_kicks`]), and the kick sweeper ([`WorldClients::start`])
+//! POSTs every pending kick every [`KICK_RESEND_MS`] (and when woken) until a
+//! [`HostToLogin::KickAck`] deletes it. A kick revokes up to an epoch, so a resend is harmless
+//! (the host applies it once, and never to a newer login). The sweeper also makes the clients of
+//! worlds with pending kicks, so kicks queued by the admin ctl (another process) or before a
+//! restart go out and their acks are read.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
-use crossbeam::channel::{Receiver, Sender};
-use login_api::{HostToLogin, LoginToHost, SPAWN_ACK_TIMEOUT_MS};
-use svc_link::{LinkDialer, LinkEvent, LinkHello, LinkTarget, PeerRole};
-use tokio::sync::{Notify, mpsc, watch};
-
-/// How often pending kicks are resent while their link is up (and new ones looked for).
-pub const KICK_RESEND_MS: u64 = 2000;
-/// A kick the host never acknowledges is dropped (with a warning) after this long.
-pub const PENDING_KICK_TTL_SECS: u64 = 86_400;
+use login_api::{
+    COORD_REFUSED_NO_GATE, COORD_REFUSED_STARTING, HEADER_COORD_LINK_VERSION, HEADER_COORD_WORLD, HostToLogin, LoginPage,
+    LoginToHost, PATH_COORD_LOGIN_ANSWERS, PATH_COORD_LOGIN_ORDERS, SPAWN_ACK_TIMEOUT_MS,
+};
+use reqwest::StatusCode;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use tokio::sync::{Notify, oneshot};
 
 use crate::metrics::Metrics;
 use crate::{LoginStore, WorldRow};
 
-/// Why a spawn order was not acknowledged (the join answers 503 `WorldUnavailable`).
+/// How often pending kicks are posted again (and new ones looked for).
+pub const KICK_RESEND_MS: u64 = 2000;
+/// A kick the host never acknowledges is dropped (with a warning) after this long.
+pub const PENDING_KICK_TTL_SECS: u64 = 86_400;
+/// The wait an answers poll asks for (the coordinator caps it at its own `MAILBOX_WAIT_MS`).
+pub const ANSWERS_WAIT_MS: u64 = 20_000;
+/// One answers poll may take this much longer than its wait before it counts as failed.
+pub const ANSWERS_POLL_SLACK_MS: u64 = 10_000;
+/// After a failed answers poll the next waits this long, doubling up to [`ANSWERS_RETRY_MAX_MS`].
+pub const ANSWERS_RETRY_MIN_MS: u64 = 250;
+pub const ANSWERS_RETRY_MAX_MS: u64 = 5000;
+/// One kick's POST may take this long.
+pub const KICK_POST_TIMEOUT_MS: u64 = SPAWN_ACK_TIMEOUT_MS;
+
+/// Why a spawn order was not acknowledged (the join answers 503).
 #[derive(Debug, PartialEq, Eq)]
 pub enum SpawnError {
     /// This login service has no service token (`VOXEL_SERVICE_TOKEN[_FILE]`).
     NoServiceToken,
-    /// The registry row's `host_link` / `host_link_cert` is unusable (or names no address).
+    /// The registry row's `host_link` / `host_link_cert` is unusable.
     BadLink(String),
     /// The host answered `ok: false` (it could not take the order).
     Refused,
-    /// No ack within [`SPAWN_ACK_TIMEOUT_MS`] (the links are down or the host is slow), or
-    /// every replica answered `NoGate` (no host of the world takes logins).
+    /// No ack within [`SPAWN_ACK_TIMEOUT_MS`] (the coordinator unreachable or refusing, or the
+    /// host slow).
     Timeout,
-    /// A replica answered `Starting` (Elastic 4): no host of the world takes logins and it
-    /// asked for one — the join answers 503 `world_starting` and the client repeats it.
+    /// No host of the world takes logins (503 `no_gate`): the join answers 503.
+    NoGate,
+    /// No host takes logins and the world is starting one (Elastic 4; 503 `world_starting`): the
+    /// join answers 503 `world_starting` and the client repeats it.
     Starting,
 }
 
@@ -83,7 +92,8 @@ impl std::fmt::Display for SpawnError {
             SpawnError::NoServiceToken => write!(f, "no service token (set VOXEL_SERVICE_TOKEN or VOXEL_SERVICE_TOKEN_FILE)"),
             SpawnError::BadLink(why) => write!(f, "bad host link: {why}"),
             SpawnError::Refused => write!(f, "the host refused the spawn order"),
-            SpawnError::Timeout => write!(f, "no ack within {SPAWN_ACK_TIMEOUT_MS} ms (or no replica has a gate host)"),
+            SpawnError::Timeout => write!(f, "no ack within {SPAWN_ACK_TIMEOUT_MS} ms"),
+            SpawnError::NoGate => write!(f, "no host of the world takes logins"),
             SpawnError::Starting => write!(f, "the world is starting a host (no host takes logins)"),
         }
     }
@@ -105,112 +115,265 @@ impl SpawnPlace {
     }
 }
 
-/// What a link's pump tells a waiting join.
+/// The URLs of a `host_link` (a URL or a comma list of them), in order; each must be `https://`.
+pub fn link_urls(link: &str) -> Result<Vec<String>, String> {
+    let urls: Vec<String> =
+        link.split(',').map(str::trim).filter(|u| !u.is_empty()).map(|u| u.trim_end_matches('/').to_string()).collect();
+    if urls.is_empty() {
+        return Err("names no URL".into());
+    }
+    for url in &urls {
+        let Some(rest) = url.strip_prefix("https://") else {
+            return Err(format!(
+                "{url:?} is not a URL: the link is the world coordinator's HTTPS API, e.g. https://coordinator.<ns>.svc.cluster.local:6480 \
+                 (a comma list for several replicas)"
+            ));
+        };
+        if rest.is_empty() || rest.contains('/') {
+            return Err(format!("{url:?}: expected https://host:port, without a path"));
+        }
+    }
+    Ok(urls)
+}
+
+/// Why one request failed.
+enum Failure {
+    /// It did not complete (connect, TLS, timeout): the next URL is tried.
+    Transport(String),
+    /// A non-success answer (status, the start of its body).
+    Status(StatusCode, String),
+    /// A body that does not decode.
+    Body(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Transport(e) => write!(f, "{e}"),
+            Failure::Status(s, body) if matches!(*s, StatusCode::UNAUTHORIZED | StatusCode::PRECONDITION_FAILED) => write!(
+                f,
+                "{s} {body}: the coordinator refused this login service's configuration (the service token, the world id, or \
+                 the build)"
+            ),
+            Failure::Status(s, body) => write!(f, "{s} {body}"),
+            Failure::Body(e) => write!(f, "undecodable answer: {e}"),
+        }
+    }
+}
+
+/// What a join waits for.
 enum Answer {
-    /// The order's ack (from any link of the world).
     Ack(bool, SpawnPlace),
-    /// The replica at this address has no gate host: it relayed nothing.
-    NoGate(SocketAddr),
-    /// No host takes logins on any replica, and the world is starting one (Elastic 4).
-    Starting,
 }
 
-/// Where a pending kick goes next ([`Linked::kick_link`]): the links that answered it
-/// `NoGate` this round, and when the current round began.
-#[derive(Default)]
-struct KickRoute {
-    said_no: BTreeSet<SocketAddr>,
-    round_at: Option<Instant>,
-}
-
-/// What a world's links share with their pumps (and the joins that hold a [`Linked`]).
-struct WorldShared {
+/// One world's client: its URLs, its pinned client, the joins waiting for answers.
+struct WorldClient {
     world: String,
-    /// The joins waiting for an answer, by `(player_token, session_epoch)`: any link's ack.
-    waiters: Mutex<BTreeMap<(String, u64), mpsc::UnboundedSender<Answer>>>,
-    /// The pending kicks sent, by `(player_token, session_epoch)`.
-    kick_routes: Mutex<BTreeMap<(String, u64), KickRoute>>,
-    /// Bumped whenever a link of the world goes up or down.
-    changed: watch::Sender<u64>,
-    /// Each current link's state, for the world's gauge (up while any link is).
-    states: Mutex<BTreeMap<SocketAddr, bool>>,
-}
-
-impl WorldShared {
-    fn changed(&self) {
-        self.changed.send_modify(|v| *v = v.wrapping_add(1));
-    }
-
-    /// Set the world's gauge from the current links' states.
-    fn report(&self, states: &BTreeMap<SocketAddr, bool>, metrics: &Metrics) {
-        metrics.host_link(&self.world, states.values().any(|up| *up));
-    }
-}
-
-/// One replica's link: the dialer's sender and whether it is up.
-struct HostLink {
-    addr: SocketAddr,
-    tx: Sender<LoginToHost>,
-    up: watch::Receiver<bool>,
-    /// Whether this is still one of the world's links; its pump reports only while it is.
-    /// Held across the check and the write, so a retirement cannot interleave.
-    current: Arc<Mutex<bool>>,
-}
-
-impl HostLink {
-    fn is_up(&self) -> bool {
-        *self.up.borrow()
-    }
-}
-
-/// One world's links: the addresses its row resolved to (in the row's order) and a link per
-/// address.
-struct WorldLinks {
-    /// The row's `host_link` and `host_link_cert` they were made for.
+    /// The row's `host_link` and `host_link_cert` it was made for.
     target: String,
     cert: String,
-    addrs: Vec<SocketAddr>,
-    links: BTreeMap<SocketAddr, Arc<HostLink>>,
-    shared: Arc<WorldShared>,
+    urls: Vec<String>,
+    /// The URL in use (a failed request moves to the next).
+    url: AtomicUsize,
+    client: reqwest::Client,
+    token: String,
+    /// The joins waiting for an answer, by `(player_token, session_epoch)`.
+    waiters: Mutex<BTreeMap<(String, u64), oneshot::Sender<Answer>>>,
+    /// Each URL's last request: whether it was answered.
+    states: Mutex<BTreeMap<String, bool>>,
 }
 
-/// A world's links at one moment, in the row's order (what a join or a sweep works with).
-struct Linked {
-    shared: Arc<WorldShared>,
-    links: Vec<Arc<HostLink>>,
-}
+impl WorldClient {
+    fn url(&self) -> String {
+        self.urls[self.url.load(Ordering::SeqCst) % self.urls.len()].clone()
+    }
 
-impl Linked {
-    /// The link the pending kick `key` goes on now: the first up link that has not answered it
-    /// `NoGate` this round; once every up link has, a new round — at most one per
-    /// [`KICK_RESEND_MS`] (`None` meanwhile, and while no link is up).
-    fn kick_link(&self, key: (String, u64), now: Instant) -> Option<Arc<HostLink>> {
-        let up: Vec<&Arc<HostLink>> = self.links.iter().filter(|l| l.is_up()).collect();
-        let first = (*up.first()?).clone();
-        let mut routes = self.shared.kick_routes.lock().unwrap_or_else(|p| p.into_inner());
-        let route = routes.entry(key).or_default();
-        if let Some(link) = up.iter().find(|l| !route.said_no.contains(&l.addr)) {
-            return Some((*link).clone());
+    /// `used` failed: the next URL, unless another request moved on already.
+    fn failed(&self, used: &str) {
+        let at = self.url.load(Ordering::SeqCst);
+        if self.urls[at % self.urls.len()] == used {
+            let _ = self.url.compare_exchange(at, (at + 1) % self.urls.len(), Ordering::SeqCst, Ordering::SeqCst);
         }
-        if route.round_at.is_some_and(|at| now.duration_since(at) < Duration::from_millis(KICK_RESEND_MS)) {
-            return None;
+    }
+
+    fn note(&self, url: &str, answered: bool) {
+        self.states.lock().unwrap_or_else(|p| p.into_inner()).insert(url.to_string(), answered);
+    }
+
+    fn headers(&self) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", self.token)) {
+            h.insert(AUTHORIZATION, v);
         }
-        route.said_no.clear();
-        route.round_at = Some(now);
-        Some(first)
+        if let Ok(v) = HeaderValue::from_str(&self.world) {
+            h.insert(HEADER_COORD_WORLD, v);
+        }
+        h.insert(HEADER_COORD_LINK_VERSION, HeaderValue::from(svc_link::LINK_PROTOCOL_VERSION));
+        h.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+        h
+    }
+
+    /// POST `order` to `url` within `timeout`.
+    async fn post_at(&self, url: &str, order: &LoginToHost, timeout: Duration) -> Result<(), Failure> {
+        let body = game::encode_packet(order).map_err(|e| Failure::Body(format!("encode: {e}")))?;
+        let resp = self
+            .client
+            .post(format!("{url}{PATH_COORD_LOGIN_ORDERS}"))
+            .headers(self.headers())
+            .timeout(timeout)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| Failure::Transport(svc_link::error_chain(&e)))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|e| Failure::Transport(svc_link::error_chain(&e)))?;
+        if status == StatusCode::ACCEPTED {
+            return Ok(());
+        }
+        Err(Failure::Status(status, String::from_utf8_lossy(&bytes).chars().take(64).collect()))
+    }
+
+    /// POST `order` within `budget`: on a transport failure, or a 503 of a replica that does not
+    /// serve (`not_ready`, `fenced`), once more on the next URL.
+    async fn post(&self, order: &LoginToHost, budget: Duration) -> Result<(), Failure> {
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let url = self.url();
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let result = self.post_at(&url, order, left).await;
+            let replica_only = match &result {
+                Ok(()) => false,
+                Err(Failure::Transport(_)) => true,
+                Err(Failure::Status(s, body)) => *s == StatusCode::SERVICE_UNAVAILABLE && (body == "not_ready" || body == "fenced"),
+                Err(_) => false,
+            };
+            self.note(&url, !matches!(result, Err(Failure::Transport(_))));
+            if replica_only {
+                self.failed(&url);
+            }
+            if !replica_only || tries >= 2 || tokio::time::Instant::now() >= deadline {
+                return result;
+            }
+        }
+    }
+
+    /// GET one page of answers past `after` from `url`.
+    async fn answers(&self, url: &str, after: u64) -> Result<LoginPage, Failure> {
+        let resp = self
+            .client
+            .get(format!("{url}{PATH_COORD_LOGIN_ANSWERS}?after={after}&wait_ms={ANSWERS_WAIT_MS}"))
+            .headers(self.headers())
+            .timeout(Duration::from_millis(ANSWERS_WAIT_MS + ANSWERS_POLL_SLACK_MS))
+            .send()
+            .await
+            .map_err(|e| Failure::Transport(svc_link::error_chain(&e)))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|e| Failure::Transport(svc_link::error_chain(&e)))?;
+        if status != StatusCode::OK {
+            return Err(Failure::Status(status, String::from_utf8_lossy(&bytes).chars().take(64).collect()));
+        }
+        game::decode_packet::<LoginPage>(&bytes).map_err(|e| Failure::Body(e.to_string()))
     }
 }
 
-/// The links to the worlds' coordinator replicas (or role-`all` servers), by world id. Shared
-/// by every handler.
-pub struct HostLinks {
+/// What a world's answers poll needs besides its client.
+#[derive(Clone)]
+struct PollCtx {
+    store: LoginStore,
+    clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    metrics: Metrics,
+}
+
+/// The standing poll of `world`'s answers, from cursor 0, for as long as its client lives (the
+/// map's entry, or a join holding it).
+async fn poll_answers(world: Weak<WorldClient>, ctx: PollCtx) {
+    let mut after = 0u64;
+    let mut backoff = ANSWERS_RETRY_MIN_MS;
+    let mut up: Option<bool> = None;
+    loop {
+        let Some(w) = world.upgrade() else { return };
+        let url = w.url();
+        let page = w.answers(&url, after).await;
+        let id = w.world.clone();
+        match page {
+            Ok(page) => {
+                backoff = ANSWERS_RETRY_MIN_MS;
+                w.note(&url, true);
+                if up != Some(true) {
+                    log::info!("[login] world {id}: reading its answers at {url}");
+                    ctx.metrics.host_link(&id, true);
+                    up = Some(true);
+                }
+                // The page's last row is the cursor (rows come in order; a cursor past every row
+                // the coordinator kept — a re-forged world — is answered from the start).
+                if let Some((last, _)) = page.rows.last() {
+                    after = *last;
+                }
+                for (_, msg) in page.rows {
+                    handle(&w, &ctx, msg).await;
+                }
+            }
+            Err(f) => {
+                if matches!(f, Failure::Transport(_)) {
+                    w.failed(&url);
+                }
+                w.note(&url, !matches!(f, Failure::Transport(_)));
+                if up != Some(false) {
+                    log::warn!("[login] world {id}: its answers cannot be read at {url}: {f} (retrying)");
+                    ctx.metrics.host_link(&id, false);
+                    up = Some(false);
+                }
+                drop(w);
+                tokio::time::sleep(Duration::from_millis(backoff)).await;
+                backoff = (backoff * 2).min(ANSWERS_RETRY_MAX_MS);
+            }
+        }
+    }
+}
+
+/// One answer of `w`'s world: an ack to its join, a kick ack or a session end into the store.
+async fn handle(w: &WorldClient, ctx: &PollCtx, msg: HostToLogin) {
+    let world = &w.world;
+    match msg {
+        HostToLogin::SpawnAck { player_token, session_epoch, ok, quic, webtransport, cert_hash } => {
+            let waiter = w.waiters.lock().unwrap_or_else(|p| p.into_inner()).remove(&(player_token, session_epoch));
+            match waiter {
+                Some(tx) => {
+                    let _ = tx.send(Answer::Ack(ok, SpawnPlace { quic, webtransport, cert_hash }));
+                }
+                // Answered already (a resend's second ack), given up on (503), another login pod's
+                // join, or read again from the start.
+                None => log::debug!("[login] world {world}: ack for epoch {session_epoch} nobody here waits for"),
+            }
+        }
+        HostToLogin::KickAck { player_token, session_epoch } => match ctx.store.kick_acked(world, &player_token, session_epoch).await {
+            Ok(true) => log::info!("[login] world {world}: kick (epoch {session_epoch}) acknowledged"),
+            Ok(false) => {}
+            Err(e) => log::error!("[login] world {world}: recording a kick ack: {e}"),
+        },
+        HostToLogin::SessionEnded { player_token, session_epoch } => {
+            let now = i64::try_from((ctx.clock)()).unwrap_or(i64::MAX);
+            if let Err(e) = ctx.store.end_session(world, &player_token, session_epoch, now).await {
+                log::error!("[login] world {world}: recording a session end: {e}");
+            }
+        }
+        // Unsent since link protocol 12 (the API answers 503 instead).
+        HostToLogin::NoGate { session_epoch, .. } | HostToLogin::Starting { session_epoch, .. } => {
+            log::debug!("[login] world {world}: an old-style refusal for epoch {session_epoch}: ignored")
+        }
+    }
+}
+
+/// The clients of the worlds' coordinator APIs, by world id. Shared by every handler.
+pub struct WorldClients {
     token: Option<String>,
     store: LoginStore,
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     ack_timeout: Duration,
-    links: Mutex<BTreeMap<String, WorldLinks>>,
-    /// Wakes the kick sweeper: a link came up, kicks were queued, or a replica answered one
-    /// `NoGate`.
+    worlds: Mutex<BTreeMap<String, Arc<WorldClient>>>,
+    /// Wakes the kick sweeper: kicks were queued.
     kicks: Arc<Notify>,
     /// Per world, why its kicks cannot be sent (as last logged): the sweeper warns once per
     /// change, not every round.
@@ -218,41 +381,48 @@ pub struct HostLinks {
     metrics: Metrics,
 }
 
-impl HostLinks {
-    /// Links that dial with the service `token` (`None`: every world with a `host_link` is
-    /// unavailable). `store` records `SessionEnded`; `clock` is seconds since the Unix epoch.
-    pub fn new(token: Option<String>, store: LoginStore, clock: Arc<dyn Fn() -> u64 + Send + Sync>) -> HostLinks {
-        HostLinks {
+impl WorldClients {
+    /// Clients that call with the service `token` (`None`: every world with a `host_link` is
+    /// unavailable). `store` records kick acks and session ends; `clock` is seconds since the
+    /// Unix epoch.
+    pub fn new(token: Option<String>, store: LoginStore, clock: Arc<dyn Fn() -> u64 + Send + Sync>) -> WorldClients {
+        WorldClients {
             token,
             store,
             clock,
             ack_timeout: Duration::from_millis(SPAWN_ACK_TIMEOUT_MS),
-            links: Mutex::default(),
+            worlds: Mutex::default(),
             kicks: Arc::new(Notify::new()),
             kick_blocked: Mutex::default(),
             metrics: Metrics::new(),
         }
     }
 
-    /// Report link state and pending kicks to `metrics` (before links are dialed).
-    pub fn with_metrics(mut self, metrics: Metrics) -> HostLinks {
+    /// Report the worlds' answer polls and pending kicks to `metrics` (before any client is made).
+    pub fn with_metrics(mut self, metrics: Metrics) -> WorldClients {
         self.metrics = metrics;
         self
     }
 
-    /// Start the kick sweeper on the current runtime (it ends when these links are dropped).
+    /// Wait at most `timeout` for an ack. Tests.
+    pub fn with_ack_timeout(mut self, timeout: Duration) -> WorldClients {
+        self.ack_timeout = timeout;
+        self
+    }
+
+    /// Start the kick sweeper on the current runtime (it ends when these clients are dropped).
     /// Without a runtime (or a service token) there is nothing to start.
     pub fn start(self: &Arc<Self>) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
         if self.token.is_none() {
             return;
         }
-        let (links, wake) = (Arc::downgrade(self), self.kicks.clone());
+        let (clients, wake) = (Arc::downgrade(self), self.kicks.clone());
         runtime.spawn(async move {
             loop {
-                let Some(links) = links.upgrade() else { return };
-                links.send_pending_kicks().await;
-                drop(links);
+                let Some(clients) = clients.upgrade() else { return };
+                clients.send_pending_kicks().await;
+                drop(clients);
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(KICK_RESEND_MS)) => {}
                     _ = wake.notified() => {}
@@ -266,18 +436,24 @@ impl HostLinks {
         self.kicks.notify_one();
     }
 
-    /// Every pending kick, over one up link of its world (the links dialed if need be).
+    /// Every pending kick POSTed to its world's coordinator (its client made if need be: its
+    /// answers poll reads the `KickAck`). A kick stays pending until its ack, whatever the POST
+    /// answered.
     async fn send_pending_kicks(&self) {
         let now = (self.clock)();
         match self.store.expire_pending_kicks(now, PENDING_KICK_TTL_SECS).await {
             // Unacknowledged for at least the TTL (the sweep runs every `KICK_RESEND_MS`).
-            Ok(expired) => for kick in expired {
-                // Never the player token in a log: the world and the kick's epoch name it.
-                log::warn!(
-                    "[login] kick for world {} (epoch {}) dropped after at least {} s unacknowledged",
-                    kick.world_id, kick.session_epoch, PENDING_KICK_TTL_SECS
-                );
-            },
+            Ok(expired) => {
+                for kick in expired {
+                    // Never the player token in a log: the world and the kick's epoch name it.
+                    log::warn!(
+                        "[login] kick for world {} (epoch {}) dropped after at least {} s unacknowledged",
+                        kick.world_id,
+                        kick.session_epoch,
+                        PENDING_KICK_TTL_SECS
+                    );
+                }
+            }
             Err(e) => log::error!("[login] expiring pending kicks: {e}"),
         }
         let kicks = match self.store.pending_kicks().await {
@@ -285,17 +461,12 @@ impl HostLinks {
             Err(e) => return log::error!("[login] reading pending kicks: {e}"),
         };
         self.metrics.pending_kicks(kicks.len() as u64);
-        let swept = Instant::now();
-        let mut pending: BTreeMap<String, BTreeSet<(String, u64)>> = BTreeMap::new();
-        let mut world: Option<(String, Option<Linked>)> = None;
+        let mut world: Option<(String, Option<Arc<WorldClient>>)> = None;
         for kick in kicks {
             if world.as_ref().is_none_or(|(id, _)| *id != kick.world_id) {
-                let linked = match self.store.world(&kick.world_id).await {
-                    Ok(Some(row)) => match self.world_links(&row).await {
-                        Ok(linked) => {
-                            self.kick_blocked(&kick.world_id, None);
-                            linked
-                        }
+                let client = match self.store.world(&kick.world_id).await {
+                    Ok(Some(row)) => match self.world_client(&row) {
+                        Ok(client) => client,
                         Err(e) => {
                             self.kick_blocked(&kick.world_id, Some(e.to_string()));
                             None
@@ -305,25 +476,18 @@ impl HostLinks {
                     Ok(None) => None,
                     Err(e) => return log::error!("[login] reading world {}: {e}", kick.world_id),
                 };
-                world = Some((kick.world_id.clone(), linked));
+                world = Some((kick.world_id.clone(), client));
             }
-            let key = (kick.player_token.clone(), kick.session_epoch);
-            pending.entry(kick.world_id.clone()).or_default().insert(key.clone());
-            if let Some((_, Some(linked))) = &world
-                && let Some(link) = linked.kick_link(key, swept)
-            {
-                let _ = link.tx.send(LoginToHost::Kick {
-                    player_token: kick.player_token,
-                    session_epoch: kick.session_epoch,
-                    reason: kick.reason,
-                });
+            let Some((_, Some(client))) = &world else { continue };
+            let order = LoginToHost::Kick {
+                player_token: kick.player_token,
+                session_epoch: kick.session_epoch,
+                reason: kick.reason,
+            };
+            match client.post(&order, Duration::from_millis(KICK_POST_TIMEOUT_MS)).await {
+                Ok(()) => self.kick_blocked(&kick.world_id, None),
+                Err(f) => self.kick_blocked(&kick.world_id, Some(f.to_string())),
             }
-        }
-        // A kick acknowledged (or expired) needs no route any more.
-        let links = self.links.lock().unwrap_or_else(|p| p.into_inner());
-        for (id, w) in links.iter() {
-            let keep = pending.get(id);
-            w.shared.kick_routes.lock().unwrap_or_else(|p| p.into_inner()).retain(|k, _| keep.is_some_and(|s| s.contains(k)));
         }
     }
 
@@ -344,322 +508,86 @@ impl HostLinks {
         }
     }
 
-    /// Wait at most `timeout` for an ack (or for a link to come up before a kick). Tests.
-    pub fn with_ack_timeout(mut self, timeout: Duration) -> HostLinks {
-        self.ack_timeout = timeout;
-        self
-    }
-
-    /// `world`'s links, one per address its row's `host_link` resolves to now: a new address
-    /// is dialed, a gone one's link retired (a changed `host_link_cert` redials them all).
-    /// A failed resolution keeps the links of an unchanged row. `Ok(None)`: the world has no
-    /// host link (R2a: nothing is pushed).
-    async fn world_links(&self, world: &WorldRow) -> Result<Option<Linked>, SpawnError> {
+    /// `world`'s client, made (its answers poll started) on first use or when the row's
+    /// `host_link` / `host_link_cert` changed. `Ok(None)`: the world has no host link (R2a:
+    /// nothing is pushed).
+    fn world_client(&self, world: &WorldRow) -> Result<Option<Arc<WorldClient>>, SpawnError> {
         let Some(target) = &world.host_link else {
-            // The row lost its link: the old ones are retired and the world reads down, once.
-            let mut links = self.links.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(old) = links.remove(&world.world_id) {
-                for link in old.links.values() {
-                    self.retire(&old.shared, link);
-                }
+            // The row lost its link: the old client goes (its poll ends) and the world reads down.
+            if self.worlds.lock().unwrap_or_else(|p| p.into_inner()).remove(&world.world_id).is_some() {
                 self.metrics.host_link(&world.world_id, false);
             }
             return Ok(None);
         };
         let token = self.token.clone().ok_or(SpawnError::NoServiceToken)?;
-        let parsed = LinkTarget::parse(target).map_err(|e| SpawnError::BadLink(format!("host_link {target:?}: {e}")))?;
-        let cert = world
-            .host_link_cert
-            .clone()
-            .ok_or_else(|| SpawnError::BadLink("host_link_cert is not set".into()))?;
+        let cert = world.host_link_cert.clone().ok_or_else(|| SpawnError::BadLink("host_link_cert is not set".into()))?;
+        let mut worlds = self.worlds.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(w) = worlds.get(&world.world_id).filter(|w| w.target == *target && w.cert == cert) {
+            return Ok(Some(w.clone()));
+        }
+        let urls = link_urls(target).map_err(|e| SpawnError::BadLink(format!("host_link {target:?}: {e}")))?;
         let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| SpawnError::BadLink("host links are used from the async runtime only".into()))?;
-        let resolved = parsed.resolve_all().await;
-        let mut all = self.links.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = all.entry(world.world_id.clone()).or_insert_with(|| WorldLinks {
-            target: String::new(),
-            cert: String::new(),
-            addrs: Vec::new(),
-            links: BTreeMap::new(),
-            shared: Arc::new(WorldShared {
-                world: world.world_id.clone(),
-                waiters: Mutex::default(),
-                kick_routes: Mutex::default(),
-                changed: watch::channel(0).0,
-                states: Mutex::default(),
-            }),
+            .map_err(|_| SpawnError::BadLink("world clients are used from the async runtime only".into()))?;
+        let client = svc_link::pinned_http2_client(&cert).map_err(|e| SpawnError::BadLink(format!("the HTTPS client: {e}")))?;
+        let w = Arc::new(WorldClient {
+            world: world.world_id.clone(),
+            target: target.clone(),
+            cert,
+            urls,
+            url: AtomicUsize::new(0),
+            client,
+            token,
+            waiters: Mutex::default(),
+            states: Mutex::default(),
         });
-        let addrs = match resolved {
-            Ok(found) => {
-                let mut addrs = Vec::new();
-                for addr in found {
-                    if !addrs.contains(&addr) {
-                        addrs.push(addr);
-                    }
-                }
-                addrs
-            }
-            Err(e) if entry.target == *target && entry.cert == cert && !entry.addrs.is_empty() => {
-                log::debug!("[login] world {}: resolving {target}: {e} (its links are kept)", world.world_id);
-                entry.addrs.clone()
-            }
-            Err(e) => return Err(SpawnError::BadLink(format!("host_link {target:?}: {e}"))),
-        };
-        let shared = entry.shared.clone();
-        if entry.cert != cert {
-            for link in std::mem::take(&mut entry.links).values() {
-                self.retire(&shared, link);
-            }
-        }
-        let gone: Vec<SocketAddr> = entry.links.keys().filter(|a| !addrs.contains(a)).copied().collect();
-        for addr in gone {
-            if let Some(link) = entry.links.remove(&addr) {
-                log::info!("[login] world {}: {addr} is no longer in its host link: retired", world.world_id);
-                self.retire(&shared, &link);
-            }
-        }
-        for addr in &addrs {
-            if !entry.links.contains_key(addr) {
-                let link = self.dial(&shared, *addr, &cert, token.clone(), runtime.clone())?;
-                entry.links.insert(*addr, link);
-            }
-        }
-        (entry.target, entry.cert, entry.addrs) = (target.clone(), cert, addrs);
-        let links = entry.addrs.iter().map(|a| entry.links[a].clone()).collect();
-        Ok(Some(Linked { shared, links }))
+        log::info!("[login] world {}: its coordinator is {}", world.world_id, w.urls.join(", "));
+        // Not answered yet: the world's series follows its poll from now on.
+        self.metrics.host_link(&world.world_id, false);
+        let ctx = PollCtx { store: self.store.clone(), clock: self.clock.clone(), metrics: self.metrics.clone() };
+        runtime.spawn(poll_answers(Arc::downgrade(&w), ctx));
+        worlds.insert(world.world_id.clone(), w.clone());
+        Ok(Some(w))
     }
 
-    /// A new link to the replica at `addr` of `shared`'s world, its pump started.
-    fn dial(
-        &self,
-        shared: &Arc<WorldShared>,
-        addr: SocketAddr,
-        cert: &str,
-        token: String,
-        runtime: tokio::runtime::Handle,
-    ) -> Result<Arc<HostLink>, SpawnError> {
-        // The world row's id: the coordinator (or a role-`all` server) admits only its own world.
-        let hello = LinkHello::new(token, PeerRole::Login, shared.world.clone());
-        let (tx, events) = LinkDialer::connect::<HostToLogin, LoginToHost>(addr, cert.to_string(), hello);
-        let (up_tx, up) = watch::channel(false);
-        let current = Arc::new(Mutex::new(true));
-        let pump = Pump {
-            addr,
-            events,
-            up: up_tx,
-            shared: shared.clone(),
-            store: self.store.clone(),
-            clock: self.clock.clone(),
-            runtime,
-            kicks: self.kicks.clone(),
-            metrics: self.metrics.clone(),
-            current: current.clone(),
-        };
-        std::thread::Builder::new()
-            .name(format!("host-link-{}", shared.world))
-            .spawn(move || pump.run())
-            .map_err(|e| SpawnError::BadLink(format!("spawn the link thread: {e}")))?;
-        log::info!("[login] host link for world {} dials {addr}", shared.world);
-        // The new link is not up yet: the world's series follows it from now on.
-        let mut states = shared.states.lock().unwrap_or_else(|p| p.into_inner());
-        states.insert(addr, false);
-        shared.report(&states, &self.metrics);
-        // Its dialer stops when its last sender (in a finishing join) drops.
-        Ok(Arc::new(HostLink { addr, tx, up, current }))
-    }
-
-    /// `link` is no longer one of its world's: its pump stops reporting, the world's series
-    /// follows the others.
-    fn retire(&self, shared: &WorldShared, link: &HostLink) {
-        *link.current.lock().unwrap_or_else(|p| p.into_inner()) = false;
-        let mut states = shared.states.lock().unwrap_or_else(|p| p.into_inner());
-        states.remove(&link.addr);
-        shared.report(&states, &self.metrics);
-        drop(states);
-        shared.changed();
-    }
-
-    /// The links `world`'s row names now (dialed, and gone ones retired, as a join does), each
-    /// address with whether it is up, in the row's order. Tests and diagnostics.
+    /// Each URL `world`'s row names, with whether its last request was answered (its client made
+    /// as a join makes it), in the row's order. Tests and diagnostics.
     pub async fn link_states(&self, world: &WorldRow) -> Result<Vec<(String, bool)>, SpawnError> {
-        let linked = self.world_links(world).await?;
-        Ok(linked.map(|l| l.links.iter().map(|k| (k.addr.to_string(), k.is_up())).collect()).unwrap_or_default())
+        let Some(w) = self.world_client(world)? else { return Ok(Vec::new()) };
+        let states = w.states.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(w.urls.iter().map(|u| (u.clone(), states.get(u).copied().unwrap_or(false))).collect())
     }
 
-    /// Push `SpawnPlayer` to `world`'s replicas — one link at a time, the next after a
-    /// `NoGate` — and wait (at most [`SPAWN_ACK_TIMEOUT_MS`]) for its ack on any link: where the
-    /// client connects, as the ack named it. `Ok` with no address at once for a world without
-    /// a host link; [`SpawnError::Timeout`] at once when every replica answered `NoGate`;
-    /// [`SpawnError::Starting`] at once when one answered `Starting` (Elastic 4).
+    /// POST `SpawnPlayer` to `world`'s coordinator and wait (at most [`SPAWN_ACK_TIMEOUT_MS`]
+    /// in all) for its ack among the world's answers: where the client connects, as the ack named
+    /// it. `Ok` with no address at once for a world without a host link;
+    /// [`SpawnError::Starting`] / [`SpawnError::NoGate`] at once when the coordinator says so.
     pub async fn spawn(&self, world: &WorldRow, player_token: &str, session_epoch: u64) -> Result<SpawnPlace, SpawnError> {
-        let Some(linked) = self.world_links(world).await? else { return Ok(SpawnPlace::default()) };
+        let Some(w) = self.world_client(world)? else { return Ok(SpawnPlace::default()) };
         let key = (player_token.to_string(), session_epoch);
-        let (answer_tx, mut answers) = mpsc::unbounded_channel();
-        linked.shared.waiters.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone(), answer_tx);
+        let (tx, rx) = oneshot::channel();
+        // Before the POST: the ack may be read before the POST's answer arrives.
+        w.waiters.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone(), tx);
         let order = LoginToHost::SpawnPlayer { player_token: player_token.to_string(), session_epoch };
-        let mut changed = linked.shared.changed.subscribe();
         let answer = tokio::time::timeout(self.ack_timeout, async {
-            let mut said_no: BTreeSet<SocketAddr> = BTreeSet::new();
-            loop {
-                let open: Vec<&Arc<HostLink>> = linked.links.iter().filter(|l| !said_no.contains(&l.addr)).collect();
-                if open.is_empty() {
-                    log::debug!("[login] world {}: every replica answered NoGate (epoch {session_epoch})", world.world_id);
-                    return None;
+            match w.post(&order, self.ack_timeout).await {
+                Ok(()) => rx.await.map_err(|_| SpawnError::Timeout),
+                Err(Failure::Status(StatusCode::SERVICE_UNAVAILABLE, body)) if body == COORD_REFUSED_STARTING => {
+                    Err(SpawnError::Starting)
                 }
-                let Some(link) = open.into_iter().find(|l| l.is_up()) else {
-                    // No open link is up: wait for one (an earlier send's ack may come meanwhile).
-                    tokio::select! {
-                        a = answers.recv() => match a {
-                            Some(Answer::Ack(ok, place)) => return Some(Some((ok, place))),
-                            Some(Answer::Starting) => return Some(None),
-                            Some(Answer::NoGate(from)) => { said_no.insert(from); }
-                            None => return None,
-                        },
-                        c = changed.changed() => if c.is_err() { return None },
-                    }
-                    continue;
-                };
-                if link.tx.send(order.clone()).is_err() {
-                    said_no.insert(link.addr); // its dialer is gone
-                    continue;
-                }
-                // The ack (on any link), this link's NoGate, or this link going down first: then
-                // the order goes out again on whichever open link is up.
-                let mut up = link.up.clone();
-                loop {
-                    tokio::select! {
-                        a = answers.recv() => match a {
-                            Some(Answer::Ack(ok, place)) => return Some(Some((ok, place))),
-                            // No replica has a gate: no other link is tried.
-                            Some(Answer::Starting) => return Some(None),
-                            Some(Answer::NoGate(from)) => {
-                                said_no.insert(from);
-                                if from == link.addr {
-                                    break;
-                                }
-                            }
-                            None => return None,
-                        },
-                        _ = up.wait_for(|u| !*u) => break,
-                    }
+                Err(Failure::Status(StatusCode::SERVICE_UNAVAILABLE, body)) if body == COORD_REFUSED_NO_GATE => Err(SpawnError::NoGate),
+                Err(f) => {
+                    log::warn!("[login] world {}: a spawn order (epoch {session_epoch}) was not taken: {f}", world.world_id);
+                    Err(SpawnError::Timeout)
                 }
             }
         })
         .await;
-        linked.shared.waiters.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
+        w.waiters.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
         match answer {
-            Ok(Some(Some((true, place)))) => Ok(place),
-            Ok(Some(Some((false, _)))) => Err(SpawnError::Refused),
-            Ok(Some(None)) => Err(SpawnError::Starting),
-            Ok(None) | Err(_) => Err(SpawnError::Timeout),
+            Ok(Ok(Answer::Ack(true, place))) => Ok(place),
+            Ok(Ok(Answer::Ack(false, _))) => Err(SpawnError::Refused),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(SpawnError::Timeout),
         }
-    }
-}
-
-/// A link's event pump (its own thread): up / down into the watch, answers to their joins (or
-/// a kick's route), kick acks and session ends into the store (on the runtime).
-struct Pump {
-    addr: SocketAddr,
-    events: Receiver<LinkEvent<HostToLogin>>,
-    up: watch::Sender<bool>,
-    shared: Arc<WorldShared>,
-    store: LoginStore,
-    clock: Arc<dyn Fn() -> u64 + Send + Sync>,
-    runtime: tokio::runtime::Handle,
-    /// Woken on every `Up` (pending kicks go out at once) and on a kick's `NoGate`.
-    kicks: Arc<Notify>,
-    metrics: Metrics,
-    /// See [`HostLink::current`].
-    current: Arc<Mutex<bool>>,
-}
-
-impl Pump {
-    /// Set this link's state and the world's gauge, unless this link was retired meanwhile.
-    fn report(&self, up: bool) {
-        let current = self.current.lock().unwrap_or_else(|p| p.into_inner());
-        if *current {
-            let mut states = self.shared.states.lock().unwrap_or_else(|p| p.into_inner());
-            states.insert(self.addr, up);
-            self.shared.report(&states, &self.metrics);
-        }
-    }
-
-    fn set_up(&self, up: bool) {
-        self.up.send_replace(up);
-        self.report(up);
-        self.shared.changed();
-    }
-
-    fn answer(&self, key: &(String, u64), answer: Answer) -> bool {
-        let waiters = self.shared.waiters.lock().unwrap_or_else(|p| p.into_inner());
-        waiters.get(key).is_some_and(|w| w.send(answer).is_ok())
-    }
-
-    fn run(self) {
-        let world = self.shared.world.clone();
-        let addr = self.addr;
-        for event in self.events.iter() {
-            match event {
-                LinkEvent::Up(_) => {
-                    log::info!("[login] host link for world {world} ({addr}) up");
-                    self.set_up(true);
-                    self.kicks.notify_one();
-                }
-                LinkEvent::Down(why) => {
-                    if *self.up.borrow() {
-                        log::warn!("[login] host link for world {world} ({addr}) down: {why}");
-                    }
-                    self.set_up(false);
-                }
-                LinkEvent::Msg(HostToLogin::SpawnAck { player_token, session_epoch, ok, quic, webtransport, cert_hash }) => {
-                    let key = (player_token, session_epoch);
-                    if !self.answer(&key, Answer::Ack(ok, SpawnPlace { quic, webtransport, cert_hash })) {
-                        // Answered already (a resend's second ack) or given up on (503).
-                        log::debug!("[login] world {world}: ack for epoch {session_epoch} nobody waits for");
-                    }
-                }
-                LinkEvent::Msg(HostToLogin::NoGate { player_token, session_epoch }) => {
-                    let key = (player_token, session_epoch);
-                    let join = self.answer(&key, Answer::NoGate(addr));
-                    let kick = {
-                        let mut routes = self.shared.kick_routes.lock().unwrap_or_else(|p| p.into_inner());
-                        routes.get_mut(&key).map(|r| r.said_no.insert(addr)).is_some()
-                    };
-                    if kick {
-                        // The kick moves to the next link now.
-                        self.kicks.notify_one();
-                    }
-                    if !join && !kick {
-                        log::debug!("[login] world {world}: NoGate from {addr} for epoch {session_epoch} nobody waits for");
-                    }
-                }
-                LinkEvent::Msg(HostToLogin::Starting { player_token, session_epoch }) => {
-                    if !self.answer(&(player_token, session_epoch), Answer::Starting) {
-                        log::debug!("[login] world {world}: Starting from {addr} for epoch {session_epoch} nobody waits for");
-                    }
-                }
-                LinkEvent::Msg(HostToLogin::KickAck { player_token, session_epoch }) => {
-                    let (store, world) = (self.store.clone(), world.clone());
-                    self.runtime.spawn(async move {
-                        match store.kick_acked(&world, &player_token, session_epoch).await {
-                            Ok(true) => log::info!("[login] world {world}: kick (epoch {session_epoch}) acknowledged"),
-                            Ok(false) => {}
-                            Err(e) => log::error!("[login] world {world}: recording a kick ack: {e}"),
-                        }
-                    });
-                }
-                LinkEvent::Msg(HostToLogin::SessionEnded { player_token, session_epoch }) => {
-                    let (store, world) = (self.store.clone(), world.clone());
-                    let now = i64::try_from((self.clock)()).unwrap_or(i64::MAX);
-                    self.runtime.spawn(async move {
-                        if let Err(e) = store.end_session(&world, &player_token, session_epoch, now).await {
-                            log::error!("[login] world {world}: recording a session end: {e}");
-                        }
-                    });
-                }
-            }
-        }
-        // The dialer is gone (its sender dropped): nothing more comes on this link.
-        self.set_up(false);
     }
 }

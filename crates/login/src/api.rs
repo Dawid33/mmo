@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::LoginConfig;
-use crate::host_link::HostLinks;
+use crate::host_link::WorldClients;
 use crate::metrics::{JoinOutcome, Metrics, OidcOutcome};
 use crate::oidc::{OidcError, OidcVerifier};
 use crate::config::OidcConfig;
@@ -62,8 +62,8 @@ pub struct AppState {
     pub config: Arc<LoginConfig>,
     /// Seconds since the Unix epoch.
     pub clock: Arc<dyn Fn() -> u64 + Send + Sync>,
-    /// The world hosts' service links (`SpawnPlayer` / `Kick`).
-    pub host_links: Arc<HostLinks>,
+    /// The worlds' coordinator APIs (`SpawnPlayer` / `Kick` posted, the answers polled).
+    pub world_clients: Arc<WorldClients>,
     /// Verifies the identity provider's tokens; `None` = identity-provider login is off.
     pub oidc: Option<Arc<OidcVerifier>>,
     /// The Prometheus metrics (`GET /metrics`).
@@ -78,8 +78,8 @@ impl AppState {
         clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> AppState {
         let metrics = Metrics::new();
-        let host_links = Arc::new(HostLinks::new(None, store.clone(), clock.clone()).with_metrics(metrics.clone()));
-        AppState { store, signer, config, clock, host_links, oidc: None, metrics }
+        let world_clients = Arc::new(WorldClients::new(None, store.clone(), clock.clone()).with_metrics(metrics.clone()));
+        AppState { store, signer, config, clock, world_clients, oidc: None, metrics }
     }
 
     /// Log players in with the identity provider's tokens, checked by `verifier` (the settings
@@ -90,18 +90,18 @@ impl AppState {
         self
     }
 
-    /// Dial world hosts with the service `token` (without one, a world with a `host_link` is
-    /// unavailable to join).
+    /// Call the worlds' coordinators with the service `token` (without one, a world with a
+    /// `host_link` is unavailable to join).
     pub fn with_service_token(self, token: Option<String>) -> AppState {
-        let links = HostLinks::new(token, self.store.clone(), self.clock.clone());
-        self.with_host_links(links)
+        let clients = WorldClients::new(token, self.store.clone(), self.clock.clone());
+        self.with_world_clients(clients)
     }
 
-    /// Use these host links (tests: a short ack timeout).
+    /// Use these world clients (tests: a short ack timeout).
     /// Starts their kick sweeper when called on a runtime.
-    pub fn with_host_links(mut self, links: HostLinks) -> AppState {
-        self.host_links = Arc::new(links.with_metrics(self.metrics.clone()));
-        self.host_links.start();
+    pub fn with_world_clients(mut self, clients: WorldClients) -> AppState {
+        self.world_clients = Arc::new(clients.with_metrics(self.metrics.clone()));
+        self.world_clients.start();
         self
     }
 
@@ -360,7 +360,7 @@ async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<LogoutRequest>)
             s.store.revoke_family(family, now).await?;
             let kicks = s.store.revoke_account_with_kicks(account, now, KICK_LOGOUT_ALL).await?;
             log::info!("[login] account {account} logged out everywhere ({kicks} kick(s) queued)");
-            s.host_links.wake_kicks();
+            s.world_clients.wake_kicks();
         }
         RefreshOutcome::Valid { account, family } | RefreshOutcome::Reused { account, family } => {
             s.store.revoke_family(family, now).await?;
@@ -416,9 +416,9 @@ async fn join_inner(s: &AppState, req: JoinRequest) -> Result<Json<JoinResponse>
     // A 503 does not mean nothing happened: an order that reached the host and was applied
     // (its ack lost, or later than the timeout) has already parked the player's online
     // session there — the player is then logged out of that world and must join again.
-    // With several hosts the order may be taken by another host than the linked one: the
+    // The order is relayed to the world's gate host, and may be placed on another host: the
     // ticket names the addresses its ack gave (else the world row's).
-    let place = match s.host_links.spawn(&world, &player_token, session_epoch).await {
+    let place = match s.world_clients.spawn(&world, &player_token, session_epoch).await {
         Ok(place) => place,
         // No host takes logins and the world is starting one: the client waits and repeats the
         // join (with the same, unspent refresh token).

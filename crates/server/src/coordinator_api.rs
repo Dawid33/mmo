@@ -72,9 +72,9 @@ pub const PATH_HOST_MESSAGES: &str = "/v1/hosts/{host}/messages";
 /// `GET`: a host's mailbox page.
 pub const PATH_HOST_MAILBOX: &str = "/v1/hosts/{host}/mailbox";
 /// The request header carrying the world id.
-pub const HEADER_WORLD: &str = "x-world";
+pub const HEADER_WORLD: &str = login_api::HEADER_COORD_WORLD;
 /// The request header carrying `svc_link::LINK_PROTOCOL_VERSION`.
-pub const HEADER_LINK_VERSION: &str = "x-link-version";
+pub const HEADER_LINK_VERSION: &str = login_api::HEADER_COORD_LINK_VERSION;
 /// The 412 body of a world mismatch.
 pub const REFUSED_WORLD: &str = "world";
 /// The 412 body of a protocol version mismatch.
@@ -123,8 +123,8 @@ impl ApiRefusal {
         match self {
             ApiRefusal::NotReady => "not_ready",
             ApiRefusal::Fenced => "fenced",
-            ApiRefusal::NoGate => "no_gate",
-            ApiRefusal::Starting => "world_starting",
+            ApiRefusal::NoGate => login_api::COORD_REFUSED_NO_GATE,
+            ApiRefusal::Starting => login_api::COORD_REFUSED_STARTING,
         }
     }
 }
@@ -168,9 +168,15 @@ impl ApiListener {
     }
 }
 
+/// What every caller must present: the service token and the world id ([`check_auth`]).
+pub(crate) struct Auth {
+    /// Never logged.
+    pub(crate) token: String,
+    pub(crate) world: String,
+}
+
 struct Shared {
-    token: String,
-    world: String,
+    auth: Auth,
     store: StoreHandle,
     calls: crossbeam::channel::Sender<ApiCall>,
     row_version: watch::Receiver<u64>,
@@ -193,20 +199,36 @@ pub fn serve(
     }
     let (tls, pin) = svc_link::pinned_server_config(&cfg.cert_file, &[b"h2"])?;
     let listener = std::net::TcpListener::bind(cfg.bind)?;
-    listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let refusal = Arc::new(AtomicU8::new(ApiRefusal::NotReady.code()));
-    let shared = Arc::new(Shared { token: cfg.token, world: cfg.world, store, calls, row_version, refusal: refusal.clone() });
-    let router = router(shared);
+    let auth = Auth { token: cfg.token, world: cfg.world };
+    let shared = Arc::new(Shared { auth, store, calls, row_version, refusal: refusal.clone() });
+    let stop = serve_tls("coordinator-api", listener, tls, router(shared))?;
+    log::info!("[coordinator-api] listening on {addr} (cert sha256 {pin})");
+    Ok(ApiListener { addr, pin, refusal, _stop: stop })
+}
+
+/// Serves `router` over HTTPS (HTTP/2, `tls`) on `listener` from a thread of its own (named
+/// `name`, a current-thread tokio runtime): at most [`API_CONNECTIONS_MAX`] connections, each
+/// handshake within [`API_TLS_HANDSHAKE_MS`], an HTTP/2 PING every [`API_H2_PING_MS`]. Dropping
+/// the returned sender stops accepting and ends the thread. Shared by the coordinator's API and
+/// role `all`'s login routes (`login_link.rs`).
+pub(crate) fn serve_tls(
+    name: &'static str,
+    listener: std::net::TcpListener,
+    tls: Arc<tokio_rustls::rustls::ServerConfig>,
+    router: Router,
+) -> io::Result<watch::Sender<bool>> {
+    listener.set_nonblocking(true)?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
     let (stop_tx, mut stop_rx) = watch::channel(false);
-    std::thread::Builder::new().name("coordinator-api".into()).spawn(move || {
+    std::thread::Builder::new().name(name.into()).spawn(move || {
         runtime.block_on(async move {
             let listener = match tokio::net::TcpListener::from_std(listener) {
                 Ok(l) => l,
                 Err(e) => {
-                    log::error!("[coordinator-api] the listener: {e}; no API");
+                    log::error!("[{name}] the listener: {e}; not serving");
                     return;
                 }
             };
@@ -217,14 +239,14 @@ pub fn serve(
                     r = listener.accept() => match r {
                         Ok(a) => a,
                         Err(e) => {
-                            log::warn!("[coordinator-api] accept: {e}");
+                            log::warn!("[{name}] accept: {e}");
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
                         }
                     },
                 };
                 let Ok(permit) = slots.clone().try_acquire_owned() else {
-                    log::warn!("[coordinator-api] refusing {peer}: {API_CONNECTIONS_MAX} connections open");
+                    log::warn!("[{name}] refusing {peer}: {API_CONNECTIONS_MAX} connections open");
                     continue;
                 };
                 let (acceptor, router) = (acceptor.clone(), router.clone());
@@ -232,20 +254,19 @@ pub fn serve(
                     let _permit = permit;
                     let tls = match tokio::time::timeout(Duration::from_millis(API_TLS_HANDSHAKE_MS), acceptor.accept(tcp)).await {
                         Ok(Ok(t)) => t,
-                        Ok(Err(e)) => return log::debug!("[coordinator-api] TLS from {peer}: {e}"),
-                        Err(_) => return log::debug!("[coordinator-api] TLS from {peer}: timed out"),
+                        Ok(Err(e)) => return log::debug!("[{name}] TLS from {peer}: {e}"),
+                        Err(_) => return log::debug!("[{name}] TLS from {peer}: timed out"),
                     };
                     let mut http = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
                     http.timer(TokioTimer::new()).keep_alive_interval(Some(Duration::from_millis(API_H2_PING_MS)));
                     if let Err(e) = http.serve_connection(TokioIo::new(tls), TowerToHyperService::new(router)).await {
-                        log::debug!("[coordinator-api] connection from {peer}: {e}");
+                        log::debug!("[{name}] connection from {peer}: {e}");
                     }
                 });
             }
         })
     })?;
-    log::info!("[coordinator-api] listening on {addr} (cert sha256 {pin})");
-    Ok(ApiListener { addr, pin, refusal, _stop: stop_tx })
+    Ok(stop_tx)
 }
 
 fn router(shared: Arc<Shared>) -> Router {
@@ -259,11 +280,11 @@ fn router(shared: Arc<Shared>) -> Router {
         .with_state(shared)
 }
 
-fn text(status: StatusCode, body: &'static str) -> Response {
+pub(crate) fn text(status: StatusCode, body: &'static str) -> Response {
     (status, body).into_response()
 }
 
-fn packet<T: serde::Serialize>(status: StatusCode, value: &T) -> Response {
+pub(crate) fn packet<T: serde::Serialize>(status: StatusCode, value: &T) -> Response {
     match game::encode_packet(value) {
         Ok(bytes) => (status, [(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
         Err(e) => {
@@ -277,23 +298,30 @@ fn refusal(r: ApiRefusal) -> Response {
     text(StatusCode::SERVICE_UNAVAILABLE, r.body())
 }
 
-/// The one auth layer: token (401), world (412), link version (412), then whether this
-/// replica serves at all (503).
-async fn guard(State(s): State<Arc<Shared>>, req: Request, next: Next) -> Response {
-    let headers = req.headers();
+/// The auth checks every route of this API (and role `all`'s login routes) makes: token (401),
+/// world (412), link version (412). `Err`: the answer.
+pub(crate) fn check_auth(auth: &Auth, headers: &axum::http::HeaderMap) -> Result<(), Response> {
     let bearer = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("");
     // Compared without an early exit (an unset header compares as empty and never matches:
     // the token is non-empty).
-    if !svc_link::ct_eq(bearer.as_bytes(), s.token.as_bytes()) {
-        return text(StatusCode::UNAUTHORIZED, "unauthorized");
+    if !svc_link::ct_eq(bearer.as_bytes(), auth.token.as_bytes()) {
+        return Err(text(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
     let world = headers.get(HEADER_WORLD).and_then(|v| v.to_str().ok()).unwrap_or("");
-    if world != s.world {
-        return text(StatusCode::PRECONDITION_FAILED, REFUSED_WORLD);
+    if world != auth.world {
+        return Err(text(StatusCode::PRECONDITION_FAILED, REFUSED_WORLD));
     }
     let version = headers.get(HEADER_LINK_VERSION).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u32>().ok());
     if version != Some(svc_link::LINK_PROTOCOL_VERSION) {
-        return text(StatusCode::PRECONDITION_FAILED, REFUSED_VERSION);
+        return Err(text(StatusCode::PRECONDITION_FAILED, REFUSED_VERSION));
+    }
+    Ok(())
+}
+
+/// The one auth layer: [`check_auth`], then whether this replica serves at all (503).
+async fn guard(State(s): State<Arc<Shared>>, req: Request, next: Next) -> Response {
+    if let Err(refused) = check_auth(&s.auth, req.headers()) {
+        return refused;
     }
     if let Some(r) = ApiRefusal::from_code(s.refusal.load(Ordering::SeqCst)) {
         return refusal(r);
@@ -347,22 +375,24 @@ struct MailboxQuery {
     wait_ms: Option<u64>,
 }
 
+/// The query of `GET` [`login_api::PATH_COORD_LOGIN_ANSWERS`] (role `all`'s too).
 #[derive(serde::Deserialize)]
-struct AnswersQuery {
-    after: u64,
-    wait_ms: Option<u64>,
+pub(crate) struct AnswersQuery {
+    pub(crate) after: u64,
+    pub(crate) wait_ms: Option<u64>,
 }
 
 /// Reads with `read` until it returns rows or `wait_ms` (capped at [`MAILBOX_WAIT_MS`]) has
-/// passed, waking on `row_version` or every [`MAILBOX_RECHECK_MS`]. The version is marked seen
-/// BEFORE each read, so a notice arriving during it wakes the next wait at once.
-async fn long_poll<F, Fut>(s: &Shared, wait_ms: Option<u64>, mut read: F) -> Result<Vec<(u64, Vec<u8>)>, world_store::StoreError>
+/// passed, waking on `versions` or every [`MAILBOX_RECHECK_MS`]. The version is marked seen
+/// BEFORE each read, so a notice arriving during it wakes the next wait at once. Shared with role
+/// `all`'s login answers (`login_link.rs`).
+pub(crate) async fn long_poll<T, E, F, Fut>(versions: &watch::Receiver<u64>, wait_ms: Option<u64>, mut read: F) -> Result<Vec<T>, E>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<(u64, Vec<u8>)>, world_store::StoreError>>,
+    Fut: std::future::Future<Output = Result<Vec<T>, E>>,
 {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms.unwrap_or(0).min(MAILBOX_WAIT_MS));
-    let mut versions = s.row_version.clone();
+    let mut versions = versions.clone();
     loop {
         versions.borrow_and_update();
         let rows = read().await?;
@@ -400,7 +430,7 @@ fn decode_rows<T: serde::de::DeserializeOwned>(what: &str, rows: Vec<(u64, Vec<u
 
 async fn host_mailbox(State(s): State<Arc<Shared>>, Path(host): Path<String>, Query(q): Query<MailboxQuery>) -> Response {
     let Some(host) = host_id(&host) else { return text(StatusCode::NOT_FOUND, "host") };
-    let rows = long_poll(&s, q.wait_ms, || s.store.mailbox_read(host, q.boot, q.after, MAILBOX_PAGE_MAX)).await;
+    let rows = long_poll(&s.row_version, q.wait_ms, || s.store.mailbox_read(host, q.boot, q.after, MAILBOX_PAGE_MAX)).await;
     match rows {
         Ok(rows) => match decode_rows::<CoordMsg>("mailbox", rows) {
             Ok(rows) => packet(StatusCode::OK, &MailboxPage { rows }),
@@ -411,9 +441,10 @@ async fn host_mailbox(State(s): State<Arc<Shared>>, Path(host): Path<String>, Qu
 }
 
 /// `login_outbox` rows are `game::encode_packet` of [`HostToLogin`] (written by the
-/// coordinator's transitions from Task 6 on).
+/// coordinator's transitions). A cursor past every row the store ever issued is another
+/// incarnation's (a re-forged world): the store answers from the start (`login_answers_read`).
 async fn login_answers(State(s): State<Arc<Shared>>, Query(q): Query<AnswersQuery>) -> Response {
-    let rows = long_poll(&s, q.wait_ms, || s.store.login_answers_read(q.after, MAILBOX_PAGE_MAX)).await;
+    let rows = long_poll(&s.row_version, q.wait_ms, || s.store.login_answers_read(q.after, MAILBOX_PAGE_MAX)).await;
     match rows {
         Ok(rows) => match decode_rows::<HostToLogin>("login answers", rows) {
             Ok(rows) => packet(StatusCode::OK, &LoginPage { rows }),

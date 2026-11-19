@@ -80,10 +80,11 @@ pub struct WorldRow {
     pub webtransport: Option<String>,
     pub cert_hash: Option<String>,
     pub created_at: i64,
-    /// The world host's service link (`host:port`): `join` pushes `SpawnPlayer` there and waits
-    /// for its ack. `None` = no push (R2a: the host checks tickets by epoch alone).
+    /// The world coordinator's HTTPS API (a URL, or a comma list of them; a role-`all` server's
+    /// login routes alike): `join` posts `SpawnPlayer` there and waits for its ack among the
+    /// answers. `None` = no push (R2a: the host checks tickets by epoch alone).
     pub host_link: Option<String>,
-    /// The SHA-256 pin of the host link's certificate (64 hex digits).
+    /// The SHA-256 pin of the coordinator's certificate (64 hex digits).
     pub host_link_cert: Option<String>,
 }
 

@@ -42,9 +42,8 @@
 # (while the k-th replica's server runs; 0: the first), host-<n>.log, host-<n>.pid (while the
 # n-th host's server runs; n is the
 # position on the command line, not a host id: ids come from the store), `stopping`, and the
-# pins the coordinator writes (coordinator.cert-sha256, login-link.cert-sha256). The login
-# service is registered with the coordinator's login link (VOXEL_LOGIN_LINK_BIND, 127.0.0.1:6490)
-# once the coordinator has written login-link.cert-sha256.
+# pin the coordinator writes (coordinator.cert-sha256). World `dev` is registered with the login
+# service — the coordinator's HTTPS URL(s) and that pin — once the coordinator has written it.
 # Knobs (the defaults are what `just dev-r3` uses; tests drive the script with stubs):
 #   DEV_R3_SERVER (./target/debug/server), DEV_R3_LOGIN (./target/debug/login),
 #   DEV_R3_LOGIN_LOG (target/dev-login/login.log), DEV_R3_PIN_WAIT_SECS (180),
@@ -52,12 +51,12 @@
 #   DEV_R3_RESTART_MAX (3), DEV_R3_RESTART_WINDOW_SECS (60), DEV_R3_RESTART_BACKOFF_SECS (1).
 # Coordinator replicas (Elastic 2b; `just coordinators=2 dev-r3`): DEV_R3_REPLICAS is a `|`-separated
 # list of env-word lists, one more coordinator each (its own VOXEL_COORDINATOR_BIND — the HTTPS API
-# the hosts call, every replica's URL in their VOXEL_COORDINATOR_ADDR — and VOXEL_LOGIN_LINK_BIND;
+# the hosts and the login service call, every replica's URL in the hosts' VOXEL_COORDINATOR_ADDR;
 # the same certificate files as the first, which has written them by then), started once the first
 # coordinator's pin exists, restarted and stopped as the first is (above); the stack stays up while
 # any coordinator replica's loop runs.
-# DEV_R3_LOGIN_LINK (127.0.0.1:6490) is the login link target world `dev` is registered with (the
-# comma-separated addresses of every replica's login listener).
+# DEV_R3_LOGIN_LINK (https://127.0.0.1:6480) is the link world `dev` is registered with (the
+# comma-separated URLs of every replica's HTTPS API).
 set -uo pipefail
 
 # `wait -n -p` (the watch) needs bash 5.1.
@@ -92,7 +91,7 @@ stop_secs=${DEV_R3_STOP_SECS:-60}
 restart_max=${DEV_R3_RESTART_MAX:-3}
 restart_window=${DEV_R3_RESTART_WINDOW_SECS:-60}
 restart_backoff=${DEV_R3_RESTART_BACKOFF_SECS:-1}
-login_link=${DEV_R3_LOGIN_LINK:-127.0.0.1:6490}
+login_link=${DEV_R3_LOGIN_LINK:-https://127.0.0.1:6480}
 replica_envs=()
 if [ -n "${DEV_R3_REPLICAS:-}" ]; then IFS='|' read -ra replica_envs <<<"$DEV_R3_REPLICAS"; fi
 
@@ -102,8 +101,7 @@ self=$0
 
 mkdir -p "$dir" "$(dirname "$login_log")"
 pin=$dir/coordinator.cert-sha256
-login_pin=$dir/login-link.cert-sha256
-rm -f "$pin" "$login_pin" "$dir"/host-*.pid "$dir"/coordinator-*.pid "$dir/stopping"
+rm -f "$pin" "$dir"/host-*.pid "$dir"/coordinator-*.pid "$dir/stopping"
 
 lpid=""
 # The coordinator replicas' loops (index 0: the first); an entry is unset once its loop ended.
@@ -336,13 +334,13 @@ coord_loop() {
 
 VOXEL_SERVICE_TOKEN_FILE=$dir/service-token setsid "$login" serve >"$login_log" 2>&1 </dev/null &
 lpid=$!
-# Once the coordinator has written its login-link pin: world `dev` gets the link (no addresses:
-# a host's spawn ack names its endpoint).
+# Once the coordinator has written its pin: world `dev` gets its URL(s) and pin (no addresses: a
+# host's spawn ack names its endpoint).
 (
-    until [ -s "$login_pin" ]; do sleep 0.5; done
+    until [ -s "$pin" ]; do sleep 0.5; done
     "$login" world add dev --name "Dev world" \
-        --link "$login_link" --link-cert "$(cat "$login_pin")" >/dev/null &&
-        say "world dev registered with the coordinator's login link ($login_link)"
+        --link "$login_link" --link-cert "$(cat "$pin")" >/dev/null &&
+        say "world dev registered with the coordinator ($login_link)"
 ) &
 rpid=$!
 read -ra coord_words <<<"$coord_env"

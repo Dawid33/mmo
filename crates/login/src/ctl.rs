@@ -22,7 +22,7 @@ const USAGE: &str = "usage: login [--db <url>] <command>
   serve
   keygen [--dir <d>]
   world add <id> --name <n> [--quic host:port] [--wt url] [--cert-hash h] [--closed]
-            [--link host:port --link-cert <sha256>]   (the host's service link: join pushes SpawnPlayer)
+            [--link <https://host:port[,…]> --link-cert <sha256>]   (the world coordinator's API and pin: join posts SpawnPlayer)
   world list | remove <id> | open <id> | close <id>
   account issue-refresh <email>   (prints a new refresh token; creates the account, verified,
                                    if missing; an existing account is left as it is)
@@ -213,16 +213,18 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     }
 }
 
-/// `--link host:port` and `--link-cert <sha256>` go together; the address must parse and the
-/// pin be 64 hex digits (stored lowercase).
+/// `--link <url[,url]>` (the world coordinator's HTTPS API, or a role-`all` server's login
+/// routes) and `--link-cert <sha256>` (the coordinator's pin) go together; each URL must be
+/// `https://host:port` (a bare `host:port` is refused) and the pin 64 hex digits (stored
+/// lowercase).
 fn host_link_args(link: Option<String>, cert: Option<String>) -> Result<(Option<String>, Option<String>), String> {
     match (link, cert) {
         (None, None) => Ok((None, None)),
         (Some(link), Some(cert)) => {
-            svc_link::LinkTarget::parse(&link).map_err(|e| format!("--link {link:?}: {e} (expected host:port)"))?;
+            crate::host_link::link_urls(&link).map_err(|e| format!("--link {link:?}: {e}"))?;
             let cert = cert.trim().to_ascii_lowercase();
             if cert.len() != 64 || !cert.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err("--link-cert is the host link's SHA-256 pin: 64 hex digits".into());
+                return Err("--link-cert is the coordinator's SHA-256 pin: 64 hex digits".into());
             }
             Ok((Some(link), Some(cert)))
         }

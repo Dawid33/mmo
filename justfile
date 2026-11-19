@@ -89,9 +89,9 @@ play_blocks := if region_blocks == "" { "256" } else { region_blocks }
 export VOXEL_REGION_BLOCKS := test_blocks
 
 # Coordinator replicas of the dev split worlds (Elastic 2b): `just coordinators=2 dev-r3` runs
-# two (1..4), replica n serving its HTTPS API on 127.0.0.1:6480+n (login link 6490+n), ALL sharing
-# one certificate (`coordinator.cert-sha256` and its `.cert`/`.key`, `login-link.cert-sha256`: a
-# host's pin is fixed per caller), and every host calls
+# two (1..4), replica n serving its HTTPS API (hosts and the login service alike) on
+# 127.0.0.1:6480+n, ALL sharing one certificate (`coordinator.cert-sha256` and its `.cert`/`.key`:
+# a caller's pin is fixed), and every host — and the login service's registration — calls
 # `VOXEL_COORDINATOR_ADDR=https://127.0.0.1:6480,https://127.0.0.1:6481` — it tries them in turn.
 # `just coordinators=2 host N` must be given the same number; `just coordinator claim <n>` starts
 # replica n by hand.
@@ -1090,8 +1090,9 @@ login-keygen:
     just login keygen
 
 # Register a world: `just login-world-add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/`.
-# `--link host:port --link-cert <sha256>` names the host's service link: joins then push
-# `SpawnPlayer` there (the login service needs VOXEL_SERVICE_TOKEN[_FILE]); see `dev-r2`.
+# `--link https://host:port[,…] --link-cert <sha256>` names the world coordinator's HTTPS API and
+# its pin (a role-`all` server's login routes alike): joins then post `SpawnPlayer` there (the login
+# service needs VOXEL_SERVICE_TOKEN[_FILE]); see `dev-r2`. A bare `host:port` is refused.
 login-world-add *args:
     just login world add {{args}}
 
@@ -1218,7 +1219,7 @@ dev_r2_dir := "target/dev-r2"
 
 # Several hosts of one world (`claim` ownership: `host`, `coordinator`, `dev-r3`) keep their dev
 # secrets and pins under the git-ignored target/dev-r3/ instead: the service token, the
-# coordinator's pin (`coordinator.cert-sha256`) and the login link's (`login-link.cert-sha256`), and
+# coordinator's pin (`coordinator.cert-sha256`; hosts and the login service pin it), and
 # every host's peer-link pin (`h<index>.peer.cert-sha256`), plus `dev-r3`'s logs.
 dev_r3_dir := "target/dev-r3"
 
@@ -1236,16 +1237,15 @@ _dev-token dir:
 _dev-r2-token: (_dev-token dev_r2_dir)
 
 # The world coordinator alone (VOXEL_ROLE=coordinator) for the dev Postgres world
-# (`just pg-up` first): serves its HTTPS API to hosts on https://127.0.0.1:6480 (pin
-# target/dev-r2|r3/coordinator.cert-sha256) and
-# the login service on 127.0.0.1:6490 (pin login-link.cert-sha256 beside it; login dials it, never a
+# (`just pg-up` first): serves its HTTPS API to hosts and the login service on
+# https://127.0.0.1:6480 (pin target/dev-r2|r3/coordinator.cert-sha256; login calls it, never a
 # host). World id `dev`, as every dev host and the login registration. Play region size.
 # `ownership` is `claim` (default: any number of hosts, secrets and pins under target/dev-r3/) or
 # `static` (ONE host, as `dev-r2`: under target/dev-r2/); give `host` the same word. The
 # coordinator declares a dead host's succession only under `claim` and refuses a host whose
 # VOXEL_OWNERSHIP says otherwise. It reads no host count.
 # `replica` (0..3, a whole number, positional: `just coordinator claim 1`) starts ANOTHER coordinator replica
-# of the same world (Elastic 2b): replica n serves hosts on https://127.0.0.1:6480+n and login on 6490+n, and
+# of the same world (Elastic 2b): replica n serves hosts and login on https://127.0.0.1:6480+n, and
 # shares replica 0's certificate files (start replica 0 first: it makes them), so one pin fits every replica;
 # hosts started with `just coordinators=<count> host …` call all of them in turn.
 coordinator ownership="claim" replica="0": (_dev-token (if ownership == "static" { dev_r2_dir } else { dev_r3_dir }))
@@ -1266,7 +1266,6 @@ coordinator ownership="claim" replica="0": (_dev-token (if ownership == "static"
         VOXEL_SERVICE_TOKEN_FILE=$dir/service-token \
         VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
         VOXEL_COORDINATOR_BIND=127.0.0.1:$((6480 + {{replica}})) \
-        VOXEL_LOGIN_LINK_BIND=127.0.0.1:$((6490 + {{replica}})) VOXEL_LOGIN_LINK_CERT_HASH_FILE=$dir/login-link.cert-sha256 \
         RUST_BACKTRACE=1 ./target/debug/server
 
 # The environment of dev host $1 (`host`, `dev-r3`), as `NAME=value` words: peer delay $2 ms,
@@ -1275,7 +1274,7 @@ coordinator ownership="claim" replica="0": (_dev-token (if ownership == "static"
 # logs and file names; a restarted process of the same name lapses its old row at once) and
 # listens for clients on UDP 6466 + 10 x index (WebTransport 6467 + 10 x index) and for its
 # peers on 127.0.0.1:6500 + index (pin $3/h<index>.peer.cert-sha256). Its id comes from the store.
-# Hosts never bind the login link (the coordinator does). Every host advertises its own
+# Hosts never serve the login service (the coordinator does). Every host advertises its own
 # WebTransport URL (a ticket names the endpoint the ack gives). Under `claim` a host needs the login service
 # (jwt, world `dev`) and a killed host's land goes to an heir and does not come back by itself (a
 # restarted process is a NEW host and owns nothing until it is given land); `static` = one
@@ -1352,10 +1351,10 @@ host index="0" delay="0" ownership="claim": (_dev-hosts-check index "6" delay "1
 # The split world with login: the dev Keycloak (`kc-up`) and Postgres (`pg-up`), the `dev-login`
 # setup and login service (players log in with Keycloak), the coordinator (log target/dev-r2/coordinator.log) and, once it has written
 # its pin, the ONE host (`h0`, `static` ownership, VOXEL_AUTH=jwt, world `dev`) in the foreground. The
-# coordinator listens for the login service on 127.0.0.1:6490 (pin target/dev-r2/login-link.cert-sha256);
-# once it has written that pin, world `dev` is registered with the link (no addresses: the host's
-# spawn ack names them), so joins push `SpawnPlayer` through the coordinator and the host admits a
-# ticket only against it. SIGTERMs the coordinator and the login
+# login service calls the coordinator's HTTPS API (https://127.0.0.1:6480, pin
+# target/dev-r2/coordinator.cert-sha256); once the coordinator has written that pin, world `dev` is
+# registered with the URL and the pin (no addresses: the host's spawn ack names them), so joins post
+# `SpawnPlayer` through the coordinator and the host admits a ticket only against it. SIGTERMs the coordinator and the login
 # service on exit. Connect with the dev account's kept login and no screens:
 # `VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/target/dev-login/refresh ./target/debug/client debug online`,
 # or the login screens: `VOXEL_LOGIN_URL=http://127.0.0.1:8790 just play`. The first start on an empty dev database
@@ -1369,24 +1368,22 @@ dev-r2: kc-up pg-up _dev-login-setup _dev-r2-token
     export VOXEL_OIDC_ISSUER={{dev_oidc_issuer}}
     {{cap}} {{cargo}} build --bin server
     pin={{dev_r2_dir}}/coordinator.cert-sha256
-    login_pin={{dev_r2_dir}}/login-link.cert-sha256
-    rm -f "$pin" "$login_pin"
+    rm -f "$pin"
     VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token \
         ./target/debug/login serve >target/dev-login/login.log 2>&1 </dev/null &
     lpid=$!
     cpid=""
-    # Once the coordinator has written its login-link pin: world `dev` gets the link.
+    # Once the coordinator has written its pin: world `dev` gets its URL and pin.
     (
-        until [ -s "$login_pin" ]; do sleep 0.5; done
+        until [ -s "$pin" ]; do sleep 0.5; done
         ./target/debug/login world add dev --name "Dev world" \
-            --link 127.0.0.1:6490 --link-cert "$(cat "$login_pin")" >/dev/null
-        echo "dev-r2: world dev registered with the coordinator's login link (127.0.0.1:6490)"
+            --link https://127.0.0.1:6480 --link-cert "$(cat "$pin")" >/dev/null
+        echo "dev-r2: world dev registered with the coordinator (https://127.0.0.1:6480)"
     ) &
     rpid=$!
     trap 'echo "dev-r2: stopping the coordinator and the login service"; kill -TERM $cpid $lpid $rpid 2>/dev/null; wait $cpid $lpid 2>/dev/null || true' EXIT
     VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=static VOXEL_WORLD_ID=dev VOXEL_WORLD_DB={{dev_database_url}} \
         VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE="$pin" \
-        VOXEL_LOGIN_LINK_BIND=127.0.0.1:6490 VOXEL_LOGIN_LINK_CERT_HASH_FILE="$login_pin" \
         ./target/debug/server >{{dev_r2_dir}}/coordinator.log 2>&1 </dev/null &
     cpid=$!
     echo "dev-r2: login on http://127.0.0.1:8790 (target/dev-login/login.log), coordinator on https://127.0.0.1:6480 ({{dev_r2_dir}}/coordinator.log)"
@@ -1419,11 +1416,10 @@ done
 '''
 
 # The coordinator's env words of `dev-r3` / `go-nogo-r3` (dir $1, store $2): `claim` ownership, world `dev`,
-# hosts on https://127.0.0.1:6480, the login service on 127.0.0.1:6490 (its pin: $1/login-link.cert-sha256).
+# hosts and the login service on https://127.0.0.1:6480 (its pin: $1/coordinator.cert-sha256).
 dev_r3_coordinator_sh := '''
 printf '%s ' VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_WORLD_ID=dev VOXEL_WORLD_DB=$2 \
-    VOXEL_SERVICE_TOKEN_FILE=$1/service-token VOXEL_COORDINATOR_CERT_HASH_FILE=$1/coordinator.cert-sha256 \
-    VOXEL_LOGIN_LINK_BIND=127.0.0.1:6490 VOXEL_LOGIN_LINK_CERT_HASH_FILE=$1/login-link.cert-sha256
+    VOXEL_SERVICE_TOKEN_FILE=$1/service-token VOXEL_COORDINATOR_CERT_HASH_FILE=$1/coordinator.cert-sha256
 '''
 
 # One world on 2..6 region hosts with login: the dev Postgres (`pg-up`, started with
@@ -1433,8 +1429,8 @@ printf '%s ' VOXEL_ROLE=coordinator VOXEL_OWNERSHIP=claim VOXEL_WORLD_ID=dev VOX
 # and, once it has written its pin, EVERY host h0..h<hosts-1> (`host` above: host h<n> on UDP
 # 6466 + 10n, peers on 127.0.0.1:6500 + n; logs target/dev-r3/host-<n>.log). Hosts have ids
 # issued by the store, not numbers: the index only names them. World `dev` is
-# registered with the coordinator's login link (127.0.0.1:6490, no addresses: each host's ack
-# names its endpoint) once the coordinator has written its login pin; `just world-hosts-dev` lists the host rows.
+# registered with the coordinator's URL(s) (https://127.0.0.1:6480, one per replica) and its pin (no
+# addresses: each host's ack names its endpoint) once the coordinator has written that pin; `just world-hosts-dev` lists the host rows.
 # Every host runs under `claim` ownership: a host that is killed (`kill -9`) loses its lease,
 # its land moves to an heir (a succession) and does NOT come back by itself — a restarted host
 # is a NEW host (its own id; the same name lapses the old row at once) and owns nothing at first.
@@ -1465,10 +1461,10 @@ dev-r3 hosts="2" delay="0": (_dev-hosts-check "0" hosts delay "2") kc-up pg-up _
     # `coordinators=<n>` (1..4): replicas 1..n-1 are the same words on their own ports (they share replica 0's certificates).
     case "{{coordinators}}" in 1 | 2 | 3 | 4) ;; *) echo "dev-r3: coordinators is 1..4 (just coordinators=2 dev-r3), not {{coordinators}}" >&2; exit 1 ;; esac
     words='{{ shell(dev_r3_coordinator_sh, dev_r3_dir, dev_database_url) }}'
-    replicas="" link=127.0.0.1:6490
+    replicas="" link=https://127.0.0.1:6480
     for ((k = 1; k < {{coordinators}}; k++)); do
-        replicas="$replicas${replicas:+|}$words VOXEL_COORDINATOR_BIND=127.0.0.1:$((6480 + k)) VOXEL_LOGIN_LINK_BIND=127.0.0.1:$((6490 + k))"
-        link=$link,127.0.0.1:$((6490 + k))
+        replicas="$replicas${replicas:+|}$words VOXEL_COORDINATOR_BIND=127.0.0.1:$((6480 + k))"
+        link=$link,https://127.0.0.1:$((6480 + k))
     done
     DEV_R3_REPLICAS="$replicas" DEV_R3_LOGIN_LINK="$link" DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} exec scripts/dev_r3.sh {{dev_r3_dir}} \
         "$words" \
@@ -1563,7 +1559,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     export VOXEL_LOGIN_DB=$out/login/login.sqlite VOXEL_LOGIN_KEYS_DIR=$out/login/keys
     login=./target/release/login
     if ! ls "$VOXEL_LOGIN_KEYS_DIR"/*.pem >/dev/null 2>&1; then $login keygen >/dev/null; fi
-    # No addresses: the script below re-adds the world with the coordinator's login link, and each host's ack names its endpoint.
+    # No addresses: the script below re-adds the world with the coordinator's URL and pin, and each host's ack names its endpoint.
     $login world add dev --name "Dev world" >/dev/null
     # A fresh login token for a probe client (its own family each time: the client rotates the
     # token in the file). Each step is its own statement; a failure ends the recipe with 3 (no verdict).
@@ -2474,9 +2470,10 @@ world-start:
 # login world add …` on any other context (the twin's own login). `world add` REPLACES the world's row:
 # run it with every option, or the omitted ones are lost.
 # The world id is the namespace without its `world-` prefix; `name=` sets the displayed name.
-# The login service links to the coordinator (coordinator.<ns>.svc.cluster.local:6490), pinned by the
-# SHA-256 of the public certificate in Secret login-link-identity. No --quic / --wt: each spawn answer
-# names the endpoint of the host that places the player. A name with a single quote is refused.
+# The login service calls the coordinator's HTTPS API (https://coordinator.<ns>.svc.cluster.local:6480),
+# pinned by the SHA-256 of the public certificate in Secret coordinator-identity (the one hosts pin).
+# No --quic / --wt: each spawn answer names the endpoint of the host that places the player. A name
+# with a single quote is refused.
 world-register $name="Errantry":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2484,17 +2481,17 @@ world-register $name="Errantry":
     ns="{{world_ns}}"
     id="${ns#world-}"
     case "$name" in *\'*) echo "world-register: the name must not contain a single quote" >&2; exit 2 ;; esac
-    pin=$(k get secret login-link-identity -o jsonpath='{.data.link\.cert-sha256\.cert}' | base64 -d | sha256sum | cut -d' ' -f1)
+    pin=$(k get secret coordinator-identity -o jsonpath='{.data.link\.cert-sha256\.cert}' | base64 -d | sha256sum | cut -d' ' -f1)
     case "$pin" in
-        *[!0-9a-f]*|'') echo "world-register: no usable link certificate in Secret login-link-identity" >&2; exit 1 ;;
+        *[!0-9a-f]*|'') echo "world-register: no usable link certificate in Secret coordinator-identity" >&2; exit 1 ;;
     esac
     # sha256sum of nothing: the Secret or its key is missing.
     [ "$pin" != e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] ||
-        { echo "world-register: Secret login-link-identity has no link.cert-sha256.cert" >&2; exit 1; }
+        { echo "world-register: Secret coordinator-identity has no link.cert-sha256.cert" >&2; exit 1; }
     [ "${#pin}" -eq 64 ] || { echo "world-register: link pin is not 64 hex digits" >&2; exit 1; }
     echo "Run this (it replaces the row of world '$id'; nothing was changed by this recipe):"
     echo
-    args="world add $id --name '$name' --link coordinator.$ns.svc.cluster.local:6490 --link-cert $pin"
+    args="world add $id --name '$name' --link https://coordinator.$ns.svc.cluster.local:6480 --link-cert $pin"
     if [ "{{world_ctx}}" = "{{orion_context}}" ]; then
         echo "just orion-login $args"
     else

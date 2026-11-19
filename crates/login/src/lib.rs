@@ -41,7 +41,7 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
         signer.signing_key().kid(),
         signer.jwks().keys.len()
     );
-    // The service token world hosts' links are dialed with (worlds with a `host_link`).
+    // The service token the worlds' coordinators are called with (worlds with a `host_link`).
     let service_token = match svc_link::service_token_from_env() {
         Ok(token) => Some(token),
         Err(why) => {

@@ -47,6 +47,7 @@ use game::coordinator::{BatchAck, CoordMsg, HostBatch, HostMsg, MailboxPage};
 use game::{HostId, WorldLink};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::StatusCode;
+use svc_link::error_chain;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::coordinator_api::{HEADER_LINK_VERSION, HEADER_WORLD, MAILBOX_WAIT_MS, PATH_HOST_MAILBOX, PATH_HOST_MESSAGES};
@@ -446,26 +447,7 @@ impl Thread {
 
 /// The client for `pin`: rustls with the pin verifier (ring), ALPN `h2`, HTTP/2 only, no proxy.
 fn build_client(pin: &str) -> io::Result<reqwest::Client> {
-    let mut tls = svc_link::pinned_client_config(pin)?;
-    tls.alpn_protocols = vec![b"h2".to_vec()];
-    reqwest::Client::builder()
-        .use_preconfigured_tls(tls)
-        .http2_prior_knowledge()
-        .no_proxy()
-        .build()
-        .map_err(|e| io::Error::other(error_chain(&e)))
-}
-
-/// An error with its sources (reqwest's top-level message alone says little).
-fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut s = e.to_string();
-    let mut src = e.source();
-    while let Some(inner) = src {
-        s.push_str(": ");
-        s.push_str(&inner.to_string());
-        src = inner.source();
-    }
-    s
+    svc_link::pinned_http2_client(pin)
 }
 
 /// Logs a failure of a down period at once, then at most every

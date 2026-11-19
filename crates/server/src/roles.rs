@@ -473,19 +473,10 @@ pub fn run_coordinator() -> ServerExit {
     if claim_world {
         log::info!("[coordinator] ownership `claim`: world cuts of any number of hosts; a crashed host's land goes to an heir (successions)");
     }
-    // Its API and its login link name the world (`VOXEL_WORLD_ID`, empty when unset: then only
-    // callers that name none are served — hosts and the login service must agree). The login
-    // service links to the coordinator (Elastic 1 Task 6), never to a host: the coordinator
-    // relays its orders to the gate host and the answers back.
+    // Its API names the world (`VOXEL_WORLD_ID`, empty when unset: then only callers that name
+    // none are served — hosts and the login service must agree). The login service calls the same
+    // API (its orders relayed to the gate host, the answers read from `login_outbox`).
     let world = crate::login_link::link_world_from(std::env::var(crate::auth_edge::WORLD_ID_ENV).ok().as_deref());
-    let login = crate::coordinator_rt::LoginListen {
-        bind: crate::login_link::login_bind_from(std::env::var(crate::login_link::LOGIN_LINK_BIND_ENV).ok().as_deref())
-            .unwrap_or_else(|e| fatal(e)),
-        token: token.clone(),
-        cert_hash_file: Some(crate::login_link::login_cert_hash_file_from(
-            std::env::var(crate::login_link::LOGIN_LINK_CERT_HASH_FILE_ENV).ok().as_deref(),
-        )),
-    };
     let coordinator = crate::coordinator_rt::start_listening_as(
         store.clone(),
         start,
@@ -496,7 +487,6 @@ pub fn run_coordinator() -> ServerExit {
         cuts,
         policy,
         &world,
-        Some(login),
     )
     .unwrap_or_else(|e| fatal(e));
     // Ready (`/readyz` 200) once its `ReplicaJoined` transition committed: the thread says so

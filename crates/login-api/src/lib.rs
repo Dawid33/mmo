@@ -23,8 +23,19 @@ pub const PATH_CONFIG: &str = "/v1/config";
 pub const PATH_JWKS: &str = "/.well-known/jwks.json";
 /// The coordinator's HTTP API (not the login service's own): `POST` a [`LoginToHost`] order.
 pub const PATH_COORD_LOGIN_ORDERS: &str = "/v1/login/orders";
-/// The coordinator's HTTP API: `GET` the [`LoginPage`] of answers after a cursor.
+/// The coordinator's HTTP API: `GET` the [`LoginPage`] of answers after a cursor
+/// (`?after=<seq>&wait_ms=<ms>`, long-polled).
 pub const PATH_COORD_LOGIN_ANSWERS: &str = "/v1/login/answers";
+/// The coordinator's HTTP API: the request header naming the caller's world id (412 `world` on a
+/// mismatch). Every request also carries `Authorization: Bearer <service token>`.
+pub const HEADER_COORD_WORLD: &str = "x-world";
+/// The coordinator's HTTP API: the request header carrying the link protocol version (412
+/// `version` on a mismatch).
+pub const HEADER_COORD_LINK_VERSION: &str = "x-link-version";
+/// The 503 body of an order no host takes (`POST` [`PATH_COORD_LOGIN_ORDERS`]).
+pub const COORD_REFUSED_NO_GATE: &str = "no_gate";
+/// The 503 body of a spawn order while the world starts a host.
+pub const COORD_REFUSED_STARTING: &str = "world_starting";
 
 /// The claims of a join JWT (`kid` rides in the header).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,8 +171,9 @@ pub const SPAWN_ACK_TIMEOUT_MS: u64 = 3000;
 /// How long a host keeps a spawn order it has not seen a matching `Hello` for.
 pub const SPAWN_PENDING_TTL_SECS: u64 = 120;
 
-/// The login service to a world host, over the service link (`svc-link`, role `Login`). Its
-/// `Debug` hides `player_token` ([`REDACTED`]): no token reaches a log.
+/// The login service to a world host: the body of `POST` [`PATH_COORD_LOGIN_ORDERS`] (the
+/// coordinator relays it to the world's gate host). Its `Debug` hides `player_token`
+/// ([`REDACTED`]): no token reaches a log.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoginToHost {
     /// A join was granted: the host admits exactly this epoch's ticket for the player (and
@@ -175,8 +187,8 @@ pub enum LoginToHost {
     Kick { player_token: String, session_epoch: u64, reason: String },
 }
 
-/// A world host to the login service, over the service link. Its `Debug` hides
-/// `player_token` ([`REDACTED`]).
+/// A world host to the login service: a row of the coordinator's `login_outbox`, read with `GET`
+/// [`PATH_COORD_LOGIN_ANSWERS`]. Its `Debug` hides `player_token` ([`REDACTED`]).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostToLogin {
     /// The answer to one [`LoginToHost::SpawnPlayer`] (matched by token and epoch). With
@@ -191,19 +203,16 @@ pub enum HostToLogin {
         webtransport: Option<String>,
         cert_hash: Option<String>,
     },
-    /// The session admitted with this epoch's ticket disconnected (best effort: lost while the
-    /// link is down).
+    /// The session admitted with this epoch's ticket disconnected (durable in `login_outbox`
+    /// until pruned).
     SessionEnded { player_token: String, session_epoch: u64 },
     /// The host applied the [`LoginToHost::Kick`] up to this epoch (sent for every copy).
     KickAck { player_token: String, session_epoch: u64 },
-    /// A coordinator replica's answer to an order (spawn or kick) when no host attached to IT
-    /// takes logins (Elastic 2b): it relayed nothing — the login service tries its next link
-    /// (another replica). Matched by token and epoch, as the acks are.
+    /// Unsent since link protocol 12 (append-only enum): an order no host takes is answered 503
+    /// [`COORD_REFUSED_NO_GATE`] by the coordinator's API.
     NoGate { player_token: String, session_epoch: u64 },
-    /// A coordinator replica's answer to a spawn order when no host takes logins on ANY live
-    /// replica and the world adds its own hosts (Elastic 4): it relayed nothing and asked for a
-    /// host — the login service answers the join 503 [`ApiErrorCode::WorldStarting`] at once
-    /// and tries no other link (no replica has a gate). Matched by token and epoch.
+    /// Unsent since link protocol 12 (append-only enum): a spawn order while the world starts a
+    /// host is answered 503 [`COORD_REFUSED_STARTING`] by the coordinator's API.
     Starting { player_token: String, session_epoch: u64 },
 }
 

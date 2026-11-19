@@ -102,7 +102,7 @@ impl Metrics {
         )
         .expect("valid metric");
         let host_link_up = IntGaugeVec::new(
-            Opts::new("login_host_link_up", "1 while the service link to a world's host is up."),
+            Opts::new("login_host_link_up", "1 while the world coordinator's login answers are read."),
             &["world"],
         )
         .expect("valid metric");

@@ -1306,8 +1306,8 @@ impl Coordinator {
     /// [`Self::login_order`] under [`Delivery::Mailbox`]: the order for the world's gate host of
     /// this moment is queued as its output, so it becomes a row of the gate's mailbox with the next
     /// transition (written without a core when nothing durable changed) — never logged: a rebase
-    /// before that transition commits drops it, and the login service's retry (or its kick
-    /// sweeper) sends it again. The gate host, or `None` (no gate host anywhere,
+    /// before that transition commits drops it, and the runtime, which holds the order until its
+    /// transition commits, issues it again. The gate host, or `None` (no gate host anywhere,
     /// [`fleet::Gate::Nobody`]).
     pub fn relay_login_order(&mut self, order: crate::LoginOrder) -> Option<HostId> {
         let fleet::Gate::Host(gate) = self.login_gate() else { return None };

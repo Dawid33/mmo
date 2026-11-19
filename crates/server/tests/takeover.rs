@@ -157,14 +157,14 @@ impl PlayerStore for RosterThenStore {
     }
 }
 
-/// The login service's side: its connection to the coordinator's login listener (Elastic 1
-/// Task 6: the coordinator relays each order to the gate host and the answers back), each
+/// The login service's side: its calls to the coordinator's HTTP API (orders posted, answers
+/// long-polled from `login_outbox`; the coordinator relays each order to the gate host), each
 /// host's relay.
 struct LoginSide {
     players: server::player_store::SharedPlayerStore,
     events_of: std::collections::BTreeMap<HostId, (Arc<SpawnOrders>, crossbeam::channel::Sender<ServerEvent>, Receiver<ServerEvent>)>,
-    tx: crossbeam::channel::Sender<LoginToHost>,
-    events: Receiver<svc_link::LinkEvent<HostToLogin>>,
+    tx: tokio::sync::mpsc::UnboundedSender<LoginToHost>,
+    events: Receiver<HostToLogin>,
     seen: Vec<HostToLogin>,
     roster: Roster,
 }
@@ -180,11 +180,7 @@ impl LoginSide {
     }
 
     fn drain(&mut self) {
-        for ev in self.events.try_iter() {
-            if let svc_link::LinkEvent::Msg(msg) = ev {
-                self.seen.push(msg);
-            }
-        }
+        self.seen.extend(self.events.try_iter());
     }
 }
 
@@ -257,7 +253,8 @@ impl Takeover {
         let mut t = Takeover { w, n, login: None, seams };
         t.w.seam = (t.seams[0], t.seams[1]);
         if login {
-            let at = t.w.coordinator.as_ref().unwrap().login.clone().expect("the coordinator listens for the login service");
+            let c = t.w.coordinator.as_ref().unwrap();
+            let at = (c.url(), c.cert_sha256.clone());
             t.login = Some(start_login(db, at, n));
         }
         for b in booted {
@@ -353,9 +350,10 @@ impl Takeover {
     }
 }
 
-/// The login service's link to the coordinator's login listener at `at` (its pin), and the
-/// relay state of every host `0..n`.
-fn start_login(db: &PgDb, at: (std::net::SocketAddr, String), n: u32) -> LoginSide {
+/// The login service's calls to the coordinator's API at `at` (its URL and pin) — on a thread of
+/// their own: each order posted (again until it is taken), the answers long-polled into a channel
+/// — and the relay state of every host `0..n`.
+fn start_login(db: &PgDb, at: (String, String), n: u32) -> LoginSide {
     let roster: Roster = Arc::default();
     let players = server::player_store::shared(RosterThenStore { roster: roster.clone(), store: open(db) });
     let mut events_of = std::collections::BTreeMap::new();
@@ -363,12 +361,66 @@ fn start_login(db: &PgDb, at: (std::net::SocketAddr, String), n: u32) -> LoginSi
         let (tx, rx) = unbounded();
         events_of.insert(h, (Arc::new(SpawnOrders::new(server::auth_edge::system_clock())), tx, rx));
     }
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Login, RIG_WORLD);
-    let (tx, events) = svc_link::LinkDialer::connect::<HostToLogin, LoginToHost>(at.0, at.1, hello);
-    match events.recv_timeout(WAIT) {
-        Ok(svc_link::LinkEvent::Up(_)) => {}
-        other => panic!("the login link did not come up: {other:?}"),
-    }
+    let (tx, mut orders) = tokio::sync::mpsc::unbounded_channel::<LoginToHost>();
+    let (answers, events) = unbounded();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async move {
+            let client = svc_link::pinned_http2_client(&at.1).expect("a client");
+            let url = at.0;
+            let headers = || {
+                let mut h = reqwest::header::HeaderMap::new();
+                h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {TOKEN}").parse().unwrap());
+                h.insert(server::coordinator_api::HEADER_WORLD, RIG_WORLD.parse().unwrap());
+                h.insert(server::coordinator_api::HEADER_LINK_VERSION, svc_link::LINK_PROTOCOL_VERSION.into());
+                h
+            };
+            let poll = {
+                let (client, url) = (client.clone(), url.clone());
+                async move {
+                    let mut after = 0u64;
+                    loop {
+                        let page = client
+                            .get(format!("{url}{}?after={after}&wait_ms=1000", login_api::PATH_COORD_LOGIN_ANSWERS))
+                            .headers(headers())
+                            .send()
+                            .await;
+                        let bytes = match page {
+                            Ok(r) if r.status() == reqwest::StatusCode::OK => r.bytes().await.ok(),
+                            _ => None,
+                        };
+                        let Some(bytes) = bytes else {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        };
+                        let page = game::decode_packet::<login_api::LoginPage>(&bytes).expect("a page");
+                        for (seq, msg) in page.rows {
+                            after = after.max(seq);
+                            if answers.send(msg).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            };
+            let post = async move {
+                while let Some(order) = orders.recv().await {
+                    let body = game::encode_packet(&order).unwrap();
+                    let deadline = Instant::now() + WAIT;
+                    loop {
+                        let r = client.post(format!("{url}{}", login_api::PATH_COORD_LOGIN_ORDERS)).headers(headers()).body(body.clone()).send().await;
+                        if r.as_ref().is_ok_and(|r| r.status() == reqwest::StatusCode::ACCEPTED) {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "the order was not taken: {:?}", r.map(|r| r.status()));
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            };
+            // The poll ends with the post (the login side dropped).
+            tokio::select! { _ = poll => {}, _ = post => {} }
+        });
+    });
     LoginSide { players, events_of, tx, events, seen: Vec::new(), roster }
 }
 

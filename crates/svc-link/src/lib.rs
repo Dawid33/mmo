@@ -1,5 +1,7 @@
-//! The authenticated QUIC service link between server-side processes (coordinator <-> host,
-//! login -> host, host <-> host).
+//! The authenticated QUIC service link between server-side processes: host <-> host (the peer
+//! links) since link protocol 12 — the hosts and the login service reach the world coordinator
+//! (and the login service a role-`all` server) over HTTPS, trusting the same pinned certificate
+//! ([`pinned_client_config`], [`pinned_http2_client`]).
 //!
 //! A [`LinkListener`] accepts, a [`LinkDialer`] dials and reconnects forever. Trust is a pinned
 //! self-signed certificate (the dialer holds its SHA-256) plus a shared service token in the
@@ -62,9 +64,10 @@ pub use target::LinkTarget;
 /// 11: Elastic 4 — a world adds and removes its own hosts: a replica with no host taking logins
 /// anywhere answers a spawn order `HostToLogin::Starting` (and asks for a host).
 /// 12: the coordinator is an HTTP service — hosts and login reach it over HTTPS (the
-/// `X-Link-Version` header carries this number); svc-link carries host↔host peer links and,
-/// until the login service moves to HTTP too, login's link (`PeerRole::Coordinator` is never
-/// sent: it stays in the enum for the wire's order).
+/// `X-Link-Version` header carries this number), the login service posting its orders and
+/// long-polling the answers (`login_outbox`); svc-link carries host↔host peer links only
+/// (`PeerRole::Coordinator` and `PeerRole::Login` are never sent: they stay in the enum for the
+/// wire's order).
 pub const LINK_PROTOCOL_VERSION: u32 = 12;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
@@ -101,6 +104,8 @@ pub enum PeerRole {
     /// has the higher one, so a listener keeping one peer per ordinal can tell a stale
     /// process (about to be fenced) from its replacement — whatever it claims or loses.
     Host { id: game::HostId, boot: u64, reg: u64 },
+    /// Unsent since version 12 (the login service reaches the coordinator over HTTPS, and a
+    /// role-`all` server's login routes too); kept for the wire's order.
     Login,
     /// Unsent since version 12 (hosts reach the coordinator over HTTPS); kept for the wire's
     /// order.
@@ -511,6 +516,32 @@ pub fn pinned_client_config(pin: &str) -> io::Result<rustls::ClientConfig> {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedCert { pin: pin.to_string(), provider }))
         .with_no_client_auth())
+}
+
+/// An HTTPS client that trusts exactly the listener whose certificate hashes to `pin`
+/// ([`pinned_client_config`]), ALPN `h2`, HTTP/2 only, no proxy: what the hosts and the login
+/// service call the coordinator's API with.
+pub fn pinned_http2_client(pin: &str) -> io::Result<reqwest::Client> {
+    let mut tls = pinned_client_config(pin)?;
+    tls.alpn_protocols = vec![b"h2".to_vec()];
+    reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .http2_prior_knowledge()
+        .no_proxy()
+        .build()
+        .map_err(|e| io::Error::other(error_chain(&e)))
+}
+
+/// An error with its sources (reqwest's top-level message alone says little).
+pub fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(inner) = src {
+        s.push_str(": ");
+        s.push_str(&inner.to_string());
+        src = inner.source();
+    }
+    s
 }
 
 /// A rustls server config for a TLS listener over the identity stored beside `hash_file`

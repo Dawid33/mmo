@@ -13,8 +13,9 @@
 //!   once, in order. The delete touches only `(host, seq <= after)`.
 //! - [`mailbox_oldest_pg`]: per host with unread rows, the boot and `at_ms` of its oldest (a
 //!   gauge of how long a host has not polled).
-//! - [`login_answers_read_pg`]: the login answers past `after`; never deleted by a read (a
-//!   transition prunes them by age).
+//! - [`login_answers_read_pg`]: the login answers past `after` (from the start when `after` is
+//!   past the newest row: another incarnation's cursor); never deleted by a read (a transition
+//!   prunes them by age).
 //!
 //! Postgres only: SQLite (one process, role `all`) answers `Unsupported`.
 
@@ -55,12 +56,20 @@ pub(crate) async fn mailbox_oldest_pg(pool: &PgPool) -> Result<Vec<(HostId, u64,
         .collect()
 }
 
-/// At most `limit` login answers after `after`, in `seq` order — `(seq, msg)`.
+/// At most `limit` login answers after `after`, in `seq` order — `(seq, msg)`. A cursor past the
+/// newest row kept is from another incarnation of the table (the world re-forged into a new
+/// database while the login service ran: its sequence started again) or the table is empty
+/// (everything pruned): the answers are read from the start. A cursor of THIS table is never past
+/// its newest row while one is kept — the prune deletes the oldest first.
 pub(crate) async fn login_answers_read_pg(pool: &PgPool, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
-    let rows = sqlx::query("SELECT seq, msg FROM login_outbox WHERE seq > $1 ORDER BY seq LIMIT $2")
-        .bind(crate::rows::i(after))
-        .bind(i64::from(limit))
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT seq, msg FROM login_outbox \
+         WHERE seq > (CASE WHEN $1 > COALESCE((SELECT MAX(seq) FROM login_outbox), 0) THEN 0 ELSE $1 END) \
+         ORDER BY seq LIMIT $2",
+    )
+    .bind(crate::rows::i(after))
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
     rows.into_iter().map(|r| Ok((r.try_get::<i64, _>(0)? as u64, r.try_get(1)?))).collect()
 }

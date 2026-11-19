@@ -15,4 +15,6 @@ quinn = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "macros", "net"] }
 rcgen = { workspace = true }
 sha2 = { workspace = true }
+# The pinned HTTPS client of the coordinator's API (`pinned_http2_client`): rustls with ring.
+reqwest = { workspace = true, features = ["http2"] }
 

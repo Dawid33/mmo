@@ -15,8 +15,10 @@ auth = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
-# The service link to world hosts (`SpawnPlayer` / `Kick`; crate `host_link`).
+# The worlds' coordinator APIs (`host_link.rs`): the pinned HTTPS client, the service token,
+# the link protocol version; `game` for the wire's packet framing (`encode_packet`).
 svc-link = { path = "../svc-link" }
+game = { workspace = true }
 crossbeam = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 rand_core = { workspace = true }
@@ -25,5 +27,5 @@ base64 = { workspace = true }
 simplelog = { workspace = true }
 jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
 prometheus = { workspace = true }

@@ -1,8 +1,14 @@
-//! The host's side of the login service's push (`svc-link`, role `Login`): `SpawnPlayer` and
-//! `Kick` in, `SpawnAck`, `KickAck` and `SessionEnded` out.
+//! The server's side of the login service's orders: `SpawnPlayer` and `Kick` in, `SpawnAck`,
+//! `KickAck` and `SessionEnded` out.
 //!
-//! A `jwt` host that has a service token listens on [`HOST_LINK_BIND_ENV`] and admits a login
-//! ticket only against a pending spawn order ([`SpawnOrders`]): the login service pushes
+//! A role-`all` `jwt` server that has a service token serves the coordinator API's two login
+//! routes itself ([`start`], on [`HOST_LINK_BIND_ENV`], HTTPS with its pinned identity, the same
+//! auth headers as the coordinator's API — `coordinator_api::check_auth`): `POST`
+//! [`login_api::PATH_COORD_LOGIN_ORDERS`] takes an order (202 once queued), `GET`
+//! [`login_api::PATH_COORD_LOGIN_ANSWERS`] long-polls its answers from an in-memory queue
+//! ([`LoginAnswers`], at most [`LOGIN_ANSWERS_HELD_MAX`]: no store table — SQLite has none). So the
+//! login service has one transport for both a split world and a role-`all` one. It admits a login
+//! ticket only against a pending spawn order ([`SpawnOrders`]): the login service posts
 //! `SpawnPlayer { player_token, session_epoch }` on every join and waits for the ack before it
 //! hands the ticket out. So:
 //! - a ticket the login service never ordered (or whose order expired, after
@@ -27,22 +33,22 @@
 //! still the player's admitted one. So a supersede never parks a newer session, and an older
 //! session never takes over a newer one.
 //!
-//! The link is at-least-once around reconnects: an order repeated with an epoch already known
-//! (ordered, live, or used within [`SPAWN_PENDING_TTL_SECS`]) is acked again and changes
-//! nothing (no second park of the session it admitted, no re-armed ticket).
+//! Delivery is at-least-once: an order repeated with an epoch already known (ordered, live, or
+//! used within [`SPAWN_PENDING_TTL_SECS`]) is acked again and changes nothing (no second park of
+//! the session it admitted, no re-armed ticket).
 //!
-//! `SessionEnded` is best effort: it goes to the login peers connected at that moment and is
-//! lost while the link is down (the login service then keeps the session open in its
-//! registry; a kick for it later is a no-op here).
+//! `SessionEnded` joins the answer queue like the acks; one dropped past
+//! [`LOGIN_ANSWERS_HELD_MAX`] (the login service not reading) leaves the session open in its
+//! registry (a kick for it later is a no-op here).
 //!
-//! The order is consumed and the supersede queued on this link's thread BEFORE the ack goes
-//! out, and the supersede shares the manager's event channel with the connects: the new
+//! The order is consumed and the supersede queued on the orders' thread BEFORE the ack is
+//! queued, and the supersede shares the manager's event channel with the connects: the new
 //! session's `ClientConnected` always comes after the old one's park was asked for.
 //!
-//! **Split roles** (Elastic 1 Task 6): a role-`host` process never listens for the login
-//! service. The login service links to the COORDINATOR (`coordinator_rt`'s login listener,
-//! [`LOGIN_LINK_BIND_ENV`]), which converts each order ([`order_from`]) and relays it to one
-//! live host, the gate host (`game::CoordMsg::Login`). There the main loop plays the server's
+//! **Split roles** (Elastic 1 Task 6; over HTTP since the coordinator HTTP API plan): a
+//! role-`host` process never serves the login service. The login service calls the
+//! COORDINATOR's API, which converts each order ([`order_from`]) and relays it to one live host,
+//! the gate host (`game::CoordMsg::Login`), as a row of its mailbox. There the main loop plays the server's
 //! half ([`LoginRelay::pump`]): it resolves the order ([`OrderResolver`]: the player's store
 //! read never waited on — the main loop beats the lease — and at most
 //! [`LOGIN_ORDERS_IN_FLIGHT_MAX`] waiting) into a
@@ -54,37 +60,47 @@
 //! order (from the gate host, the order's origin), `KickAck` once every host applied a kick
 //! (from the gate host), `SessionEnded` only when a session left the world, never on a
 //! hand-off to another host (from the host it ended on). The coordinator converts each answer
-//! ([`answer_from`]) and forwards it unchanged.
+//! ([`answer_from`]) and writes it as a `login_outbox` row, which the login service reads.
 
 use game::HostId;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
+use axum::extract::{Query, Request, State};
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::Router;
 use crossbeam::channel::{Receiver, Sender};
 use game::{PlayerToken, ServerEvent, LOGGED_IN_ELSEWHERE};
-use login_api::{HostToLogin, LoginToHost, SPAWN_PENDING_TTL_SECS};
-use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
+use login_api::{HostToLogin, LoginPage, LoginToHost, SPAWN_PENDING_TTL_SECS};
+use tokio::sync::watch;
+
+use crate::coordinator_api::{AnswersQuery, Auth, MAILBOX_PAGE_MAX};
 
 use crate::auth_edge::{Clock, REFUSE_SUPERSEDED};
 use crate::player_store::{PlayerKey, Resolving, SharedPlayerStore};
 
-/// Where a role-`all` server listens for the login service (`ip:port`).
+/// Where a role-`all` server serves the login service's routes (`ip:port`, TCP, HTTPS).
 pub const HOST_LINK_BIND_ENV: &str = "VOXEL_HOST_LINK_BIND";
 pub const DEFAULT_HOST_LINK_BIND: &str = "127.0.0.1:6490";
-/// Where the host writes its link certificate's SHA-256 pin (the login registry's
+/// Where the server writes its login routes' certificate SHA-256 pin (the login registry's
 /// `host_link_cert`); its cert and key persist beside it (keep it under a git-ignored dir).
 pub const HOST_LINK_CERT_HASH_FILE_ENV: &str = "VOXEL_HOST_LINK_CERT_HASH_FILE";
 pub const DEFAULT_HOST_LINK_CERT_HASH_FILE: &str = "target/dev-r2/host-0.cert-sha256";
-/// Where the coordinator (role `coordinator`) listens for the login service (`ip:port`).
-pub const LOGIN_LINK_BIND_ENV: &str = "VOXEL_LOGIN_LINK_BIND";
-pub const DEFAULT_LOGIN_LINK_BIND: &str = "127.0.0.1:6490";
-/// Where the coordinator writes its login listener's SHA-256 pin (the login registry's
-/// `host_link_cert`); its cert and key persist beside it.
-pub const LOGIN_LINK_CERT_HASH_FILE_ENV: &str = "VOXEL_LOGIN_LINK_CERT_HASH_FILE";
-pub const DEFAULT_LOGIN_LINK_CERT_HASH_FILE: &str = "target/dev-r2/login-link.cert-sha256";
+
+/// At most this many answers wait in a role-`all` server's queue for the login service
+/// ([`LoginAnswers`]); beyond it the oldest is dropped (warned at most once per
+/// [`LOGIN_ANSWERS_DROP_WARN_MS`]).
+pub const LOGIN_ANSWERS_HELD_MAX: usize = 4096;
+/// The warning about dropped answers comes at most this often.
+pub const LOGIN_ANSWERS_DROP_WARN_MS: u64 = 60_000;
 
 /// The refusal of a ticket no pending spawn order matches.
 pub const REFUSE_NO_SPAWN_ORDER: &str = "no spawn order for this login — log in again";
@@ -150,18 +166,6 @@ pub fn cert_hash_file_from(value: Option<&str>) -> PathBuf {
     PathBuf::from(value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_HOST_LINK_CERT_HASH_FILE))
 }
 
-/// The coordinator's login listen address from an env value; unset or empty is
-/// [`DEFAULT_LOGIN_LINK_BIND`].
-pub fn login_bind_from(value: Option<&str>) -> Result<SocketAddr, String> {
-    addr_from(LOGIN_LINK_BIND_ENV, value, DEFAULT_LOGIN_LINK_BIND)
-}
-
-/// The coordinator's login pin file from an env value; unset or empty is
-/// [`DEFAULT_LOGIN_LINK_CERT_HASH_FILE`].
-pub fn login_cert_hash_file_from(value: Option<&str>) -> PathBuf {
-    PathBuf::from(value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_LOGIN_LINK_CERT_HASH_FILE))
-}
-
 fn addr_from(env: &str, value: Option<&str>, default: &str) -> Result<SocketAddr, String> {
     let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(default);
     value.parse().map_err(|_| format!("{env}={value:?} is not an address (ip:port)"))
@@ -179,23 +183,6 @@ pub fn order_from(msg: LoginToHost) -> game::LoginOrder {
         LoginToHost::SpawnPlayer { player_token, session_epoch } => game::LoginOrder::Spawn { player_token, session_epoch },
         LoginToHost::Kick { player_token, session_epoch, reason } => game::LoginOrder::Kick { player_token, session_epoch, reason },
     }
-}
-
-/// A coordinator replica's answer to `msg` when no host takes logins
-/// ([`game::Coordinator::gate_host`] is `None`; the gate is world-wide, so no other replica has
-/// one either): the join answers 503, a kick is resent.
-pub fn no_gate(msg: &LoginToHost) -> HostToLogin {
-    let (LoginToHost::SpawnPlayer { player_token, session_epoch } | LoginToHost::Kick { player_token, session_epoch, .. }) = msg;
-    HostToLogin::NoGate { player_token: player_token.clone(), session_epoch: *session_epoch }
-}
-
-/// A coordinator replica's answer to a spawn order when no host takes logins and the world adds
-/// its own hosts ([`game::coordinator::Gate::Nobody`], fleet dials
-/// set; Elastic 4): the world is starting — the login service answers the join 503
-/// `world_starting` at once; the replica asks for a host ([`game::coordinator::Input::StartWanted`]).
-pub fn starting(msg: &LoginToHost) -> HostToLogin {
-    let (LoginToHost::SpawnPlayer { player_token, session_epoch } | LoginToHost::Kick { player_token, session_epoch, .. }) = msg;
-    HostToLogin::Starting { player_token: player_token.clone(), session_epoch: *session_epoch }
 }
 
 /// A host's answer, as the coordinator forwards it to the login service.
@@ -447,10 +434,63 @@ impl OrderState {
     }
 }
 
-/// The login peers `SessionEnded` goes to.
-struct LoginPeers {
-    senders: PeerSenders<HostToLogin>,
-    peers: Mutex<BTreeSet<PeerId>>,
+/// A role-`all` server's answers to the login service, in order, numbered: what `GET`
+/// [`login_api::PATH_COORD_LOGIN_ANSWERS`] reads past a cursor (nothing is deleted by a read; at
+/// most [`LOGIN_ANSWERS_HELD_MAX`] are kept, the oldest dropped first). The numbers start at this
+/// process's start time in µs-ish units (ms × 1000), so a restarted server's answers number past
+/// the previous one's; a cursor past every number issued (a clock that went back) reads from the
+/// start. Every answer kind is idempotent at the login service, so a re-read costs nothing.
+pub struct LoginAnswers {
+    inner: Mutex<AnswersInner>,
+    /// The newest number issued: what wakes a waiting poll.
+    version: watch::Sender<u64>,
+}
+
+struct AnswersInner {
+    rows: VecDeque<(u64, HostToLogin)>,
+    /// The newest number issued.
+    newest: u64,
+    dropped: u64,
+    warned_at: Option<Instant>,
+}
+
+impl LoginAnswers {
+    fn new() -> LoginAnswers {
+        let start = crate::roles::unix_ms_now().saturating_mul(1000);
+        LoginAnswers {
+            inner: Mutex::new(AnswersInner { rows: VecDeque::new(), newest: start, dropped: 0, warned_at: None }),
+            version: watch::channel(start).0,
+        }
+    }
+
+    /// `msg` for the login service, after every answer queued before it.
+    fn push(&self, msg: HostToLogin) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if inner.rows.len() >= LOGIN_ANSWERS_HELD_MAX {
+            inner.rows.pop_front();
+            inner.dropped += 1;
+            if inner.warned_at.is_none_or(|at| at.elapsed() >= Duration::from_millis(LOGIN_ANSWERS_DROP_WARN_MS)) {
+                log::warn!(
+                    "[login-link] {LOGIN_ANSWERS_HELD_MAX} answers wait for the login service: the oldest dropped ({} since start)",
+                    inner.dropped
+                );
+                inner.warned_at = Some(Instant::now());
+            }
+        }
+        inner.newest += 1;
+        let seq = inner.newest;
+        inner.rows.push_back((seq, msg));
+        drop(inner);
+        self.version.send_replace(seq);
+    }
+
+    /// At most `limit` answers numbered past `after` (from the start when `after` is past the
+    /// newest number issued).
+    fn read(&self, after: u64, limit: usize) -> Vec<(u64, HostToLogin)> {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let after = if after > inner.newest { 0 } else { after };
+        inner.rows.iter().filter(|(seq, _)| *seq > after).take(limit).cloned().collect()
+    }
 }
 
 /// The admission state of a host the login service pushes to. Shared by the link's thread
@@ -458,8 +498,8 @@ struct LoginPeers {
 pub struct SpawnOrders {
     state: Mutex<OrderState>,
     now: Clock,
-    /// Set once the link listens.
-    login: OnceLock<LoginPeers>,
+    /// Set once the login routes serve (role `all`): where `SessionEnded` goes.
+    login: OnceLock<Arc<LoginAnswers>>,
     /// Role `host` ([`Self::relay_through`]): the manager's event channel.
     relay: OnceLock<Sender<ServerEvent>>,
 }
@@ -482,17 +522,14 @@ impl SpawnOrders {
         self.relay.get().is_some()
     }
 
-    /// `msg` to every login peer connected now (none: lost, best effort).
+    /// `msg` for the login service (its answer queue; none served: dropped).
     fn tell_login(&self, msg: HostToLogin) {
         let Some(login) = self.login.get() else {
             // `HostToLogin`'s `Debug` hides the player token.
-            log::warn!("[login-link] {msg:?} for the login service, which is not linked to this host: dropped");
+            log::warn!("[login-link] {msg:?} for the login service, which this server does not serve: dropped");
             return;
         };
-        let peers = login.peers.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        for peer in peers {
-            login.senders.send(peer, msg.clone());
-        }
+        login.push(msg);
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, OrderState> {
@@ -649,7 +686,7 @@ impl SpawnOrders {
         state.used.insert(token.to_string(), (newest, now.saturating_add(SPAWN_PENDING_TTL_SECS)));
     }
 
-    /// `SessionEnded` to the login peers connected now (none linked: nothing).
+    /// `SessionEnded` to the login service (not served: nothing).
     fn tell_ended(&self, token: &str, epoch: u64) {
         if self.login.get().is_some() {
             self.tell_login(HostToLogin::SessionEnded { player_token: token.to_string(), session_epoch: epoch });
@@ -657,122 +694,128 @@ impl SpawnOrders {
     }
 }
 
-/// The running link: the listener (drop it from synchronous code) and its address and pin.
+/// Role `all`'s login routes, serving: their address and pin. Dropping it stops them.
 pub struct LoginLink {
-    listener: LinkListener,
+    addr: SocketAddr,
+    pin: String,
+    _stop: watch::Sender<bool>,
 }
 
 impl LoginLink {
     pub fn local_addr(&self) -> SocketAddr {
-        self.listener.local_addr()
+        self.addr
+    }
+
+    /// The URL the login registry needs (`world add --link`).
+    pub fn url(&self) -> String {
+        format!("https://{}", self.addr)
     }
 
     /// The pin the login registry needs (`world add --link-cert`).
     pub fn cert_sha256(&self) -> &str {
-        self.listener.cert_sha256()
+        &self.pin
     }
 }
 
-/// Listen for the login service on `bind` (port 0 picks one) with the service `token`; the
-/// pin goes to `cert_hash_file` (its directory is created). Orders land in `orders`; players
-/// are resolved through `players`; supersedes go to the manager on `events`.
+/// What the login routes share.
+struct RouteState {
+    auth: Auth,
+    orders: Sender<LoginToHost>,
+    answers: Arc<LoginAnswers>,
+}
+
+/// Serve the login routes on `bind` (port 0 picks one) to callers presenting the service `token`
+/// and naming world `world`; the identity `<cert_hash_file>.cert` / `.key`, its pin written to
+/// `cert_hash_file` (its directory is created). Orders land in `orders` (on a thread of their
+/// own, in arrival order); players are resolved through `players`; supersedes go to the manager
+/// on `events`.
 pub fn start(
     bind: SocketAddr,
     token: String,
-    cert_hash_file: Option<PathBuf>,
-    orders: Arc<SpawnOrders>,
-    players: SharedPlayerStore,
-    events: Sender<ServerEvent>,
-) -> io::Result<LoginLink> {
-    start_with(bind, token, String::new(), cert_hash_file, orders, players, events)
-}
-
-/// [`start`] for the login service of world `world` ([`svc_link::LinkHello::world`]).
-pub fn start_in_world(
-    bind: SocketAddr,
-    token: String,
     world: String,
-    cert_hash_file: Option<PathBuf>,
-    orders: Arc<SpawnOrders>,
-    players: SharedPlayerStore,
-    events: Sender<ServerEvent>,
-) -> io::Result<LoginLink> {
-    start_with(bind, token, world, cert_hash_file, orders, players, events)
-}
-
-fn start_with(
-    bind: SocketAddr,
-    token: String,
-    world: String,
-    cert_hash_file: Option<PathBuf>,
+    cert_hash_file: PathBuf,
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
 ) -> io::Result<LoginLink> {
     if orders.relays() {
-        return Err(io::Error::other("relaying spawn orders (role host) take the coordinator's orders, not a login link"));
+        return Err(io::Error::other("relaying spawn orders (role host) take the coordinator's orders, not the login service's"));
     }
-    if let Some(dir) = cert_hash_file.as_deref().and_then(std::path::Path::parent).filter(|d| !d.as_os_str().is_empty()) {
+    if token.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the service token is empty"));
+    }
+    if let Some(dir) = cert_hash_file.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let (listener, link_events, senders) = LinkListener::bind::<LoginToHost, HostToLogin>(bind, token, world, cert_hash_file)?;
-    if orders.login.set(LoginPeers { senders: senders.clone(), peers: Mutex::default() }).is_err() {
-        return Err(io::Error::other("these spawn orders already have a login link"));
+    let answers = Arc::new(LoginAnswers::new());
+    if orders.login.set(answers.clone()).is_err() {
+        return Err(io::Error::other("these spawn orders already serve the login service"));
     }
-    log::info!("[login-link] listening for the login service on {}", listener.local_addr());
+    let (tls, pin) = svc_link::pinned_server_config(&cert_hash_file, &[b"h2"])?;
+    let listener = std::net::TcpListener::bind(bind)?;
+    let addr = listener.local_addr()?;
+    let (orders_tx, orders_rx) = crossbeam::channel::unbounded();
+    let state = Arc::new(RouteState { auth: Auth { token, world }, orders: orders_tx, answers: answers.clone() });
+    let router = Router::new()
+        .route(login_api::PATH_COORD_LOGIN_ORDERS, post(take_order))
+        .route(login_api::PATH_COORD_LOGIN_ANSWERS, get(read_answers))
+        .layer(axum::extract::DefaultBodyLimit::max(crate::coordinator_api::API_BODY_MAX_BYTES))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
+        .with_state(state);
     std::thread::Builder::new()
         .name("login-link".into())
-        .spawn(move || serve(link_events, senders, orders, players, events))?;
-    Ok(LoginLink { listener })
+        .spawn(move || serve(orders_rx, answers, orders, players, events))?;
+    let stop = crate::coordinator_api::serve_tls("login-link-api", listener, tls, router)?;
+    log::info!("[login-link] serving the login service on https://{addr} (pin {pin})");
+    Ok(LoginLink { addr, pin, _stop: stop })
 }
 
+async fn auth_layer(State(s): State<Arc<RouteState>>, req: Request, next: Next) -> Response {
+    if let Err(refused) = crate::coordinator_api::check_auth(&s.auth, req.headers()) {
+        return refused;
+    }
+    next.run(req).await
+}
+
+/// `POST` an order: 202 once queued for the orders' thread (its answer comes as a queued answer).
+async fn take_order(State(s): State<Arc<RouteState>>, body: Bytes) -> Response {
+    let Ok(msg) = game::decode_packet::<LoginToHost>(&body) else {
+        return crate::coordinator_api::text(StatusCode::BAD_REQUEST, "order");
+    };
+    if s.orders.send(msg).is_err() {
+        return crate::coordinator_api::text(StatusCode::SERVICE_UNAVAILABLE, "not_ready");
+    }
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// `GET` the answers past `after`, long-polled as the coordinator's.
+async fn read_answers(State(s): State<Arc<RouteState>>, Query(q): Query<AnswersQuery>) -> Response {
+    let versions = s.answers.version.subscribe();
+    let read = || {
+        let rows = s.answers.read(q.after, MAILBOX_PAGE_MAX as usize);
+        async move { Ok::<_, std::convert::Infallible>(rows) }
+    };
+    let Ok(rows) = crate::coordinator_api::long_poll(&versions, q.wait_ms, read).await;
+    crate::coordinator_api::packet(StatusCode::OK, &LoginPage { rows })
+}
+
+/// The orders' thread: each order applied in arrival order, its answer queued.
 fn serve(
-    link_events: Receiver<(PeerId, LinkEvent<LoginToHost>)>,
-    senders: PeerSenders<HostToLogin>,
+    orders_rx: Receiver<LoginToHost>,
+    answers: Arc<LoginAnswers>,
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
 ) {
-    let login_peers = |f: &mut dyn FnMut(&mut BTreeSet<PeerId>)| {
-        if let Some(login) = orders.login.get() {
-            f(&mut login.peers.lock().unwrap_or_else(|p| p.into_inner()));
-        }
-    };
-    for (peer, event) in link_events.iter() {
-        match event {
-            LinkEvent::Up(hello) if hello.role == PeerRole::Login => {
-                log::info!("[login-link] login service connected (peer {})", peer.0);
-                login_peers(&mut |p| {
-                    p.insert(peer);
-                });
+    for msg in orders_rx.iter() {
+        match msg {
+            LoginToHost::SpawnPlayer { player_token, session_epoch } => {
+                let ok = spawn(&orders, &players, &events, &player_token, session_epoch);
+                answers.push(spawn_ack(player_token, session_epoch, ok, None));
             }
-            LinkEvent::Up(hello) => {
-                log::error!("[login-link] peer {} is {:?}, not the login service: closed", peer.0, hello.role);
-                senders.close(peer);
-            }
-            LinkEvent::Down(why) => {
-                login_peers(&mut |p| {
-                    p.remove(&peer);
-                });
-                log::info!("[login-link] peer {} gone: {why}", peer.0);
-            }
-            LinkEvent::Msg(msg) => {
-                let mut is_login = false;
-                login_peers(&mut |p| is_login = p.contains(&peer));
-                if !is_login {
-                    log::warn!("[login-link] message from peer {} that is not the login service: ignored", peer.0);
-                    continue;
-                }
-                match msg {
-                    LoginToHost::SpawnPlayer { player_token, session_epoch } => {
-                        let ok = spawn(&orders, &players, &events, &player_token, session_epoch);
-                        senders.send(peer, spawn_ack(player_token, session_epoch, ok, None));
-                    }
-                    LoginToHost::Kick { player_token, session_epoch, reason } => {
-                        if kick(&orders, &players, &events, &player_token, session_epoch, reason) {
-                            senders.send(peer, HostToLogin::KickAck { player_token, session_epoch });
-                        }
-                    }
+            LoginToHost::Kick { player_token, session_epoch, reason } => {
+                if kick(&orders, &players, &events, &player_token, session_epoch, reason) {
+                    answers.push(HostToLogin::KickAck { player_token, session_epoch });
                 }
             }
         }

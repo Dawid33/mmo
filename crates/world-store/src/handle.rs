@@ -513,8 +513,10 @@ impl StoreHandle {
     }
 
     /// At most `limit` of the coordinator's login answers after `after`, as `(seq,
-    /// game::encode_packet bytes)` in `seq` (commit) order; a read deletes nothing (transitions
-    /// prune them by age, `TransitionWrite::login_prune_before_ms`). SQLite: `Unsupported`.
+    /// game::encode_packet bytes)` in `seq` (commit) order — from the start when `after` is past
+    /// the newest row kept (another incarnation's cursor: a re-forged world); a read deletes
+    /// nothing (transitions prune them by age, `TransitionWrite::login_prune_before_ms`). SQLite:
+    /// `Unsupported`.
     pub async fn login_answers_read(&self, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
         let (tx, rx) = oneshot::channel();
         self.send(Request::LoginAnswersRead(after, limit, Reply::asynch(tx))).map_err(|_| stopped())?;

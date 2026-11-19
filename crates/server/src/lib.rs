@@ -967,20 +967,21 @@ pub fn run() -> claims::ServerExit {
     let sinks = rgi.sinks();
     let rt = build_server_runtime(worker_threads);
     let cps = client_packet_send.clone();
-    // The login service's push: a listener (dropped at the end of `run`, sync code) — role
-    // `all` only (one process; split roles: the coordinator listens, see above).
+    // The login service's routes (the coordinator API's two login routes, served here; dropped
+    // at the end of `run`) — role `all` only (one process; split roles: the coordinator serves
+    // them, see above).
     let _login_link = spawn_orders.filter(|_| role != roles::Role::Host).map(|(orders, token)| {
         let bind = login_link::bind_from(std::env::var(login_link::HOST_LINK_BIND_ENV).ok().as_deref())
             .unwrap_or_else(|e| fatal(&e));
         let pin_file =
             login_link::cert_hash_file_from(std::env::var(login_link::HOST_LINK_CERT_HASH_FILE_ENV).ok().as_deref());
         let world = login_link::link_world_from(std::env::var(auth_edge::WORLD_ID_ENV).ok().as_deref());
-        let (pin, events) = (Some(pin_file.clone()), client_packet_send.clone());
-        let link = login_link::start_in_world(bind, token, world, pin, orders, players.clone(), events)
-            .unwrap_or_else(|e| fatal(&format!("the login link on {bind}: {e}")));
+        let events = client_packet_send.clone();
+        let link = login_link::start(bind, token, world, pin_file.clone(), orders, players.clone(), events)
+            .unwrap_or_else(|e| fatal(&format!("the login routes on {bind}: {e}")));
         info!(
-            "auth: login tickets need the login service's spawn orders, pushed to {} (pin {} in {})",
-            link.local_addr(),
+            "auth: login tickets need the login service's spawn orders, posted to {} (pin {} in {})",
+            link.url(),
             link.cert_sha256(),
             pin_file.display()
         );
