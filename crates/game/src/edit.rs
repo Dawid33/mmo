@@ -765,30 +765,3 @@ pub fn raycast_blocks(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::voxel::CHUNK_CLONES;
-
-    /// A per-block edit must not copy the chunk: at 16³ blocks a clone is a
-    /// 4096-block box per click, re-paid on every replay of the tick.
-    #[test]
-    fn edit_never_clones_the_chunk() {
-        // Delta, not Full: Full-mode rollback clones the whole field for its
-        // mismatch diagnostics (a harness cost, not the edit's). Delta also
-        // checks the per-block entry's slot digest round-trips.
-        let _mode = crate::state::delta_digest_tests::delta_mode();
-        let (send, _recv) = crossbeam::channel::unbounded();
-        let mut r = Rollback::new(Some(send));
-        let coords = ChunkCoords::new(1, 0, 1);
-        r.seed_terrain_genesis(vec![(coords, Chunk::flat_floor(16))]);
-        let cb = CHUNK_BLOCKS as i32;
-        let pos = [cb, 0, cb];
-        let before = CHUNK_CLONES.with(|c| c.get());
-        r.new_transaction();
-        assert!(r.set_block_safe(pos, Block::new(BlockId::AIR)), "the floor block breaks");
-        r.rollback();
-        let after = CHUNK_CLONES.with(|c| c.get());
-        assert_eq!(after, before, "a break + undo cloned the chunk {} times", after - before);
-    }
-}

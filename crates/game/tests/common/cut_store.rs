@@ -2,7 +2,7 @@
 //! store holds after committing a sequence of save cuts
 //! ([`game::WorldCut`]), and the places an entity is saved in.
 use game::{
-    ChunkCoords, Chunk, EntityId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, WorldCut,
+    ChunkCoords, Chunk, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, WorldCut,
 };
 use std::collections::BTreeMap;
 
@@ -38,22 +38,5 @@ impl CutStore {
             self.history = cut.history.clone();
         }
         self.tick = cut.tick;
-    }
-
-    /// Where `id` is saved: `(region, "state")` for each stored region whose
-    /// entities hold it, `(target, "row")` for each in-flight crossing of it.
-    pub fn places(&self, id: EntityId) -> Vec<(RegionCoords, &'static str)> {
-        let mut at = Vec::new();
-        for (rc, stored) in &self.regions {
-            at.extend(stored.entities.iter().filter(|b| b.id == id).map(|_| (*rc, "state")));
-        }
-        for row in &self.in_flight {
-            if let InFlightRow::Transfer { target, bundle, .. } = row {
-                if bundle.id == id {
-                    at.push((*target, "row"));
-                }
-            }
-        }
-        at
     }
 }

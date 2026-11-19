@@ -2,13 +2,13 @@
 //! the real region tick: a hand-built floor, one settled player, key presses
 //! and per-tick body reads. Every read of the physics engine's types lives
 //! here, so an engine switch migrates one file.
-#![allow(dead_code)]
+#![allow(dead_code)] // each test binary that mounts this module uses its own subset
 
 use std::collections::BTreeMap;
 use std::ops::Range;
 
 use game::{
-    chunk_coords_from_translation, Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Pose,
+    Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Pose,
     Key, Region, RegionCoords, Rollback, World, CHUNK_UNITS, PLAYER_SPAWN_X, PLAYER_SPAWN_Z,
 };
 
@@ -35,8 +35,6 @@ pub fn install_real_block_props() {
 /// Height (units) of the top of the one-block test floor (`Chunk::flat_floor(BLOCK_VOXELS)`
 /// under every column: `seam_translate::uniform_floor`, `history_handover::floored_region`).
 pub const FLOOR_TOP: f32 = game::BLOCK_VOXELS as f32;
-/// The block level a body stands in (and a pile rests in) on the one-block test floor.
-pub const STAND: i32 = 1;
 
 /// The y (units) of a player body's centre when it stands on a floor whose top is
 /// `top` units high.
@@ -49,28 +47,6 @@ pub fn standing_y(top: f32) -> f32 {
 /// players and put slimes and bodies down "on the floor".
 pub fn above_floor_y() -> f32 {
     standing_y(FLOOR_TOP) + 3.6
-}
-
-/// A manager over `spawner` whose never-run regions start from `floor(rc)` (its
-/// `RegionGenerator`); far terrain is empty (an inline LOD builder with no coarse data).
-pub fn floor_manager<S: game::RegionSpawner>(
-    spawner: S,
-    floor: impl FnMut(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send + 'static,
-    out: crossbeam::channel::Sender<(Option<game::ClientId>, game::ServerPacket)>,
-    region_out: crossbeam::channel::Sender<(RegionCoords, game::RegionOutput)>,
-) -> game::WorldManager<S> {
-    let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
-    let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
-        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-        water: Box::new(game::lod::LodWater::dry),
-        out: lod_result_send,
-    });
-    game::WorldManager::new(spawner, Box::new(floor), out, region_out, lod_builder, lod_result_recv)
-}
-
-/// The chunk holding the world-unit position `units` (floor by `CHUNK_UNITS`).
-pub fn chunk_of(units: game::rapier3d::math::Vector) -> ChunkCoords {
-    chunk_coords_from_translation(units)
 }
 
 /// Chunk index along one horizontal axis of the world-unit coordinate `u`.
@@ -100,20 +76,6 @@ pub fn floor_chunks(x_units: Range<f32>, z_units: Range<f32>, depth: u32) -> Vec
         .collect()
 }
 
-/// Seeds `region`'s terrain halo (it stands at `here`) as if each of its 8
-/// neighbours were floored like [`floor_chunks`] edge to edge: the seeds the
-/// manager sends a starting region.
-pub fn seed_floor_halo(region: &mut game::Region, here: game::RegionCoords) {
-    let size = game::REGION_SIZE;
-    let chunks = floor_chunks(0.0..size, 0.0..size, 16);
-    for from in here.window_3x3().into_iter().filter(|&rc| rc != here) {
-        let seed = game::halo::halo_seed_from_chunks(from, here, chunks.iter().map(|(c, ch)| (*c, ch)))
-            .expect("neighbours");
-        region.handle_event(game::GameEventKind::HaloUpdate(seed)).unwrap();
-        region.forget_last_event();
-    }
-}
-
 /// The first chunk row past the spawn's: where a chunk seam lies ahead of the
 /// player walking +z / +x from the spawn column (row 5, z = 160, at 2-block
 /// chunks).
@@ -127,18 +89,6 @@ pub fn seam_z() -> f32 {
 /// World x of the first chunk border ahead of the spawn along +x.
 pub fn seam_x() -> f32 {
     (chunk_index_of(PLAYER_SPAWN_X) + 1) as f32 * CHUNK_EDGE
-}
-
-/// Unit range one chunk either side of the spawn column in x (`3..=4` at
-/// 2-block chunks): all a walk straight along z touches.
-pub fn spawn_x_band() -> Range<f32> {
-    PLAYER_SPAWN_X - CHUNK_EDGE..PLAYER_SPAWN_X + CHUNK_EDGE
-}
-/// Unit range from one chunk behind the spawn to `ahead` units past it,
-/// padded by two chunks — the z extent of a walk of `ahead` units.
-pub fn spawn_z_walk(ahead: f32) -> Range<f32> {
-    let end = (chunk_index_of(PLAYER_SPAWN_Z) + 2 + (ahead / CHUNK_EDGE) as usize) as f32 * CHUNK_EDGE;
-    PLAYER_SPAWN_Z - CHUNK_EDGE..end
 }
 
 pub fn r0() -> RegionCoords {
@@ -171,12 +121,6 @@ pub fn world_of(
     ticks(&mut world, 12);
     assert!(body(&world).grounded, "player must settle on the floor");
     world
-}
-
-/// One-voxel terraces, a step down per chunk along +z: the gentle slopes of
-/// generated terrain.
-pub fn terraces(z_units: Range<f32>) -> World {
-    world_of(spawn_x_band(), z_units, |_, z| Chunk::flat_floor(28 - z as u32))
 }
 
 pub fn key(world: &mut World, key: Key, pressed: bool) {
@@ -259,21 +203,6 @@ pub fn fixed_body_mass_count(data: &Rollback) -> (usize, usize) {
 /// A host id from its number (the tests name hosts `h(0)`, `h(1)`, ...).
 pub fn h(n: u64) -> game::HostId {
     game::HostId(n)
-}
-
-/// The first site of `h` an adventure may start at: not abandoned, with a living member (the
-/// coordinator's `SiteAbandoned` / `Unpopulated` rules).
-pub fn populated_site(h: &game::history::History) -> game::history::SiteId {
-    h.sites()
-        .find(|s| s.abandoned.is_none() && !h.living_members(s.id).is_empty())
-        .map(|s| s.id)
-        .expect("a populated site")
-}
-
-/// A player's request to start an adventure at `site`: the state-changing world request the
-/// request, settle and hand-off guarantees are proven on.
-pub fn start_request(site: game::history::SiteId) -> game::coordinator::WorldRequest {
-    game::coordinator::WorldRequest::StartAdventure(site)
 }
 
 /// The coordinator's inputs as the tests send them, each through

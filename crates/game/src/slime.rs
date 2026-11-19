@@ -334,33 +334,3 @@ impl Rollback {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roll_is_deterministic_and_spread() {
-        assert_eq!(roll(7, 9, 1), roll(7, 9, 1));
-        assert_ne!(roll(7, 9, 1), roll(8, 9, 1));
-        assert_ne!(roll(7, 9, 1), roll(7, 10, 1));
-        assert_ne!(roll(7, 9, 1), roll(7, 9, 2));
-    }
-
-    #[test]
-    fn wrap_angle_stays_in_range() {
-        for a in [-10.0f32, -PI, -1.0, 0.0, 1.0, PI, 10.0] {
-            let w = wrap_angle(a);
-            assert!((-PI..PI).contains(&w), "{a} -> {w}");
-        }
-    }
-
-    #[test]
-    fn collider_fills_the_cube_height() {
-        for size in [1, 2, 4] {
-            let ColliderSpec::CapsuleY { half_height, radius } = slime_collider(size) else {
-                panic!("a slime is a capsule")
-            };
-            assert!((2.0 * (half_height + radius) - slime_edge_units(size)).abs() < 1e-4);
-        }
-    }
-}

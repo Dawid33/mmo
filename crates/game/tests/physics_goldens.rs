@@ -285,41 +285,49 @@ fn check(name: &str) {
     }
 }
 
+/// Gate: pins physics behaviour; re-record only on purpose
 #[test]
 fn walk_flat_across_chunk_seam_golden() {
     check("walk_flat_across_chunk_seam");
 }
 
+/// Gate: pins physics behaviour; re-record only on purpose
 #[test]
 fn walk_scale_seam_golden() {
     check("walk_scale_seam");
 }
 
+/// Gate: pins physics behaviour; re-record only on purpose
 #[test]
 fn step_up_one_block_golden() {
     check("step_up_one_block");
 }
 
+/// Gate: pins physics behaviour; re-record only on purpose
 #[test]
 fn terrace_uphill_1_voxel_golden() {
     check("terrace_uphill_1_voxel");
 }
 
+/// Gate: pins physics behaviour; re-record only on purpose
 #[test]
 fn jump_in_place_golden() {
     check("jump_in_place");
 }
 
+/// Gate: pins physics behaviour; re-record only on purpose
 #[test]
 fn sprint_jump_over_gap_golden() {
     check("sprint_jump_over_gap");
 }
 
+/// Gate: pins physics behaviour; re-record only on purpose
 #[test]
 fn sunk_start_depenetrates_golden() {
     check("sunk_start_depenetrates");
 }
 
+/// Gate: pins physics behaviour; re-record only on purpose
 #[test]
 fn slime_hop_sequence_golden() {
     check("slime_hop_sequence");

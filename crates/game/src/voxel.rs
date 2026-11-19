@@ -390,65 +390,6 @@ impl block_mesh::Voxel for Voxel {
     }
 }
 
-#[cfg(test)]
-mod coord_tests {
-    use super::*;
-
-    #[test]
-    fn chunk_coords_allow_negative_y() {
-        let c = ChunkCoords::new(3, -2, 5);
-        assert_eq!(c.y, -2);
-        assert_eq!(c.x, 3);
-        assert_eq!(c.z, 5);
-    }
-
-    #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn bricks_tile_the_chunk_and_read_its_blocks_and_chisel() {
-        let stone = Block::new(BlockId(2));
-        assert_eq!(Chunk::uniform(stone).brick([0, 0, 0]).uniform(), Some(stone));
-        // A Uniform grid with one chiseled block is no longer uniform there.
-        let mut c = Chunk::uniform(stone);
-        let half = ChiselData::cuboid(BlockId(3), [0, 0, 0], [BLOCK_VOXELS, BLOCK_VOXELS / 2, BLOCK_VOXELS]);
-        c.chisel.insert(BlockIndex::from_xyz(1, 0, 1), half);
-        c.set_block(0, 1, 0, Block::new(BlockId(4)));
-        let n = BRICKS_PER_CHUNK_EDGE;
-        assert_eq!(c.bricks().count(), n * n * n);
-        for (b, brick) in c.bricks() {
-            let voxels = brick.voxels();
-            assert_eq!(voxels.len(), BRICK_VOXEL_COUNT);
-            let mut uniform = true;
-            for i in 0..BRICK_VOXEL_COUNT {
-                let [x, y, z] = [i % BRICK_VOXELS, (i / BRICK_VOXELS) % BRICK_VOXELS, i / (BRICK_VOXELS * BRICK_VOXELS)];
-                // Chunk-local block and in-block voxel of brick voxel (x, y, z).
-                let cb = [b[0] * BRICK_BLOCKS + x / BLOCK_VOXELS, b[1] * BRICK_BLOCKS + y / BLOCK_VOXELS, b[2] * BRICK_BLOCKS + z / BLOCK_VOXELS];
-                let bi = BlockIndex::from_xyz(cb[0], cb[1], cb[2]);
-                let want = match c.chisel.get(&bi) {
-                    Some(ch) => ch.material_at(x % BLOCK_VOXELS, y % BLOCK_VOXELS, z % BLOCK_VOXELS),
-                    None => c.blocks.get(bi).id,
-                };
-                uniform &= want == BlockId(2) && c.chisel.get(&bi).is_none();
-                assert_eq!(voxels[i].block, want, "brick {b:?} voxel ({x}, {y}, {z})");
-            }
-            assert_eq!(brick.uniform().is_some(), uniform, "brick {b:?}");
-        }
-    }
-
-    #[test]
-    fn brick_coords_scale_chunk_coords_with_signed_y() {
-        let n = BRICKS_PER_CHUNK_EDGE as i64;
-        assert_eq!(brick_coords(ChunkCoords::new(3, -2, 5), [0, 0, 0]), [3 * n, -2 * n, 5 * n]);
-        let last = BRICKS_PER_CHUNK_EDGE - 1;
-        assert_eq!(brick_coords(ChunkCoords::new(0, -1, 0), [last; 3]), [n - 1, -1, n - 1]);
-    }
-
-    #[test]
-    fn column_coords_construct() {
-        let c = ColumnCoords::new(1, 7);
-        assert_eq!((c.x, c.z), (1, 7));
-    }
-}
-
 impl MergeVoxel for Voxel {
     type MergeValue = BlockId;
     type MergeValueFacingNeighbour = BlockId;

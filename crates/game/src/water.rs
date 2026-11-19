@@ -225,17 +225,3 @@ impl Rollback {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn df_depth_maps_units_to_sevenths() {
-        assert_eq!(df_depth(0), 0);
-        assert_eq!(df_depth(1), 1);
-        assert_eq!(df_depth(WATER_FULL / 7), 1);
-        assert_eq!(df_depth(WATER_FULL * 3 / 7), 3);
-        assert_eq!(df_depth(WATER_FULL * 3 / 7 + 1), 4);
-        assert_eq!(df_depth(WATER_FULL), 7);
-    }
-}

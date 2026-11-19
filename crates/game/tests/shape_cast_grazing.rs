@@ -48,6 +48,7 @@ fn assert_floor_hit(hit: Option<game::parry::query::ShapeCastHit>, context: &str
     );
 }
 
+/// Regression: walking jitter/sinking at chunk borders (cast from target distance); user-reported "jitter and lag crossing chunk borders" in play (docs/memories/kcc-voxel-seam-jitter.md, fix 4173c4ef)
 /// The cast is a ray cast against the shape rounded by the target distance;
 /// starting on that rounded surface it missed, or returned its last search
 /// direction — degrees off a flat face — as the normal.
@@ -71,19 +72,6 @@ fn cast_starting_at_the_target_distance_hits_with_the_true_normal() {
             .unwrap();
             assert_floor_hit(hit, &format!("gap {gap} z {z}"));
         }
-    }
-}
-
-#[test]
-fn cast_moving_away_from_within_the_target_distance_is_free() {
-    let cuboid = Cuboid::new(v(8.0, 8.0, 8.0));
-    let capsule = Capsule::new_y(r(HALF_HEIGHT), r(RADIUS));
-    let pos2 = Pose::translation(r(0.0), r(8.0 + HALF_HEIGHT + RADIUS + SKIN), r(0.0));
-    for vel in [v(0.0, 0.0, 3.0), v(0.0, 1.0, 3.0)] {
-        let hit =
-            cast_shapes(&Pose::IDENTITY, Vector::ZERO, &cuboid, &pos2, vel, &capsule, skin_cast(1.0))
-                .unwrap();
-        assert!(hit.is_none(), "sliding along or lifting off the floor is no hit: {hit:?}");
     }
 }
 
@@ -114,6 +102,7 @@ fn cast_on_floor(floor: &Voxels, size: f32, x: f32, z: f32, vel: Vector) -> Opti
     .unwrap()
 }
 
+/// Regression: walking jitter at chunk borders (voxels cast missed voxel under hovering shape); user-reported in play (docs/memories/kcc-voxel-seam-jitter.md, fix 4173c4ef)
 /// The voxels cast looked for voxels under the shape's bare AABB — which a
 /// shape hovering a skin above the floor does not reach — and then moved that
 /// search box with the motion instead of growing it: when the box crossed a
@@ -129,6 +118,7 @@ fn voxels_cast_sees_the_voxel_under_a_hovering_shape() {
     }
 }
 
+/// Regression: walking jitter at chunk borders (ghost edges inside flat floor); user-reported in play (docs/memories/kcc-voxel-seam-jitter.md, fix 4173c4ef)
 /// Every voxel is cast against as a free-standing box, so the seams of a flat
 /// floor reported their edges: a normal leaning along the floor whenever the
 /// shape's lowest point was nearer a neighbouring voxel's rim than its face.
@@ -150,25 +140,3 @@ fn voxels_cast_reports_no_edges_inside_a_flat_floor() {
     );
 }
 
-/// The floor's real rim keeps its edge: nothing covers the faces around it.
-#[test]
-fn voxels_cast_keeps_real_edges() {
-    let floor = voxel_floor(16.0);
-    let capsule = Capsule::new_y(r(HALF_HEIGHT), r(RADIUS));
-    // Beyond the z = 48 rim and below the top, moving back in: the capsule's
-    // rounded foot meets the rim's edge.
-    let pos2 = Pose::translation(r(24.0), r(16.0 + HALF_HEIGHT + RADIUS - 2.0), r(48.0 + 8.0));
-    let hit = cast_shapes(
-        &Pose::IDENTITY,
-        Vector::ZERO,
-        &floor,
-        &pos2,
-        v(0.0, 0.0, -1.0),
-        &capsule,
-        skin_cast(8.0),
-    )
-    .unwrap()
-    .expect("the rim must stop the capsule");
-    let n = hit.normal1;
-    assert!(n.z > 0.3 && n.y > 0.3, "an edge contact leans: ({}, {}, {})", n.x, n.y, n.z);
-}

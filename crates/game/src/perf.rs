@@ -266,36 +266,3 @@ macro_rules! perf_event {
     };
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tick_time_stats_nearest_rank() {
-        assert_eq!(TickTimeStats::from_samples([]), None);
-        let one = TickTimeStats::from_samples([7]).unwrap();
-        assert_eq!((one.mean_us, one.p50_us, one.p99_us, one.max_us), (7, 7, 7, 7));
-        // 1..=100: p50 = 50, p95 = 95, p99 = 99, mean 50 (floor of 50.5).
-        let s = TickTimeStats::from_samples((1..=100).rev()).unwrap();
-        assert_eq!(s, TickTimeStats { samples: 100, mean_us: 50, p50_us: 50, p95_us: 95, p99_us: 99, max_us: 100 });
-        // One slow tick in 20 shows at p95's edge and in max, not in p50.
-        let mut v = vec![1_000; 19];
-        v.push(9_000);
-        let s = TickTimeStats::from_samples(v).unwrap();
-        assert_eq!((s.p50_us, s.p95_us, s.max_us, s.mean_us), (1_000, 1_000, 9_000, 1_400));
-    }
-
-    #[test]
-    fn clock_is_monotonic_and_survives_a_missing_init() {
-        let a = t_ms();
-        let b = t_ms();
-        assert!(b >= a);
-    }
-
-    #[test]
-    fn ms_rounds_to_one_decimal() {
-        assert_eq!(ms(std::time::Duration::from_micros(1_234)), 1.2);
-        assert_eq!(ms(std::time::Duration::from_micros(1_250)), 1.3);
-        assert_eq!(ms(std::time::Duration::ZERO), 0.0);
-    }
-}

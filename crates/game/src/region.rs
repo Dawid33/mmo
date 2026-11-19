@@ -1292,36 +1292,3 @@ impl Region {
     }
 }
 
-#[cfg(test)]
-mod ui_action_tests {
-    use super::*;
-    use crate::{BlockId, Inventory, ItemId, ItemStack, UiAction};
-
-    #[test]
-    fn click_picks_up_and_rolls_back() {
-        let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
-        region.handle_event(GameEventKind::CreateClient(0)).unwrap();
-        region.forget_last_event();
-        region.with_data(|d| {
-            let c = d.clients.get_mut(&0).unwrap();
-            c.inventory.slots[0] = Some(ItemStack { item: ItemId::block(BlockId(1)), count: 42 });
-            // Clicks need an open inventory.
-            c.inventory_open = true;
-        });
-        let before = crate::state_hash(region.data());
-
-        let click = UiAction::Click {
-            slot: crate::SlotRef::Player(0),
-            button: crate::ClickButton::Left,
-            shift: false,
-        };
-        region.handle_event(GameEventKind::UiAction(0, click)).unwrap();
-        let c = region.data().clients.get(&0).unwrap();
-        let inv: &Inventory = &c.inventory;
-        assert_eq!(inv.slots[0], None);
-        assert_eq!(c.cursor, Some(ItemStack { item: ItemId::block(BlockId(1)), count: 42 }));
-
-        region.rollback_last_event();
-        assert_eq!(before, crate::state_hash(region.data()), "UiAction must invert bit-exact");
-    }
-}

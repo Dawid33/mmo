@@ -25,6 +25,7 @@ fn player_body_y(region: &Region) -> f32 {
     body.translation().y
 }
 
+/// Regression: player spawned ~1000 voxels below terrain, camera saw nothing; seen running the client on generated terrain (fix 8b18ab25 message)
 #[test]
 fn player_spawns_above_terrain_surface() {
     let mut region = region_with_high_floor();

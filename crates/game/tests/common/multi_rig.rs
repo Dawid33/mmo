@@ -200,9 +200,6 @@ pub fn world_boot(peer_boot: u64) -> u64 {
     peer_boot + 3000
 }
 
-/// Rounds [`MultiRig::run_succession`] waits for a running world cut to be decided.
-pub const SUCCESSION_DECLARE_ROUNDS: usize = 400;
-
 /// The adjacent pair of regions nearest the origin whose owners differ (`hosts` hosts,
 /// `s` regions per super-region side): `(a, b)`, `b` one step +x or +z of `a`.
 pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
@@ -215,26 +212,6 @@ pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
         }
     }
     panic!("no host seam within 64 regions of the origin ({hosts} hosts, s = {s})");
-}
-
-/// The 2x2 block of regions nearest the origin whose four owners all differ (`s`
-/// regions per super-region side, 4 hosts), as `[a, a+x, a+x+z, a+z]` — a loop round
-/// its corner.
-pub fn four_host_corner(s: u32) -> [RegionCoords; 4] {
-    let owner = |rc: RegionCoords| super::fixed(HostId::SOLO, 4).owner_of(rc, s);
-    for a in nearest_first(64) {
-        let block = [
-            a,
-            RegionCoords::new(a.x + 1, a.z),
-            RegionCoords::new(a.x + 1, a.z + 1),
-            RegionCoords::new(a.x, a.z + 1),
-        ];
-        let owners: BTreeSet<HostId> = block.iter().map(|rc| owner(*rc)).collect();
-        if owners.len() == 4 {
-            return block;
-        }
-    }
-    panic!("no four-host corner within 64 regions of the origin (s = {s})");
 }
 
 /// Regions within `r` of the origin, nearest first (then by x, z).
@@ -624,23 +601,6 @@ impl MultiRig {
         panic!("the hosts never all attached to the coordinator");
     }
 
-    /// Arm the [`Strip`] hook of the link `from` → `to`.
-    pub fn strip_next_wrapper(&mut self, from: HostId, to: HostId) {
-        let mut strip = self.strips[&(from, to)].lock().unwrap();
-        *strip = Strip { armed: true, after_mark: false, stripped: strip.stripped, mute_acks: strip.mute_acks };
-    }
-
-    /// From now on the acknowledgements host `from` sends host `to` are lost: what `to`
-    /// sent stays unacknowledged in its session.
-    pub fn mute_acks(&mut self, from: HostId, to: HostId) {
-        self.strips[&(from, to)].lock().unwrap().mute_acks = true;
-    }
-
-    /// Wrappers the `from` → `to` hook stripped so far.
-    pub fn stripped(&self, from: HostId, to: HostId) -> usize {
-        self.strips[&(from, to)].lock().unwrap().stripped
-    }
-
     /// World cuts every `every_ms` (the coordinator's period; its clock is the hosts').
     /// Rounds then go through [`Self::cut_round`].
     pub fn with_world_cuts(&mut self, every_ms: u64) {
@@ -650,207 +610,6 @@ impl MultiRig {
         core.set_cut_epoch(1);
         core.set_expected_hosts(hosts);
         core.set_world_cuts(every_ms);
-    }
-
-    /// The coordinator process crashes and a new one starts (Elastic 2a): the store decisions its
-    /// committed transitions carried ran with them (their answers lost), and the new one loads the
-    /// LAST TRANSITION written ([`game::coordinator::RigCluster::stored`]) as a new replica — the
-    /// marks whose answers it lacks are looked up (Elastic 2b Task 3) — is configured as the runtime configures it (the cut period
-    /// continues from the projection, the crash policy, the hosts a cut expects — every live
-    /// host whose row is not clean — and the store's open successions read again), and
-    /// replaces the old core. Whatever the old process had not written or handed to a link is
-    /// lost: its outgoing queue, the messages on every world link both ways. Every host's world
-    /// link is down for one round, then up: each host attaches again.
-    pub fn restart_coordinator_from_store(&mut self) {
-        let shared = self.coordinator.clone().expect("a coordinator");
-        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        self.coordinator_starts += 1;
-        let process = game::coordinator::ReplicaId(self.coordinator_starts);
-        // What the old process committed is in the store (its decisions ran with their
-        // transitions); their answers die with it.
-        self.execute_committed(false);
-        let open: Vec<game::Succession> = self
-            .successions
-            .iter()
-            .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
-            .map(|(s, _)| s.clone())
-            .collect();
-        let expected: BTreeSet<HostId> = host_ids(self.hosts.len() as u32)
-            .filter(|h| !self.dead.contains(h) && self.left.get(h) != Some(&self.boots[h.0 as usize]))
-            .collect();
-        {
-            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-            let (core, history) = guard.stored().expect("the coordinator wrote a transition");
-            let grid = guard.history().grid().clone();
-            let policy = guard.crash_policy();
-            let mut loaded = game::Coordinator::load(&core, &history, grid, process, now).expect("the projection loads");
-            // Its first input: it registered alone (the old process's row lapsed) — Elastic 2b
-            // Task 4: the old replica's attachments and marks are no longer live.
-            loaded.apply(game::coordinator::Input::ReplicaJoined { me: process, alone: true }, now);
-            loaded.set_crash_policy(policy);
-            loaded.set_expected_hosts(expected);
-            if policy == game::CrashPolicy::Succession {
-                loaded.successions_unknown();
-                loaded.successions_open(open, now);
-            }
-            guard.restart(loaded);
-        }
-        let n = self.hosts.len();
-        for h in 0..n {
-            if self.dead.contains(&HostId(h as u64)) {
-                continue;
-            }
-            if let Some(link) = self.hosts[h].manager.world_link_mut().and_then(|l| l.as_inline_mut()) {
-                link.lose_unhandled();
-                link.lose_in_transit();
-                link.set_up(false);
-            }
-        }
-        self.round();
-        for h in 0..n {
-            if self.dead.contains(&HostId(h as u64)) {
-                continue;
-            }
-            if let Some(link) = self.hosts[h].manager.world_link_mut().and_then(|l| l.as_inline_mut()) {
-                link.set_up(true);
-            }
-        }
-    }
-
-    /// Elastic 2b Task 5: `n` coordinator replicas over the rig's one row ([`Self::with_coordinator`]
-    /// first): each added one is a new process — a new replica id — that loads the row as it
-    /// stands, registered beside replica 0 (not alone), configured as the runtime configures every
-    /// replica (the crash policy), and joins the live set with its first transition. Its cache
-    /// holds nothing of the others' later writes until it rebases (a conflict) or refreshes. Hosts
-    /// stay linked to replica 0 until moved ([`Self::link_world_to`]). Timed work (the upkeep, the
-    /// cuts' and successions' hand-outs, the rig's drives) runs on the ticker — replica 0, the
-    /// lowest id, until it dies (Elastic 2b Task 6).
-    pub fn with_replicas(&mut self, n: usize) {
-        let shared = self.coordinator.clone().expect("a coordinator");
-        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        // Replica 0's configuration (the cut period and epoch) is in the row first: a new replica
-        // reads the row, and replica 0 holds nothing outside its log when another writes.
-        shared.lock().unwrap_or_else(|e| e.into_inner()).commit();
-        for _ in 1..n {
-            self.coordinator_starts += 1;
-            let id = game::coordinator::ReplicaId(self.coordinator_starts);
-            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-            let (core, history) = guard.stored().expect("the coordinator wrote a transition");
-            let grid = guard.history().grid().clone();
-            let policy = guard.crash_policy();
-            let mut loaded = game::Coordinator::load(&core, &history, grid, id, now).expect("the projection loads");
-            loaded.set_version(guard.row_version());
-            loaded.apply(game::coordinator::Input::ReplicaJoined { me: id, alone: false }, now);
-            loaded.set_crash_policy(policy);
-            let r = guard.add_replica(loaded);
-            guard.pump_replica(r);
-        }
-    }
-
-    /// Host `h`'s world link moves to replica `to` (Elastic 2b Task 5): its link to the replica it
-    /// reached goes down there (what was on it lost), it stays down one round, then comes up to
-    /// `to`; rounds until the host is attached again.
-    pub fn link_world_to(&mut self, h: HostId, to: usize) {
-        let now = self.hosts[h.0 as usize].now_ms;
-        self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link").move_to(to, now);
-        self.round();
-        self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link").set_up(true);
-        for _ in 0..CONNECT_ROUNDS {
-            if self.hosts[h.0 as usize].manager.world_attached() {
-                return;
-            }
-            self.round();
-        }
-        panic!("host {h} never attached to replica {to}");
-    }
-
-    /// The replica host `h`'s world link reaches.
-    pub fn world_replica_of(&self, h: HostId) -> usize {
-        self.hosts[h.0 as usize].manager.world_link().and_then(|l| l.as_inline()).expect("an inline world link").replica_index()
-    }
-
-    /// Elastic 2b Task 6: replica `r`'s process dies ([`game::coordinator::RigCluster::kill_replica`])
-    /// — what it held and what its links carried is lost — and every live host's world link dials
-    /// replica `to` instead (down one round, then up, as a host's dialer rotates); rounds until
-    /// every live host is attached again.
-    pub fn kill_replica(&mut self, r: usize, to: usize) {
-        self.core().kill_replica(r);
-        let live: Vec<HostId> = host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h)).collect();
-        for h in &live {
-            self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link").relink_to(to);
-        }
-        self.round();
-        for h in &live {
-            self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline world link").set_up(true);
-        }
-        for _ in 0..CONNECT_ROUNDS {
-            if live.iter().all(|h| self.hosts[h.0 as usize].manager.world_attached()) {
-                return;
-            }
-            self.round();
-        }
-        panic!("the hosts never attached to replica {to} (seed {})", self.seed);
-    }
-
-    /// Elastic 2b Task 6: replica `by` ends replica `r` — its own watch saw `r`'s row stand
-    /// still for a lease ([`game::coordinator::Input::ReplicaLapsed`], `r`'s row ended in the
-    /// same transaction) — and writes it.
-    pub fn end_replica(&mut self, by: usize, r: usize) {
-        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let mut c = self.core();
-        let lapsed = c.replica_core(r).replica();
-        c.replica_core_mut(by).apply(game::coordinator::Input::ReplicaLapsed(lapsed), now);
-        c.pump_replica(by);
-    }
-
-    /// One pass of the ticker's runtime over the hosts and successions (Elastic 2b Task 6): a
-    /// `hosts` read ([`game::coordinator::Input::HostsRead`]: every live host beating, `deads`
-    /// vouched — `seen_ms = 0`, lapsed at once —, the rows of declared predecessors dead), the open
-    /// successions read when the ticker owes one (the rig store's), and a declaration the ticker
-    /// hands out committed with its transition and executed in the rig store — its answer applied
-    /// (`answer`) or lost with the replica. Whatever replica the ticker is (none: nothing). The
-    /// declaration handed out.
-    pub fn drive_declaration(&mut self, deads: &[HostId], answer: bool) -> Option<game::coordinator::Declare> {
-        let n = self.hosts.len() as u32;
-        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let declared_dead: BTreeSet<(HostId, u64)> =
-            self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
-        let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
-            .filter(|h| !self.dead.contains(h) || deads.contains(h))
-            .map(|h| {
-                let boot = self.boots[h.0 as usize];
-                let state = if declared_dead.contains(&(h, boot)) { game::HOST_DEAD } else { game::HOST_LIVE };
-                let seen_ms = if deads.contains(&h) { 0 } else { now + 1 };
-                game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false, load: Default::default(), landed: self.landed(h) }
-            })
-            .collect();
-        let open: Vec<game::Succession> = self
-            .successions
-            .iter()
-            .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
-            .map(|(s, _)| s.clone())
-            .collect();
-        let live = host_ids(n).find(|h| !self.dead.contains(h)).expect("a live host");
-        let world_tick = self.hosts[live.0 as usize].manager.spawner_mut().world_tick();
-        let mut core = self.core();
-        if !core.is_ticker() {
-            return None;
-        }
-        core.apply(game::coordinator::Input::HostsRead { rows, next_host_id: u64::from(n), issued_mono: now, received_mono: now, world_tick }, now);
-        if core.take_successions_reread() {
-            core.successions_open(open, now);
-        }
-        let d = core.declare_wanted(now);
-        drop(core);
-        let d = d?;
-        self.core().commit();
-        self.execute_committed(answer);
-        Some(d)
-    }
-
-    /// The row version that released each coordinator message host `h` read so far, in order.
-    pub fn world_read_versions(&self, h: HostId) -> Vec<u64> {
-        self.hosts[h.0 as usize].manager.world_link().and_then(|l| l.as_inline()).expect("an inline world link").read_versions().to_vec()
     }
 
     /// A round ([`Self::round`]) with every host's upkeep ([`game::WorldManager::maintain`],
@@ -903,18 +662,6 @@ impl MultiRig {
         if core.take_successions_reread() {
             core.successions_open(open, now);
         }
-    }
-
-    /// From now on the rig coordinator runs successions (`claim`) and gives a departed
-    /// host's land to an heir as soon as a host asks for it (`LandNeeded`): every
-    /// [`Self::cut_round`] does what the coordinator runtime does ([`Self::drive_land`]), and
-    /// every round looks up the land asked for ([`Self::drive_assignment`]).
-    pub fn with_land_on_demand(&mut self) {
-        let mut core = self.core();
-        core.set_crash_policy(game::CrashPolicy::Succession);
-        drop(core);
-        self.land_on_demand = true;
-        self.assigning = true;
     }
 
     /// One pass of the coordinator runtime's succession pump for drained land
@@ -1283,188 +1030,6 @@ impl MultiRig {
         }
     }
 
-    /// The last committed cut, or a panic.
-    pub fn last_committed(&self) -> (CutId, &BTreeMap<HostId, WorldCut>) {
-        let (cut, parts) = self.last_cut.as_ref().expect("a committed world cut");
-        (*cut, parts)
-    }
-
-    /// Where the committed store holds `id`: `(host, region, "state" | "row")`.
-    pub fn stored_places(&self, id: EntityId) -> Vec<(HostId, RegionCoords, &'static str)> {
-        let mut out = Vec::new();
-        for (h, store) in &self.committed {
-            out.extend(store.places(id).into_iter().map(|(rc, what)| (*h, rc, what)));
-        }
-        out
-    }
-
-    /// Every host's peer journal explains how the running world differs from the last
-    /// committed world cut K, and holds nothing K already explains.
-    ///
-    /// Needed entries: for every pair of hosts (A, B), every tracked entity the store holds
-    /// on B that is live on A now (a running region of A, or A's `in_flight` /
-    /// `pending_arrivals`) has a `Received` entry from B on A AND a `Sent` entry toward A on
-    /// B — unless it went through a third host C (C has a `Received` entry from B and a
-    /// `Sent` entry toward A for it); the same for every connected player, by the part that
-    /// wrote its record and the host of its body. Returns how many moves were checked
-    /// without that exemption.
-    ///
-    /// No explained entry: every host that took part in K and counts from it has truncated
-    /// toward every other participant by both marks of K, and every entry left from before
-    /// a mark of its direction travelled wrapped in K — or, toward a participant K counted
-    /// with across a down link (R4 Task 12), by the counts: every entry left from before the
-    /// commit travelled wrapped in K or is a sent one above the peer's count. A journal never
-    /// counts from a cut later than K.
-    pub fn assert_journals_explain_the_cut(&mut self) -> usize {
-        use game::{JournalEvent, Subject};
-        let Some((cut, _)) = &self.last_cut else { return 0 };
-        let cut = *cut;
-        let n = self.hosts.len() as u32;
-        let (_, parts) = self.last_committed();
-        let participants: BTreeSet<HostId> = parts.keys().copied().collect();
-        // (host, peer, sent?) → subjects.
-        let mut journalled: BTreeMap<(HostId, HostId, bool), BTreeSet<Subject>> = BTreeMap::new();
-        let mut counted_checked = 0;
-        for h in host_ids(n) {
-            let journal = self.hosts[h.0 as usize].manager.peer_journal();
-            let base = journal.base();
-            assert!(base <= cut, "host {h}'s journal counts from cut {} past the last committed {}", base.0, cut.0);
-            for p in host_ids(n).filter(|p| *p != h) {
-                for (e, _) in journal.entries(p) {
-                    let sent = matches!(e.event, JournalEvent::Sent(_));
-                    journalled.entry((h, p, sent)).or_default().insert(e.subject);
-                }
-            }
-            // A cut with no other participant (the last host standing after a succession)
-            // truncates toward nobody.
-            if base != cut || !participants.contains(&h) || participants.len() == 1 {
-                continue;
-            }
-            let Some((marked, marks)) = journal.last_marks() else {
-                panic!("host {h} counts from cut {} without having truncated by its marks (seed {})", cut.0, self.seed)
-            };
-            assert_eq!(*marked, cut, "host {h}'s last truncation was by cut {}, its base is {}", marked.0, cut.0);
-            let counted = journal.last_counted().filter(|(c, _)| *c == cut).map(|(_, read)| read.clone()).unwrap_or_default();
-            for p in participants.iter().copied().filter(|p| *p != h) {
-                // A pair counted across a down link (R4 Task 12). What is left from before the
-                // commit, unless it travelled wrapped in K, must be explained by the STORED
-                // parts, independently of the journal's own bookkeeping: a received entry is
-                // inside this host's count (its part holds it) — none may be left; a sent one is
-                // above the peer's count — this host's part of K holds it (a row, or the
-                // player's record) and the peer's does not.
-                if let Some(read) = counted.get(&p) {
-                    counted_checked += 1;
-                    let (mine, theirs) = (&parts[&h], &parts[&p]);
-                    let (my_ids, their_ids) = (part_entities(mine), part_entities(theirs));
-                    let writes = |part: &WorldCut, player: PlayerId| part.players.iter().any(|(q, _)| *q == player);
-                    for (e, seq, accounted) in journal.rows(p) {
-                        if seq >= read.after || accounted == Some(cut) {
-                            continue;
-                        }
-                        let where_ = format!(
-                            "host {h} keeps {:?} with host {p}, counted with in cut {} ({accounted:?}; seed {}, link delay {})",
-                            e.subject, cut.0, self.seed, self.link_delay
-                        );
-                        let JournalEvent::Sent(msg) = &e.event else {
-                            panic!("{where_}: a received entry inside this host's count — the cut explains it");
-                        };
-                        match (e.subject, &**msg) {
-                            // A person is never a row (the history respawns people): nothing stored to check.
-                            (_, Reliable::Transfer { bundle, .. }) if matches!(bundle.kind, game::EntityKind::Person { .. }) => {}
-                            (Subject::Entity(id), Reliable::Transfer { player: None, .. }) => {
-                                assert!(my_ids.contains(&id), "{where_}: not in this host's part — the peer had it");
-                                assert!(!their_ids.contains(&id), "{where_}: in the peer's part — the cut explains it");
-                            }
-                            // A body handed over with its player: the player's record decides.
-                            (Subject::Entity(id), _) => {
-                                assert!(!their_ids.contains(&id), "{where_}: the body is in the peer's part");
-                            }
-                            (Subject::Player(player), _) => {
-                                assert!(writes(mine, player), "{where_}: this host's part does not write the player");
-                                assert!(!writes(theirs, player), "{where_}: the peer's part writes the player");
-                            }
-                        }
-                    }
-                    continue;
-                }
-                let Some(&(Some(out), Some(inn))) = marks.get(&p) else {
-                    panic!("host {h} truncated by cut {} without both marks with host {p}: {:?} (seed {})", cut.0, marks.get(&p), self.seed)
-                };
-                for (e, seq, accounted) in journal.rows(p) {
-                    let mark = if matches!(e.event, JournalEvent::Sent(_)) { out } else { inn };
-                    assert!(
-                        seq >= mark || accounted == Some(cut),
-                        "host {h} keeps {:?} with host {p} from before the mark of cut {}, not wrapped in it ({accounted:?}): \
-                         the cut explains it (seed {}, link delay {})",
-                        e.subject,
-                        cut.0,
-                        self.seed,
-                        self.link_delay
-                    );
-                }
-            }
-        }
-        self.counted_pairs_checked += counted_checked;
-        let mut moved: Vec<(Subject, HostId, HostId)> = Vec::new();
-        let ids: Vec<EntityId> = self.tracked.keys().copied().collect();
-        for id in ids {
-            let stored: BTreeSet<HostId> = self.stored_places(id).into_iter().map(|(h, _, _)| h).collect();
-            let mut live: BTreeSet<HostId> = self.owners_of(id).into_iter().map(|(h, _)| h).collect();
-            for (h, rig) in self.hosts.iter().enumerate() {
-                let m = &rig.manager;
-                if m.in_flight_ids().iter().chain(m.pending_arrival_ids().iter()).any(|(i, _)| *i == id) {
-                    live.insert(HostId(h as u64));
-                }
-            }
-            for &b in &stored {
-                moved.extend(live.iter().filter(|a| **a != b).map(|a| (Subject::Entity(id), b, *a)));
-            }
-        }
-        let (_, parts) = self.last_committed();
-        let players: Vec<(ClientId, PlayerId, Vec<HostId>)> = self
-            .players
-            .iter()
-            .map(|(c, p)| (*c, *p, parts.iter().filter(|(_, part)| part.players.iter().any(|(q, _)| q == p)).map(|(h, _)| *h).collect()))
-            .collect();
-        for (client, player, writers) in players {
-            if let Some((a, _, _)) = self.player_body(client) {
-                moved.extend(writers.into_iter().filter(|b| *b != a).map(|b| (Subject::Player(player), b, a)));
-            }
-        }
-        let has = |key: (HostId, HostId, bool), s: &Subject| journalled.get(&key).is_some_and(|set| set.contains(s));
-        let mut checked = 0;
-        for (subject, b, a) in moved {
-            let through_third = host_ids(self.hosts.len() as u32).any(|c| c != a && c != b && has((c, b, false), &subject) && has((c, a, true), &subject));
-            if through_third {
-                continue;
-            }
-            checked += 1;
-            assert!(
-                has((a, b, false), &subject),
-                "{subject:?}: stored on host {b} by cut {}, now on host {a}, which has no Received entry from {b} \
-                 (seed {}, link delay {})",
-                cut.0,
-                self.seed,
-                self.link_delay
-            );
-            assert!(
-                has((b, a, true), &subject),
-                "{subject:?}: stored on host {b} by cut {}, now on host {a}; host {b} has no Sent entry toward {a} \
-                 (seed {}, link delay {})",
-                cut.0,
-                self.seed,
-                self.link_delay
-            );
-        }
-        checked
-    }
-
-    /// The parts of the last committed cut that write `player`'s record.
-    pub fn last_cut_writers(&self, player: PlayerId) -> Vec<HostId> {
-        let (_, parts) = self.last_committed();
-        parts.iter().filter(|(_, p)| p.players.iter().any(|(q, _)| *q == player)).map(|(h, _)| *h).collect()
-    }
-
     /// Every host answers ownership from a `PgClaim` directory holding exactly `rows`
     /// (`(super-region, owner, epoch)`; owner `None` = a free row) from now on: a
     /// super-region with no row is `Unknown` (the directory is never read whole). The rows
@@ -1501,35 +1066,6 @@ impl MultiRig {
         }
         for h in host_ids(self.hosts.len() as u32) {
             self.read_directory(h);
-        }
-    }
-
-    /// Every host releases land idle for `ms` (Elastic 3 Task 6, `set_land_idle_ms`; a host
-    /// started later too).
-    pub fn with_land_idle_ms(&mut self, ms: u64) {
-        self.land_idle_ms = Some(ms);
-        for rig in &mut self.hosts {
-            rig.manager.set_land_idle_ms(ms);
-        }
-    }
-
-    /// The next `n` [`game::CoordMsg::Assigned`] host `h` reads are lost (0: none any more).
-    pub fn drop_assigned(&mut self, h: HostId, n: usize) {
-        self.world_drop_assigned[h.0 as usize].store(n, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// How many more `Assigned` host `h` will lose ([`Self::drop_assigned`]).
-    pub fn assigned_drops_left(&self, h: HostId) -> usize {
-        self.world_drop_assigned[h.0 as usize].load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Every live host's world link goes down (`false`: every coordinator replica is gone, as
-    /// far as a host can tell) or comes back up (`true`; each host attaches again).
-    pub fn world_links_up(&mut self, up: bool) {
-        for h in host_ids(self.hosts.len() as u32).filter(|h| !self.dead.contains(h)) {
-            if let Some(link) = self.hosts[h.0 as usize].manager.world_link_mut().and_then(|l| l.as_inline_mut()) {
-                link.set_up(up);
-            }
         }
     }
 
@@ -1705,59 +1241,6 @@ impl MultiRig {
         self.core().commit();
     }
 
-    /// Host `h` holds no super-region any more: each of its rows in the rig's `super_regions`
-    /// table is free (epoch + 1), and every live host's directory is read again — the state
-    /// of a host that never claimed anything (claim on demand: an idle host).
-    /// Not a release (no cut, no part: an operator's edit of the table, or a release every peer
-    /// has heard of at once) — a test that needs a real one uses [`Self::with_land_idle_ms`].
-    pub fn force_free_land_of(&mut self, h: HostId) {
-        let store = self.claim_store.as_mut().expect("with_assignment");
-        for (owner, epoch) in store.values_mut() {
-            if *owner == Some(h) {
-                *owner = None;
-                *epoch += 1;
-            }
-        }
-        for o in host_ids(self.hosts.len() as u32) {
-            if !self.dead.contains(&o) {
-                self.read_directory(o);
-            }
-        }
-    }
-
-    /// The owner of `sr` in the rig's `super_regions` table ([`Self::with_assignment`]).
-    pub fn stored_owner(&self, sr: game::SuperRegion) -> Option<HostId> {
-        self.claim_store.as_ref().and_then(|s| s.get(&sr)).and_then(|(owner, _)| *owner)
-    }
-
-    /// Host `h` alone answers from a `PgClaim` directory read whole from `rows`
-    /// (`(super-region, owner, epoch)`), every host live; the others keep theirs.
-    pub fn set_directory(&mut self, h: HostId, rows: Vec<(game::SuperRegion, Option<HostId>, u64)>) {
-        let hosts = self.hosts.len() as u32;
-        let m = &mut self.hosts[h.0 as usize].manager;
-        m.set_ownership(Box::new(game::PgClaim::new(h)), self.s);
-        let rows = rows.into_iter().map(|(sr, owner, epoch)| (sr, owner.map_or(game::NO_OWNER, |o| o.0 as i64), epoch)).collect();
-        m.directory_read(rows, host_ids(hosts).collect());
-        assert!(m.owns(self.homes[h.0 as usize]), "the rows give host {h} its keeper's home");
-    }
-
-    /// The world restarted from the store: every host restored from its committed parts
-    /// (its regions from the stored ones, its in-flight rows put back on their way),
-    /// lockstep, no link delay, each keeper back home.
-    pub fn rebuild_from_last_cut(&self) -> MultiRig {
-        let regions: BTreeMap<RegionCoords, StoredRegion> =
-            self.committed.values().flat_map(|s| s.regions.iter().map(|(rc, r)| (*rc, r.clone()))).collect();
-        let hosts = self.hosts.len() as u32;
-        let mut rig = MultiRig::new_from(hosts, self.s, None, 0, 0, Some(regions), self.founders);
-        if let Some(rows) = &self.directory {
-            rig.with_directory(rows.clone());
-        }
-        for (h, store) in &self.committed {
-            rig.hosts[(*h).0 as usize].manager.restore_in_flight(store.in_flight.clone());
-        }
-        rig
-    }
-
     /// Host `h` dies: its manager and spawner are dropped (an empty placeholder keeps its
     /// slot and the world tick), its peer links go down for everyone (what is in transit is
     /// lost), the coordinator sees its link drop, and its parts staged in the rig store stay.
@@ -1864,14 +1347,6 @@ impl MultiRig {
         h
     }
 
-    /// The process of the dead host `h` wakes (a zombie: the SAME id and boot — a hung
-    /// process, never a restart): a fresh manager as [`Self::start`]'s, linked to every live
-    /// host and to the coordinator, whose hellos the others must refuse.
-    pub fn revive(&mut self, h: HostId) {
-        let boot = self.boots[h.0 as usize];
-        self.start_process(h, boot);
-    }
-
     /// Host slot `h` (dead, see [`Self::start`]) runs as process `boot`: a fresh manager on the
     /// rig store's committed state — its regions as stored, its journal from the last
     /// committed cut, a `PgClaim` directory read from the rig's `super_regions` table — with a
@@ -1935,84 +1410,6 @@ impl MultiRig {
             let rig = &mut self.hosts[h.0 as usize];
             rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is, hold_orders: hold_orders.clone(), stash: Default::default(), drop_assigned: self.world_drop_assigned[h.0 as usize].clone() }), world_boot(boot), now);
             rig.settle();
-        }
-    }
-
-    /// The rig coordinator declares host `dead` (killed, [`Self::kill`]) dead as the
-    /// coordinator runtime would: its lease watch reads every live host beating and `dead`'s
-    /// row vouched (`seen_ms = 0`), [`game::Coordinator::declare_wanted`] is asked (cut
-    /// rounds while a running cut is first decided aborted), the batch is declared in the
-    /// rig store ([`Self::declare_in_store`]) and the store's answer handed back — the orders
-    /// go out to the survivors. The successions declared.
-    pub fn run_succession(&mut self, dead: HostId) -> Vec<game::Succession> {
-        self.run_successions(&[dead])
-    }
-
-    /// [`Self::run_succession`] of several killed hosts at once: every one of them vouched
-    /// dead in the same lease reads, declared in one batch.
-    pub fn run_successions(&mut self, deads: &[HostId]) -> Vec<game::Succession> {
-        self.run_successions_answered(deads, true)
-    }
-
-    /// [`Self::run_succession`] whose store commit is never answered: the coordinator process
-    /// dies between the store's commit and the transition holding its answer (Elastic 2a final
-    /// review, C1) — call [`Self::restart_coordinator_from_store`] next. The successions the
-    /// rig store opened.
-    pub fn declare_unanswered(&mut self, dead: HostId) -> Vec<game::Succession> {
-        self.run_successions_answered(&[dead], false)
-    }
-
-    fn run_successions_answered(&mut self, deads: &[HostId], answer: bool) -> Vec<game::Succession> {
-        let n = self.hosts.len() as u32;
-        self.core().set_crash_policy(game::CrashPolicy::Succession);
-        let declared_dead: BTreeSet<(HostId, u64)> =
-            self.successions.iter().map(|(s, _)| (s.predecessor, s.predecessor_boot)).collect();
-        let mut d = None;
-        for r in 0..SUCCESSION_DECLARE_ROUNDS {
-            self.answer_successions_read();
-            let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-            let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
-                .filter(|h| !self.dead.contains(h) || deads.contains(h))
-                .map(|h| {
-                    let boot = self.boots[h.0 as usize];
-                    let state = if declared_dead.contains(&(h, boot)) { game::HOST_DEAD } else { game::HOST_LIVE };
-                    // Every live host beats every round; the dead ones are vouched.
-                    let seen_ms = if deads.contains(&h) { 0 } else { now + 1 };
-                    game::coordinator::HostSeen { ordinal: h, boot, clean: false, state, seen_ms, draining: false, load: Default::default(), landed: self.landed(h) }
-                })
-                .collect();
-            let mut core = self.core();
-            core.observe_leases(&rows, now, now);
-            d = core.declare_wanted(now);
-            drop(core);
-            if d.is_some() {
-                break;
-            }
-            assert!(r + 1 < SUCCESSION_DECLARE_ROUNDS, "hosts {deads:?} were never declared (seed {})", self.seed);
-            self.cut_round();
-        }
-        let d = d.expect("declared");
-        // The declaration leaves with its transition and runs in it; its answer is applied (or,
-        // `!answer`, dropped: the coordinator dies after the commit).
-        self.core().commit();
-        let outcome = self
-            .execute_committed(answer)
-            .into_iter()
-            .find_map(|a| match a {
-                game::coordinator::DecisionAnswer::Declared { outcome, .. } => Some(outcome.expect("the rig store answers")),
-                _ => None,
-            })
-            .expect("the declaration committed with its transition");
-        if !answer {
-            let game::Declared::Done(list) = outcome else { panic!("the rig store refused the declaration: {outcome:?}") };
-            return list;
-        }
-        let live: BTreeSet<HostId> = host_ids(n).filter(|h| !self.dead.contains(h) && !d.dead.iter().any(|(p, _)| p == h)).collect();
-        // The predecessor's row is dead: not expected by world cuts any more.
-        self.core().set_expected_hosts(live);
-        match outcome {
-            game::Declared::Done(list) => list,
-            other => panic!("the rig store refused the declaration: {other:?}"),
         }
     }
 
@@ -2132,67 +1529,6 @@ impl MultiRig {
         game::LandlessEnd::Ended
     }
 
-    /// One pass of the coordinator runtime's hosts read and end pump (Elastic 2a): every
-    /// running host beating, every killed host whose row is not dead vouched (`seen_ms = 0`,
-    /// lapsed at once), dead rows dead, clean rows clean; the expected hosts the dirty live rows;
-    /// the core's upkeep run; then the end the core hands out executed in the rig store and
-    /// answered. The end handed out, with the store's answer.
-    pub fn drive_leases(&mut self) -> Option<(game::coordinator::EndLandless, game::LandlessEnd)> {
-        self.drive_leases_answered(true)
-    }
-
-    /// [`Self::drive_leases`] whose end, if the core hands one out, is executed in the rig store
-    /// and never answered: the coordinator process dies between the store's commit and the
-    /// transition holding its answer (Elastic 2a final review, C1) — call
-    /// [`Self::restart_coordinator_from_store`] next.
-    pub fn end_unanswered(&mut self) -> Option<(game::coordinator::EndLandless, game::LandlessEnd)> {
-        self.drive_leases_answered(false)
-    }
-
-    fn drive_leases_answered(&mut self, answer: bool) -> Option<(game::coordinator::EndLandless, game::LandlessEnd)> {
-        let n = self.hosts.len() as u32;
-        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
-            .map(|h| {
-                let boot = self.boots[h.0 as usize];
-                let clean = self.left.get(&h) == Some(&boot);
-                let state = if self.row_dead(h) { game::HOST_DEAD } else { game::HOST_LIVE };
-                let seen_ms = if self.dead.contains(&h) { 0 } else { now + 1 };
-                game::coordinator::HostSeen { ordinal: h, boot, clean, state, seen_ms, draining: false, load: Default::default(), landed: self.landed(h) }
-            })
-            .collect();
-        let expected: BTreeSet<HostId> =
-            rows.iter().filter(|r| !r.clean && r.state == game::HOST_LIVE).map(|r| r.ordinal).collect();
-        let open: Vec<game::Succession> = self
-            .successions
-            .iter()
-            .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
-            .map(|(s, _)| s.clone())
-            .collect();
-        let mut core = self.core();
-        core.observe_leases(&rows, now, now);
-        core.set_expected_hosts(expected);
-        // The runtime answers a re-read of the open successions the read asked for.
-        if core.take_successions_reread() {
-            core.successions_open(open, now);
-        }
-        core.maintain(now);
-        let end = core.take_end_landless(now);
-        drop(core);
-        let end = end?;
-        // The end leaves with its transition and runs in it; its answer applied or dropped.
-        self.core().commit();
-        let outcome = self
-            .execute_committed(answer)
-            .into_iter()
-            .find_map(|a| match a {
-                game::coordinator::DecisionAnswer::Ended { outcome, .. } => Some(outcome.expect("the rig store answers")),
-                _ => None,
-            })
-            .expect("the end committed with its transition");
-        Some((end, outcome))
-    }
-
     /// The rig store's open successions (neither settled nor abandoned).
     pub fn open_successions(&self) -> BTreeSet<game::SuccessionId> {
         self.successions
@@ -2200,16 +1536,6 @@ impl MultiRig {
             .filter(|(s, settled)| settled.is_none() && !self.abandoned.contains(&s.id))
             .map(|(s, _)| s.id)
             .collect()
-    }
-
-    /// From now on the rig answers every heir's adoption read as the server does (Task 9):
-    /// [`game::WorldManager::take_adoption_wanted`] is answered after 0..=`link_delay` rounds
-    /// (seeded) with the predecessor's in-flight rows of the last committed cut
-    /// (`load_in_flight_of`) and the stored regions of the drop set (`regions_of_entities`),
-    /// the predecessor's stored regions handed to the heir's spawner first (what its
-    /// region threads would read from the store).
-    pub fn with_adoption(&mut self) {
-        self.adopting = true;
     }
 
     /// One round of every heir's adoption reads ([`Self::with_adoption`]).
@@ -2259,103 +1585,9 @@ impl MultiRig {
         }
     }
 
-    /// Host `dead` (killed after a committed leave cut it left in) is declared dead as a
-    /// LEAVE succession ([`game::SuccessionKind::Leave`]): the rig store moves its land to
-    /// its heir and the coordinator sends the orders. The succession declared.
-    pub fn declare_leave(&mut self, dead: HostId) -> game::Succession {
-        let n = self.hosts.len() as u32;
-        self.core().set_crash_policy(game::CrashPolicy::Succession);
-        let live: BTreeSet<HostId> = host_ids(n).filter(|h| !self.dead.contains(h) && *h != dead).collect();
-        let heir = game::heir_of(dead, &live).expect("a live host");
-        let d = game::coordinator::Declare {
-            dead: vec![(dead, self.boots[dead.0 as usize])],
-            heirs: vec![heir],
-            kind: game::SuccessionKind::Leave,
-            generation: self.generation,
-        };
-        let outcome = self.declare_in_store(&d);
-        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let mut core = self.core();
-        // Declared by hand, not through `declare_wanted`: an answer is taken only while a
-        // declaration is in flight.
-        core.declaring_by_hand();
-        core.declared(outcome.clone(), now);
-        core.set_expected_hosts(live);
-        drop(core);
-        match outcome {
-            game::Declared::Done(mut list) => list.remove(0),
-            other => panic!("the rig store refused the declaration: {other:?}"),
-        }
-    }
-
-    /// Host `dead` (killed while a succession is open) lapses: the coordinator wants the
-    /// world rolled back (cut rounds while it notices), the rig store abandons every open
-    /// succession and raises the world generation, and the coordinator tells every host
-    /// ([`game::CoordMsg::Generation`]). The new generation.
-    pub fn roll_back(&mut self, dead: HostId) -> u64 {
-        let n = self.hosts.len() as u32;
-        for r in 0..SUCCESSION_DECLARE_ROUNDS {
-            self.answer_successions_read();
-            let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-            let rows: Vec<game::coordinator::HostSeen> = host_ids(n)
-                .filter(|h| !self.dead.contains(h) || *h == dead)
-                .map(|h| {
-                    let seen_ms = if h == dead { 0 } else { now + 1 };
-                    game::coordinator::HostSeen { ordinal: h, boot: self.boots[h.0 as usize], clean: false, state: game::HOST_LIVE, seen_ms, draining: false, load: Default::default(), landed: self.landed(h) }
-                })
-                .collect();
-            let mut core = self.core();
-            core.observe_leases(&rows, now, now);
-            core.maintain(now);
-            if core.rollback_wanted() {
-                break;
-            }
-            drop(core);
-            assert!(r + 1 < SUCCESSION_DECLARE_ROUNDS, "the coordinator never wanted a rollback (seed {})", self.seed);
-            self.cut_round();
-        }
-        // The rollback leaves with its transition and runs in it (every open succession
-        // abandoned, the generation raised); its answer tells every host.
-        assert!(self.core().take_rollback().is_some(), "the rollback is handed out (seed {})", self.seed);
-        self.core().commit();
-        self.execute_committed(true);
-        self.generation
-    }
-
     /// The rig's coordinator, locked ([`Self::with_coordinator`]).
     pub fn core(&self) -> std::sync::MutexGuard<'_, game::coordinator::RigCluster> {
         self.coordinator.as_ref().expect("a rig coordinator").lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Hold back (`true`) or release what the coordinator sends host `h`.
-    pub fn hold_world(&mut self, h: HostId, hold: bool) {
-        self.world_hold[h.0 as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Hold back (`true`) or release the succession orders the coordinator sends host `h`
-    /// (and whatever follows one): what comes before an order is read as usual.
-    pub fn hold_orders(&mut self, h: HostId, hold: bool) {
-        self.world_hold_orders[h.0 as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// What host `h` sent its coordinator so far.
-    /// `HopIs` messages every host read from the coordinator.
-    pub fn hop_is_received(&self) -> usize {
-        self.world_hop_is.iter().map(|n| n.load(std::sync::atomic::Ordering::SeqCst)).sum()
-    }
-
-    pub fn sent_to_coordinator(&self, h: HostId) -> Vec<game::HostMsg> {
-        self.world_sent[h.0 as usize].lock().unwrap().clone()
-    }
-
-    /// Messages the hosts sent the coordinator that it has not handled yet (its links'
-    /// delay).
-    pub fn coordinator_pending(&self) -> Vec<game::HostMsg> {
-        self.hosts
-            .iter()
-            .filter_map(|r| r.manager.world_link().and_then(|l| l.as_inline()))
-            .flat_map(|l| l.pending().cloned().collect::<Vec<_>>())
-            .collect()
     }
 
     /// Host `h`'s keeper: a client whose body stands in the middle of its home region.
@@ -2382,72 +1614,10 @@ impl MultiRig {
         self.assert_conserved_world();
     }
 
-    /// [`Self::connect_home`], and an observer session of the same client on every other
-    /// host (what a client holds once its home host redirected it there).
-    pub fn connect_everywhere(&mut self, home: HostId, client: ClientId, player: PlayerId, record: PlayerRecord) {
-        self.connect_home(home, client, player, record);
-        for h in host_ids(self.hosts.len() as u32) {
-            if h != home {
-                self.hosts[h.0 as usize].event(ServerEvent::ObserverConnected { client, player });
-            }
-        }
-    }
-
-    /// `client` of `player` connects to host `h` with a login ticket of (`token`, `epoch`)
-    /// ([`ServerEvent::LoginConnected`]), restored from `record`; tracked from now on.
-    pub fn connect_login(
-        &mut self,
-        h: HostId,
-        client: ClientId,
-        player: PlayerId,
-        record: Option<PlayerRecord>,
-        token: &str,
-        epoch: u64,
-    ) {
-        self.players.insert(client, player);
-        let ev = ServerEvent::LoginConnected { client, player, record, player_token: token.into(), session_epoch: epoch };
-        self.hosts[h.0 as usize].event(ev);
-        self.assert_conserved_world();
-    }
-
-    /// Every host's server half of the login relay, as `server::login_link` plays it: a
-    /// spawn order a host took is recorded — the player's sessions there superseded first
-    /// (`Supersede`) — and answered ok; a kick another host relayed is applied and
-    /// answered. The orders taken, with the host that took each.
-    pub fn serve_logins(&mut self) -> Vec<(HostId, game::SpawnRequest)> {
-        let mut taken = Vec::new();
-        for (h, rig) in self.hosts.iter_mut().enumerate() {
-            for order in rig.manager.take_spawn_here() {
-                rig.event(ServerEvent::Supersede { player: order.player, reason: game::LOGGED_IN_ELSEWHERE.into() });
-                taken.push((HostId(h as u64), order.clone()));
-                rig.manager.spawn_answered(order, true);
-            }
-            for kick in rig.manager.take_kicks_in() {
-                rig.manager.kick_applied(kick, true);
-            }
-        }
-        taken
-    }
-
-    /// `client`'s connection to host `h` ends.
-    pub fn disconnect(&mut self, h: HostId, client: ClientId) {
-        self.hosts[h.0 as usize].event(ServerEvent::ClientDisconnected(client));
-    }
-
     /// Every host records the packets its manager sends ([`Rig::packets_seen`]).
     pub fn record_packets(&mut self) {
         for rig in &mut self.hosts {
             rig.packets_seen = Some(Vec::new());
-        }
-    }
-
-    /// Every host's clock jumps `ms` ahead and its upkeep runs ([`game::WorldManager::maintain`]).
-    pub fn maintain_all(&mut self, ms: u64) {
-        for rig in &mut self.hosts {
-            rig.now_ms += ms;
-            let now = rig.now_ms;
-            rig.manager.maintain(now);
-            rig.settle();
         }
     }
 
@@ -2522,50 +1692,9 @@ impl MultiRig {
         assert!(self.host_of(rc).manager.running_regions().contains(&rc), "{rc:?} runs on its owner");
     }
 
-    /// Let `rc` go: its owner's keeper unsubscribes, and after the grace it parks.
-    pub fn park(&mut self, rc: RegionCoords) {
-        let rig = self.host_of(rc);
-        rig.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(rc), CLIENT));
-        rig.now_ms += game::UNLOAD_GRACE_MS;
-        let now = rig.now_ms;
-        rig.manager.maintain(now);
-        rig.settle();
-        for _ in 0..4 {
-            if self.host_of(rc).manager.parked_regions().contains(&rc) {
-                break;
-            }
-            self.round();
-        }
-        assert!(self.host_of(rc).manager.parked_regions().contains(&rc), "{rc:?} parked");
-        // Every host's clock moves on together.
-        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        for r in &mut self.hosts {
-            r.now_ms = now;
-        }
-    }
-
     /// Take the link between hosts `a` and `b` down (what is in transit is lost).
     pub fn link_down(&mut self, a: HostId, b: HostId) {
         self.link(a, b).lock().unwrap().set_up(false);
-    }
-
-    /// Bring it back, as a new connection.
-    pub fn link_up(&mut self, a: HostId, b: HostId) {
-        self.link(a, b).lock().unwrap().set_up(true);
-    }
-
-    /// Give hosts `a` and `b` a fresh link pair (its `connection()` the same as a fresh
-    /// pair's: 1): `set_peer` on both with a new session each — the managers keep their
-    /// sessions and swap only the link. What was in transit on the old link is lost.
-    pub fn replace_link(&mut self, a: HostId, b: HostId, seed: u64, link_delay_steps: u32) {
-        let (a, b) = (a.min(b), a.max(b));
-        let (ea, eb) = InlinePeerLink::pair(seed, link_delay_steps);
-        let (ea, eb) = (Arc::new(Mutex::new(ea)), Arc::new(Mutex::new(eb)));
-        let sa = self.strips[&(a, b)].clone();
-        let sb = self.strips[&(b, a)].clone();
-        self.hosts[a.0 as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone(), sa)));
-        self.hosts[b.0 as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone(), sb)));
-        self.links.insert((a, b), (ea, eb));
     }
 
     fn link(&self, a: HostId, b: HostId) -> &Arc<Mutex<InlinePeerLink>> {
@@ -2597,17 +1726,6 @@ impl MultiRig {
         self.assert_conserved_world();
     }
 
-    /// Spawn a size-1 slime in `rc` (on its owner) at `pos` (`rc`'s frame); its id.
-    pub fn spawn_slime(&mut self, rc: RegionCoords, pos: [f32; 3]) -> EntityId {
-        let mut id = None;
-        self.host_of(rc).manager.spawner_mut().with_region(rc, |region| {
-            let tick = region.current_tick();
-            let e = super::spawn_slime(region, pos, 1, 0.0, tick);
-            id = *region.data().ecs.id.try_get(e);
-        });
-        id.expect("the slime has an EntityId")
-    }
-
     /// Move entity `id`, owned by running region `rc`, to `pos` (`rc`'s frame): a test
     /// teleport. `false` if `rc` does not own it.
     pub fn teleport(&mut self, rc: RegionCoords, id: EntityId, pos: [f32; 3]) -> bool {
@@ -2621,26 +1739,6 @@ impl MultiRig {
             done = true;
         });
         done
-    }
-
-    /// Where `id` is owned now: `(host, region)` of every running region holding it.
-    pub fn owners_of(&mut self, id: EntityId) -> Vec<(HostId, RegionCoords)> {
-        let mut out = Vec::new();
-        for (h, rig) in self.hosts.iter_mut().enumerate() {
-            for rc in rig.manager.running_regions() {
-                rig.manager.spawner_mut().with_region(rc, |region| {
-                    if region.data().id_index.contains_key(&id) {
-                        out.push((HostId(h as u64), rc));
-                    }
-                });
-            }
-        }
-        out
-    }
-
-    /// Reliable messages not acknowledged yet, over every host.
-    pub fn peer_unreceived(&self) -> usize {
-        self.hosts.iter().map(|r| r.manager.peer_unreceived()).sum()
     }
 
     /// Conservation across hosts. Every tracked `EntityId` (people aside, whom a history

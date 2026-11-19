@@ -477,6 +477,7 @@ fn log(line: &str) {
     wasm_bindgen_test::console_log!("{line}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn scene_hash_native() {
@@ -488,6 +489,7 @@ fn scene_hash_native() {
     assert_eq!(hash, SCENE_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn scene_hash_wasm() {
@@ -499,6 +501,7 @@ fn scene_hash_wasm() {
     assert_eq!(hash, SCENE_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn underground_hash_native() {
@@ -510,6 +513,7 @@ fn underground_hash_native() {
     assert_eq!(hash, UNDERGROUND_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn underground_hash_wasm() {
@@ -521,6 +525,7 @@ fn underground_hash_wasm() {
     assert_eq!(hash, UNDERGROUND_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn voxel_body_hash_native() {
@@ -532,6 +537,7 @@ fn voxel_body_hash_native() {
     assert_eq!(hash, VOXEL_BODY_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn voxel_body_hash_wasm() {
@@ -543,6 +549,7 @@ fn voxel_body_hash_wasm() {
     assert_eq!(hash, VOXEL_BODY_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn history_hash_native() {
@@ -553,6 +560,7 @@ fn history_hash_native() {
     assert_eq!(digest, HISTORY_DIGEST, "native history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn history_hash_wasm() {
@@ -563,6 +571,7 @@ fn history_hash_wasm() {
     assert_eq!(digest, HISTORY_DIGEST, "wasm32 history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn explicit_mass_compound_is_cross_target_native() {
@@ -570,6 +579,7 @@ fn explicit_mass_compound_is_cross_target_native() {
     assert_eq!(digest, EXPLICIT_MASS_DIGEST, "native explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn explicit_mass_compound_is_cross_target_wasm() {
@@ -577,6 +587,7 @@ fn explicit_mass_compound_is_cross_target_wasm() {
     assert_eq!(digest, EXPLICIT_MASS_DIGEST, "wasm32 explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn creature_mass_is_cross_target_native() {
@@ -584,6 +595,7 @@ fn creature_mass_is_cross_target_native() {
     assert_eq!(digest, CREATURE_MASS_DIGEST, "native creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn creature_mass_is_cross_target_wasm() {
@@ -591,6 +603,7 @@ fn creature_mass_is_cross_target_wasm() {
     assert_eq!(digest, CREATURE_MASS_DIGEST, "wasm32 creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}");
 }
 
+/// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
 /// A `ClientId` is 64 bits on every target (wasm32's `usize` is 32).
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

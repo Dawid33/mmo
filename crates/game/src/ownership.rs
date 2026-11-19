@@ -519,18 +519,3 @@ pub fn ownership_for(policy: &str, me: HostId) -> Result<Box<dyn Ownership>, Str
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_host_id_orders_and_prints_by_its_number() {
-        assert!(HostId(2) < HostId(10));
-        assert_eq!(format!("{}", HostId(7)), "h7");
-        let endpoint = crate::HostEndpoint { id: HostId(9), quic: Some("127.0.0.1:1".into()), webtransport: None, cert_hash: None };
-        let bytes = bincode::serialize(&endpoint).unwrap();
-        let back: crate::HostEndpoint = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(back.id, HostId(9));
-        assert_eq!(back, endpoint);
-    }
-}

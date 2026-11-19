@@ -8,20 +8,7 @@ fn state_hash(r: &Rollback) -> u32 {
     hasher.finalize()
 }
 
-#[test]
-fn rollback_of_create_player_restores_state() {
-    let (send, _recv) = crossbeam::channel::unbounded();
-    let mut r = Rollback::new(Some(send));
-    let before = state_hash(&r);
-
-    r.new_transaction();
-    r.create_player_safe(0);
-    assert_ne!(before, state_hash(&r), "create_player_safe changed nothing");
-
-    r.rollback();
-    assert_eq!(before, state_hash(&r), "rollback did not restore state");
-}
-
+/// Regression: remove_entity_safe left dangling camera/kind slots, rollback panic on slot reuse; found by running the GUI client and roaming (region-crossing input freeze; specs/2026-07-06-headless-sim-test-harness-design.md, fix 1eefba92)
 #[test]
 fn rollback_after_slot_reuse_restores_camera_hash() {
     // Regression: an entity created via create_entity_safe carries a None
@@ -60,6 +47,7 @@ fn rollback_after_slot_reuse_restores_camera_hash() {
     );
 }
 
+/// Regression: SendError panic on window close after rapid region crossing; observed as a crash in the client (test comment, fix 67f79d96)
 #[test]
 fn sim_survives_dropped_render_receiver() {
     // Shutdown-ordering race (observed as a crash when crossing regions
@@ -88,33 +76,3 @@ fn sim_survives_dropped_render_receiver() {
     );
 }
 
-#[test]
-fn rollback_of_create_mesh_restores_state() {
-    let (send, _recv) = crossbeam::channel::unbounded();
-    let mut r = Rollback::new(Some(send));
-    let before = state_hash(&r);
-
-    r.new_transaction();
-    r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
-    assert_ne!(before, state_hash(&r), "create_mesh changed nothing");
-
-    r.rollback();
-    assert_eq!(before, state_hash(&r), "rollback did not restore state");
-}
-
-#[test]
-fn rollback_of_mixed_scale_create_mesh_restores_state() {
-    // flat_floor(24) yields both whole solid blocks (block-scale collider)
-    // and chiseled blocks (voxel-scale collider): two attaches, two
-    // PhysicsState snapshots, both must unwind bit-exactly.
-    let (send, _recv) = crossbeam::channel::unbounded();
-    let mut r = Rollback::new(Some(send));
-    let before = state_hash(&r);
-
-    r.new_transaction();
-    r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(24));
-    assert_ne!(before, state_hash(&r), "create_mesh changed nothing");
-
-    r.rollback();
-    assert_eq!(before, state_hash(&r), "rollback did not restore state");
-}

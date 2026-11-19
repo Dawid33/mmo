@@ -1057,8 +1057,8 @@ site-test:
 # The routine check, hard-limited to `smoke_timeout` seconds (default 60). Even
 # the "quick" per-crate suites below build every game test module and a
 # Bevy-sized client test binary, which is far too slow for a while-iterating loop. So
-# smoke runs two modules of the game test binary (undo/rollback invariants,
-# region park/restore) and the server lib tests, TYPE-CHECKS the server's integration
+# smoke runs two modules of the game test binary (rollback restore regressions,
+# the region runner's input regressions) and the server lib tests, TYPE-CHECKS the server's integration
 # tests (all tagged slow, so nothing else would notice them rotting — a new
 # `ClientPacket` variant once left one uncompilable), and only TYPE-CHECKS the client
 # (lib + bin + tests): building or linking a client test binary means a full
@@ -1081,7 +1081,7 @@ smoke:
         fi
         if [ "$rc" -ne 0 ]; then exit "$rc"; fi
     }
-    step {{cargo}} test -q -p game --test it -- simple:: region_runner::
+    step {{cargo}} test -q -p game --test it -- rollback_restore:: region_runner::
     step {{cargo}} test -q -p server --lib
     step {{cargo}} check -q -p server --tests --features test-hooks
     step {{cargo}} check -q -p client --lib --bins --tests
