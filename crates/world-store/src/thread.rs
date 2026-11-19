@@ -107,7 +107,6 @@ pub(crate) enum Request {
     /// Claim the list; with a boot, only while that boot's `hosts` row is live.
     ClaimSuperRegions(HostId, Vec<SuperRegion>, Option<u64>, Reply<Fence>),
     /// Free the fence's super-regions.
-    Release(Fence, Reply<()>),
     /// Elastic 2b Task 3: the coordinator row's first write (first writer wins).
     BootstrapCoordinator(Vec<u8>, Vec<u8>, Reply<crate::Bootstrapped>),
     RaiseCoordinatorEpoch(Reply<Option<u64>>),
@@ -178,7 +177,7 @@ pub(crate) struct CutState {
     pub pending: std::sync::Mutex<Option<CutId>>,
     /// `lock_timeout` of every cut transaction, ms ([`crate::CUT_LOCK_TIMEOUT_MS`]).
     pub lock_timeout_ms: AtomicU64,
-    /// `lock_timeout` of every claim, release and registration, ms
+    /// `lock_timeout` of every claim and registration, ms
     /// ([`crate::CLAIM_LOCK_TIMEOUT_MS`]; a test hook lowers it,
     /// [`crate::StoreHandle::set_claim_lock_timeout_ms`]).
     pub claim_lock_timeout_ms: AtomicU64,
@@ -587,13 +586,6 @@ async fn serve(
                     r.send(on_pool!(&pool, claim_super_regions(owner, srs, s, live, lock_ms)))
                 })
             }
-            Request::Release(fence, r) => {
-                let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
-                tokio::spawn(async move {
-                    let _w = writer.lock().await;
-                    r.send(on_pool!(&pool, release(fence, lock_ms)))
-                })
-            }
             Request::BootstrapCoordinator(core, history, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, bootstrap_coordinator(core, history)))
@@ -985,7 +977,6 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::CommitCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::PutTiled(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimSuperRegions(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::Release(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::BootstrapCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RaiseCoordinatorEpoch(r) => r.send(Err(StoreError::ReadOnly)),
         Request::WriteTransition { reply, .. } => reply.send(Err(StoreError::ReadOnly)),

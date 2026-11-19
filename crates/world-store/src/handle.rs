@@ -842,7 +842,7 @@ impl StoreHandle {
         self.ask(|r| Request::VouchHost(ordinal, r))
     }
 
-    /// Test hook: the `lock_timeout` of this handle's later claims, releases and registrations,
+    /// Test hook: the `lock_timeout` of this handle's later claims and registrations,
     /// in ms (instead of [`crate::CLAIM_LOCK_TIMEOUT_MS`]).
     #[doc(hidden)]
     pub fn set_claim_lock_timeout_ms(&self, ms: u64) {
@@ -935,26 +935,6 @@ impl StoreHandle {
     /// re-claims its own rows with.
     pub fn claim_super_regions_live(&self, owner: HostId, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
         self.ask(|r| Request::ClaimSuperRegions(owner, srs, Some(boot), r))
-    }
-
-    /// Frees the super-regions `owner` holds under `fence` (owner [`NO_OWNER`], epoch + 1:
-    /// `fence` is fenced from then on). One transaction, fenced: `Fenced` (nothing freed)
-    /// unless every row of `fence` is still stored with its owner and epoch; only those rows
-    /// are freed. Refused with `Unsupported` for a fence of another owner, and with
-    /// `CutPending` (as the handle's other operations) while this handle has an undecided
-    /// staged cut part (its rows would be freed under it: release after
-    /// [`Self::cut_decided`]). No host calls it on exit; tools and tests do.
-    pub fn release(&self, owner: HostId, fence: &Fence) -> Result<(), StoreError> {
-        if fence.owner != owner {
-            return Err(StoreError::Unsupported(format!(
-                "releasing host {owner}'s super-regions with host {}'s fence",
-                fence.owner
-            )));
-        }
-        if let Some(pending) = *self.cuts.pending() {
-            return Err(StoreError::CutPending(pending));
-        }
-        self.ask(|r| Request::Release(fence.clone(), r))
     }
 
     /// The coordinator row's first write (Elastic 2b Task 3): `core` and `history` at version 1,

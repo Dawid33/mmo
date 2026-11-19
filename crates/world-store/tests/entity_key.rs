@@ -96,6 +96,7 @@ fn world_keyed_entities_migrate_unchanged() {
             players: vec![],
             history: None,
             adopts: vec![],
+            releases: vec![],
         };
         h.commit_cut(cut, f.clone()).recv().unwrap().unwrap();
         assert_eq!(h.load_region(A, &f).unwrap().unwrap().entities, vec![entity(5)]);
@@ -134,6 +135,7 @@ fn entity_twice_in_one_part_is_refused() {
                 players: vec![],
                 history: None,
                 adopts: vec![],
+                releases: vec![],
             };
             let err = h.commit_cut(cut, f.clone()).recv().unwrap().unwrap_err();
             assert!(
@@ -172,6 +174,7 @@ fn entity_saved_while_a_region_outside_the_cut_still_holds_it_is_refused() {
             players: vec![],
             history: None,
             adopts: vec![],
+            releases: vec![],
         };
         h.commit_cut(cut(1, vec![(A, region(vec![entity(5)])), (B, region(vec![]))]), f.clone()).recv().unwrap().unwrap();
         let err = h.commit_cut(cut(2, vec![(B, region(vec![entity(5)]))]), f.clone()).recv().unwrap().unwrap_err();

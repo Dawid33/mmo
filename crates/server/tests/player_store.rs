@@ -54,6 +54,7 @@ fn resolve_same_token_same_id_across_reopen() {
             players: vec![(a, record(4))],
             history: None,
             adopts: vec![],
+            releases: vec![],
         };
         let fence = HostClaims::claim_around(handle.clone(), game::SPAWN_REGION, 1).unwrap().fence().as_ref().clone();
         handle.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");

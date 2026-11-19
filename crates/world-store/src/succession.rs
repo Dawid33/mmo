@@ -21,7 +21,8 @@
 //! statement, no new lock; a heartbeat waits for
 //! the declaration, so a beat between the lapse check and the update cannot be lost), then
 //! each predecessor's `super_regions` rows `FOR NO KEY UPDATE` in key order. A staged cut
-//! part of the predecessor holds those rows `FOR SHARE` until its cut is decided: the
+//! part of the predecessor holds those rows `FOR SHARE` (the rows it releases `FOR NO KEY
+//! UPDATE`, Elastic 3: "A part's release" below) until its cut is decided: the
 //! declaration waits for it, at most `lock_timeout` (the caller declares only between
 //! cuts; a timeout is a retry). It never locks a row a staged part could be waiting for.
 //!
@@ -37,6 +38,9 @@
 //!    fenced exit (3); still live → it re-claims once more. If the declaration is aborted,
 //!    the coordinator declares again after a fresh lease read (the re-claimed rows then move
 //!    to the heir, or the row is no longer lapsed).
+//!
+//! A second safe cycle (Elastic 3) is a declaration against a cut part of the same host that
+//! releases land: under "A part's release" below.
 //!
 //! (Corrected, Elastic 1: the R4 notes listed a second cycle, "a zombie's claim of free land vs
 //! a declaration of several predecessors". Elastic 3 removed the host's claim of free land
@@ -105,9 +109,11 @@
 //! `coordinator` row is already held (the compare-and-set). Then, in this order:
 //! 1. `SELECT drain_at_ms FROM hosts WHERE id = $h AND boot = $b AND state = LIVE AND clean = 0
 //!    FOR SHARE`. No row → `HostNotLive`; a drain mark → `HostDraining`.
-//! 2. `INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $h, 1) ON CONFLICT (sx,
-//!    sz) DO NOTHING RETURNING epoch`.
-//! 3. If that inserted no row: `UPDATE super_regions SET owner = $h, epoch = epoch + 1 WHERE sx
+//! 2. A PLAIN `SELECT owner FROM super_regions WHERE sx = $1 AND sz = $2` (no lock): owned →
+//!    `Owned`, nothing more (Elastic 3 Task 5; why: the last bullet below).
+//! 3. Only if that read found no row: `INSERT INTO super_regions (sx, sz, owner, epoch) VALUES
+//!    ($1, $2, $h, 1) ON CONFLICT (sx, sz) DO NOTHING RETURNING epoch`.
+//! 4. If no row was inserted: `UPDATE super_regions SET owner = $h, epoch = epoch + 1 WHERE sx
 //!    = $1 AND sz = $2 AND owner = -1 RETURNING epoch`. No row → `Owned`.
 //!
 //! Why no cycle:
@@ -133,10 +139,15 @@
 //!   re-claim locks only rows it owns (what its registration gave it); an assignment writes only
 //!   a free or absent row. They share no `super_regions` row, and their locks of the host's
 //!   `hosts` row are both `FOR SHARE`, which do not conflict.
-//! - Statements 2 and 3 never wait for a staged part. A row a part holds is owned in every
-//!   committed snapshot: `ON CONFLICT DO NOTHING` sees it, and the `UPDATE`'s `WHERE owner = -1`
-//!   does not match it, so no row lock is requested. A part that RELEASES the row is the same
-//!   case until its `COMMIT PREPARED`.
+//! - Statements 2 to 4 never wait for a staged part. A row a part holds is owned in every
+//!   committed snapshot: the plain read answers `Owned` and neither write runs. A part that
+//!   RELEASES the row is the same case until its `COMMIT PREPARED` — and the read is what keeps
+//!   it so (found by Task 5's test): that part has UPDATED the row (owner -1, epoch + 1), and
+//!   the unique check of an `INSERT … ON CONFLICT` meeting a row version an uncommitted
+//!   transaction updated WAITS for that transaction; a part that only share-locks a row is a
+//!   locker, not an updater, and is not waited for. The insert runs only for a row the read
+//!   found absent (no part holds an absent row); the `UPDATE`'s `WHERE owner = -1` is evaluated
+//!   on the committed version first, so an owned row is not locked.
 //! - The share lock on the assignee's `hosts` row is held until the transition commits. The
 //!   assignee's beat (`UPDATE hosts SET seen_ms …`) waits behind it, under its own 1 s
 //!   `lock_timeout`, as it does behind a declaration. A total-crash registration that would
@@ -144,8 +155,55 @@
 //!   assignment. A drain mark (one `UPDATE` of that row) waits likewise: one that committed
 //!   first is seen (`HostDraining`), one after it finds land the host then leaves with.
 //!
-//! Cost: at most `ASSIGN_PER_PASS_MAX` (64) assignments per transition; each is three
+//! Cost: at most `ASSIGN_PER_PASS_MAX` (64) assignments per transition; each is at most four
 //! single-row statements.
+//!
+//! **A part's release** (`rows.rs` `cut_rows`, Elastic 3 Task 5): a host's world-cut part
+//! gives super-regions back (`WorldCut::releases`) inside its own transaction, before `PREPARE
+//! TRANSACTION`. Refused with `Unsupported` before any statement: a release its fence does not
+//! hold, and any release in a one-phase cut (`CutEnd::Commit`: static, all-in-one, SQLite —
+//! nothing pairs the free land with a decision). The statements of a part, in this order (2 and 5
+//! are the release's):
+//! 1. `SET LOCAL lock_timeout`; the plain generation read (no lock).
+//! 2. Only with `releases`: the fence check's statement over `releases` with `FOR NO KEY UPDATE`
+//!    in place of `FOR SHARE`, in key order, compared as the fence check compares (owner and
+//!    epoch must be the fence's; else `Fenced`).
+//! 3. The fence check over the part's check set (`commit_check_set`: the touched super-regions
+//!    and every one of the fence), `FOR SHARE`, in key order — a no-op on the rows step 2 holds.
+//! 4. The region, chunk, entity, player and in-flight writes, unchanged.
+//! 5. Per release: `UPDATE super_regions SET owner = -1, epoch = epoch + 1 WHERE sx = $1 AND sz =
+//!    $2 AND owner = $me AND epoch = $e`; anything but one row → `Fenced`.
+//! 6. `PREPARE TRANSACTION`.
+//!
+//! Why the released rows are locked `FOR NO KEY UPDATE` at step 2 and not at step 5: a part that
+//! took them `FOR SHARE` (step 3) and updated them later would UPGRADE its lock, and a
+//! declaration of this host waiting for its own `FOR NO KEY UPDATE` of those rows would queue
+//! between the share lock and the upgrade — a deadlock on every such meeting. Locked for update
+//! up front, the part holds what it will write from its first lock on.
+//!
+//! Why this is safe:
+//! - "A cut part writes only rows of its own regions" holds: the released rows are the part's
+//!   own until its commit, and no other host's part checks or writes them (a part's check set is
+//!   its own land).
+//! - The only other lockers of this host's `super_regions` rows are its own region loads (`FOR
+//!   SHARE` of one row: none runs in land the host masks for release, and one still open from
+//!   before the mask delays step 2 by its length), a declaration of this very host, a total-crash
+//!   registration (nobody live) and a boot's re-claim of its own rows (a boot that is not this
+//!   process). An assignment (above) never waits: the row is owned in every committed snapshot
+//!   until `COMMIT PREPARED`, so its plain read answers `Owned` before any write (its insert
+//!   would wait for the part, which has updated the row).
+//! - **One new deadlock cycle, safe.** Steps 2 and 3 are two key-ordered passes, so a declaration
+//!   of this host walking the same rows in ONE key-ordered pass can hold a row of step 3's set
+//!   while this part holds one of step 2's and waits for it. Postgres aborts one side (`40P01`):
+//!   the part's maps to `Fenced` (`fence_race`), which is true — the host is being declared dead;
+//!   the declaration's is its savepoint's refusal, decided again later. Nothing is written by
+//!   either aborted side.
+//! - A STAGED releasing part holds the released rows `FOR NO KEY UPDATE` until `COMMIT PREPARED`
+//!   / `ROLLBACK PREPARED`. A declaration of the releaser waits for it up to its `lock_timeout`, as
+//!   it waits for a staged part's share lock, and then (READ COMMITTED re-checks the locked row)
+//!   moves only the rows the releaser still owns: a committed release stays free. `decide_in`
+//!   touches no `super_regions` row, and finishing the parts (`finish_staged`) runs after the
+//!   decision's commit, outside the `coordinator` row: the part's lock never waits for anything.
 //!
 //! **A cut's begin** (`two_phase::begin_in`, Elastic 1 Task 4): in the transition that starts
 //! the cut, after its compare-and-set holds `coordinator`, a PLAIN read of `world.next_host_id`

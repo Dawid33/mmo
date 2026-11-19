@@ -1,13 +1,12 @@
 //! The ownership directory (R4): the reads `owners` and `owned_by`, and the writes
-//! `claim_super_regions_live` (a boot's re-claim) and `release`. Free land is assigned by the
-//! coordinator (Elastic 3, `assign.rs`): its tests are there.
+//! `claim_super_regions_live` (a boot's re-claim). Free land is assigned by the coordinator
+//! (Elastic 3, `assign.rs`) and released only by a committed cut part (`two_phase.rs`): their
+//! tests are there.
 
 use crate::common::hid;
-use game::{ChunkCoords, CutId, PortableRegion, RegionCoords, WorldCut};
-use world_store::{Fence, NO_OWNER, StoreError, StoreHandle, StoreUrl};
+use game::{CutId, WorldCut};
+use world_store::{NO_OWNER, StoreHandle};
 
-use crate::codec::{chunk, meta, region_ground};
-use crate::common;
 use crate::handle::{TEST_SUPER_REGIONS, each_backend, open, raw_exec};
 
 #[test]
@@ -62,18 +61,7 @@ pub(crate) fn live_boot(h: &StoreHandle, owner: game::HostId) -> u64 {
 
 /// A cut that writes nothing but the world tick: fenced by every super-region of its fence.
 fn empty_cut(id: u64) -> WorldCut {
-    WorldCut { id: CutId(id), host: hid(0), tick: 100 * id, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] }
-}
-
-/// A throwaway Postgres world (`None`, with the skip message, without the test database).
-fn pg_db() -> Option<(common::PgTestDb, StoreUrl)> {
-    if common::pg_admin_url().is_none() {
-        common::skip_msg();
-        return None;
-    }
-    let db = common::PgTestDb::create("mmo_test_dir").expect("pg env var set");
-    let url = StoreUrl::Postgres(db.url.clone());
-    Some((db, url))
+    WorldCut { id: CutId(id), host: hid(0), tick: 100 * id, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![], releases: vec![] }
 }
 
 /// A draining host keeps the land it owns until it leaves: its re-claim of its own rows still
@@ -96,58 +84,3 @@ fn a_draining_host_keeps_its_own_land() {
     });
 }
 
-#[test]
-fn released_rows_are_free_and_the_old_fence_is_refused() {
-    each_backend("dir_release", false, |url| {
-        let h = open(url);
-        let [x, y, _] = TEST_SUPER_REGIONS;
-        let old = h.claim_super_regions(hid(0), vec![x, y]).unwrap();
-        h.release(hid(0), &old).unwrap();
-        let rows = h.owners().unwrap();
-        assert!(rows.contains(&(x, NO_OWNER, old.epochs[&x] + 1)), "{rows:?}");
-        assert!(rows.contains(&(y, NO_OWNER, old.epochs[&y] + 1)), "{rows:?}");
-        let err = h.commit_cut(empty_cut(1), old.clone()).recv().unwrap().unwrap_err();
-        assert!(matches!(err, StoreError::Fenced { sr: Some(_) }), "{err}");
-        assert_eq!(h.world_info().unwrap().world_tick, 0, "nothing was written");
-        // A release is fenced too: the old fence holds nothing any more.
-        let err = h.release(hid(0), &old).unwrap_err();
-        assert!(matches!(err, StoreError::Fenced { sr: Some(_) }), "{err}");
-        let new = h.claim_super_regions_live(hid(1), live_boot(&h, hid(1)), vec![x]).unwrap();
-        assert_eq!(new.epochs, [(x, old.epochs[&x] + 2)].into_iter().collect());
-        // A release names its owner: another owner's fence is refused, nothing freed.
-        let err = h.release(hid(2), &new).unwrap_err();
-        assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
-        assert!(h.owners().unwrap().contains(&(x, 1, new.epochs[&x])));
-        h.shutdown();
-    });
-}
-
-#[test]
-fn release_waits_for_no_staged_part() {
-    let Some((_db, url)) = pg_db() else { return };
-    let h = open(&url);
-    let rc = RegionCoords::new(0, 0);
-    let fence = h.claim_super_regions(hid(0), vec![game::super_region_of(rc, h.super_region_regions())]).unwrap();
-    let part = WorldCut {
-        regions: vec![(
-            rc,
-            PortableRegion {
-                meta: meta(),
-                chunks: [(ChunkCoords::new(0, 0, 0), chunk())].into_iter().collect(),
-                ground: Some(region_ground()),
-                ..Default::default()
-            },
-        )],
-        ..empty_cut(1)
-    };
-    h.prepare_cut(part, fence.clone(), 0).recv().unwrap().expect("staged");
-    // The handle's other operations' answer for the same state: retry after the decision.
-    let err = h.release(hid(0), &fence).unwrap_err();
-    assert_eq!(err, StoreError::CutPending(CutId(1)), "{err}");
-    assert_eq!(h.owned_by(hid(0)).unwrap(), fence, "nothing was released");
-    assert!(!h.abort_cut(CutId(1), 100).unwrap());
-    assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(false));
-    h.release(hid(0), &fence).expect("no staged part any more");
-    assert!(h.owned_by(hid(0)).unwrap().epochs.is_empty());
-    h.shutdown();
-}

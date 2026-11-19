@@ -634,7 +634,7 @@ fn cut_pending_on_a_host_settles_that_cut_first() {
     let mut w = world(&db, &dir);
     let other = game::CutId(77);
     let generation = w.generations[0].mine();
-    let empty = game::WorldCut { id: other, host: h(0), tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
+    let empty = game::WorldCut { id: other, host: h(0), tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![], releases: vec![] };
     let staged = w.claims[0].store().prepare_cut(empty, (*w.claims[0].fence()).clone(), generation).recv().unwrap();
     assert!(staged.is_ok(), "the other cut's part is staged: {staged:?}");
     w.pair.until("a world cut decided", |_| decisions(&db).iter().any(|(c, _, _)| *c as u64 != other.0));
@@ -1116,7 +1116,7 @@ fn role_all_on_postgres_resolves_an_orphan_part_before_its_claim() {
     let (store, claims) = claim(&db, h(0));
     let generation = store.world_generation().unwrap();
     let srs: Vec<_> = claims.fence().epochs.keys().copied().collect();
-    let orphan = game::WorldCut { id: game::CutId(9), host: h(0), tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![] };
+    let orphan = game::WorldCut { id: game::CutId(9), host: h(0), tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None, adopts: vec![], releases: vec![] };
     store.prepare_cut(orphan, (*claims.fence()).clone(), generation).recv().unwrap().expect("staged");
     // The host process dies: the part stays prepared.
     drop(claims);

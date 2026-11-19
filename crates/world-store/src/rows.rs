@@ -400,42 +400,9 @@ macro_rules! engine_rows {
                 }
             }
 
-            /// Frees every super-region of `fence` (owner [`crate::NO_OWNER`], epoch + 1, so
-            /// `fence` and anything claimed before it is fenced) in one transaction: first
-            /// [`check_fence`] over the fence's own rows (refused with `Fenced` unless they are
-            /// all still `fence`'s), then one update per row in key order. Only the fence's rows
-            /// are freed: a release never skips the fence. `lock_timeout` `lock_ms`
-            /// ([`crate::CLAIM_LOCK_TIMEOUT_MS`]) like a claim. Callers hold the writer lock.
-            pub(crate) async fn release(pool: &Pool, fence: Fence, lock_ms: u64) -> Result<(), StoreError> {
-                let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
-                let mut tx = begin_claim(pool, lock_ms).await?;
-                // `FOR SHARE` never waits for a staged part (it holds its rows `FOR SHARE` too);
-                // the updates below do.
-                check_fence(&mut *tx, &fence, &srs).await?;
-                for (sx, sz) in srs {
-                    let done = sqlx::query(&format!(
-                        "UPDATE super_regions SET owner = {}, epoch = epoch + 1 WHERE sx = $1 AND sz = $2 AND owner = $3",
-                        crate::NO_OWNER
-                    ))
-                    .bind(i64::from(sx))
-                    .bind(i64::from(sz))
-                    .bind(i(fence.owner.0))
-                    .execute(&mut *tx)
-                    .await;
-                    match done {
-                        // Held `FOR SHARE` since the check (Postgres), under the writer lock (SQLite).
-                        Ok(d) if d.rows_affected() == 1 => {}
-                        Ok(_) => return Err(StoreError::Fenced { sr: Some((sx, sz)) }),
-                        Err(e) => return Err(claim_error(pool, tx, e, lock_ms).await),
-                    }
-                }
-                tx.commit().await?;
-                Ok(())
-            }
-
-            /// Locks (Postgres: `FOR SHARE`) and checks every super-region of
-            /// `srs` in `tx`: each must be claimed in `fence` and stored with its
-            /// owner and epoch. The first that is not → `Fenced`. Postgres: before it locks
+            /// Locks (Postgres: `lock`, [`SHARE_LOCK`] or [`RELEASE_LOCK`], in key order) and checks
+            /// every super-region of `srs` in `tx`: each must be claimed in `fence` and stored with
+            /// its owner and epoch. The first that is not → `Fenced`. Postgres: before it locks
             /// anything the transaction's idle limit is set ([`crate::FENCED_TX_IDLE_MS`]) —
             /// a client that freezes holding these locks loses its session, and the locks
             /// with it, after a lease.
@@ -443,6 +410,7 @@ macro_rules! engine_rows {
                 conn: &mut Conn,
                 fence: &Fence,
                 srs: &std::collections::BTreeSet<SuperRegion>,
+                lock: &str,
             ) -> Result<(), StoreError> {
                 let srs: Vec<SuperRegion> = srs.iter().copied().collect();
                 if $lock_timeout && !srs.is_empty() {
@@ -454,7 +422,7 @@ macro_rules! engine_rows {
                     .await?;
                 }
                 for batch in srs.chunks(FENCE_CHECK_BATCH) {
-                    let sql = fence_check_sql(batch.len(), $share_lock);
+                    let sql = fence_check_sql(batch.len(), lock);
                     let mut q = sqlx::query(&sql);
                     for (sx, sz) in batch {
                         q = q.bind(i64::from(*sx)).bind(i64::from(*sz));
@@ -478,6 +446,15 @@ macro_rules! engine_rows {
                 Ok(())
             }
 
+            /// The lock of an ordinary fence check (Postgres `FOR SHARE`: a claim or a declaration
+            /// waits for it, another check shares it).
+            const SHARE_LOCK: &str = $share_lock;
+
+            /// The lock of a part's release check (Postgres `FOR NO KEY UPDATE`): the part updates
+            /// those rows later, and holding them for update from the start leaves no share lock to
+            /// upgrade while a declaration waits between the two (module notes of `succession.rs`).
+            const RELEASE_LOCK: &str = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
+
             /// Test support ([`crate::StoreHandle::freeze_in_fenced_tx`]): a transaction that
             /// passed the real fence check over all of `fence`'s super-regions (Postgres: they
             /// are held `FOR SHARE`) and is handed back OPEN, for the caller to sit on.
@@ -485,7 +462,7 @@ macro_rules! engine_rows {
             pub(crate) async fn fenced_tx_held(pool: &Pool, fence: &Fence) -> Result<Tx, StoreError> {
                 let mut tx = pool.begin().await?;
                 let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
-                check_fence(&mut *tx, fence, &srs).await?;
+                check_fence(&mut *tx, fence, &srs, SHARE_LOCK).await?;
                 Ok(tx)
             }
 
@@ -1262,7 +1239,7 @@ macro_rules! engine_rows {
                 s: u32,
             ) -> Result<Option<StoredRegion>, StoreError> {
                 let mut tx = begin_read(pool).await?;
-                check_fence(&mut *tx, fence, &[load_check(rc, s)].into()).await?;
+                check_fence(&mut *tx, fence, &[load_check(rc, s)].into(), SHARE_LOCK).await?;
                 let Some((meta, ground)) = region_row(&mut tx, rc).await? else {
                     tx.commit().await?;
                     return Ok(None);
@@ -1542,6 +1519,7 @@ macro_rules! engine_rows {
                 end: &CutEnd,
                 lock_timeout_ms: u64,
             ) -> Result<CutCommitted, StoreError> {
+                release_refusal(cut, fence, end)?;
                 match end {
                     CutEnd::Commit => {
                         let mut tx = pool.begin().await?;
@@ -1572,6 +1550,29 @@ macro_rules! engine_rows {
                         staged
                     }
                 }
+            }
+
+            /// Elastic 3: what refuses a cut's `releases` before any statement (`Unsupported`): a
+            /// release in a one-phase cut (`CutEnd::Commit`: static, all-in-one, SQLite — the land
+            /// would be free with no decision to pair it with), or of a super-region `fence` does
+            /// not hold (it is not this host's to give back).
+            fn release_refusal(cut: &WorldCut, fence: &Fence, end: &CutEnd) -> Result<(), StoreError> {
+                if cut.releases.is_empty() {
+                    return Ok(());
+                }
+                if matches!(end, CutEnd::Commit) {
+                    return Err(StoreError::Unsupported(format!(
+                        "a one-phase cut releases no land (host {}'s cut {} releases {:?})",
+                        cut.host, cut.id.0, cut.releases
+                    )));
+                }
+                if let Some(sr) = cut.releases.iter().find(|sr| !fence.epochs.contains_key(sr)) {
+                    return Err(StoreError::Unsupported(format!(
+                        "host {}'s cut {} releases {sr:?}, which its fence does not hold",
+                        cut.host, cut.id.0
+                    )));
+                }
+                Ok(())
             }
 
             /// A pooled connection with a raw transaction that may still be open:
@@ -1669,10 +1670,14 @@ macro_rules! engine_rows {
                 Ok(())
             }
 
-            /// The rows of a cut, inside the caller's transaction. First the fence:
-            /// every super-region the cut touches and every one `fence` claimed must
-            /// still be held ([`commit_check_set`]). The world tick is written only
-            /// by a one-phase commit (a prepared part leaves it to the decision).
+            /// The rows of a cut, inside the caller's transaction. First the fence: the
+            /// super-regions the part releases (Elastic 3), checked and locked for update
+            /// ([`RELEASE_LOCK`]) — then every super-region the cut touches and every one
+            /// `fence` claimed must still be held ([`commit_check_set`]). Last, the released rows
+            /// are freed (owner [`crate::NO_OWNER`], epoch + 1): free when the part commits, this
+            /// host's if it is rolled back. The statement order and why it is safe: the module
+            /// notes of `succession.rs` ("A part's release"). The world tick is written only by a
+            /// one-phase commit (a prepared part leaves it to the decision).
             async fn cut_rows(
                 conn: &mut Conn,
                 cut: &WorldCut,
@@ -1681,7 +1686,11 @@ macro_rules! engine_rows {
                 end: &CutEnd,
             ) -> Result<CutCommitted, StoreError> {
                 let t = i(cut.tick);
-                check_fence(conn, fence, &commit_check_set(cut, fence, s)).await?;
+                let releases: std::collections::BTreeSet<SuperRegion> = cut.releases.iter().copied().collect();
+                if !releases.is_empty() {
+                    check_fence(&mut *conn, fence, &releases, RELEASE_LOCK).await?;
+                }
+                check_fence(&mut *conn, fence, &commit_check_set(cut, fence, s), SHARE_LOCK).await?;
                 if !cut.adopts.is_empty() {
                     // An heir writes as itself: its cut, its fence (an all-in-one fence runs every host).
                     if !fence.all_hosts && cut.host != fence.owner {
@@ -1840,6 +1849,25 @@ macro_rules! engine_rows {
                     .bind(bytes.as_slice())
                     .execute(&mut *conn)
                     .await?;
+                }
+                // Held for update since the release check: each row is still the fence's.
+                for &(sx, sz) in &releases {
+                    let epoch = fence.epochs[&(sx, sz)];
+                    let freed = sqlx::query(&format!(
+                        "UPDATE super_regions SET owner = {}, epoch = epoch + 1 \
+                         WHERE sx = $1 AND sz = $2 AND owner = $3 AND epoch = $4",
+                        crate::NO_OWNER
+                    ))
+                    .bind(i64::from(sx))
+                    .bind(i64::from(sz))
+                    .bind(i(fence.owner.0))
+                    .bind(i(epoch))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| fence_race(e, (sx, sz)))?;
+                    if freed.rows_affected() != 1 {
+                        return Err(StoreError::Fenced { sr: Some((sx, sz)) });
+                    }
                 }
                 if matches!(end, CutEnd::Commit) {
                     sqlx::query("UPDATE world SET world_tick = $1 WHERE id = 1 AND world_tick < $1").bind(t).execute(&mut *conn).await?;

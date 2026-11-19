@@ -51,6 +51,7 @@ fn in_flight_cut(id: u64, host: HostId, rc: RegionCoords) -> WorldCut {
         players: vec![],
         history: None,
         adopts: vec![],
+        releases: vec![],
     }
 }
 

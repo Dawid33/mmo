@@ -3083,6 +3083,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             // From `SuccessionAdopted` until the settle: what the coordinator's `settles`
             // pairs with (`succession.rs`).
             adopts: self.adopting_predecessors(),
+            releases: Vec::new(),
         };
         log::debug!(
             "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",

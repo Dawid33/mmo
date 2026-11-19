@@ -97,6 +97,11 @@ pub struct WorldCut {
     /// the open successions that made this host their heir (the store refuses any other).
     /// Empty everywhere else.
     pub adopts: Vec<HostId>,
+    /// Elastic 3: super-regions of this host's fence this part gives back. The store frees
+    /// them (owner `NO_OWNER`, epoch + 1) inside the prepared part, so they are free exactly
+    /// when the cut commits and stay this host's if it aborts. A one-phase cut refuses any.
+    /// Empty everywhere until hosts release idle land.
+    pub releases: Vec<crate::SuperRegion>,
 }
 
 /// A region's snapshots not committed yet, merged ([`PortableRegion::merge`]);

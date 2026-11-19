@@ -900,6 +900,7 @@ mod tests {
             players: Vec::new(),
             history: Some(bytes),
             adopts: vec![],
+            releases: vec![],
         };
         store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the cut commits");
     }
@@ -917,6 +918,7 @@ mod tests {
             players: Vec::new(),
             history: None,
             adopts: vec![],
+            releases: vec![],
         };
         store.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");
     }

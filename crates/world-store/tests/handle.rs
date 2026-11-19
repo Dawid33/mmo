@@ -131,6 +131,7 @@ pub(crate) fn first_cut(h: &StoreHandle) -> WorldCut {
         players: vec![(pid, player())],
         history: Some(vec![1, 2, 3, 4]),
         adopts: vec![],
+        releases: vec![],
     }
 }
 
@@ -195,6 +196,7 @@ fn second_cut_writes_only_given_chunks() {
             players: vec![],
             history: None,
             adopts: vec![],
+            releases: vec![],
         };
         let done = h.commit_cut(second, f.clone()).recv().unwrap().unwrap();
         assert_eq!(done.versions, vec![(A, 2), (B, 1)]);
@@ -240,6 +242,7 @@ fn commit_cut_is_atomic() {
             })],
             history: Some(vec![9]),
             adopts: vec![],
+            releases: vec![],
         };
         let err = h.commit_cut(bad, f.clone()).recv().unwrap().unwrap_err();
         assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("two regions")), "{err}");
@@ -300,6 +303,7 @@ fn u64_max_serial_roundtrips() {
             players: vec![(pid, player())],
             history: None,
             adopts: vec![],
+            releases: vec![],
         };
         let done = h.commit_cut(cut.clone(), f.clone()).recv().unwrap().unwrap();
         assert_eq!(done.id, CutId(u64::MAX));
@@ -410,6 +414,7 @@ fn first_region_row_without_ground_is_refused() {
             players: vec![],
             history: None,
             adopts: vec![],
+            releases: vec![],
         };
         let err = h.commit_cut(cut(1, A, false), f.clone()).recv().unwrap().unwrap_err();
         assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("no ground")), "{err}");

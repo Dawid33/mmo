@@ -41,6 +41,7 @@ fn cut(h: &StoreHandle, id: u64) -> WorldCut {
         players: vec![(pid, player())],
         history: None,
         adopts: vec![],
+        releases: vec![],
     }
 }
 
@@ -303,4 +304,19 @@ fn concurrent_claim_and_commit_serialise() {
     h.shutdown();
     rt.block_on(conn.close()).unwrap();
     drop(db);
+}
+
+/// Elastic 3: land a committed part released is free at `epoch + 1`, so a region load under a
+/// fence that still lists it at its old epoch is refused like any other stale one.
+#[test]
+fn a_region_load_in_released_land_is_fenced() {
+    let Some(w) = crate::two_phase::pg_world() else { return };
+    let h = open(&w.url);
+    let fence = h.claim_super_regions(hid(0), vec![(0, 0)]).unwrap();
+    h.prepare_cut(WorldCut { releases: vec![(0, 0)], ..cut(&h, 1) }, fence.clone(), 0).recv().unwrap().unwrap();
+    assert!(h.decide_cut(CutId(1), 100, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
+    assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
+    assert_eq!(h.load_region(A, &fence).unwrap_err(), StoreError::Fenced { sr: Some((0, 0)) });
+    assert!(h.load_terrain(A).unwrap().is_some(), "the part's region was saved (terrain is an unfenced read)");
+    h.shutdown();
 }

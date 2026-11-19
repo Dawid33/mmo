@@ -25,7 +25,7 @@ const B: RegionCoords = RegionCoords { x: 1, z: -1 };
 /// Host 2's region (super-region (1, 0) at the default side 16).
 const C: RegionCoords = RegionCoords { x: 16, z: 0 };
 /// A second super-region of host 1, with no region saved in it.
-const FAR: (i32, i32) = (5, 5);
+pub(crate) const FAR: (i32, i32) = (5, 5);
 
 pub(crate) fn boot_of(ordinal: game::HostId) -> u64 {
     100 + ordinal.0
@@ -61,6 +61,7 @@ pub(crate) fn part(id: u64, host: game::HostId, in_flight: Vec<InFlightRow>) -> 
         players: vec![],
         history: None,
         adopts: vec![],
+        releases: vec![],
     }
 }
 

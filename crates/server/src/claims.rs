@@ -152,7 +152,7 @@ impl WorldGeneration {
 pub struct HostClaims {
     store: StoreHandle,
     /// The current fence: read whole by every load and commit, swapped whole by
-    /// [`HostClaims::add`] / [`HostClaims::replace`].
+    /// [`HostClaims::add`] / [`HostClaims::replace`] / [`HostClaims::shrink`].
     fence: Arc<RwLock<Arc<Fence>>>,
     fenced: Fenced,
     /// Entities a region load leaves out ([`HostClaims::forget_entities`]: an heir's drop
@@ -317,6 +317,22 @@ impl HostClaims {
             *e = (*e).max(epoch);
         }
         *current = Arc::new(grown);
+    }
+
+    /// Shrinks the fence by `released` (Elastic 3: the super-regions a committed cut part gave
+    /// back, now free at `epoch + 1`): those keys leave it, nothing else changes. Runs before the
+    /// manager learns of the commit, so no later load or part is checked against a row this host
+    /// no longer holds (it would be refused `Fenced`).
+    pub fn shrink(&self, released: &[SuperRegion]) {
+        if released.is_empty() {
+            return;
+        }
+        let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
+        let mut shrunk = (**current).clone();
+        for sr in released {
+            shrunk.epochs.remove(sr);
+        }
+        *current = Arc::new(shrunk);
     }
 
     /// From now on a region load leaves `ids` out of the stored state it returns (an heir's
@@ -932,6 +948,7 @@ mod tests {
             players: vec![],
             history: None,
             adopts: vec![],
+            releases: vec![],
         }
     }
 
@@ -993,6 +1010,25 @@ mod tests {
         claims.grow_to(Fence { owner: h(0), epochs: [((0, 0), 2), ((2, 0), 5)].into_iter().collect(), all_hosts: false });
         let epochs: Vec<(SuperRegion, u64)> = claims.fence().epochs.iter().map(|(sr, e)| (*sr, *e)).collect();
         assert_eq!(epochs, [((0, 0), 3), ((1, 0), 2), ((2, 0), 5)]);
+        store.shutdown();
+    }
+
+    /// Elastic 3: a committed part's releases leave the fence (before the manager learns of the
+    /// commit); every other row stays at its epoch, the owner and `all_hosts` with it, and a key
+    /// the fence does not hold changes nothing.
+    #[test]
+    fn shrinking_drops_only_the_released_rows() {
+        let store = memory_store();
+        let claims = HostClaims::none(store.clone(), h(0));
+        claims.replace(Fence { owner: h(0), epochs: [((0, 0), 3), ((1, 0), 2), ((2, 0), 5)].into_iter().collect(), all_hosts: false });
+        let before = claims.fence();
+        claims.shrink(&[(1, 0), (9, 9)]);
+        let epochs: Vec<(SuperRegion, u64)> = claims.fence().epochs.iter().map(|(sr, e)| (*sr, *e)).collect();
+        assert_eq!(epochs, [((0, 0), 3), ((2, 0), 5)]);
+        assert_eq!((claims.fence().owner, claims.fence().all_hosts), (h(0), false));
+        assert_eq!(before.epochs.len(), 3, "a snapshot taken before is unchanged");
+        claims.shrink(&[]);
+        assert_eq!(claims.fence().epochs.len(), 2, "nothing released, nothing dropped");
         store.shutdown();
     }
 

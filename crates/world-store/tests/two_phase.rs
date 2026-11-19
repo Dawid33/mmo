@@ -43,6 +43,7 @@ fn part(id: u64, host: game::HostId) -> WorldCut {
         players: vec![],
         history: None,
         adopts: vec![],
+        releases: vec![],
     }
 }
 
@@ -1194,5 +1195,203 @@ fn claim_behind_a_staged_part_times_out_with_the_remedy() {
     assert_eq!(h.owned_by(hid(0)).unwrap(), f0, "nothing claimed");
     assert_eq!(prepared(&w), 0);
     other.shutdown();
+    h.shutdown();
+}
+
+// --- Elastic 3 Task 5: a part releases super-regions with its commit ---
+
+/// `sr`'s row: `(owner, epoch)`, `None` when absent.
+fn sr_row(h: &StoreHandle, sr: world_store::SuperRegion) -> Option<(i64, u64)> {
+    h.owners().unwrap().into_iter().find(|(s, _, _)| *s == sr).map(|(_, owner, epoch)| (owner, epoch))
+}
+
+/// Host 0 holds `s1` (A's super-region) at epoch 2 and `s2` (B's) at epoch 1: its whole fence.
+fn two_rows_held(h: &StoreHandle) -> (Fence, world_store::SuperRegion, world_store::SuperRegion) {
+    let s = h.super_region_regions();
+    let (s1, s2) = (game::super_region_of(A, s), game::super_region_of(B, s));
+    h.claim_super_regions(hid(0), vec![s1]).unwrap();
+    h.claim_super_regions(hid(0), vec![s1]).unwrap();
+    h.claim_super_regions(hid(0), vec![s2]).unwrap();
+    let fence = h.owned_by(hid(0)).unwrap();
+    assert_eq!(fence.epochs, [(s1, 2), (s2, 1)].into_iter().collect());
+    (fence, s1, s2)
+}
+
+/// Host 0's part of cut `id` saving region B only (in `s2`, the land it keeps).
+fn part_in_b(id: u64) -> WorldCut {
+    WorldCut { regions: vec![(B, region())], in_flight: vec![InFlightRow::Intent { target: B, msg: intent() }], ..part(id, hid(0)) }
+}
+
+#[test]
+fn a_releasing_part_frees_its_rows_when_the_cut_commits() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (fence, s1, s2) = two_rows_held(&h);
+    // The part saves region A (in `s1`) and gives `s1` back.
+    h.prepare_cut(WorldCut { releases: vec![s1], ..part(20, hid(0)) }, fence, 0).recv().unwrap().unwrap();
+    assert_eq!(sr_row(&h, s1), Some((0, 2)), "the host's until the commit");
+    assert!(h.decide_cut(CutId(20), 2000, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
+    assert_eq!(h.cut_decided(CutId(20)).unwrap(), Some(true));
+    assert_eq!(prepared(&w), 0);
+    assert_eq!(sr_row(&h, s1), Some((world_store::NO_OWNER, 3)), "free at epoch + 1");
+    assert_eq!(sr_row(&h, s2), Some((0, 1)), "the land kept is untouched");
+    assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM regions WHERE rx = 0 AND rz = 0"), 1, "the part's region in s1 is saved");
+    assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM chunks WHERE rx = 0 AND rz = 0"), 1);
+    assert_eq!(h.world_info().unwrap().world_tick, 2000);
+    h.shutdown();
+}
+
+#[test]
+fn an_aborted_releasing_part_keeps_the_land() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (fence, s1, s2) = two_rows_held(&h);
+    h.prepare_cut(WorldCut { releases: vec![s1], ..part(21, hid(0)) }, fence.clone(), 0).recv().unwrap().unwrap();
+    assert!(!h.abort_cut(CutId(21), 2100).unwrap(), "ROLLBACK PREPARED");
+    assert_eq!(h.cut_decided(CutId(21)).unwrap(), Some(false));
+    assert_eq!(prepared(&w), 0);
+    assert_eq!(sr_row(&h, s1), Some((0, 2)), "still the host's, at its epoch");
+    assert_eq!(sr_row(&h, s2), Some((0, 1)));
+    assert!(h.stored_regions().unwrap().is_empty());
+    assert_eq!(h.owned_by(hid(0)).unwrap(), fence, "the fence still holds all of it");
+    h.shutdown();
+}
+
+#[test]
+fn a_release_outside_the_fence_is_refused_before_any_write() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (fence, s1, s2) = two_rows_held(&h);
+    let elsewhere = (7, 7);
+    let err = h.prepare_cut(WorldCut { releases: vec![s1, elsewhere], ..part(22, hid(0)) }, fence.clone(), 0).recv().unwrap().unwrap_err();
+    assert!(matches!(&err, StoreError::Unsupported(why) if why.contains("(7, 7)")), "{err}");
+    assert_eq!(prepared(&w), 0, "nothing staged");
+    assert_eq!(idle_in_transaction(&w), 0);
+    assert!(h.stored_regions().unwrap().is_empty(), "nothing written");
+    assert_eq!((sr_row(&h, s1), sr_row(&h, s2), sr_row(&h, elsewhere)), (Some((0, 2)), Some((0, 1)), None));
+    // A refusal settles the part: the next one is accepted.
+    h.prepare_cut(part(23, hid(0)), fence, 0).recv().unwrap().expect("the next part");
+    assert!(!h.abort_cut(CutId(23), 2300).unwrap());
+    h.shutdown();
+}
+
+#[test]
+fn a_release_at_another_epoch_is_fenced() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (fence, s1, _) = two_rows_held(&h);
+    // The row moved on since the fence was read (epoch 3; the fence says 2).
+    h.claim_super_regions(hid(0), vec![s1]).unwrap();
+    let err = h.prepare_cut(WorldCut { releases: vec![s1], ..part_in_b(24) }, fence, 0).recv().unwrap().unwrap_err();
+    assert_eq!(err, StoreError::Fenced { sr: Some(s1) });
+    assert_eq!(prepared(&w), 0);
+    assert_eq!(idle_in_transaction(&w), 0);
+    assert_eq!(sr_row(&h, s1), Some((0, 3)), "not freed");
+    assert!(h.stored_regions().unwrap().is_empty());
+    h.shutdown();
+}
+
+#[test]
+fn a_one_phase_cut_with_releases_is_unsupported() {
+    each_backend("two_phase_one_phase_release", false, |url| {
+        let h = open(url);
+        let fence = h.claim_super_regions(hid(0), vec![(0, 0), (0, -1)]).unwrap();
+        let err = h.commit_cut(WorldCut { releases: vec![(0, 0)], ..part(1, hid(0)) }, fence.clone()).recv().unwrap().unwrap_err();
+        assert!(matches!(err, StoreError::Unsupported(_)), "{err}");
+        assert!(h.stored_regions().unwrap().is_empty(), "nothing written");
+        assert_eq!(h.world_info().unwrap().world_tick, 0);
+        assert_eq!(h.owned_by(hid(0)).unwrap(), fence, "nothing released");
+        h.commit_cut(part(2, hid(0)), fence).recv().unwrap().expect("the next one-phase cut");
+        h.shutdown();
+    });
+}
+
+#[test]
+fn a_row_a_staged_part_releases_is_owned_until_the_commit_then_assignable() {
+    use crate::succession::{World, boot_of, part as host_part};
+    use game::coordinator::{AssignLand, Assigned};
+    let Some(w) = World::new(2) else { return };
+    let s = w.h.super_region_regions();
+    let sr = game::super_region_of(B, s);
+    // Host 1 holds `sr` at epoch 2 (a re-claim of its own row).
+    w.hosts[1].claim_super_regions_live(hid(1), boot_of(hid(1)), vec![sr]).unwrap();
+    let fence = w.h.owned_by(hid(1)).unwrap();
+    assert_eq!(fence.epochs[&sr], 2);
+    w.hosts[0].prepare_cut(host_part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[1].prepare_cut(WorldCut { releases: vec![sr], ..host_part(1, hid(1), vec![]) }, fence, 0).recv().unwrap().unwrap();
+    let to_host_0 = AssignLand { sr, host: hid(0), boot: boot_of(hid(0)) };
+    let started = std::time::Instant::now();
+    assert_eq!(w.h.assign_land(to_host_0).unwrap(), Assigned::Owned, "owned in every committed snapshot");
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(500), "the assignment waited {took:?} for the staged part");
+    assert!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap());
+    assert_eq!(prepared(&w.w), 0);
+    assert_eq!(sr_row(&w.h, sr), Some((world_store::NO_OWNER, 3)));
+    assert_eq!(w.h.assign_land(to_host_0).unwrap(), Assigned::Done { epoch: 4 });
+    assert_eq!(sr_row(&w.h, sr), Some((0, 4)));
+    w.shutdown();
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_declaration_behind_a_staged_releasing_part_moves_only_what_is_left() {
+    use crate::succession::{FAR, World, part as host_part};
+    use world_store::{Declared, SuccessionKind};
+    let Some(w) = World::new(2) else { return };
+    let sr = game::super_region_of(B, w.h.super_region_regions());
+    assert_eq!(w.fences[1].epochs, [(sr, 1), (FAR, 1)].into_iter().collect());
+    w.hosts[0].prepare_cut(host_part(1, hid(0), vec![]), w.fences[0].clone(), 0).recv().unwrap().unwrap();
+    w.hosts[1]
+        .prepare_cut(WorldCut { releases: vec![sr], ..host_part(1, hid(1), vec![]) }, w.fences[1].clone(), 0)
+        .recv()
+        .unwrap()
+        .unwrap();
+    // The commit is decided; host 0's part is finished and host 1's (the releaser's) is still
+    // staged, as when the coordinator's post-commit effect has not reached it yet.
+    w.h.stop_after_commit_prepared(1);
+    assert_eq!(w.h.decide_cut(CutId(1), 100, true, vec![hid(0), hid(1)], vec![], 0, vec![]).unwrap_err(), StoreError::Backend("test stop".into()));
+    assert_eq!(prepared(&w.w), 1);
+    // Host 1 dies; its declaration waits for the staged part's rows.
+    w.lapse(hid(1));
+    let (done_tx, done_rx) = crossbeam::channel::bounded(1);
+    let declarer = {
+        let h = w.h.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(h.declare_succession(vec![(hid(1), crate::succession::boot_of(hid(1)))], vec![hid(0)], SuccessionKind::Crash, 0));
+        })
+    };
+    assert!(done_rx.recv_timeout(BLOCKED_FOR).is_err(), "the declaration waits for the staged releasing part");
+    assert_eq!(w.hosts[1].cut_decided(CutId(1)).unwrap(), Some(true), "COMMIT PREPARED");
+    let declared = done_rx.recv_timeout(Duration::from_secs(10)).expect("the declaration goes on after the commit").unwrap();
+    declarer.join().unwrap();
+    let Declared::Done(list) = declared else { panic!("declared: {declared:?}") };
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].moved, vec![(FAR, 2)], "only the land host 1 still owned");
+    assert_eq!(sr_row(&w.h, sr), Some((world_store::NO_OWNER, 2)), "the released row stays free");
+    assert_eq!(sr_row(&w.h, FAR), Some((0, 2)), "the heir's");
+    assert_eq!(prepared(&w.w), 0);
+    w.shutdown();
+}
+
+#[test]
+fn the_releasers_next_part_commits_with_the_shrunk_fence_and_is_fenced_with_the_old_one() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (old, s1, s2) = two_rows_held(&h);
+    h.prepare_cut(WorldCut { releases: vec![s1], ..part(30, hid(0)) }, old.clone(), 0).recv().unwrap().unwrap();
+    assert!(h.decide_cut(CutId(30), 3000, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
+    assert_eq!(h.cut_decided(CutId(30)).unwrap(), Some(true));
+    // The old fence still lists `s1` at epoch 2: refused, nothing staged.
+    let err = h.prepare_cut(part_in_b(31), old.clone(), 0).recv().unwrap().unwrap_err();
+    assert_eq!(err, StoreError::Fenced { sr: Some(s1) });
+    assert_eq!(prepared(&w), 0);
+    // Shrunk by the release, it commits.
+    let mut shrunk = old;
+    shrunk.epochs.remove(&s1);
+    assert_eq!(shrunk.epochs, [(s2, 1)].into_iter().collect());
+    h.prepare_cut(part_in_b(32), shrunk.clone(), 0).recv().unwrap().expect("the shrunk fence holds");
+    assert!(h.decide_cut(CutId(32), 3200, true, vec![hid(0)], vec![], 0, vec![]).unwrap());
+    assert!(h.load_region(B, &shrunk).unwrap().is_some());
+    assert_eq!(h.world_info().unwrap().world_tick, 3200);
     h.shutdown();
 }

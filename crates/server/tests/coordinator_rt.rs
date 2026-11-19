@@ -320,6 +320,7 @@ fn r1_world_migrates_history_row() {
         players: Vec::new(),
         history: Some(r1.clone()),
         adopts: vec![],
+        releases: vec![],
     };
     store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the R1 cut commits");
     assert_eq!(store.load_coordinator().unwrap(), None, "an R1 world has no coordinator row");
