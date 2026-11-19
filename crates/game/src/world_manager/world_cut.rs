@@ -339,6 +339,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         if self.begin_cut_at(cut, tick).is_none() {
             // A dead region thread: the part failed; the caller sends the one `CutFailed`.
+            // Nothing of it was staged: its mask lifts now (its `CutDone` may never come).
+            self.release_aborted(cut);
             if let Some(run) = self.world_cut.take() {
                 for o in &run.outsiders {
                     if let Some(peer) = self.peers.get_mut(o) {

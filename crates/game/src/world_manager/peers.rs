@@ -479,10 +479,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Parked from the hand-off, as a player crossing into a region whose load fails
             // is (`region_load_failed`); `park_handed` reports it offline.
             let record = handoff_record(target, &bundle, &h).expect("checked above");
-            if self.inherited_not_adopted(target) {
+            if self.masked_or_released(target) {
                 // A survivor that applied the succession hands it here before this heir
-                // adopted the land: expected, nothing is lost (the player logs in again).
-                log::info!("[server] player {} handed into {target:?}, inherited and not adopted yet: parked", h.player.0);
+                // adopted the land, or a peer not told yet of a release here: expected,
+                // nothing is lost (the player logs in again).
+                log::info!("[server] player {} handed into {target:?}, inherited or released here: parked", h.player.0);
             } else {
                 log::error!("[server] player {} handed into {target:?}, which cannot take it now: parked", h.player.0);
             }
@@ -590,8 +591,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.placed_by_handoff(h.player, h.hop);
         if self.is_unavailable(target) || !self.owns(target) || self.leave_parked {
-            if self.inherited_not_adopted(target) {
-                log::info!("[server] player {} moved into {target:?}, inherited and not adopted yet: parked", h.player.0);
+            if self.masked_or_released(target) {
+                log::info!("[server] player {} moved into {target:?}, inherited or released here: parked", h.player.0);
             } else {
                 log::error!("[server] player {} moved into {target:?}, unavailable, not this host's or leaving: parked", h.player.0);
             }
@@ -651,6 +652,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Whether this host already holds `player`: online (any session), parked, parking,
     /// moving, its body being created, awaited after a hand-off, or a login of it waiting
     /// for a park.
+    /// `player`'s record when this host holds the player ONLY as a parked record (not online,
+    /// parking, being created or awaiting its park).
+    pub(super) fn parked_only(&self, player: PlayerId) -> Option<&PlayerRecord> {
+        let record = self.parked_players.get(&player)?;
+        let live = self.player_of.values().any(|p| *p == player)
+            || self.parking.values().any(|p| p.player == player)
+            || self.creating.values().any(|(_, p, _)| *p == player)
+            || self.awaiting_park.contains_key(&player);
+        (!live).then_some(record)
+    }
+
     pub(super) fn holds_player(&self, player: PlayerId) -> bool {
         self.player_of.values().any(|p| *p == player)
             || self.parked_players.contains_key(&player)
@@ -1742,7 +1754,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.accept_arrival(None, target, stamp, *bundle, now_ms);
             }
             Reliable::Transfer { target, stamp, bundle, player: Some(handoff) } => {
-                if !self.owns(target) && !self.inherited_not_adopted(target) {
+                if !self.owns(target) && !self.masked_or_released(target) {
                     // Parked here from the hand-off (`accept_handoff`): a region this host does
                     // not own is never started here. Never lost.
                     log::error!("[server] host {from} handed a player into {target:?}, which this host does not own");
@@ -1769,7 +1781,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 // Ownership disagrees: never forwarded (it could bounce between hosts). An
                 // intent is refused back (its items return), a reply held here.
-                log::error!("[server] host {from} sent {msg:?} for {target:?}, which this host does not own");
+                if self.masked_or_released(target) {
+                    log::debug!("[server] host {from} sent {msg:?} for {target:?}, inherited or released here");
+                } else {
+                    log::error!("[server] host {from} sent {msg:?} for {target:?}, which this host does not own");
+                }
                 match msg {
                     // Refused back to where it came from: its items return.
                     crate::IntentMsg::Intent(s) => {
@@ -1785,7 +1801,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             Reliable::PlayerMove { handoff, record, target } => {
-                if !self.owns(target) && !self.inherited_not_adopted(target) {
+                if !self.owns(target) && !self.masked_or_released(target) {
                     // Parked here (`accept_move`): a region this host does not own is never
                     // started here, so its body could not be created. Never lost.
                     log::error!("[server] host {from} moved a player into {target:?}, which this host does not own");

@@ -233,6 +233,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let held = self.spawn_held.iter().map(|(_, r)| r).chain(&self.spawn_here);
         busy.extend(held.map(|r| sr(&self.spawn_region(r.record_region))));
+        // An order already placed here pins its region until the session comes.
+        busy.extend(self.pinned_regions().map(|rc| sr(&rc)));
         busy.extend(self.succession_pinned.iter().map(sr));
         busy.extend(self.inheriting.keys().copied());
         busy
@@ -240,7 +242,8 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The upkeep's idle stamps, at most once per [`LAND_IDLE_SCAN_MS`]: every owned
     /// super-region nothing holds keeps (or gets) the time it was first seen idle; a busy one,
-    /// or one no longer owned, loses its stamp. Never under `static` / all-in-one.
+    /// or one no longer owned, loses its stamp. Never under `static` / all-in-one. A busy spell
+    /// shorter than one scan between two scans leaves the stamp as it was (bounded early release).
     pub(super) fn scan_idle_land(&mut self, now_ms: u64) {
         if self.idle_scanned_ms != 0 && now_ms < self.idle_scanned_ms.saturating_add(LAND_IDLE_SCAN_MS) {
             return;
@@ -325,6 +328,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.terrain_cache.retain(|rc, _| !of_released(rc));
         self.pristine_terrain.retain(|rc, _| !of_released(rc));
         self.unavailable.retain(|rc, _| !of_released(rc));
+        // The records parked here on that land that the part wrote, unchanged since: the store
+        // holds them (whoever places the player next reads them there — never two writers).
+        for (player, written) in self.released_parked.remove(&cut).unwrap_or_default() {
+            if self.parked_players.get(&player) == Some(&written) {
+                self.parked_players.remove(&player);
+                self.parked_bodies.retain(|_, p| *p != player);
+            }
+        }
         for sr in &released {
             self.land_idle_since.remove(sr);
             self.releasing.remove(sr);
@@ -337,6 +348,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Cut `cut` was decided aborted (or its part never staged): the mask of its releases lifts,
     /// the land stays this host's, and what waited for it is delivered here.
     pub(super) fn release_aborted(&mut self, cut: CutId) {
+        self.released_parked.remove(&cut);
         let kept = self.releases_of(cut);
         if kept.is_empty() {
             return;
@@ -356,6 +368,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         };
         self.recently_released.retain(|sr, _| directory.get(*sr, me) == Owner::Free);
+    }
+
+    /// Whether `rc`'s land is masked here (inherited and not adopted, or released in a pending
+    /// part) or was released here and no read showed it owned since: a peer's state message for
+    /// it is expected (a peer not told yet), not a disagreement — logged below error.
+    pub(super) fn masked_or_released(&self, rc: RegionCoords) -> bool {
+        let sr = crate::super_region_of(rc, self.ownership.1);
+        self.inheriting.contains_key(&sr) || self.releasing.contains_key(&sr) || self.recently_released.contains_key(&sr)
     }
 
     /// Test support and the `[server]` line: the super-regions masked for a release now.

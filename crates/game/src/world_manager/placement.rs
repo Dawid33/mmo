@@ -169,6 +169,8 @@ pub const KICK_UNACKED_WARN_MS: u64 = 60_000;
 pub(super) struct Pin {
     at_ms: u64,
     epoch: u64,
+    /// The region the player is placed in here (its land is busy while the pin lasts, `land.rs`).
+    region: RegionCoords,
     /// Its clamp at a host seam was logged.
     told: bool,
 }
@@ -191,10 +193,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.ordinal()
     }
 
-    /// Where `player` of a login is placed, in order: online, parked or parking here →
-    /// here; handed to another host (`departed`) → that host; its record's region (off the
-    /// map: the spawn region) → its owner; no record → the owner of [`SPAWN_REGION`].
+    /// Where `player` of a login is placed, in order: online, parking or being created here →
+    /// here; held here only as a parked record → by its region's owner: this host or another
+    /// (here: the session's placement hands the record to that host, `place_player`), nobody
+    /// known — land masked for a release (`land.rs`), free or unknown — wait; handed to another
+    /// host (`departed`) → that host; its record's region (off the map: the spawn region) → its
+    /// owner; no record → the owner of [`SPAWN_REGION`].
     pub fn place_spawn(&self, player: PlayerId, record_region: Option<RegionCoords>) -> Placement {
+        if let Some(parked) = self.parked_only(player) {
+            return match self.owner_of(self.spawn_region(Some(parked.region))) {
+                crate::Owner::Me | crate::Owner::Host(_) => Placement::Here,
+                crate::Owner::Free | crate::Owner::Unknown => Placement::Wait,
+            };
+        }
         if self.holds_player(player) {
             return Placement::Here;
         }
@@ -310,8 +321,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         match self.place_spawn(req.player, req.record_region) {
             Placement::Here if !live && !self.peers_synced() => self.hold_spawn(req, since_ms, "a peer has not synced"),
             Placement::Wait => {
-                // Wanted for a claim: the order is placed once an owner is known.
-                let region = self.spawn_region(req.record_region);
+                // Wanted for a claim: the order is placed once an owner is known (a record
+                // parked here is placed by its own region).
+                let region = self.placed_region(req.player, req.record_region);
                 self.note_unowned(region);
                 self.hold_spawn(req, since_ms, "its region has no owner this host knows")
             }
@@ -320,7 +332,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // Its session connects here: the player stays here until it does.
                 let now = self.clock_ms;
                 self.spawn_pins.retain(|_, p| now.saturating_sub(p.at_ms) < SPAWN_PIN_MS);
-                self.spawn_pins.insert(req.player, Pin { at_ms: now, epoch: req.session_epoch, told: false });
+                let region = self.placed_region(req.player, req.record_region);
+                self.spawn_pins.insert(req.player, Pin { at_ms: now, epoch: req.session_epoch, told: false, region });
                 self.spawn_here.push(req);
             }
             Placement::Host(owner) if self.leave_blocks(owner) && self.ownership.0.directory().is_some() => {
@@ -381,6 +394,20 @@ impl<S: RegionSpawner> WorldManager<S> {
         for (since, req) in std::mem::take(&mut self.spawn_held) {
             self.spawn_order_since(req, since);
         }
+    }
+
+    /// The region a login of `player` is placed in: its record parked here, else its stored
+    /// record's ([`Self::spawn_region`]).
+    fn placed_region(&self, player: PlayerId, record_region: Option<RegionCoords>) -> RegionCoords {
+        let parked = self.parked_players.get(&player).map(|r| r.region);
+        self.spawn_region(parked.or(record_region))
+    }
+
+    /// The regions of spawn orders placed here whose session has not come yet (pins not
+    /// expired): busy land (`land.rs`).
+    pub(super) fn pinned_regions(&self) -> impl Iterator<Item = RegionCoords> + '_ {
+        let now = self.clock_ms;
+        self.spawn_pins.values().filter(move |p| now.saturating_sub(p.at_ms) < SPAWN_PIN_MS).map(|p| p.region)
     }
 
     /// Whether a spawn order this host took for `player` waits for its session: the player

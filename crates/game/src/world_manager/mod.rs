@@ -1257,6 +1257,9 @@ pub struct WorldManager<S: RegionSpawner> {
     recently_released: BTreeMap<crate::SuperRegion, u64>,
     /// Super-regions released since start (the `[server]` line).
     land_released_total: u64,
+    /// Per world cut whose part releases land: the records parked here on that land, as the
+    /// part wrote them (dropped here when it commits, unless parked anew since).
+    released_parked: BTreeMap<CutId, BTreeMap<PlayerId, PlayerRecord>>,
     /// An `Unknown` owner was hit: the server reads the directory whole
     /// ([`Self::take_directory_wanted`]).
     directory_wanted: bool,
@@ -1592,6 +1595,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             releasing: BTreeMap::new(),
             recently_released: BTreeMap::new(),
             land_released_total: 0,
+            released_parked: BTreeMap::new(),
             directory_wanted: false,
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
@@ -3101,6 +3105,20 @@ impl<S: RegionSpawner> WorldManager<S> {
         // waiting on the first's prepared row lock until its lock timeout (10 s): the cut
         // aborts.
         let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
+        // Records parked here on land this part releases, as the part writes them: dropped
+        // here once it commits (`land_released`) — the store holds them then, and whoever
+        // places the player next reads them there.
+        let releases = self.releases_of(cut.id);
+        if !releases.is_empty() {
+            let s = self.ownership.1;
+            let parked: BTreeMap<PlayerId, PlayerRecord> = self
+                .parked_players
+                .iter()
+                .filter(|(p, r)| releases.contains(&crate::super_region_of(r.region, s)) && players.get(*p) == Some(*r))
+                .map(|(p, r)| (*p, r.clone()))
+                .collect();
+            self.released_parked.insert(cut.id, parked);
+        }
         let world_cut = WorldCut {
             host: self.ordinal(),
             id: cut.id,
@@ -3114,7 +3132,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             // pairs with (`succession.rs`).
             adopts: self.adopting_predecessors(),
             // Masked since its `BeginCut` (`land.rs`): the store frees them with the commit.
-            releases: self.releases_of(cut.id),
+            releases,
         };
         log::debug!(
             "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",
@@ -3693,8 +3711,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.awaiting_park.insert(player, (id, record));
             self.deferred_packets.entry(id).or_default();
         } else {
+            let held_here = self.parked_players.contains_key(&player);
             let record = self.take_parked(player).or(record);
-            self.place_player(id, record, now_ms);
+            self.place_player(id, record, held_here, now_ms);
         }
         if let Some(map) = &self.world_map {
             let _ = self.out.send((Some(id), ServerPacket::WorldMap(map.clone())));
@@ -3735,11 +3754,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Give a session its body: restored from `record`; a record whose region is
     /// off the map (the world changed) lands at the spawn region with its
     /// `Client` (no claims); no record = a fresh player at the spawn region.
-    fn place_player(&mut self, id: ClientId, record: Option<PlayerRecord>, now_ms: u64) {
+    ///
+    /// `held_here`: the record was this host's parked one (not the store's, read by the edge).
+    fn place_player(&mut self, id: ClientId, record: Option<PlayerRecord>, held_here: bool, now_ms: u64) {
         let target = match &record {
             Some(r) if !crate::off_map(self.map_extent(), r.region) => r.region,
             _ => SPAWN_REGION,
         };
+        // A record parked here whose land another host owns now (released here, assigned there):
+        // this host holds its newest copy, so the player goes there as a move ([`Self::move_to_peer`]:
+        // queued, conserved; the session follows as an observer of the new home).
+        if held_here && self.is_foreign(target) && record.as_ref().is_some_and(|r| r.region == target) {
+            let landing = self.landing_in(target);
+            let m = Moving { from: target, target, landing, then: Vec::new() };
+            return self.move_to_peer(id, m, record.map(Box::new), now_ms);
+        }
         // A login whose record lies on another host is placed there by the login relay
         // (`placement.rs`); one that still gets here (local auth, or no relay) is refused as
         // for a region that cannot be loaded. A move goes across (`move_client`).
@@ -3753,8 +3782,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             // A region another host owns: the store holds the record already,
             // unchanged (our cut must not write it back). Nor is an off-map record
             // parked again (only the store can hold one): a cut writing it would touch a
-            // super-region nobody claims, and be refused as fenced for good.
-            if self.owns(target) {
+            // super-region nobody claims, and be refused as fenced for good. A record parked
+            // here stays parked here unless another host owns its land (land masked for a
+            // release, free or unknown: the next part carries it, the next login finds it).
+            if self.owns(target) || (held_here && !self.is_foreign(target)) {
                 if let (Some(record), Some(player)) = (record, self.player_of.get(&id).copied()) {
                     if crate::off_map(self.map_extent(), record.region) {
                         log::warn!("client {id}: its off-map record is left as stored");
@@ -3864,8 +3895,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         if !self.sessions.contains_key(&waiting) {
             return;
         }
+        let held_here = self.parked_players.contains_key(&player);
         let record = self.take_parked(player).or(edge_record);
-        self.place_player(waiting, record, now_ms);
+        self.place_player(waiting, record, held_here, now_ms);
         if self.world.is_some() && self.sessions.contains_key(&waiting) {
             self.send_claims(waiting);
             self.world_player_online(waiting);

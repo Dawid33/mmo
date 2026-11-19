@@ -70,7 +70,10 @@ fn land_idle_ms_from(value: Option<&str>) -> Result<u64, String> {
     if value.is_empty() {
         return Ok(game::LAND_IDLE_MS);
     }
-    value.parse::<u64>().map_err(|_| format!("invalid {LAND_IDLE_MS_ENV} value `{value}` (expected a number of ms)"))
+    match value.parse::<u64>() {
+        Ok(ms) if ms > 0 => Ok(ms),
+        _ => Err(format!("invalid {LAND_IDLE_MS_ENV} value `{value}` (expected a number of ms above 0)")),
+    }
 }
 
 /// The WebTransport ingress's port (unset or empty = [`WEBTRANSPORT_PORT`]): several hosts
