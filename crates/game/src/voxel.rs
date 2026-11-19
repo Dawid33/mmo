@@ -21,12 +21,143 @@ pub const BRICK_VOXEL_COUNT: usize = BRICK_VOXELS * BRICK_VOXELS * BRICK_VOXELS;
 /// [`BlockIndex`]. Always canonical: a grid whose blocks are all equal is
 /// `Uniform`, never a `Dense` box, so equal contents serialize and hash
 /// equally (every constructor and [`ChunkBlocks::set`] normalise).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ChunkBlocks {
     /// Every block is this one.
     Uniform(Block),
     /// Length `CHUNK_BLOCK_COUNT`, at least two distinct blocks.
-    Dense(Box<[Block]>),
+    Dense(DenseBlocks),
+}
+
+/// A dense grid's blocks and the digest of what they hash as, once asked for
+/// ([`DenseBlocks::digest`]). The blocks are private: every write goes
+/// through [`ChunkBlocks::set`], which forgets the digest — an undo's write
+/// included. On the wire and in the store it is the block list alone.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct DenseBlocks {
+    blocks: Box<[Block]>,
+    #[serde(skip)]
+    digest: DigestCache,
+}
+
+impl DenseBlocks {
+    fn new(blocks: Box<[Block]>) -> Self {
+        Self { blocks, digest: DigestCache::default() }
+    }
+
+    /// `(crc32, length)` of the grid's state-hash byte stream ([`dense_stream`]),
+    /// computed on the first ask after a write.
+    fn digest(&self) -> (u32, u64) {
+        if let Some(found) = self.digest.get() {
+            return found;
+        }
+        let (mut crc, mut len) = (crc32fast::Hasher::new(), 0u64);
+        dense_stream(&self.blocks, |bytes| {
+            crc.update(bytes);
+            len += bytes.len() as u64;
+        });
+        let digest = (crc.finalize(), len);
+        self.digest.set(digest);
+        digest
+    }
+}
+
+impl PartialEq for DenseBlocks {
+    fn eq(&self, other: &Self) -> bool {
+        self.blocks == other.blocks
+    }
+}
+impl Eq for DenseBlocks {}
+impl std::hash::Hash for DenseBlocks {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.blocks.hash(state);
+    }
+}
+
+/// A [`DenseBlocks`] digest, or none: bit 63 set, the stream's length in bits
+/// 32..63 and its crc32 in the low half. An atomic, not a `Cell`: region
+/// snapshots are shared between threads (`Arc<GameData>`), and two threads
+/// filling it write the same value.
+#[derive(Debug, Default)]
+struct DigestCache(std::sync::atomic::AtomicU64);
+
+impl DigestCache {
+    const SET: u64 = 1 << 63;
+
+    fn get(&self) -> Option<(u32, u64)> {
+        let v = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        (v & Self::SET != 0).then_some((v as u32, (v & !Self::SET) >> 32))
+    }
+
+    fn set(&self, (crc, len): (u32, u64)) {
+        debug_assert!(len < 1 << 31);
+        self.0.store(Self::SET | len << 32 | crc as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn clear(&mut self) {
+        *self.0.get_mut() = 0;
+    }
+}
+
+impl Clone for DigestCache {
+    fn clone(&self) -> Self {
+        Self(std::sync::atomic::AtomicU64::new(self.0.load(std::sync::atomic::Ordering::Relaxed)))
+    }
+}
+
+/// The bytes a `Dense` grid hashes as, fed to `sink` in batches: exactly the
+/// stream `#[derive(StateHash)]` wrote for `ChunkBlocks::Dense(Box<[Block]>)`
+/// — the variant's index as `u32`, the slice's length as `u64`, then each
+/// [`Block`]: `id` as `u16` and `data` as a 3-long sequence (a `u64` 3 and
+/// the three bytes), all native-endian — so every state hash and golden is
+/// unchanged. Batched because five hasher writes per block, 20k per chunk,
+/// made the region thread's terrain fingerprint and state hash 100-190 ms of
+/// a 50 ms tick in a dev build (2026-11-19 perf capture).
+fn dense_stream(blocks: &[Block], mut sink: impl FnMut(&[u8])) {
+    /// Bytes of one hashed [`Block`], and blocks per batch.
+    const PER: usize = 2 + 8 + 3;
+    const BATCH: usize = 256;
+    let mut head = [0u8; 12];
+    head[..4].copy_from_slice(&1u32.to_ne_bytes());
+    head[4..].copy_from_slice(&(blocks.len() as u64).to_ne_bytes());
+    sink(&head);
+    let data_len = 3u64.to_ne_bytes();
+    let mut buf = [0u8; PER * BATCH];
+    for batch in blocks.chunks(BATCH) {
+        for (out, block) in buf.chunks_exact_mut(PER).zip(batch) {
+            out[..2].copy_from_slice(&block.id.0.to_ne_bytes());
+            out[2..10].copy_from_slice(&data_len);
+            out[10..].copy_from_slice(&block.data);
+        }
+        sink(&buf[..PER * batch.len()]);
+    }
+}
+
+/// The derive's byte stream (see [`dense_stream`]), for a hasher whose
+/// `write_*` are the `std` defaults (native-endian bytes into `write`), as
+/// [`crate::StateHasher`]'s are. A dense grid hashed into a `StateHasher`
+/// that takes digests ([`crate::StateHasher::taking_digests`]) hands over its
+/// cached digest instead of its 53 kB: a region's terrain is nearly all of
+/// its hashed state and almost never changes between two hashes, so only
+/// edited chunks are read again.
+impl state_hash::StateHash for ChunkBlocks {
+    fn state_hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        match self {
+            ChunkBlocks::Uniform(block) => {
+                h.write_u32(0);
+                block.state_hash(h);
+            }
+            ChunkBlocks::Dense(dense) => {
+                if crate::digests_taken() {
+                    let (crc, len) = dense.digest();
+                    crate::hand_digest(h, crc, len);
+                } else {
+                    dense_stream(&dense.blocks, |bytes| h.write(bytes));
+                }
+            }
+        }
+    }
 }
 
 impl Default for ChunkBlocks {
@@ -42,7 +173,7 @@ impl ChunkBlocks {
         assert_eq!(blocks.len(), CHUNK_BLOCK_COUNT, "a chunk holds exactly CHUNK_BLOCK_COUNT blocks");
         match Self::all_equal(&blocks) {
             Some(b) => ChunkBlocks::Uniform(b),
-            None => ChunkBlocks::Dense(blocks.into_boxed_slice()),
+            None => ChunkBlocks::Dense(DenseBlocks::new(blocks.into_boxed_slice())),
         }
     }
 
@@ -54,7 +185,7 @@ impl ChunkBlocks {
     pub fn get(&self, i: BlockIndex) -> Block {
         match self {
             ChunkBlocks::Uniform(b) => *b,
-            ChunkBlocks::Dense(blocks) => blocks[i.linear()],
+            ChunkBlocks::Dense(dense) => dense.blocks[i.linear()],
         }
     }
 
@@ -68,12 +199,13 @@ impl ChunkBlocks {
                 if *u != b {
                     let mut blocks = vec![*u; CHUNK_BLOCK_COUNT].into_boxed_slice();
                     blocks[i.linear()] = b;
-                    *self = ChunkBlocks::Dense(blocks);
+                    *self = ChunkBlocks::Dense(DenseBlocks::new(blocks));
                 }
             }
-            ChunkBlocks::Dense(blocks) => {
-                blocks[i.linear()] = b;
-                if let Some(u) = Self::all_equal(blocks) {
+            ChunkBlocks::Dense(dense) => {
+                dense.blocks[i.linear()] = b;
+                dense.digest.clear();
+                if let Some(u) = Self::all_equal(&dense.blocks) {
                     *self = ChunkBlocks::Uniform(u);
                 }
             }

@@ -162,6 +162,7 @@ pub const METRICS_REPORT_INTERVAL: std::time::Duration = std::time::Duration::fr
 /// across runs, machines and native/wasm32 — the basis for client/server
 /// convergence assertions in tests.
 pub fn state_hash(r: &Rollback) -> u32 {
+    let _digests = StateHasher::taking_digests();
     let mut h = StateHasher::new();
     r.data.state_hash(&mut h);
     h.finalize()
@@ -209,7 +210,71 @@ impl StateHasher {
     }
 }
 
+thread_local! {
+    /// See [`StateHasher::taking_digests`].
+    static DIGESTS: std::cell::Cell<Digests> = const { std::cell::Cell::new(Digests::Off) };
+}
+
+#[derive(Clone, Copy)]
+enum Digests {
+    Off,
+    /// A `StateHasher` walk on this thread takes digests.
+    Taken,
+    /// One is on its way to the hasher: `(crc32, length)`.
+    Handed(u32, u64),
+}
+
+/// While it lives, `StateHash` walks on this thread may hand a
+/// [`StateHasher`] the crc32 of a span of bytes instead of the bytes.
+pub struct TakingDigests(Digests);
+
+impl Drop for TakingDigests {
+    fn drop(&mut self) {
+        DIGESTS.set(self.0);
+    }
+}
+
+impl StateHasher {
+    /// Declare that every hasher fed on this thread until the guard drops is
+    /// a `StateHasher`. A value that caches the crc32 of its own byte stream
+    /// (`voxel::DenseBlocks`) then hands that over ([`hand_digest`]) and the
+    /// hasher splices it in (`crc32fast::Hasher::combine`) — the SAME crc32
+    /// as hashing the bytes, without reading them. The walk is generic over
+    /// `Hasher`, so a value cannot ask what it is writing to: the caller that
+    /// owns the hasher says so, and the digest travels through
+    /// `Hasher::write_usize`, which no `StateHash` impl uses (`usize` hashes
+    /// as `u64`). Never hold the guard across a walk into any other hasher.
+    pub fn taking_digests() -> TakingDigests {
+        TakingDigests(DIGESTS.replace(Digests::Taken))
+    }
+}
+
+/// Whether a walk on this thread takes digests ([`StateHasher::taking_digests`]).
+pub(crate) fn digests_taken() -> bool {
+    !matches!(DIGESTS.get(), Digests::Off)
+}
+
+/// Hand `h` — a [`StateHasher`], see [`digests_taken`] — the crc32 `crc` of
+/// the next `len` bytes of its stream in place of the bytes.
+pub(crate) fn hand_digest<H: std::hash::Hasher>(h: &mut H, crc: u32, len: u64) {
+    DIGESTS.set(Digests::Handed(crc, len));
+    h.write_usize(0);
+    debug_assert!(matches!(DIGESTS.get(), Digests::Taken), "the hasher was not a StateHasher");
+}
+
 impl std::hash::Hasher for StateHasher {
+    /// A digest handed by [`hand_digest`], else the integer as `std` writes it.
+    fn write_usize(&mut self, i: usize) {
+        match DIGESTS.get() {
+            Digests::Handed(crc, len) => {
+                DIGESTS.set(Digests::Taken);
+                self.flush();
+                self.crc.combine(&crc32fast::Hasher::new_with_initial_len(crc, len));
+            }
+            _ => self.write(&i.to_ne_bytes()),
+        }
+    }
+
     fn write(&mut self, bytes: &[u8]) {
         if self.len + bytes.len() > STATE_HASHER_CHUNK {
             self.flush();

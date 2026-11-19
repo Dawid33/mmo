@@ -1999,6 +1999,8 @@ impl Rollback {
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;
         let body = self.data.physics.bodies.get(handle)?;
         let t = body.translation();
+        // An unedited chunk's blocks cost one crc32 combine, not a read.
+        let _digests = crate::StateHasher::taking_digests();
         let mut h = crate::StateHasher::new();
         // Same coordinate derivation as `terrain_snapshot`.
         let c = chunk_coords_from_translation(t);
