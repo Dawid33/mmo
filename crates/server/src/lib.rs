@@ -1187,7 +1187,7 @@ pub fn run() -> claims::ServerExit {
         manager.set_draining(draining);
         manager.directory_read(rows, live);
         lease::beat_at_boot(&mut heartbeat, "reading the ownership directory");
-        directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone(), boot));
+        directory_keeper = Some(claims::DirectoryKeeper::new(claims.clone()));
     }
     // `claim`: an heir's adoption reads (R4, a succession) — what it
     // inherits, read on the store thread while this loop (and its heartbeat) runs on.

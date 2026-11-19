@@ -42,8 +42,21 @@
 //! store), every peer is told ([`crate::Reliable::Released`]; a peer that links later, at its
 //! hello), the mask lifts and what waited asks for an owner. Aborted
 //! ([`WorldManager::release_aborted`]): the mask lifts, the land is this host's, what waited is
-//! delivered here. Nothing is released under `static` / all-in-one, by a leaving host (Task 8),
-//! or while any succession run is open on this host.
+//! delivered here. Nothing is released under `static` / all-in-one, or while any succession run
+//! is open on this host.
+//!
+//! **A clean leave releases all its land** (Elastic 3 Task 8, plan "### 2. Release"): a host
+//! leaving in a cut releases nothing at its `BeginCut`; once its part is complete
+//! ([`WorldManager::leave_release`], from `try_complete_cut`: only there is the part's in-flight
+//! list known) every super-region its directory gives it is masked for that cut and the part
+//! carries them all — unless the part carries an in-flight row or a succession run is open on
+//! this host: then it releases nothing and the land waits for its `Leave` succession (the rows
+//! are keyed to this host id; only a succession's adopting part moves them). The leaver parked
+//! everything at its `BeginCut`, so the mask only gates `owner_of`; committed or aborted, the
+//! mask lifts as for an idle release (an aborted leave keeps the land, its retry's part decides
+//! again). Peers learn it from a directory read (`end_leaves` asks for one: the leaver's
+//! `Released` stays in its held sessions), and what they held for the leaver goes on by the
+//! land's next owner ([`WorldManager::reroute_held_for_landless_leavers`]).
 
 use std::collections::BTreeSet;
 
@@ -267,15 +280,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// At world cut `cut`'s `BeginCut` (after its participation checks, before any region is
     /// asked): the owned super-regions idle for at least the dial and not busy now are masked
     /// until the cut is decided here, and this host's part releases them. Nothing under `static`
-    /// / all-in-one, while this host leaves in the cut (Task 8 decides a leaver's release), or
-    /// while any succession run is open on this host (heir, survivor or adopting).
+    /// / all-in-one, while this host leaves in the cut ([`Self::leave_release`] decides a
+    /// leaver's), or while any succession run is open on this host (heir, survivor or adopting).
     pub(super) fn begin_release(&mut self, cut: CutId, now_ms: u64) {
         let me = self.ordinal();
         let Some(directory) = self.ownership.0.directory() else { return };
         if self.leave_parked || self.leaving_cut == Some(cut) {
             return;
         }
-        if !self.successions.is_empty() || !self.inheriting.is_empty() || !self.adoptions.is_empty() {
+        if self.succession_open_here() {
             return;
         }
         let busy = self.busy_land();
@@ -292,6 +305,50 @@ impl<S: RegionSpawner> WorldManager<S> {
         log::info!("[server] world cut {}: {} idle super-region(s) released in this host's part (masked until it is decided)", cut.0, idle.len());
         log::debug!("[server] world cut {}: releasing {idle:?}", cut.0);
         for sr in idle {
+            self.releasing.insert(sr, cut);
+        }
+    }
+
+    /// Whether any succession run is open on this host (heir, survivor or adopting): no part of
+    /// it releases land until every one settled.
+    fn succession_open_here(&self) -> bool {
+        !self.successions.is_empty() || !self.inheriting.is_empty() || !self.adoptions.is_empty()
+    }
+
+    /// This host leaves in world cut `cut` and its part is complete (`try_complete_cut`, before
+    /// the part is built): every super-region its directory gives it is masked for `cut` and
+    /// the part releases them all (the module docs) — unless the part carries an in-flight row
+    /// (`in_flight_rows`) or a succession run is open on this host: then nothing, and its land
+    /// waits for a `Leave` succession. Nothing under `static` / all-in-one. Land assigned to
+    /// this host and not yet in its directory (`assigned_rows`, its fence not grown yet) is not
+    /// released: it is this host's in the store, and goes by that `Leave` succession.
+    pub(super) fn leave_release(&mut self, cut: CutId, in_flight_rows: usize) {
+        let me = self.ordinal();
+        let Some(directory) = self.ownership.0.directory() else { return };
+        let land = directory.owned_by(me);
+        if land.is_empty() {
+            return;
+        }
+        if in_flight_rows > 0 {
+            log::info!(
+                "[server] world cut {}: this host leaves with {in_flight_rows} in-flight row(s): its {} super-region(s) are \
+                 kept for a Leave succession",
+                cut.0,
+                land.len()
+            );
+            return;
+        }
+        if self.succession_open_here() {
+            log::info!(
+                "[server] world cut {}: this host leaves with a succession open on it: its {} super-region(s) are kept for a \
+                 Leave succession",
+                cut.0,
+                land.len()
+            );
+            return;
+        }
+        log::info!("[server] world cut {}: this host leaves: its {} super-region(s) are released in its part", cut.0, land.len());
+        for sr in land {
             self.releasing.insert(sr, cut);
         }
     }

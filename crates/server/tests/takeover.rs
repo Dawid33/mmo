@@ -87,7 +87,7 @@ fn build(t: &mut Takeover, b: Booted, replaces: bool) -> Sim {
     sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
     // Before any placement, as `server::run`: the hosts that left cleanly hold nobody.
     sim.manager.note_left_peers(server::peer_link::left_cleanly(&store, ordinal).unwrap());
-    sim.keeper = Some(server::claims::DirectoryKeeper::new(claims.clone(), boot));
+    sim.keeper = Some(server::claims::DirectoryKeeper::new(claims.clone()));
     sim.adopter = Some(server::claims::AdoptionReader::new(claims.clone()));
     let mut beat = server::lease::Heartbeat::new(store.clone(), ordinal, boot);
     beat.set_period(Duration::from_millis(BEAT_MS));

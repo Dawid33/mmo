@@ -1058,6 +1058,88 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// Hosts that left cleanly and own NOTHING now in this host's directory (read whole): their
+    /// leave cut released their land (Elastic 3 Task 8) — or, read before its order came here, a
+    /// `Leave` succession moved it. No report of this host can owe anything of theirs to an heir
+    /// then (a released leaver has no succession; a racing order finds nothing held and nothing
+    /// journalled, and the heir receives these messages directly), and the host id never comes
+    /// back (Elastic 1). So everything this host holds for such a host — its session's
+    /// unreceived messages and what waits for a session — leaves it, its journal entries with
+    /// it are dropped (resent, they are journalled toward their new receiver), and each goes on
+    /// by its land's owner as if routed now, with its cut flags:
+    /// - a transfer without a player waits for an owner ([`Self::wait_for_owner`]: this host's
+    ///   cut row meanwhile; asked of the coordinator, delivered by `flush_unowned`);
+    /// - an intent is refused back to its sender region (its items return), as any intent for
+    ///   land this host does not own; a reply waits in its region's mailbox (forwarded once that
+    ///   land's owner is reached, `forward_mailbox`) and its land is asked for;
+    /// - anything else (orders, acks, notices, marks: no state) is dropped and counted
+    ///   (`peer_dropped_for_dead=`).
+    ///
+    /// A player hand-off or move cannot be held for a leaver (`leave_blocks`: nothing is handed
+    /// to it once its leave cut began; what was handed before its mark reached it) — if one is,
+    /// nothing of that host moves ("wait, never guess"): `log::error!`, kept. Called before
+    /// [`Self::forget_landless_leavers`] forgets any departed host (which drops what it holds).
+    pub(super) fn reroute_held_for_landless_leavers(&mut self) {
+        let hosts: Vec<HostId> = self
+            .left_peers
+            .keys()
+            .copied()
+            .filter(|o| !self.leave_pairs.contains_key(o) && !self.returning_peers.contains_key(o))
+            .filter(|o| !self.successions.values().any(|r| r.order.predecessor == *o))
+            .filter(|o| self.land_of(*o).is_some_and(|l| l.is_empty()))
+            .filter(|o| !self.peer_entries_of(*o).is_empty())
+            .collect();
+        for o in hosts {
+            let entries: Vec<(u64, Reliable)> = self.peer_entries_of(o).into_iter().map(|(id, r)| (id, r.clone())).collect();
+            if let Some((_, r)) =
+                entries.iter().find(|(_, r)| matches!(r.inner(), Reliable::Transfer { player: Some(_), .. } | Reliable::PlayerMove { .. }))
+            {
+                log::error!(
+                    "[server] host {o} left and owns no land, but a {} is held for it: nothing held for it moves (a \
+                     conservation bug: nothing is handed to a leaving host)",
+                    reliable_name(r)
+                );
+                continue;
+            }
+            if let Some(peer) = self.peers.get_mut(&o) {
+                peer.session.take_unreceived();
+            }
+            self.peer_waiting.remove(&o);
+            self.journal.take(o);
+            log::info!("[server] host {o} left and owns no land: {} message(s) held for it go on by their land's owner", entries.len());
+            for (id, msg) in entries {
+                let view = self.peer_in_source_view.remove(&(o, id));
+                let (body, accounted) = match msg {
+                    Reliable::InCut { cut, body } => (*body, Some(cut)),
+                    other => (other, self.inbound_accounted),
+                };
+                match body {
+                    Reliable::Transfer { target, stamp, bundle, player: None } => {
+                        self.wait_for_owner(target, Reliable::Transfer { target, stamp, bundle, player: None }, view, accounted);
+                    }
+                    Reliable::Intent(crate::IntentMsg::Intent(s)) => {
+                        let target = s.target.region().unwrap_or(s.from);
+                        let reply = crate::IntentReply::Refused(s.intent, crate::IntentRefusal::OwnerNotRunning);
+                        let back = crate::SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 };
+                        let lineage = std::mem::replace(&mut self.inbound_accounted, accounted);
+                        self.route_intent(crate::IntentMsg::Reply(back), target, view);
+                        self.inbound_accounted = lineage;
+                    }
+                    Reliable::Intent(reply @ crate::IntentMsg::Reply(_)) => {
+                        let target = peer_intent_target(&reply);
+                        self.intent_mailbox.entry(target).or_default().push(Mail { msg: reply, in_source_view: view, accounted_in: accounted });
+                        self.note_unowned(target);
+                    }
+                    msg => {
+                        log::debug!("[server] a {} held for host {o}, which left owning no land: dropped", reliable_name(&msg));
+                        self.peer_dropped_for_dead += 1;
+                    }
+                }
+            }
+        }
+        self.flush_unowned();
+    }
+
     /// `msg` to host `ordinal` now: on its session, or kept until it has one. Its id among
     /// everything queued to that host (`peer_entries`); `None` for a forgotten host — the
     /// message is not queued at all ([`Self::to_forgotten`]).

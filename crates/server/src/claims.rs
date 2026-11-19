@@ -581,10 +581,8 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
 
 impl DirectoryKeeper {
     /// The keeper of `claims` (its owner is this host); its first backstop read comes one
-    /// period from now (a boot reads the directory itself, [`read_directory`]). `_boot`, this
-    /// process's boot, is no longer used: the keeper makes no per-boot store call since free
-    /// land is assigned by the coordinator (Elastic 3), not claimed here.
-    pub fn new(claims: HostClaims, _boot: u64) -> DirectoryKeeper {
+    /// period from now (a boot reads the directory itself, [`read_directory`]).
+    pub fn new(claims: HostClaims) -> DirectoryKeeper {
         let next_read = Instant::now() + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
         DirectoryKeeper { claims, reading: None, read_wanted: false, next_read, warned: None, hosts_read: None }
     }

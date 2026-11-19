@@ -514,7 +514,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // its NEXT boot may have come before this `CutDone`).
                 let (boot, land) = pair.leaver.clone().unwrap_or((self.peer_boots.get(&ordinal).copied(), None));
                 log::info!(
-                    "[server] host {ordinal} left in world cut {}: {} message(s) wait for its return",
+                    "[server] host {ordinal} left in world cut {}: {} message(s) held for it wait for its land's next owner",
                     cut.0,
                     pair.held.len()
                 );
@@ -553,8 +553,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// can owe an heir anything of them, and a restarted process is a new host (Elastic 1), so
     /// nothing will ever be sent to that id again. One still holding land is kept: its
     /// `left_land` and held session are its `Leave` succession's, which forgets it when it
-    /// settles.
+    /// settles. First, what is held for a departed host that owns nothing NOW goes on by its
+    /// land's owner ([`Self::reroute_held_for_landless_leavers`]): forgetting drops it.
     pub(super) fn forget_landless_leavers(&mut self) {
+        self.reroute_held_for_landless_leavers();
         let landless: Vec<HostId> = self
             .left_peers
             .keys()
@@ -574,7 +576,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Under `claim`: the land host `ordinal` holds as this host's directory gives it now
     /// (`None`: the directory was not read whole yet).
-    fn land_of(&self, ordinal: HostId) -> Option<BTreeSet<crate::SuperRegion>> {
+    pub(super) fn land_of(&self, ordinal: HostId) -> Option<BTreeSet<crate::SuperRegion>> {
         let directory = self.ownership.0.directory()?;
         directory.is_read().then(|| directory.owned_by(ordinal).into_iter().collect())
     }

@@ -3107,6 +3107,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         // waiting on the first's prepared row lock until its lock timeout (10 s): the cut
         // aborts.
         let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
+        // A clean leave releases all this host's land in its part, decided only now that the
+        // part's in-flight list is known (`land.rs`, `leave_release`).
+        if self.leaving_cut == Some(cut.id) {
+            self.leave_release(cut.id, cut.rows.len());
+        }
         // Records parked here on land this part releases, as the part writes them: dropped
         // here once it commits (`land_released`) — the store holds them then, and whoever
         // places the player next reads them there.
@@ -3133,7 +3138,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             // From `SuccessionAdopted` until the settle: what the coordinator's `settles`
             // pairs with (`succession.rs`).
             adopts: self.adopting_predecessors(),
-            // Masked since its `BeginCut` (`land.rs`): the store frees them with the commit.
+            // Masked since its `BeginCut`, or above for a leave (`land.rs`): the store frees
+            // them with the commit.
             releases,
         };
         log::debug!(
