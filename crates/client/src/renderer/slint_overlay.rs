@@ -1057,9 +1057,11 @@ fn slint_input<C: ComponentHandle + 'static>(
     }
 }
 
-/// The map tile (column, row) of region `rc`, `None` off the map.
+/// The map tile (column, row) of region `rc` (canonical or any copy of it),
+/// `None` off the map.
 pub fn map_tile(map: &WorldMap, rc: RegionCoords) -> Option<(i32, i32)> {
     map.tile(rc)?;
+    let rc = map.extent().canonical(rc);
     Some((rc.x - map.origin.x, rc.z - map.origin.z))
 }
 
@@ -1069,10 +1071,10 @@ pub fn map_layer(index: i32) -> MapLayer {
     usize::try_from(index).ok().and_then(|i| MapLayer::ALL.get(i)).copied().unwrap_or(MapLayer::ALL[0])
 }
 
-/// The region of map tile (`col`, `row`), `None` off the map.
+/// The (canonical) region of map tile (`col`, `row`), `None` off the map.
 pub fn tile_region(map: &WorldMap, col: i32, row: i32) -> Option<RegionCoords> {
     let rc = RegionCoords::new(map.origin.x + col, map.origin.z + row);
-    (col >= 0 && row >= 0 && map.tile(rc).is_some()).then_some(rc)
+    (col >= 0 && row >= 0 && map.tile(rc).is_some()).then(|| map.extent().canonical(rc))
 }
 
 /// The 8 civ colours of the site markers, picked by `civ.0 % 8`.

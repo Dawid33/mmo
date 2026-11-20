@@ -339,8 +339,9 @@ fn drive_autopilot(
         }
         Mode::Seam { kind, overshoot } => {
             if let Some(t) = camera {
+                // Where each region is drawn (the camera's frame), with its host.
                 let loaded: Vec<(RegionCoords, Option<HostId>)> =
-                    roots.0.keys().map(|rc| (*rc, region_hosts.0.get(rc).copied().flatten())).collect();
+                    roots.0.keys().map(|rc| (roots.alias(*rc), region_hosts.0.get(rc).copied().flatten())).collect();
                 seam_shuttle(&mut pilot, now, &t, &loaded, kind, overshoot, &key, &send);
             }
         }
@@ -595,7 +596,8 @@ const STUCK_WINDOW_MS: u64 = 2_000;
 const STUCK_PATH_M: f32 = 1.0;
 const STUCK_CLIMB_MS: u64 = 1_500;
 
-/// The seam nearest `home` whose two sides are both loaded, both with a known host, and on
+/// The seam nearest `home` (regions as drawn: their copies in the `WrapFrame`, so a seam
+/// across the world's wrap is two adjacent copies) whose two sides are both loaded, both with a known host, and on
 /// different hosts (`want_host_seam`) or on the same one, by the client's own region → host
 /// map alone. Returns `(a, b)` with `b` one region past `a` in +x or +z. "Nearest": by the
 /// distance from the middle of `home` to the middle of the seam, ties to the lower `a`

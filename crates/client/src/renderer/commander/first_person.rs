@@ -219,10 +219,9 @@ fn eyes_body<'a>(
 }
 
 /// A region-local sim position in world space (bodies are children of their
-/// region's root, which sits at the region's offset).
-fn world_pos(region: game::RegionId, local: Vec3) -> Vec3 {
-    let offset = region.world_offset();
-    Vec3::new(offset[0], offset[1], offset[2]) + local
+/// region's root, which sits at the offset of its copy in `frame`).
+fn world_pos(frame: &crate::wrap_frame::WrapFrame, region: game::RegionId, local: Vec3) -> Vec3 {
+    Vec3::from_array(frame.offset(region)) + local
 }
 
 /// The [`Eyes`] while the body view is on and the world has the screen, and
@@ -250,7 +249,7 @@ pub fn sync_first_person_camera(
         return;
     }
     let Some((sim, body)) = eyes_body(mirror.region(), bodies.iter()) else { return };
-    let (pos, rot) = (world_pos(sim.region, body.pos), body.rot);
+    let (pos, rot) = (world_pos(&mirror.frame(), sim.region, body.pos), body.rot);
     if let Ok((_, mut target)) = eyes.single_mut() {
         if target.pos != pos || target.rot != rot {
             target.pos = pos;
@@ -358,8 +357,7 @@ pub fn place_third_person_camera(
     for (mut tf, mut pull) in &mut eyes {
         let eye = tf.translation;
         let (yaw, pitch, _roll) = tf.rotation.to_euler(EulerRot::YXZ);
-        let hit = mirror.region().and_then(|home| {
-            let offset = Vec3::from_array(home.world_offset());
+        let hit = mirror.home_offset().and_then(|offset| {
             let halo = mirror.with_halo();
             third_person_hit(eye - offset, third_person_back(yaw, pitch), |p| {
                 game::block_props().blocks_ray(game::TileSource::block(&halo, p))

@@ -12,7 +12,8 @@ use super::{clamp_focus, region_rect, CommanderCamera};
 use crate::renderer::hud::HudStatus;
 use crate::world_scale::WorldScale;
 
-/// The home rect grown by `near_radius × REGION_SIZE` on each side.
+/// The home rect grown by `near_radius × REGION_SIZE` on each side (`home`:
+/// its copy in the `WrapFrame`).
 pub fn window_rect(home: RegionId, near_radius: i32) -> Rect {
     let r = region_rect(home);
     let grow = Vec2::splat(near_radius.max(0) as f32 * game::REGION_SIZE);
@@ -34,10 +35,12 @@ pub fn clamp_to_window(
     mode: Res<ClientPlayMode>,
     status: Res<HudStatus>,
     scale: Option<Res<WorldScale>>,
+    frame: Option<Res<crate::wrap_frame::WrapFrame>>,
     mut cam: ResMut<CommanderCamera>,
 ) {
     let scale = scale.map_or(WorldScale::FULL, |s| *s);
-    let window = status.home_region.map(|home| window_rect(home, scale.near_radius));
+    let frame = frame.as_deref().copied().unwrap_or_default();
+    let window = status.home_region.map(|home| window_rect(frame.alias(home), scale.near_radius));
     let bounds = pan_bounds(mode.adventure(), window);
     let clamped = clamp_focus(cam.focus, bounds);
     if clamped != cam.focus {

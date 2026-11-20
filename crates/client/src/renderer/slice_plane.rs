@@ -244,7 +244,7 @@ fn update_slice_plane(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    let origin = Vec3::from_array(home.world_offset());
+    let origin = Vec3::from_array(tiles.frame().offset(home));
     let half = REGION_SIZE / 2.0;
     tf.set_if_neq(Transform::from_xyz(origin.x + half, cut, origin.z + half));
     visibility.set_if_neq(Visibility::Inherited);

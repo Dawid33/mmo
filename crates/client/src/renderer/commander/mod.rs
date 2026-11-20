@@ -187,8 +187,9 @@ pub struct CommanderCamera {
 }
 
 impl CommanderCamera {
-    /// Whether the camera has been put over the local body inside `rc`, i.e.
-    /// `rc` is the home and its region is loaded far enough to show the body.
+    /// Whether the camera has been put over the local body inside `rc` (the
+    /// home's copy in the `WrapFrame`), i.e. `rc` is the home and its region
+    /// is loaded far enough to show the body.
     pub fn placed_in(&self, rc: game::RegionCoords) -> bool {
         self.placed && self.bounds == Some(region_rect(rc))
     }
@@ -236,7 +237,8 @@ fn start_angle_deg(name: &str) -> Option<f32> {
 #[derive(Component)]
 pub struct CommanderView;
 
-/// A region's rectangle on the ground plane (world x, z).
+/// A region's rectangle on the ground plane (world x, z); `rc` is the copy in
+/// the `WrapFrame` (render space).
 pub fn region_rect(rc: game::RegionCoords) -> Rect {
     let o = rc.world_offset();
     Rect::new(o[0], o[2], o[0] + game::REGION_SIZE, o[2] + game::REGION_SIZE)
@@ -684,8 +686,10 @@ fn track_home_region(
     mut pending_play: ResMut<crate::renderer::world_map::PendingPlay>,
     mut level: ResMut<level::WorkingLevel>,
     mut cam: ResMut<CommanderCamera>,
+    frame: Option<Res<crate::wrap_frame::WrapFrame>>,
 ) {
-    let bounds = status.home_region.map(region_rect);
+    let frame = frame.as_deref().copied().unwrap_or_default();
+    let bounds = status.home_region.map(|home| region_rect(frame.alias(home)));
     if cam.bounds != bounds {
         let change = cam.bounds.is_some() && bounds.is_some();
         // Only a Play re-places the camera over the new region's body; a

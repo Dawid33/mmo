@@ -384,11 +384,12 @@ pub fn cutaway_active(u: &FortressViewUniform) -> bool {
 /// Pure uniform builder: the cut follows the working level in the home
 /// region, off when the cut is toggled off, the level is unknown or there is
 /// no home. The overlay is on whenever the home and the level are known,
-/// cut on or off, its layers ending at the working level.
-pub fn build_uniform(working: &WorkingLevel, home: Option<RegionId>) -> FortressViewUniform {
+/// cut on or off, its layers ending at the working level. The home is drawn
+/// at its copy in `frame`.
+pub fn build_uniform(working: &WorkingLevel, home: Option<RegionId>, frame: &crate::wrap_frame::WrapFrame) -> FortressViewUniform {
     let mut u = FortressViewUniform::default();
     let Some(region) = home else { return u };
-    u.origin = Vec3::from_array(region.world_offset()).extend(0.0);
+    u.origin = Vec3::from_array(frame.offset(region)).extend(0.0);
     u.cut.w = REGION_SIZE;
     if let Some(level) = working.level {
         u.cut.z = 1.0;
@@ -409,7 +410,7 @@ pub fn update_fortress_view(
     tiles: Res<TileMirror>,
     mut uniform: ResMut<FortressViewUniform>,
 ) {
-    let next = build_uniform(&working, tiles.region());
+    let next = build_uniform(&working, tiles.region(), &tiles.frame());
     if uniform.as_ref() != &next {
         *uniform = next;
     }

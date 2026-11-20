@@ -144,7 +144,9 @@ pub fn start_flights(
     roots: Res<ItemPileRoots>,
     sim_entities: Option<Res<SimEntityMap>>,
     bodies: Query<&GlobalTransform>,
+    frame: Option<Res<crate::wrap_frame::WrapFrame>>,
 ) {
+    let frame = frame.as_deref().copied().unwrap_or_default();
     for msg in msgs.read() {
         match msg {
             ItemPileMsg::Landed { region, flights } => {
@@ -152,7 +154,7 @@ pub fn start_flights(
                     if !recent.first((*region, f.tick, f.from, f.to, false)) {
                         continue;
                     }
-                    let (from, to) = (pile_world_position(*region, f.from), pile_world_position(*region, f.to));
+                    let (from, to) = (pile_world_position(&frame, *region, f.from), pile_world_position(&frame, *region, f.to));
                     let secs = landing_secs(from, to);
                     spawn_flight(&mut commands, &mut assets, &mut images, &mut mats, &f.stacks, from, FlightTarget::Point(to), secs, false);
                     if let Some(&root) = roots.0.get(&(*region, f.to)) {
@@ -165,7 +167,7 @@ pub fn start_flights(
                     if !recent.first((*region, p.tick, p.cell, p.cell, true)) {
                         continue;
                     }
-                    let from = pile_world_position(*region, p.cell);
+                    let from = pile_world_position(&frame, *region, p.cell);
                     let body = body_entity(sim_entities.as_deref(), *region, p.entity);
                     let to = match body.and_then(|e| bodies.get(e).ok().map(|g| (e, g.translation()))) {
                         Some((entity, at)) => FlightTarget::Body { entity, last: at },

@@ -676,12 +676,12 @@ pub fn update_drag_preview(
     readout.0 = text;
 }
 
-/// A world-space gizmo cuboid over the tiles of `b` (region-local) in `region`.
-fn tile_box_transform(b: TileBox, region: RegionId, inflate: f32) -> Transform {
+/// A world-space gizmo cuboid over the tiles of `b` (local to the region
+/// whose origin is `offset`, render space).
+fn tile_box_transform(b: TileBox, offset: Vec3, inflate: f32) -> Transform {
     let size = BLOCK_VOXELS as f32;
     let min = Vec3::new(b.min[0] as f32, b.min[1] as f32, b.min[2] as f32) * size;
     let max = Vec3::new(b.max[0] as f32 + 1.0, b.max[1] as f32 + 1.0, b.max[2] as f32 + 1.0) * size;
-    let offset = Vec3::from_array(region.world_offset());
     Transform::from_translation(offset + (min + max) / 2.0).with_scale(max - min + Vec3::splat(2.0 * inflate))
 }
 
@@ -713,7 +713,7 @@ pub fn draw_designate_gizmos(
     mut ghosts: crate::session::SessionLocal<GhostCache>,
 ) {
     let ghosts = ghosts.get();
-    let Some(region) = mirror.region() else { return };
+    let Some(origin) = mirror.home_offset() else { return };
     if let Some(level) = working.level {
         let key = Some((mirror.version(), level));
         if ghosts.key != key {
@@ -730,18 +730,18 @@ pub fn draw_designate_gizmos(
             ghosts.boxes.truncate(MAX_GHOST_BOXES);
         }
         for b in &ghosts.boxes {
-            gizmos.cube(tile_box_transform(*b, region, 0.0), BUILD_COLOR);
+            gizmos.cube(tile_box_transform(*b, origin, 0.0), BUILD_COLOR);
         }
     }
     if let Some((_, area, _)) = state.drag_area() {
         let too_large = area.clip_to_region().is_some_and(|a| a.tile_count() > MAX_ORDER_TILES);
         let color = if too_large { TOO_LARGE_COLOR } else { kind_color(preview.kind) };
-        let tf = tile_box_transform(area, region, HOVER_INFLATE);
+        let tf = tile_box_transform(area, origin, HOVER_INFLATE);
         gizmos.cube(tf, color);
         hidden.cube(tf, color.with_alpha(HIDDEN_EDGE_ALPHA));
     }
     if let (Some(_), Some(p)) = (state.tool, state.hover) {
-        gizmos.cube(tile_box_transform(TileBox { min: p, max: p }, region, HOVER_INFLATE), HOVER_COLOR);
+        gizmos.cube(tile_box_transform(TileBox { min: p, max: p }, origin, HOVER_INFLATE), HOVER_COLOR);
     }
 }
 

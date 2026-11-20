@@ -564,7 +564,9 @@ fn clear_skipped(world: &mut World, chunk: Entity) {
 }
 
 /// A region left the window: drop its skipped bricks (its entities despawn
-/// with the root, without passing through [`clear_skipped`]).
+/// with the root, without passing through [`clear_skipped`]). `region` is
+/// the copy its tree was drawn at (`bridge::RegionRoots::alias`), where both
+/// maps keyed it.
 pub fn prune_region_skipped(world: &mut World, region: game::RegionId) {
     let per = game::REGION_SIZE as i32 / BRICK_VOXELS as i32;
     if let Some(mut skipped) = world.get_resource_mut::<SkippedBricks>() {

@@ -30,9 +30,10 @@ pub struct Regions(pub BTreeMap<RegionId, Receiver<GameDataUpdate>>);
 #[derive(Resource, Default)]
 pub struct RegionRoots(pub BTreeMap<RegionId, Entity>, BodyRoots);
 
-/// The bodies roots behind [`RegionRoots::bodies`].
+/// The bodies roots behind [`RegionRoots::bodies`], and the frame copy each
+/// region's tree was placed at ([`RegionRoots::alias`]).
 #[derive(Default)]
-pub struct BodyRoots(BTreeMap<RegionId, Entity>);
+pub struct BodyRoots(BTreeMap<RegionId, Entity>, BTreeMap<RegionId, RegionId>);
 
 impl RegionRoots {
     /// The parent of `region`'s non-terrain entities: its bodies root, or
@@ -42,14 +43,26 @@ impl RegionRoots {
         self.1 .0.get(&region).or_else(|| self.0.get(&region)).copied()
     }
 
-    fn insert(&mut self, region: RegionId, root: Entity, bodies: Entity) {
-        self.0.insert(region, root);
-        self.1 .0.insert(region, bodies);
+    /// The copy of `region` (canonical) in the `WrapFrame` its tree was
+    /// placed at, at its spawn: everything keyed by world position under it
+    /// (brick and chunk grids, the height grid, water) is keyed there. It
+    /// never moves (`crate::wrap_frame`'s module docs); `region` itself for
+    /// one mapped without it (tests that insert into `.0`).
+    pub fn alias(&self, region: RegionId) -> RegionId {
+        self.1 .1.get(&region).copied().unwrap_or(region)
     }
 
-    fn remove(&mut self, region: &RegionId) -> Option<Entity> {
+    fn insert(&mut self, region: RegionId, root: Entity, bodies: Entity, alias: RegionId) {
+        self.0.insert(region, root);
+        self.1 .0.insert(region, bodies);
+        self.1 .1.insert(region, alias);
+    }
+
+    /// Unmaps `region`: its root and the alias it was placed at.
+    fn remove(&mut self, region: &RegionId) -> Option<(Entity, RegionId)> {
         self.1 .0.remove(region);
-        self.0.remove(region)
+        let alias = self.1 .1.remove(region).unwrap_or(*region);
+        self.0.remove(region).map(|root| (root, alias))
     }
 }
 
@@ -64,10 +77,10 @@ pub struct BodiesOf(pub Entity);
 #[relationship_target(relationship = BodiesOf, linked_spawn)]
 pub struct RegionBodies(Vec<Entity>);
 
-/// The region root and bodies root of a newly received region, both at its
-/// fixed world offset (they never move).
-fn spawn_region_roots(commands: &mut Commands, id: RegionId) -> (Entity, Entity) {
-    let offset = id.world_offset();
+/// The region root and bodies root of a newly received region, both at the
+/// offset of its copy in `frame` (they never move: [`RegionRoots::alias`]).
+fn spawn_region_roots(commands: &mut Commands, id: RegionId, frame: &crate::wrap_frame::WrapFrame) -> (Entity, Entity) {
+    let offset = frame.offset(id);
     let at = Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2]));
     let root = commands
         .spawn((at, Visibility::default(), Name::new(format!("region {:?}", id)), SessionScoped))
@@ -923,15 +936,19 @@ pub fn drain_client_updates(
                     // Replace-on-re-receipt: resubscribe/crash-respawn resync.
                     remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
                 }
-                let (root, bodies) = spawn_region_roots(&mut commands, id);
-                roots.insert(id, root, bodies);
+                // Placed in the frame of this point of the stream: a frame
+                // change is drained in order with the regions it concerns.
+                let frame = wrap_frame.as_deref().copied().unwrap_or_default();
+                let (root, bodies) = spawn_region_roots(&mut commands, id, &frame);
+                roots.insert(id, root, bodies, frame.alias(id));
                 regions.0.insert(id, receiver);
-                // The snapshot's item piles and halo pile mirrors (cells in
-                // the region's frame), ahead of the region's own updates.
-                let frame = |m: &std::collections::BTreeMap<game::WorldBlockPos, game::ItemPile>| -> Vec<_> {
-                    m.iter().map(|(p, pile)| (game::local_cell(id, *p), Some(pile.view()))).collect()
+                // The snapshot's item piles and halo pile mirrors (canonical
+                // cells, to the region's block frame by the nearest image),
+                // ahead of the region's own updates.
+                let local = |m: &std::collections::BTreeMap<game::WorldBlockPos, game::ItemPile>| -> Vec<_> {
+                    m.iter().map(|(p, pile)| (game::local_block(frame.extent, id, *p), Some(pile.view()))).collect()
                 };
-                let (piles, mirrors) = (frame(data.item_piles()), frame(data.halo_piles()));
+                let (piles, mirrors) = (local(data.item_piles()), local(data.halo_piles()));
                 // The water pass's recipe (its tiles mesh once the chunks land).
                 let water_ground = Arc::new(data.ground_recipes().clone());
                 commands.queue(move |world: &mut World| {
@@ -966,6 +983,7 @@ pub fn drain_client_updates(
                     root,
                     bodies,
                     id,
+                    frame.offset(id),
                     &data,
                     &mut map,
                     player.0,
@@ -990,9 +1008,9 @@ pub fn drain_client_updates(
             ClientUpdateEvent::SetPlayer(client_id) => player.0 = Some(client_id),
             ClientUpdateEvent::RemoveRegion(id) => {
                 // Unmapped now, despawned over the next frames.
-                if let Some(root) = unmap_region(&mut regions, &mut roots, &mut map, id) {
+                if let Some((root, alias)) = unmap_region(&mut regions, &mut roots, &mut map, id) {
                     retired_roots.0.push_back((id, root));
-                    commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, id));
+                    commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, alias));
                 }
                 debug_lines.0.remove(&id);
                 commands.queue(move |world: &mut World| {
@@ -1089,21 +1107,21 @@ fn remove_region(
     map: &mut SimEntityMap,
     id: RegionId,
 ) {
-    if let Some(root) = unmap_region(regions, roots, map, id) {
+    if let Some((root, alias)) = unmap_region(regions, roots, map, id) {
         // despawn() removes descendants via ChildOf relationships (Bevy 0.16+).
         commands.entity(root).despawn();
-        commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, id));
+        commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, alias));
     }
 }
 
 /// Take a region out of every bridge map and return its root, which the
-/// caller despawns.
+/// caller despawns, and the alias it was placed at ([`RegionRoots::alias`]).
 fn unmap_region(
     regions: &mut Regions,
     roots: &mut RegionRoots,
     map: &mut SimEntityMap,
     id: RegionId,
-) -> Option<Entity> {
+) -> Option<(Entity, RegionId)> {
     regions.0.remove(&id);
     map.0.retain(|(region, _), _| *region != id);
     roots.remove(&id)
@@ -1115,6 +1133,7 @@ fn spawn_region_snapshot(
     root: Entity,
     bodies: Entity,
     region: RegionId,
+    origin: [f32; 3],
     data: &Arc<GameData>,
     map: &mut SimEntityMap,
     local_player: Option<game::ClientId>,
@@ -1191,8 +1210,7 @@ fn spawn_region_snapshot(
     // batches that share the snapshot through the `Arc` (no per-chunk clone).
     // Batches are only QUEUED here; `apply_snapshot_voxels` hands them to the
     // compute pool a few at a time, nearest to the camera first.
-    let offset = region.world_offset();
-    let offset = Vec3::new(offset[0], offset[1], offset[2]);
+    let offset = Vec3::from_array(origin);
     for batch in chunk_entities.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
         let center = batch.iter().map(|(_, _, position)| *position).sum::<Vec3>() / batch.len() as f32;
         voxel_queue.batches.push_back(PendingVoxelBatch {
@@ -1528,9 +1546,9 @@ pub fn drain_region_updates(
             }
         }
         if !new_terrain.is_empty() {
-            // Region-local centroid -> world, chunk origin -> centre.
-            let offset = region.world_offset();
-            let offset = Vec3::new(offset[0], offset[1], offset[2]);
+            // Region-local centroid -> world (where its tree is placed),
+            // chunk origin -> centre.
+            let offset = Vec3::from_array(roots.alias(region).world_offset());
             for batch in new_terrain.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
                 let center = batch.iter().map(|(_, _, p)| *p).sum::<Vec3>() / batch.len() as f32;
                 voxel_queue.batches.push_back(PendingVoxelBatch {

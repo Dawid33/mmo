@@ -44,8 +44,9 @@ pub enum RegionCmd {
     Intent(game::IntentMsg),
     /// The world's extent and coarse-route map (`Region::set_route_map`).
     SetRouteMap(Option<std::sync::Arc<game::RouteMap>>),
-    /// Wireframe the colliders near this viewer WORLD position.
-    DebugLines([f32; 3]),
+    /// Wireframe the colliders near the viewer at this position of this
+    /// (home) region's frame.
+    DebugLines(game::RegionCoords, [f32; 3]),
     /// Answered with `Pong` once every earlier command has run.
     Ping(u64),
     /// Answered with `StateHash`: the region's tick and `game::state_hash`
@@ -229,13 +230,14 @@ pub fn handle(
         RegionCmd::Halo(update, stamp) => transfer(st, GameEventKind::HaloUpdate(update), stamp),
         RegionCmd::Intent(msg) => transfer(st, GameEventKind::Intent(msg), msg.due()),
         RegionCmd::SetRouteMap(route) => region.set_route_map(route),
-        RegionCmd::DebugLines(viewer_world) => {
+        RegionCmd::DebugLines(home, at) => {
             if ctx.debug_flags.collider_wireframes() {
-                let off = ctx.id.world_offset();
+                // The home's origin in this region's frame, by the nearest image.
+                let (dx, dz) = game::region_delta(region.map_extent(), ctx.id, home);
                 let viewer_local = [
-                    viewer_world[0] - off[0],
-                    viewer_world[1] - off[1],
-                    viewer_world[2] - off[2],
+                    at[0] + dx as f32 * game::REGION_SIZE,
+                    at[1],
+                    at[2] + dz as f32 * game::REGION_SIZE,
                 ];
                 let data = region.data();
                 let lines = st.collider_debug.collect(&*data.physics.bodies, &*data.physics.colliders, viewer_local);

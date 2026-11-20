@@ -94,7 +94,7 @@ pub fn track_join_timeline(
     // Per session: a second world gets its own join timeline.
     mut state: crate::session::SessionLocal<JoinTimelineState>,
     // Paired: the function is at Bevy's 16-parameter limit.
-    (time, mut world_ready): (Res<Time<Real>>, ResMut<WorldReady>),
+    (time, mut world_ready, frame): (Res<Time<Real>>, ResMut<WorldReady>, Option<Res<crate::wrap_frame::WrapFrame>>),
     scale: Option<Res<WorldScale>>,
     hud: Res<HudStatus>,
     roots: Res<RegionRoots>,
@@ -134,9 +134,12 @@ pub fn track_join_timeline(
     if roots.0.len() >= scale.near_region_count() {
         if let Some(viewer) = hud.viewer_region.filter(|v| state.expected_for != Some((*v, roots.0.len()))) {
             state.expected_for = Some((viewer, roots.0.len()));
-            let near: BTreeSet<game::RegionCoords> = roots.0.keys().copied().collect();
+            // In the frame the instance asks LOD keys in: the viewer's copy
+            // and the near regions where they are drawn.
+            let frame = frame.as_deref().copied().unwrap_or_default();
+            let near: BTreeSet<game::RegionCoords> = roots.0.keys().map(|rc| roots.alias(*rc)).collect();
             let (_, keys) = crate::instance::desired_lod(
-                viewer,
+                frame.alias(viewer),
                 &near,
                 &BTreeMap::new(),
                 scale.lod_table,

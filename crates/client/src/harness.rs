@@ -894,11 +894,12 @@ impl SimHarness {
             .local_player_translation()
             .expect("player exists after connect")
     }
-    /// The local body's WORLD translation, from the home region's view
-    /// (`None` while the home holds no body: a crossing not yet landed).
+    /// The local body's WORLD translation (the client's `WrapFrame`), from the
+    /// home region's view (`None` while the home holds no body: a crossing not
+    /// yet landed).
     pub fn player_world_pos(&self) -> Option<[f32; 3]> {
         let t = self.client.local_player_translation()?;
-        let off = self.client_home().world_offset();
+        let off = self.client.wrap_frame().offset(self.client_home());
         Some([t[0] + off[0], t[1] + off[1], t[2] + off[2]])
     }
     fn client_home(&self) -> RegionCoords {

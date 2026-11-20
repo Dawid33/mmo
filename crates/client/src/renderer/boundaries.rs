@@ -63,15 +63,17 @@ pub fn toggle_boundary_overlay(keys: Res<ButtonInput<KeyCode>>, mut state: ResMu
 pub fn update_boundary_uniform(
     state: Res<BoundaryOverlay>,
     status: Res<HudStatus>,
+    frame: Option<Res<crate::wrap_frame::WrapFrame>>,
     mut uniform: ResMut<BoundaryUniform>,
 ) {
-    let next = build_uniform(state.enabled, status.home_region);
+    let frame = frame.as_deref().copied().unwrap_or_default();
+    let next = build_uniform(state.enabled, status.home_region.map(|home| frame.alias(home)));
     if uniform.as_ref() != &next {
         *uniform = next;
     }
 }
 
-/// Pure uniform builder.
+/// Pure uniform builder; `home` is the home region's copy in the `WrapFrame`.
 pub fn build_uniform(enabled: bool, home: Option<RegionCoords>) -> BoundaryUniform {
     let mut u = BoundaryUniform {
         shape: Vec4::new(HOME_LINE_WIDTH, HOME_LINE_MIN_PX, 0.0, 0.0),

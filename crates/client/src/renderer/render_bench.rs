@@ -620,6 +620,7 @@ struct BenchmarkScene<'w, 's> {
     game_events: Res<'w, GameEvents>,
     hud_status: Res<'w, super::hud::HudStatus>,
     roots: Res<'w, RegionRoots>,
+    frame: Option<Res<'w, crate::wrap_frame::WrapFrame>>,
     remesh_queue: Res<'w, RemeshQueue>,
     lod_build_queue: Res<'w, LodBuildQueue>,
     lod_rings: Res<'w, LodRings>,
@@ -720,9 +721,11 @@ fn run_benchmark(
         && scene.client_updates.0.is_empty()
         && scene.lod_rings.pending.is_empty()
     {
-        let near_regions = scene.roots.0.keys().copied().collect::<BTreeSet<_>>();
+        // In the frame the LOD keys are asked in (`WrapFrame`).
+        let frame = scene.frame.as_deref().copied().unwrap_or_default();
+        let near_regions = scene.roots.0.keys().map(|rc| scene.roots.alias(*rc)).collect::<BTreeSet<_>>();
         if snapshot_has_all_lod_keys(
-            scene.hud_status.viewer_region,
+            scene.hud_status.viewer_region.map(|v| frame.alias(v)),
             &near_regions,
             runtime.readiness.scale.lod_table,
             scene.lod_rings.roots.keys().copied(),

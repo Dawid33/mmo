@@ -20,7 +20,13 @@
 //!
 //! The game thread owns one (`GameInstanceManager`) and pushes it to the render
 //! world on change (`ClientUpdateEvent::WrapFrame`), where it is this Bevy
-//! resource, reset with the session.
+//! resource, reset with the session. Everything the renderer places for a
+//! region goes to [`WrapFrame::offset`]; a region's tree is placed once, at
+//! its spawn (`renderer::bridge::RegionRoots::alias`). A loaded region's alias
+//! never changes while the anchor follows the home (the near window is far
+//! narrower than half the narrowest wrapping world), only when the extent
+//! arrives — and then the client asks for every held region again, whose fresh
+//! snapshot replaces its tree at the new alias.
 use bevy::prelude::Resource;
 use game::{MapExtent, RegionCoords};
 
@@ -34,11 +40,6 @@ pub struct WrapFrame {
 }
 
 impl WrapFrame {
-    /// Whether the frame differs from the canonical one anywhere (a wrapping map).
-    pub fn wraps(&self) -> bool {
-        self.extent.is_some_and(|m| m.wraps())
-    }
-
     /// The copy of `rc` (canonical or not) nearest `anchor`: its x differs from
     /// the anchor's by `MapExtent::delta` (in `(-width/2, width/2]`).
     pub fn alias(&self, rc: RegionCoords) -> RegionCoords {

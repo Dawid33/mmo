@@ -26,7 +26,8 @@ use super::tiles::TileMirror;
 use game::movement::UNITS_PER_METER;
 
 /// The cut, as the ray walk needs it: the working level, the home region
-/// (where the cut applies) and the cut plane's world y.
+/// (where the cut applies — its copy in the `WrapFrame`, where its blocks
+/// are drawn) and the cut plane's world y.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cut {
     pub level: i32,
@@ -55,7 +56,8 @@ fn box_entry(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Vec3 {
 }
 
 /// The dug-space x-ray, as the ray walk needs it: the home region (whose
-/// blocks are walked) and which of its tiles are dug air.
+/// blocks are walked — its copy in the `WrapFrame`) and which of its tiles
+/// are dug air.
 pub struct Xray<D> {
     pub region: RegionId,
     pub dug: D,
@@ -135,8 +137,10 @@ pub fn visible_ground(
     mirror: &TileMirror,
     xray: bool,
 ) -> Option<Vec3> {
-    let home = mirror.region();
-    let rect = home.map(super::cut_entities::home_rect);
+    let frame = mirror.frame();
+    // The home's copy in the frame: where the blocks the walks read are drawn.
+    let home = mirror.region().map(|home| frame.alias(home));
+    let rect = home.map(|home| super::cut_entities::home_rect(&frame, home));
     let cut = Cut::of(level, home);
     let xray = home
         .filter(|_| xray && cut.is_none())

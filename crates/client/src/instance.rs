@@ -1199,6 +1199,11 @@ impl GameInstanceManager {
         self.home_region.expect("home region set")
     }
 
+    /// The client's `WrapFrame` (test/harness hook).
+    pub fn wrap_frame(&self) -> WrapFrame {
+        self.frame
+    }
+
     /// True once every buffered server event has been reconciled into a
     /// loaded region (no snapshot still in flight). Test/harness hook.
     pub fn pending_events_empty(&self) -> bool {
@@ -1707,6 +1712,12 @@ impl GameInstanceManager {
                     std::mem::take(&mut self.shift.waiting).into_iter().map(|(rc, at)| (frame.canonical(rc), at)).collect();
             }
             self.window_center = self.window_center.map(|c| frame.alias(c));
+            // `lod_assigned` and the cached answer are in the old frame: a
+            // moved anchor re-derives them (one LOD pass loses its stickiness).
+            if frame.anchor != before.anchor {
+                self.lod_assigned.clear();
+                self.lod_desired = None;
+            }
         }
         self.sync_frame();
     }
@@ -1777,17 +1788,16 @@ impl GameInstanceManager {
         if !self.debug_flags.collider_wireframes() {
             return;
         }
-        // Viewer = local player's body, rebased to world space via home.
+        // Viewer = local player's body in its home's frame; each region
+        // rebases it into its own by the nearest image.
         let (Some(local), Some(home)) = (self.local_player_translation(), self.home_region) else {
             // no player body yet: no lines beats wrong lines — the render side
             // keeps drawing the last buffers until the body is readable again
             // (debug-only, self-healing).
             return;
         };
-        let hoff = home.world_offset();
-        let world_pos = [local[0] + hoff[0], local[1] + hoff[1], local[2] + hoff[2]];
         // Each region collects its own lines (region-local) and ships them.
-        self.host.broadcast(|| RegionCmd::DebugLines(world_pos));
+        self.host.broadcast(|| RegionCmd::DebugLines(home, local));
     }
 
     /// The local player's fps-cam toggle state in its home region, if the

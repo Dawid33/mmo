@@ -14,7 +14,10 @@ use super::runner::{handle, RegionCmd, RegionReport, RunnerCtx, RunnerState};
 /// itself becomes the region.
 pub(crate) fn build_region(ctx: &RunnerCtx, snapshot: Rollback, route: Option<std::sync::Arc<game::RouteMap>>) -> Region {
     let (send, recv) = crossbeam::channel::unbounded();
-    let _ = ctx.client_event_send.send(ClientUpdateEvent::NewRegion(ctx.id, (*snapshot.data).clone(), recv));
+    // The render copy answers the seam helpers (`GameData::map`) as the region will.
+    let mut render = (*snapshot.data).clone();
+    render.set_map(route.as_ref().map(|r| r.extent()));
+    let _ = ctx.client_event_send.send(ClientUpdateEvent::NewRegion(ctx.id, render, recv));
     let mut region = Region::new(snapshot, Some(send), ctx.id, Some(ctx.client_id));
     region.set_route_map(route);
     region

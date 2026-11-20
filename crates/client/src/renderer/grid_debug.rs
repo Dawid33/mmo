@@ -134,6 +134,7 @@ pub fn chunk_cube_lines(cell: IVec3) -> Vec<(Vec3, Vec3)> {
 /// Boundary "wall band" lines for one region, centered on the camera's
 /// height: per edge, a vertical line every `REGION_WALL_INTERVAL` plus
 /// horizontal rails at the band's bottom, middle (camera height), and top.
+/// `coords` is the region's copy in the `WrapFrame` (render space).
 pub fn region_wall_lines(coords: RegionCoords, camera_y: f32) -> Vec<(Vec3, Vec3)> {
     let off = coords.world_offset();
     let (x0, z0) = (off[0], off[2]);
@@ -206,7 +207,8 @@ pub fn draw_grid_debug(
         }
     }
 
-    let regions = near.0.keys().map(|c| (*c, REGION_NEAR_COLOR)).chain(
+    // Near regions where their trees are drawn; LOD keys are already in the frame.
+    let regions = near.0.keys().map(|c| (near.alias(*c), REGION_NEAR_COLOR)).chain(
         lod.roots
             .keys()
             .filter(|k| k.region_span() == 1)

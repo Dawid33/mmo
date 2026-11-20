@@ -44,9 +44,10 @@ pub fn feet_offset(kind: EntityKind) -> f32 {
     }
 }
 
-/// The home region's world-space xz rectangle, `[offset, offset + REGION_SIZE)`.
-pub fn home_rect(home: RegionId) -> Rect {
-    let o = home.world_offset();
+/// The home region's world-space xz rectangle, `[offset, offset + REGION_SIZE)`
+/// at its copy in `frame`.
+pub fn home_rect(frame: &crate::wrap_frame::WrapFrame, home: RegionId) -> Rect {
+    let o = frame.offset(home);
     Rect::new(o[0], o[2], o[0] + REGION_SIZE, o[2] + REGION_SIZE)
 }
 
@@ -66,9 +67,10 @@ pub fn hide_cut_entities(
     mut entities: Query<(Entity, &SimEntity, &SimKind, &Transform, &mut Visibility, Option<&mut CutHidden>)>,
 ) {
     let cut = camera_cut(&level, &tiles);
-    let home = tiles.region().map(home_rect);
+    let frame = tiles.frame();
+    let home = tiles.region().map(|home| home_rect(&frame, home));
     for (e, sim, kind, tf, mut vis, held) in &mut entities {
-        let o = sim.region.world_offset();
+        let o = frame.offset(sim.region);
         let feet = tf.translation + Vec3::new(o[0], o[1] - feet_offset(kind.0), o[2]);
         let hide = hidden_by_cut(feet, cut, home);
         match (hide, held) {

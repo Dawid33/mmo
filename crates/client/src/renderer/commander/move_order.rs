@@ -219,14 +219,15 @@ pub struct SentPath {
 }
 
 /// The local body's home-local feet tile as the sim would start a walk from
-/// it (`game::current_tile`), when it stands in `home`.
+/// it (`game::current_tile`), when it stands in `home` (drawn at `origin`).
 fn body_tile(
     bodies: &Query<(&SimEntity, &GlobalTransform), With<LocalBody>>,
     mirror: &impl TileSource,
     home: RegionId,
+    origin: Vec3,
 ) -> Option<(TilePos, (RegionId, game::EntityKey))> {
     let (sim, gt) = bodies.iter().find(|(s, _)| s.region == home)?;
-    let o = home.world_offset();
+    let o = origin;
     let t = gt.translation();
     let feet = game::feet_of(Vector::new(t.x - o[0], t.y - o[1], t.z - o[2]));
     Some((game::current_tile(mirror, feet)?, (sim.region, sim.key)))
@@ -254,7 +255,9 @@ pub fn update_path_preview(
     let tiles = mirror.with_halo();
     let route = route_of(world_map.as_deref());
     let map = route.as_deref();
-    let body = home.and_then(|home| body_tile(&bodies, &tiles, home).map(|b| (home, b)));
+    let frame = frame.as_deref().copied().unwrap_or_default();
+    let origin = |home: RegionId| Vec3::from_array(frame.offset(home));
+    let body = home.and_then(|home| body_tile(&bodies, &tiles, home, origin(home)).map(|b| (home, b)));
     // The sent path is done once the body stands on its end, or left with it.
     if !sent.path.is_empty() {
         let arrived = body.is_some_and(|(_, (tile, _))| sent.beyond.is_none() && sent.path.last() == Some(&tile));
@@ -280,11 +283,10 @@ pub fn update_path_preview(
         }
         return;
     };
-    let frame = frame.as_deref().copied().unwrap_or_default();
     // Block selection's tile first; the ground pick only off the region's blocks.
     let ray = window.single().ok().zip(view.single().ok()).and_then(|(w, v)| designate::cursor_ray(w, v, home, &frame));
     if let Some(tile) = ray.and_then(|ray| pick_move_tile(ray, &working, &mirror, crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut))) {
-        preview.update(&tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(tile, home));
+        preview.update(&tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(tile, origin(home)));
         return;
     }
     let goal = goal_from_hover(&frame, region, local, pick.1, home);
@@ -394,12 +396,11 @@ pub fn send_move_order(
     *sent = SentPath { region: Some(here), path, beyond };
 }
 
-/// World point of tile `p`'s floor centre in `home`, lifted
-/// [`PATH_LIFT_M`].
-fn tile_point(p: TilePos, home: RegionId) -> Vec3 {
+/// World point of tile `p`'s floor centre in the home region drawn at
+/// `origin`, lifted [`PATH_LIFT_M`].
+fn tile_point(p: TilePos, origin: Vec3) -> Vec3 {
     let bv = BLOCK_VOXELS as f32;
-    let o = Vec3::from_array(home.world_offset());
-    o + Vec3::new((p[0] as f32 + 0.5) * bv, p[1] as f32 * bv + PATH_LIFT_M * UNITS_PER_METER, (p[2] as f32 + 0.5) * bv)
+    origin + Vec3::new((p[0] as f32 + 0.5) * bv, p[1] as f32 * bv + PATH_LIFT_M * UNITS_PER_METER, (p[2] as f32 + 0.5) * bv)
 }
 
 /// A dashed line from `a` to `b`.
@@ -422,10 +423,10 @@ fn draw_path(
     hidden: &mut Gizmos<HiddenEdgeGizmos>,
     path: &[TilePos],
     beyond: Option<Vec3>,
-    home: RegionId,
+    origin: Vec3,
     color: Color,
 ) {
-    let points: Vec<Vec3> = path.iter().map(|&p| tile_point(p, home)).collect();
+    let points: Vec<Vec3> = path.iter().map(|&p| tile_point(p, origin)).collect();
     gizmos.linestrip(points.iter().copied(), color);
     hidden.linestrip(points.iter().copied(), color.with_alpha(color.alpha() * HIDDEN_PATH_ALPHA));
     if let (Some(end), Some(b)) = (points.last(), beyond) {
@@ -443,13 +444,13 @@ pub fn draw_paths(
     mut gizmos: Gizmos,
     mut hidden: Gizmos<HiddenEdgeGizmos>,
 ) {
-    let Some(home) = mirror.region() else { return };
+    let (Some(home), Some(origin)) = (mirror.region(), mirror.home_offset()) else { return };
     if sent.region == Some(home) && !sent.path.is_empty() {
         let dim = PATH_COLOR_OK.with_alpha(SENT_PATH_ALPHA);
-        draw_path(&mut gizmos, &mut hidden, &sent.path, sent.beyond, home, dim);
+        draw_path(&mut gizmos, &mut hidden, &sent.path, sent.beyond, origin, dim);
     }
     match (&preview.path, preview.hover) {
-        (Some(plan), _) => draw_path(&mut gizmos, &mut hidden, &plan.local_path(home), preview.beyond, home, PATH_COLOR_OK),
+        (Some(plan), _) => draw_path(&mut gizmos, &mut hidden, &plan.local_path(home), preview.beyond, origin, PATH_COLOR_OK),
         (None, Some(at)) => {
             let color = if preview.unreachable { PATH_COLOR_NONE } else { PATH_COLOR_UNKNOWN };
             let r = NO_PATH_CROSS_M * UNITS_PER_METER;

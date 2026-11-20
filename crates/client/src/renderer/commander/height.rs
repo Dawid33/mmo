@@ -170,7 +170,8 @@ impl HeightGrid {
 
     /// Take `region`'s recipe water (its `Reset`'s ground recipes): a column's
     /// surface then reaches the water's top (`water_top + 1`), its ground
-    /// does not. Replaces the region's earlier recipe water.
+    /// does not. Replaces the region's earlier recipe water. `region` is the
+    /// copy its tree is drawn at (`RegionRoots::alias`), where its chunks are keyed.
     pub fn set_recipe_water(&mut self, region: game::RegionId, ground: &std::collections::BTreeMap<game::ColumnCoords, game::ColumnGround>) {
         let n = game::REGION_BLOCKS as i32;
         let (x0, z0) = (region.x * n, region.z * n);
@@ -270,9 +271,10 @@ impl HeightGrid {
     }
 }
 
-/// World chunk coordinates of a sim chunk entity at `tf` in `sim`'s region.
-fn world_chunk_key(tf: &Transform, sim: &SimEntity) -> [i32; 3] {
-    let offset = Vec3::from_array(sim.region.world_offset());
+/// World chunk coordinates (render space) of a sim chunk entity at `tf`
+/// under a region root drawn at `alias` (`RegionRoots::alias`).
+fn world_chunk_key(tf: &Transform, alias: game::RegionId) -> [i32; 3] {
+    let offset = Vec3::from_array(alias.world_offset());
     let world = (tf.translation + offset) / CHUNK_EDGE as f32;
     [world.x.round() as i32, world.y.round() as i32, world.z.round() as i32]
 }
@@ -283,17 +285,18 @@ pub fn update_height_grid(
     mut msgs: MessageReader<super::tiles::TileMirrorMsg>,
     changed: Query<(Entity, &SimChunk, &Transform, &SimEntity), Changed<SimChunk>>,
     mut removed: RemovedComponents<SimChunk>,
+    roots: Res<crate::renderer::bridge::RegionRoots>,
 ) {
     for msg in msgs.read() {
         if let super::tiles::TileMirrorMsg::Reset { region, ground, .. } = msg {
-            grid.set_recipe_water(*region, ground);
+            grid.set_recipe_water(roots.alias(*region), ground);
         }
     }
     for entity in removed.read() {
         grid.remove_entity(entity);
     }
     for (entity, chunk, tf, sim) in &changed {
-        grid.insert_chunk(entity, world_chunk_key(tf, sim), chunk_tops(&chunk.0));
+        grid.insert_chunk(entity, world_chunk_key(tf, roots.alias(sim.region)), chunk_tops(&chunk.0));
     }
 }
 

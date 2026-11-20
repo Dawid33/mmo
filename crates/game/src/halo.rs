@@ -358,6 +358,13 @@ impl GameData {
         *self.map_extent
     }
 
+    /// Sets the extent [`GameData::map`] answers on a copy no sim runs (the
+    /// client's render copy of a snapshot; a region's own is set by
+    /// `Region::set_route_map`). Configuration, written raw like there.
+    pub fn set_map(&mut self, map: Option<MapExtent>) {
+        *self.map_extent.raw_mut() = map;
+    }
+
     /// The canonical world block of local block `local` (it may lie past the
     /// region's edges).
     pub fn world_block(&self, local: [i32; 3]) -> WorldBlockPos {

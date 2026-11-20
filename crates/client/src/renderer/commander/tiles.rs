@@ -24,6 +24,7 @@ use game::{
 use crate::renderer::bricks::{ChunkEdits, SimChunk};
 use crate::renderer::bridge::{RegionRoots, SimEntity};
 use crate::renderer::hud::HudStatus;
+use crate::wrap_frame::WrapFrame;
 
 /// Tile state from the bridge, per region.
 #[derive(Message, Debug, Clone)]
@@ -96,6 +97,10 @@ static NO_DESIGNATIONS: BTreeMap<TilePos, Designation> = BTreeMap::new();
 #[derive(Resource, Default)]
 pub struct TileMirror {
     home: Option<RegionId>,
+    /// The render world's `WrapFrame` (kept by [`update_tile_mirror`]): where
+    /// world columns and grid keys (render space) belong, and the halo's
+    /// canonical keys.
+    frame: WrapFrame,
     /// Every loaded region's state; only `home`'s is read.
     regions: BTreeMap<RegionId, RegionTiles>,
     /// Home region chunks (region-local chunk coords) → blocks (id + data,
@@ -121,6 +126,16 @@ impl TileMirror {
         self.home
     }
 
+    /// The frame the mirror answers in (see the field).
+    pub fn frame(&self) -> WrapFrame {
+        self.frame
+    }
+
+    /// The home region's origin in the frame (render space).
+    pub fn home_offset(&self) -> Option<Vec3> {
+        self.home.map(|home| Vec3::from_array(self.frame.offset(home)))
+    }
+
     pub fn designations(&self) -> &BTreeMap<TilePos, Designation> {
         self.home_tiles().map_or(&NO_DESIGNATIONS, |t| &t.designations)
     }
@@ -140,10 +155,10 @@ impl TileMirror {
         self.home_tiles().is_some_and(|t| !t.ground.is_empty())
     }
 
-    /// Whether world block column `(x, z)` lies in the home region.
+    /// Whether world block column `(x, z)` (render space) lies in the home region.
     pub fn in_home(&self, x: i32, z: i32) -> bool {
         let n = REGION_BLOCKS as i32;
-        self.home == Some(game::RegionCoords::new(x.div_euclid(n), z.div_euclid(n)))
+        self.home == Some(self.frame.canonical(game::RegionCoords::new(x.div_euclid(n), z.div_euclid(n))))
     }
 
     /// The ORIGINAL worldgen surface block y of world block column `(x, z)`
@@ -364,7 +379,8 @@ impl TileMirror {
         self.chunks.get(&key).map(|(_, blocks)| blocks[BlockIndex::from_xyz(local.0, local.1, local.2).linear()])
     }
 
-    /// What an unloaded sim chunk at world chunk `key` stands for when it lies
+    /// What an unloaded sim chunk at world chunk `key` (render space, as the
+    /// brick grid keys it) stands for when it lies
     /// below its column's materialised band in a loaded region: implied
     /// ground, answered with an opaque block of it (its bedrock — any opaque
     /// block will do for meshing, which only asks "solid?"). `None` inside or
@@ -372,7 +388,7 @@ impl TileMirror {
     /// checks the chunk is not loaded: a dug-out chunk is real air.
     pub fn implied_chunk_block(&self, key: [i32; 3]) -> Option<BlockId> {
         let n = game::REGION_CHUNKS as i32;
-        let region: RegionId = game::RegionCoords::new(key[0].div_euclid(n), key[2].div_euclid(n));
+        let region: RegionId = self.frame.canonical(game::RegionCoords::new(key[0].div_euclid(n), key[2].div_euclid(n)));
         let column = ColumnCoords::new(key[0].rem_euclid(n) as usize, key[2].rem_euclid(n) as usize);
         let ground = self.regions.get(&region)?.ground.get(&column)?;
         ground.is_implied(key[1]).then_some(ground.bedrock)
@@ -463,7 +479,7 @@ impl WithHalo<'_> {
         let key = [p[0].div_euclid(cb), p[1].div_euclid(cb), p[2].div_euclid(cb)];
         game::halo::in_halo_band(key[0], key[2]).then(|| {
             let local = (p[0].rem_euclid(cb) as usize, p[1].rem_euclid(cb) as usize, p[2].rem_euclid(cb) as usize);
-            (game::WorldChunkPos::from_local(home, key), local)
+            (game::world_chunk(self.0.frame.extent, home, key), local)
         })
     }
 
@@ -537,7 +553,7 @@ impl TileSource for WithHalo<'_> {
         let home = self.0.home?;
         let tiles = self.0.home_tiles()?;
         game::probe_column_band(column, None, |cy| {
-            tiles.halo.contains_key(&game::WorldChunkPos::from_local(home, [cx, cy, cz]))
+            tiles.halo.contains_key(&game::world_chunk(self.0.frame.extent, home, [cx, cy, cz]))
         })
     }
 
@@ -581,7 +597,13 @@ pub fn update_tile_mirror(
     mut changed: Query<(Entity, &SimChunk, &Transform, &SimEntity, Option<&mut ChunkEdits>), Changed<SimChunk>>,
     all: Query<(Entity, &SimChunk, &Transform, &SimEntity)>,
     mut removed: RemovedComponents<SimChunk>,
+    frame: Option<Res<WrapFrame>>,
 ) {
+    let frame = frame.as_deref().copied().unwrap_or_default();
+    if mirror.frame != frame {
+        mirror.frame = frame;
+        mirror.version += 1;
+    }
     for msg in msgs.read() {
         mirror.apply(msg.clone());
     }

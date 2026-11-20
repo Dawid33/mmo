@@ -174,7 +174,8 @@ enum Cell {
     Solid,
 }
 
-/// The mesher input of tile `tile` of `region` (see the module doc): the
+/// The mesher input of tile `tile` of `region` (its copy where its tree is
+/// drawn, `bridge::RegionRoots::alias`; see the module doc): the
 /// recipe's water ranges minus the cells holding a block that is neither air
 /// nor liquid, read through `chunk_at` (world sim-chunk key, as
 /// `bricks::SimChunkIndex` keys it). A cell with no chunk is implied ground
@@ -416,7 +417,8 @@ fn schedule_water_meshes(
         let Some(ground) = grounds.0.get(region).filter(|_| ready) else {
             continue;
         };
-        let input = tile_input(*region, *tile, ground, chunk_at);
+        // Its chunks are keyed where its tree is drawn.
+        let input = tile_input(roots.alias(*region), *tile, ground, chunk_at);
         state.task = Some(super::compute::spawn(WaterMeshJob(input), tile_mesh));
         state.dirty = false;
         built += 1;

@@ -520,7 +520,9 @@ type UnmeshedNearChunkFilter = Or<(
 /// its root entity, so a replaced region (new root) starts over and a region
 /// that regresses (a chunk re-inserted before the LOD was released) resets.
 /// Remeshes of already-meshed chunks don't count against it: they keep their
-/// previous quads on screen until the new ones attach.
+/// previous quads on screen until the new ones attach. Answered as the
+/// copies the regions are drawn at (`RegionRoots::alias`), the frame LOD
+/// keys are in: a far second image of a near region is not replaced by it.
 fn near_regions_meshed(
     near: &RegionRoots,
     unmeshed: &Query<&ChildOf, UnmeshedNearChunkFilter>,
@@ -546,7 +548,7 @@ fn near_regions_meshed(
         }
         streak.1 = streak.1.saturating_add(1);
         if streak.1 >= NEAR_HANDOFF_HOLD_FRAMES {
-            ready.insert(rc);
+            ready.insert(near.alias(rc));
         }
     }
     ready

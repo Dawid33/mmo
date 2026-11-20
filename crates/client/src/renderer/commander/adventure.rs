@@ -17,7 +17,7 @@
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
-use game::{Order, PlayMode, RegionId, TilePos, REGION_BLOCKS};
+use game::{Order, PlayMode, TilePos, REGION_BLOCKS};
 
 use super::designate::DesignateState;
 use super::first_person::BodyView;
@@ -103,22 +103,23 @@ pub fn toggled(mode: PlayMode) -> PlayMode {
 }
 
 /// The tile under the camera focus (world x, z and the ground height
-/// `ground_y`, sim units), local to `home`: the air tile feet standing on
-/// that ground occupy (`game::feet_tile`).
-pub fn focus_tile(focus: Vec2, ground_y: f32, home: RegionId) -> TilePos {
-    let o = home.world_offset();
+/// `ground_y`, sim units), local to the home region drawn at `origin`: the
+/// air tile feet standing on that ground occupy (`game::feet_tile`).
+pub fn focus_tile(focus: Vec2, ground_y: f32, origin: Vec3) -> TilePos {
+    let o = origin;
     game::feet_tile(Vector::new(focus.x - o[0], ground_y - o[1], focus.y - o[2]))
 }
 
 /// The order the mode button sends from `mode`: the other mode, entering
-/// Adventure at the focus tile (when there is a home region).
-pub fn toggle_order(mode: PlayMode, cam: &CommanderCamera, home: Option<RegionId>) -> Order {
+/// Adventure at the focus tile (when there is a home region, drawn at
+/// `home_origin`).
+pub fn toggle_order(mode: PlayMode, cam: &CommanderCamera, home_origin: Option<Vec3>) -> Order {
     let next = toggled(mode);
     let at = match next {
-        PlayMode::Adventure => home.map(|home| {
+        PlayMode::Adventure => home_origin.map(|origin| {
             // A focus outside the home region (panned away) puts the body at
             // the nearest home tile, not at an out-of-region one.
-            let mut t = focus_tile(cam.focus, cam.ground_y, home);
+            let mut t = focus_tile(cam.focus, cam.ground_y, origin);
             let last = REGION_BLOCKS as i32 - 1;
             t[0] = t[0].clamp(0, last);
             t[2] = t[2].clamp(0, last);
@@ -143,7 +144,7 @@ pub fn send_mode_toggle(
         return;
     }
     let Some(client) = local.0 else { return };
-    let order = toggle_order(mode.0, &cam, mirror.region());
+    let order = toggle_order(mode.0, &cam, mirror.home_offset());
     let _ = events.0.send(game::GameEventKind::Order(client, order));
 }
 

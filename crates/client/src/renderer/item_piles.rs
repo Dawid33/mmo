@@ -34,6 +34,7 @@ use super::commander::cut_entities::{home_rect, hidden_by_cut};
 use super::commander::level::{camera_cut, WorkingLevel};
 use super::commander::tiles::TileMirror;
 use crate::session::{SessionResetExt, SessionScoped};
+use crate::wrap_frame::WrapFrame;
 
 /// Edge of one item cube, metres.
 pub const ITEM_CUBE_SIZE_M: f32 = 0.25;
@@ -97,15 +98,15 @@ pub struct ItemPileRoot {
 }
 
 impl ItemPileRoot {
-    /// The world cell it stands for.
-    pub fn world_cell(&self) -> game::WorldBlockPos {
-        world_cell(self.region, self.cell)
+    /// The (canonical) world cell it stands for on `map`.
+    pub fn world_cell(&self, map: Option<game::MapExtent>) -> game::WorldBlockPos {
+        world_cell(map, self.region, self.cell)
     }
 }
 
-/// `cell` of `region`'s frame as a world cell.
-pub fn world_cell(region: RegionId, cell: BlockPos) -> game::WorldBlockPos {
-    game::WorldBlockPos::from_local(region, game::BlockPos::new(cell[0], cell[1], cell[2]))
+/// `cell` of `region`'s frame as a canonical world cell on `map`.
+pub fn world_cell(map: Option<game::MapExtent>, region: RegionId, cell: BlockPos) -> game::WorldBlockPos {
+    game::world_block(map, region, cell)
 }
 
 /// One drawn cube (child of a root): its rest position and animation phase.
@@ -177,9 +178,9 @@ pub(crate) fn material_for(
     (material, flat)
 }
 
-/// World position of the floor centre of `cell` in `region`.
-pub fn pile_world_position(region: RegionId, cell: BlockPos) -> Vec3 {
-    let o = region.world_offset();
+/// World position of the floor centre of `cell` in `region`'s copy in `frame`.
+pub fn pile_world_position(frame: &WrapFrame, region: RegionId, cell: BlockPos) -> Vec3 {
+    let o = frame.offset(region);
     let b = BLOCK_VOXELS as f32;
     Vec3::new(o[0] + (cell[0] as f32 + 0.5) * b, o[1] + cell[1] as f32 * b, o[2] + (cell[2] as f32 + 0.5) * b)
 }
@@ -214,6 +215,7 @@ fn spawn_pile(
     assets: &mut ItemPileAssets,
     images: &mut Assets<Image>,
     mats: &mut Assets<StandardMaterial>,
+    frame: &WrapFrame,
     region: RegionId,
     cell: BlockPos,
     mirror: bool,
@@ -236,7 +238,7 @@ fn spawn_pile(
         .spawn((
             ItemPileRoot { region, cell, mirror },
             SessionScoped,
-            Transform::from_translation(pile_world_position(region, cell)),
+            Transform::from_translation(pile_world_position(frame, region, cell)),
             Visibility::default(),
         ))
         .add_children(&children)
@@ -250,7 +252,9 @@ fn apply_pile_msgs(
     mut assets: ResMut<ItemPileAssets>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    frame: Option<Res<WrapFrame>>,
 ) {
+    let frame = frame.as_deref().copied().unwrap_or_default();
     for msg in msgs.read() {
         let (region, changes, mirror) = match msg {
             ItemPileMsg::Set { region, changes } => (region, changes, false),
@@ -277,7 +281,7 @@ fn apply_pile_msgs(
                 commands.entity(old).despawn();
             }
             if let Some(view) = view.as_ref().filter(|v| !v.stacks.is_empty()) {
-                let e = spawn_pile(&mut commands, &mut assets, &mut images, &mut mats, *region, *cell, mirror, view);
+                let e = spawn_pile(&mut commands, &mut assets, &mut images, &mut mats, &frame, *region, *cell, mirror, view);
                 map.insert((*region, *cell), e);
             }
         }
@@ -294,15 +298,15 @@ fn animate_cubes(time: Res<Time>, mut cubes: Query<(&ItemCube, &mut Transform)>)
     }
 }
 
-/// Which halo mirror roots draw: one per world cell no region here owns (a
-/// pile drawn by its owner hides every mirror of it), the lowest hosting
-/// region's (a corner pile is mirrored into up to 3 regions).
-pub fn shown_mirrors(roots: &ItemPileRoots) -> std::collections::BTreeSet<(RegionId, BlockPos)> {
+/// Which halo mirror roots draw: one per (canonical) world cell on `map` no
+/// region here owns (a pile drawn by its owner hides every mirror of it), the
+/// lowest hosting region's (a corner pile is mirrored into up to 3 regions).
+pub fn shown_mirrors(roots: &ItemPileRoots, map: Option<game::MapExtent>) -> std::collections::BTreeSet<(RegionId, BlockPos)> {
     let owned: std::collections::BTreeSet<game::WorldBlockPos> =
-        roots.0.keys().map(|(r, c)| world_cell(*r, *c)).collect();
+        roots.0.keys().map(|(r, c)| world_cell(map, *r, *c)).collect();
     let mut drawn: BTreeMap<game::WorldBlockPos, (RegionId, BlockPos)> = BTreeMap::new();
     for &(region, cell) in roots.1.keys() {
-        let w = world_cell(region, cell);
+        let w = world_cell(map, region, cell);
         if owned.contains(&w) {
             continue;
         }
@@ -322,13 +326,14 @@ fn hide_cut_piles(
     mut roots: Query<(&ItemPileRoot, &mut Visibility, Option<&super::item_flights::LandingHold>)>,
 ) {
     let cut = camera_cut(&level, &tiles);
-    let home = tiles.region().map(home_rect);
-    let shown = shown_mirrors(&pile_roots);
+    let frame = tiles.frame();
+    let home = tiles.region().map(|home| home_rect(&frame, home));
+    let shown = shown_mirrors(&pile_roots, frame.extent);
     for (root, mut vis, hold) in &mut roots {
         let duplicate = root.mirror && !shown.contains(&(root.region, root.cell));
         let hide = duplicate
             || hold.is_some()
-            || hidden_by_cut(pile_world_position(root.region, root.cell), cut, home);
+            || hidden_by_cut(pile_world_position(&frame, root.region, root.cell), cut, home);
         vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited });
     }
 }

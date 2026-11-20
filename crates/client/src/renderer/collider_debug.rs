@@ -20,12 +20,13 @@ pub struct DebugColliderLines(pub BTreeMap<RegionId, Vec<DebugLine>>);
 pub struct DebugFlagsRes(pub game::DebugFlags);
 
 /// Draw the buffered wireframes while the collider toggle is on, shifting
-/// each region's lines by its world offset (the sim is region-local; the
-/// world offset exists only at this render boundary). When off, clear
+/// each region's lines by its offset in the `WrapFrame` (the sim is
+/// region-local; the world offset exists only at this render boundary). When off, clear
 /// the buffers once so stale geometry never flashes on the next toggle.
 pub fn draw_collider_wireframes(
     flags: Res<DebugFlagsRes>,
     mut lines: ResMut<DebugColliderLines>,
+    frame: Option<Res<crate::wrap_frame::WrapFrame>>,
     mut gizmos: Gizmos,
 ) {
     if !flags.0.collider_wireframes() {
@@ -34,8 +35,9 @@ pub fn draw_collider_wireframes(
         }
         return;
     }
+    let frame = frame.as_deref().copied().unwrap_or_default();
     for (id, buf) in &lines.0 {
-        let off = id.world_offset();
+        let off = frame.offset(*id);
         let off = Vec3::new(off[0], off[1], off[2]);
         for l in buf {
             gizmos.line(
