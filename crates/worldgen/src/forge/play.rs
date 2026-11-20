@@ -28,16 +28,19 @@ pub fn preview_cell_for(width_m: f64, height_m: f64) -> f64 {
 /// cores of an i7-12700H laptop with 31 GB RAM, incl. writing the PNGs and the
 /// world file): every menu size at 16 m and 32 m and the dev size at 32 m,
 /// 0.13 M cells (1.0 s) to 78.7 M (655 s, Large at 16 m). Least squares on
-/// log-log; with [`FORGE_COST_EXPONENT`] the worst row is off by 6.8 %
-/// (dev at 32 m). Table: the design's Measurements, Phase 1a.
+/// log-log gives 7.747 × Mcells^1.0169 (worst row 5.7 % off); this and
+/// [`FORGE_COST_EXPONENT`] are that fit rounded, whose worst row is off by
+/// 6.8 % (dev at 32 m). Table: the design's Measurements, Phase 1a.
 pub const FORGE_SECS_PER_MCELL: f64 = 7.7;
 
-/// Wall time grows as cells^this (the same fit: 1.017, rounded).
+/// Wall time grows as cells^this (the same fit's 1.0169, rounded).
 pub const FORGE_COST_EXPONENT: f64 = 1.02;
 
 /// Peak memory of a forge: a fixed base plus this per cell (the same runs,
 /// max RSS 0.08 GB at 0.13 M cells to 13.5 GB at 78.7 M; worst row off by
-/// 16 %, Tiny at 32 m, and under 3 % from 4.9 M cells up).
+/// 16 %, Tiny at 32 m, and under 3 % from 4.9 M cells up). Chosen to bound
+/// the worst row: plain least squares, 80.6 MB + 170.5 B per cell, misses the
+/// dev row by 28 %.
 pub const FORGE_RAM_BYTES_PER_CELL: f64 = 172.0;
 pub const FORGE_RAM_BASE_BYTES: f64 = 70.0e6;
 

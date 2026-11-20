@@ -321,7 +321,9 @@ machine. No limit is set on any of them yet.
 
 Measured 2026-11-14 with `just forge-bench <size> <cell>` (release, pinned to 16 of 20 logical cores by the
 justfile's `cap`, i7-12700H laptop, 31 GB RAM; wall time includes writing the PNGs and the world file). One
-run each, on a machine in use, so read them as ±20%.
+run each, on a machine in use, so read them as ±20%. (Note 2026-11-20: the recipe has timed the forge binary
+OUTSIDE `cap` since `5cef874a`, 2026-11-01 — only its build is pinned — and that line was unchanged from then until
+2026-11-19 (when only its arguments changed), so these runs most likely used all 20 logical cores; not recorded at the time.)
 
 | Square world | Cells | Stands for | Wall time | Peak memory | World file |
 |---|---|---|---|---|---|
@@ -335,13 +337,13 @@ Large at 16 m (78.7 M cells) was not run: about 14 GB by the memory model, with 
 What they say: memory follows the forge's model (100 MB + 180 B per cell) closely. Time does not: the model
 (`9.0 s × Mcells^1.05`) predicts 205 s at 19.7 M cells and 425 s at 39.3 M; measured is 254 s and 638 s,
 an exponent near 1.3 between the two largest runs. The estimate shown in the menu is therefore low for big
-worlds; Task 17 of the Phase 1a plan refits it.
+worlds; Task 19 of the Phase 1a plan refits it.
 
 ### Phase 1a (the Planet: 2:1, wraps east–west, every menu size)
 
 Measured 2026-11-20 with `just forge-bench <width> <height> <cell>` (release; the recipe's `cap` pins only its
-build, so the forge ran on all 20 logical cores — affinity `0-19`, nice 5, checked during Large at 16 m; the Phase 0
-line above used the same recipe; i7-12700H laptop, 31 GB RAM, 21 GB available before and after; wall time includes
+build, so the forge ran on all 20 logical cores — affinity `0-19`, nice 5, checked during Large at 16 m;
+i7-12700H laptop, 31 GB RAM, 21 GB available before and after; wall time includes
 writing the PNGs and the world file). One run each, one after another, nothing else heavy running.
 `scaling_cur_freq` of cpu0: 660,570 kHz before the series, 618,161 kHz after it (466,547 / 789,947 kHz around
 Large at 16 m) — idle-core snapshots between runs, no sign of clamping, not a reading under load.
@@ -360,16 +362,20 @@ Large at 16 m) — idle-core snapshots between runs, no sign of clamping, not a 
 
 (Peak memory is `/usr/bin/time`'s max RSS, KiB × 1,024; MB and GB are 10⁶ and 10⁹ bytes.)
 
-What they say: at equal cell counts the Planet forge is faster than Phase 0's square one — 4.9 M cells 39 s
-against 47 s, 19.7 M cells 161–164 s against 238–254 s — with the same memory (0.93 against 0.96 GB, 3.4 against
-3.5–3.6 GB) and world files of the same order (a 2:1 world at 32 m keeps more tiles per cell than one at 16 m:
-8.0 against 5.8 MB at 4.9 M). Time now grows almost linearly: a least-squares power law over the nine rows gives
-7.75 s × Mcells^1.017 (worst row 5.6 % off), against the old model's 1.05 and Phase 0's measured exponent near
-1.3 between its two largest runs; Large at 16 m, not run in Phase 0, takes 11 minutes and 13.5 GB. The forge's
-estimate was refitted in Task 19 (`forge::play`): `7.7 s × Mcells^1.02` (worst 6.8 %) and `70 MB + 172 B per
-cell` (worst 16 %, the small worlds; under 3 % from 4.9 M cells up). With the Play forge's 12 GiB cap the menu
-still offers every size: Tiny and Small at 16 / 32 / 8 m, Medium at 16 / 32 m, Large at 32 m only (Large at 16 m
-is estimated at 13.6 GB).
+What they say. Against Phase 0 the comparison is INDICATIVE only: a different layout (a square Continent
+world then, the 2:1 Planet now), different forge code (Phase 1a rewrote the grid, the noise and the climate
+lengths), one run each on a machine in use (±20 %), and the core pinning of Phase 0 was not recorded (most likely
+all 20 cores, as now: see the note on its line). At equal cell counts: 4.9 M cells 39 s now against 47 s then
+(−17 %, inside the ±20 %); 19.7 M cells 161–164 s against 238–254 s (about −35 %, more than the noise, but which
+of the differences above causes it is not known); memory the same within 6 % (0.93 against 0.96 GB,
+3.4 against 3.5–3.6 GB); world files of the same order (a 2:1 world at 32 m keeps more tiles per cell than one at
+16 m: 8.0 against 5.8 MB at 4.9 M). Within Phase 1a, time grows almost linearly with cells: a least-squares power
+law over the nine rows gives 7.75 s × Mcells^1.017 (worst row 5.7 % off), against the old model's 1.05 and Phase
+0's measured exponent near 1.3 between its two largest runs. Large at 16 m, not run in Phase 0, takes 11 minutes
+and 13.5 GB. The forge's estimate was refitted in Task 19 (`forge::play`) with the fit rounded to `7.7 s ×
+Mcells^1.02` (worst 6.8 %) and `70 MB + 172 B per cell` (worst 16 %, the small worlds; under 3 % from 4.9 M cells
+up). With the Play forge's 12 GiB cap the menu still offers every size: Tiny and Small at 16 / 32 / 8 m, Medium
+at 16 / 32 m, Large at 32 m only (Large at 16 m is estimated at 13.6 GB).
 
 ## Left to the builder
 

@@ -320,7 +320,10 @@ lengths in degrees of latitude; every size measured.
 To be appended as phases finish. Already known:
 
 - After Phase 1a (built 2026-11-20; evidence below):
-  1. `just run --reset` (a new dev world; a world of a deleted layout is refused with the re-forge wording).
+  1. `just run --reset` (a new dev world). What an old world does: a world file and the menu's world list refuse
+     any version-8 world (re-forge wording); a store holding version-8 tiles of an old layout is refused; a
+     version-8 PLANET already stored as tiles still loads (ruled acceptable: its bytes are identical) but should be
+     re-forged to get the tuned land and the climate in degrees.
   2. Open the world map: ice-pale polar seas top and bottom, the hot band across the middle, the left and right
      edges continuing into each other (as in `target/world-forge/phase1a-map.png-tiles-biomes.png`; a Medium
      world for comparison: `target/world-forge/phase1a-medium-map.png-tiles-biomes.png`).
@@ -330,12 +333,13 @@ To be appended as phases finish. Already known:
   5. Commit or drop the working-tree-only edits made in the OWNER's untracked or uncommitted files (never committed
      by the run): `crates/panel/src/forge.rs` (`PRESETS`), `crates/panel/src/web.rs` and
      `crates/panel/templates/world.html` (the size select) — `task-3-report.md` and `task-17-report.md`;
-     `crates/client/src/renderer/look_target.rs` (lines 80, 94, 99, 100) and `block_damage.rs` (`block_centre` and
-     its callers) — `task-15-report.md`; the one line in `crates/game/src/people.rs` `follow_path_safe`
+     `crates/client/src/renderer/look_target.rs` (lines 80, 94, 99, 100, checked in the working tree 2026-11-20) and
+     `block_damage.rs` (`block_centre` and its callers) — `task-15-report.md`, "In the owner's hunks"; the one line in `crates/game/src/people.rs` `follow_path_safe`
      (`w.waypoint(…)` in the region's frame) — `task-7-report.md` (all under
      `.superpowers/sdd/2026-11-14-planet-frame-1a/`).
-  6. Re-forge every world before running this build: dev worlds (`just run --reset`, `worlds/`), the web world, dev
-     Postgres worlds (`just pg-reset`), the twin and orion (artifact v9, world map v3).
+  6. Re-forge every world before running this build (artifact v9, world map v3; as in step 1, only a stored v8
+     Planet would still load, without this phase's tuning): dev worlds (`just run --reset`, `worlds/`), the web
+     world, dev Postgres worlds (`just pg-reset`), the twin and orion.
 - After Phases 2–5: `just world-map` on a Medium world — do the continents, ranges, climates and coasts read
   as a small Earth?
 - Before or during Phase 6: decide the day length.
@@ -417,19 +421,34 @@ which changes no forged byte.
   | rivers_across_seam (max gap, cells) | 0 | 1 (0.031) | 0 | 0 | 0 | 0 | 0 | 2 (0.031) |
   | trees_across_seam_ok | yes | yes | yes | yes | yes | yes | yes | yes |
 
-  Summary lines: `seam_seeds_not_ok_height: 1`, `seam_pass_height: yes`; `seam_seeds_not_ok_precip: 0`,
+  Summary lines (32 m): `seam_seeds_not_ok_height: 1`, `seam_pass_height: yes`; `seam_seeds_not_ok_precip: 0`,
   `seam_pass_precip: yes`; `seam_seeds_not_ok_biome: 0`, `seam_pass_biome: yes`; median ranks 0.6505 / 0.498 /
-  0.410; `lakes_across_seam` 0 on every seed. At 64 m: the same yes/no lines except precipitation on seed 0207
-  (ratio 3.894, rank 0.008, `no`) and the seam height miss again on 020D (1.756, rank 0.000); `seam_pass_*` yes ×3;
-  land share 0.259–0.372; temperatures −23.1…−22.9 / 26.8 / −23.1…−22.9; components and drainage unchanged.
-- **Judged against the Phase 1a ranges:** rows 0 and `nz−1` all sea — met (8/8). Polar sea-level temperature
-  below −15 °C (−23.3…−23.1) and the middle row above 20 °C (26.9) — met (8/8). Land share 0.15–0.6 — met
-  (0.258–0.372). Seam height step "at most 1.5 × the interior's" — not met as written on every seed: the ratios
-  are listed above (worst 1.751 height, 0.708 precipitation, 1.801 biome); judged by the ruled seed-set rule (a
-  seed is `ok` when its ratio ≤ 1.5 or its rank ≥ 0.05; a field passes when at most 2 of 8 seeds are `no` and the
-  median rank ≥ 0.25) all three fields PASS. Aliased regions identical — met (8/8). Also: every land cell drains to
-  the sea, the world map wraps, trees and rivers continue across the seam (river gaps ≤ 0.031 cell), the seam's
-  region cliff is at most the interior's (≤ 1.0). Two land components over 1 % on 7 of 8 seeds (`…0209` has one).
+  0.41; `lakes_across_seam: 0` on every seed. At 64 m (`just forge-report --size dev --cell 64 --seeds 8`):
+  `seam_seeds_not_ok_height: 1` (020D: 1.756, rank 0.000), `seam_seeds_not_ok_precip: 1` (0207: 3.894, rank 0.008),
+  `seam_seeds_not_ok_biome: 0`; median ranks 0.649 / 0.496 / 0.5235; `seam_pass_*` yes ×3; `lakes_across_seam: 0`
+  on every seed; land share 0.258698–0.371918; temperatures north −23.1…−22.9, middle 26.8, south −23.1…−22.9;
+  `polar_rows_all_sea: yes`, `drains_to_sea` 1 on every seed; `seam_region_cliff` 0.5–1 (020D 0.750);
+  `rivers_across_seam_max_gap_cells` at most 0.156 (020D).
+- **Judged against the Phase 1a ranges:** rows 0 and `nz−1` all sea — met (8/8 at 32 m and at 64 m). Polar sea-level
+  temperature below −15 °C (32 m: −23.3…−23.1) and the middle row above 20 °C (26.9) — met (8/8). Land share
+  0.15–0.6 — met (0.258–0.372). Aliased regions identical — met (8/8).
+  **The seam.** The program's criterion — the HEIGHT step across the seam at most 1.5 × the interior's — is not met
+  on every seed. Raw counts of seeds whose ratio is above 1.5:
+
+  | field | 32 m | 64 m |
+  |---|---|---|
+  | height | 1 of 8: 020D 1.751 (rank 0.008) | 1 of 8: 020D 1.756 (rank 0.000) |
+  | biome | 3 of 8: 0206 1.801 (rank 0.139), 020C 1.529 (0.209), 020D 1.633 (0.131) — each rescued by rank ≥ 0.05 | 1 of 8: 020D 1.532 (rank 0.141) — rescued by rank |
+  | precipitation | 0 of 8 (max 0.708) | 1 of 8: 0207 3.894 (rank 0.008) |
+
+  Under the ruled seed-set rule (a seed is `ok` when its ratio ≤ 1.5 or its rank ≥ 0.05; a field passes when at most
+  2 of 8 seeds are `no` and the median rank ≥ 0.25): 32 m — height 1 `no`, median rank 0.6505, PASS; precipitation 0
+  `no`, 0.498, PASS; biome 0 `no`, 0.41, PASS. 64 m — height 1 `no`, 0.649, PASS; precipitation 1 `no`, 0.496,
+  PASS; biome 0 `no`, 0.5235, PASS. The height miss is the same seed (020D) at both cells, where 0.8 % (32 m) and none
+  (64 m, rank 0.000) of the interior column pairs are as rough as its seam.
+  Also (32 m): every land cell drains to the sea, the world map wraps, trees and rivers continue across the seam
+  (river gaps ≤ 0.031 cell), the seam's region cliff is at most the interior's (0.5–1.0). Two land components over
+  1 % on 7 of 8 seeds (`…0209` has one).
 - **Map:** `just forge-proto --size dev --cell 32 --out target/world-forge/phase1a` (`phase1a.world`, 0.4 MiB, and
   its forge PNGs `target/world-forge/phase1a-{biome,temperature,rain,relief,…}.png`), then `just world-map --world
   target/world-forge/phase1a.world --tiles --out target/world-forge/phase1a-map.png` → `target/world-forge/
