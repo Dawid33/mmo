@@ -17,7 +17,10 @@ const FOOTPRINT: usize = COLUMN_FOOTPRINT;
 fn footprint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Box<[i16]>, D::Error> {
     let v: Vec<i16> = serde::Deserialize::deserialize(d)?;
     if v.len() != FOOTPRINT {
-        return Err(serde::de::Error::invalid_length(v.len(), &"one entry per block column of the footprint"));
+        return Err(serde::de::Error::invalid_length(
+            v.len(),
+            &"one entry per block column of the footprint",
+        ));
     }
     Ok(v.into_boxed_slice())
 }
@@ -26,14 +29,19 @@ fn footprint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Box<[i16]>, D::Er
 fn footprint_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Box<[u32]>, D::Error> {
     let v: Vec<u32> = serde::Deserialize::deserialize(d)?;
     if v.len() != FOOTPRINT {
-        return Err(serde::de::Error::invalid_length(v.len(), &"one entry per block column of the footprint"));
+        return Err(serde::de::Error::invalid_length(
+            v.len(),
+            &"one entry per block column of the footprint",
+        ));
     }
     Ok(v.into_boxed_slice())
 }
 
 /// Ground recipe for one column footprint. Per-footprint arrays hold
 /// `FOOTPRINT` entries indexed `lx * CHUNK_BLOCKS + lz`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash,
+)]
 pub struct ColumnGround {
     /// Surface block Y per block column.
     #[serde(deserialize_with = "footprint")]
@@ -77,8 +85,17 @@ impl Default for ColumnGround {
 impl ColumnGround {
     /// One stone formation everywhere, bedrock `UNDERGROUND_DEPTH` below the surface, no water.
     /// `surface` holds `COLUMN_FOOTPRINT` entries.
-    pub fn plain(surface: Box<[i16]>, band_base_sub_y: i32, stone: BlockId, bedrock: BlockId) -> Self {
-        assert_eq!(surface.len(), FOOTPRINT, "one surface per block column of the footprint");
+    pub fn plain(
+        surface: Box<[i16]>,
+        band_base_sub_y: i32,
+        stone: BlockId,
+        bedrock: BlockId,
+    ) -> Self {
+        assert_eq!(
+            surface.len(),
+            FOOTPRINT,
+            "one surface per block column of the footprint"
+        );
         Self {
             surface,
             geo: vec![0; FOOTPRINT].into_boxed_slice(),
@@ -146,5 +163,9 @@ pub fn implied_block(
     if !ground.is_implied(coords.y) {
         return None;
     }
-    Some(ground.block_at(local.0, local.2, coords.y * CHUNK_BLOCKS as i32 + local.1 as i32))
+    Some(ground.block_at(
+        local.0,
+        local.2,
+        coords.y * CHUNK_BLOCKS as i32 + local.1 as i32,
+    ))
 }

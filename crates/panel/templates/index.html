@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Worlds</h1>
+<p class="muted">Every namespace labelled <span class="mono">app.kubernetes.io/name=world</span> on this cluster. Refreshes every 5 s.</p>
+<div hx-get="/fragments/worlds" hx-trigger="load, every 5s">Loading…</div>
+{% endblock %}

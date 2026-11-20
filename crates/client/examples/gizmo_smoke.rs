@@ -4,7 +4,7 @@
 //! "gizmos draw but nothing shows" — compares the gizmo pipeline against the
 //! mesh pipeline under this machine's adapter/driver.
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 fn main() {
     App::new()
@@ -40,7 +40,10 @@ fn draw_gizmos(mut gizmos: Gizmos) {
         Vec3::new(3.0, 3.0, 0.0),
         bevy::color::palettes::css::RED,
     );
-    gizmos.cube(Transform::from_xyz(2.5, 0.0, 0.0), bevy::color::palettes::css::YELLOW);
+    gizmos.cube(
+        Transform::from_xyz(2.5, 0.0, 0.0),
+        bevy::color::palettes::css::YELLOW,
+    );
 }
 
 fn screenshot_and_exit(

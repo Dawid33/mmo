@@ -28,13 +28,13 @@
 //! over the body. Esc opens the menu and frees the pointer.
 
 use bevy::prelude::*;
-use game::movement::UNITS_PER_METER;
 use game::InputEvent;
+use game::movement::UNITS_PER_METER;
 
+use super::CommanderCamera;
 use super::adventure::ClientPlayMode;
 use super::level::WorkingLevel;
 use super::tiles::TileMirror;
-use super::CommanderCamera;
 use crate::renderer::bridge::{LocalBody, SimEntity, SimTarget};
 use crate::renderer::cursor::CursorPolicy;
 use crate::renderer::look::look_rotation;
@@ -44,7 +44,8 @@ use crate::session::{AppState, InPlay};
 
 /// Switches first ↔ third person (Minecraft's perspective key).
 pub const BODY_VIEW_KEY: KeyCode = KeyCode::F5;
-/// Vertical field of view of the eyes.
+/// Vertical field of view of the eyes at start: the FOV setting's default
+/// (`GraphicsSettings::fov_deg`, which `view_feel::apply_view_feel` applies).
 pub const FIRST_PERSON_FOV_Y_DEG: f32 = 70.0;
 /// Near clip plane of the eyes, metres.
 pub const FIRST_PERSON_NEAR_M: f32 = 0.05;
@@ -146,7 +147,10 @@ pub fn ensure_first_person(
     // Nobody pressed for the eyes (Adventure starting): the pointer stays free
     // until a click in the window (`cursor::retake_pointer`).
     policy.released = want;
-    let _ = events.0.send(game::GameEventKind::PlayerInput(client, InputEvent::FpsCam(want)));
+    let _ = events.0.send(game::GameEventKind::PlayerInput(
+        client,
+        InputEvent::FpsCam(want),
+    ));
     if want {
         // The eyes replace the top-down view: back to the 3D rig first, so
         // leaving the body view returns to it.
@@ -239,6 +243,7 @@ pub fn sync_first_person_camera(
     mirror: Res<TileMirror>,
     bodies: Query<(&SimEntity, &SimTarget), (With<LocalBody>, Without<Eyes>)>,
     mut eyes: Query<(Entity, &mut SimTarget), With<Eyes>>,
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
     roots: Res<crate::renderer::bridge::RegionRoots>,
 ) {
     if !fp.on || crate::session::frontend_has_screen(state.as_deref(), in_play.as_deref()) {
@@ -250,7 +255,12 @@ pub fn sync_first_person_camera(
         return;
     }
     // Bodies of a tree the frame moved away from do not count (`RegionRoots::drawn`).
-    let Some((sim, body)) = eyes_body(mirror.region(), bodies.iter().filter(|(s, _)| roots.drawn(s.region))) else { return };
+    let Some((sim, body)) = eyes_body(
+        mirror.region(),
+        bodies.iter().filter(|(s, _)| roots.drawn(s.region)),
+    ) else {
+        return;
+    };
     let (pos, rot) = (world_pos(&mirror.frame(), sim.region, body.pos), body.rot);
     if let Ok((_, mut target)) = eyes.single_mut() {
         if target.pos != pos || target.rot != rot {
@@ -263,15 +273,20 @@ pub fn sync_first_person_camera(
     commands.spawn((
         Eyes,
         ThirdPersonPull::default(),
+        super::view_feel::ViewFeel::default(),
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
-            fov: FIRST_PERSON_FOV_Y_DEG.to_radians(),
+            fov: settings.fov_deg.to_radians(),
             near: FIRST_PERSON_NEAR_M * UNITS_PER_METER,
             far: game::lod::LOD_HORIZON_UNITS,
             ..default()
         }),
         // At the eye height from the first frame: no rise from the body's centre.
-        Transform { translation: target.goal(), rotation: rot, ..default() },
+        Transform {
+            translation: target.goal(),
+            rotation: rot,
+            ..default()
+        },
         target,
         UiCamera,
         crate::session::SessionScoped,
@@ -303,7 +318,9 @@ pub fn restore_eye_point(mut eyes: Query<(&mut Transform, &mut ThirdPersonPull),
 /// [`THIRD_PERSON_WALL_MARGIN_M`] short of it, never past the eye.
 pub fn third_person_position(eye: Vec3, yaw: f32, pitch: f32, hit: Option<f32>) -> Vec3 {
     let full = THIRD_PERSON_DISTANCE_M * UNITS_PER_METER;
-    let d = hit.map_or(full, |h| (h - THIRD_PERSON_WALL_MARGIN_M * UNITS_PER_METER).clamp(0.0, full));
+    let d = hit.map_or(full, |h| {
+        (h - THIRD_PERSON_WALL_MARGIN_M * UNITS_PER_METER).clamp(0.0, full)
+    });
     eye + third_person_back(yaw, pitch) * d
 }
 
@@ -334,7 +351,11 @@ fn third_person_hit(eye: Vec3, dir: Vec3, solid: impl Fn(game::TilePos) -> bool)
     let reach = THIRD_PERSON_DISTANCE_M * UNITS_PER_METER / size;
     let v = |p: Vec3| game::rapier3d::math::Vector::new(p.x, p.y, p.z);
     let hit = game::edit::raycast_blocks(v(eye), v(dir), reach, solid)?;
-    let min = Vec3::new(hit.block[0] as f32, hit.block[1] as f32, hit.block[2] as f32) * size;
+    let min = Vec3::new(
+        hit.block[0] as f32,
+        hit.block[1] as f32,
+        hit.block[2] as f32,
+    ) * size;
     Some(box_entry_distance(eye, dir, min, min + Vec3::splat(size)))
 }
 
@@ -375,4 +396,3 @@ pub fn place_third_person_camera(
         }
     }
 }
-

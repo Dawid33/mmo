@@ -130,7 +130,10 @@ enum ForgedLayer {
 
 impl ForgedLayer {
     fn is_monthly(self) -> bool {
-        matches!(self, ForgedLayer::MonthlyTemperature | ForgedLayer::MonthlyRain)
+        matches!(
+            self,
+            ForgedLayer::MonthlyTemperature | ForgedLayer::MonthlyRain
+        )
     }
 
     fn parse(name: &str) -> Option<ForgedLayer> {
@@ -277,14 +280,21 @@ fn parse_args() -> Args {
         }
     }
     let monthly = a.forged_layer.is_some_and(ForgedLayer::is_monthly);
-    assert!(!monthly || a.world.is_some(), "--layer {} needs --world <file>", layer_name_of(&a));
-    assert!(a.month.is_none() || monthly, "--month needs --layer monthly-temperature or monthly-rain");
+    assert!(
+        !monthly || a.world.is_some(),
+        "--layer {} needs --world <file>",
+        layer_name_of(&a)
+    );
+    assert!(
+        a.month.is_none() || monthly,
+        "--month needs --layer monthly-temperature or monthly-rain"
+    );
     if monthly {
         // The whole world unless the caller chose a window: the default 8 km window shows only the
         // middle latitudes of even the Dev planet.
         let path = a.world.as_ref().expect("checked above");
-        let world =
-            worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let world = worldgen::forged::ForgedWorld::load(path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let (min, max) = world.artifact_bounds_engine_m();
         if !a.span_given {
             a.span_m = max[0] - min[0];
@@ -300,7 +310,8 @@ fn parse_args() -> Args {
 /// forged world the fresh-water surface over it (NaN = none).
 fn sample_heights(a: &Args) -> (Vec<f32>, Vec<f32>) {
     let forged = a.world.as_ref().map(|path| {
-        worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        worldgen::forged::ForgedWorld::load(path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     });
     let p = TerrainPipeline::new(a.seed);
     let step = a.span_m / a.size as f64;
@@ -312,7 +323,9 @@ fn sample_heights(a: &Args) -> (Vec<f32>, Vec<f32>) {
     let mut heights = vec![0f32; a.size * a.size];
     let mut waters = vec![f32::NAN; a.size * a.size];
     std::thread::scope(|s| {
-        let bands = heights.chunks_mut(rows_per * a.size).zip(waters.chunks_mut(rows_per * a.size));
+        let bands = heights
+            .chunks_mut(rows_per * a.size)
+            .zip(waters.chunks_mut(rows_per * a.size));
         for (band, (rows, water_rows)) in bands.enumerate() {
             let (p, forged) = (&p, &forged);
             s.spawn(move || {
@@ -353,16 +366,27 @@ fn percentile(sorted: &[f32], q: f64) -> f32 {
 
 /// `--tiles`: the world map as the game shows it, one PNG per layer.
 fn write_tiles(a: &Args) {
-    use worldgen::tile_map::{build_world_map, rasterize_layer, MapLayer};
+    use worldgen::tile_map::{MapLayer, build_world_map, rasterize_layer};
     let path = a.world.as_ref().expect("--tiles needs --world <file>");
-    let world = worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let world = worldgen::forged::ForgedWorld::load(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let started = std::time::Instant::now();
     let map = build_world_map(&world);
-    println!("world map: {}x{} tiles in {:?}", map.width, map.height, started.elapsed());
+    println!(
+        "world map: {}x{} tiles in {:?}",
+        map.width,
+        map.height,
+        started.elapsed()
+    );
     let packet = game::encode_packet(&game::ServerPacket::WorldMap(map.clone())).expect("encode");
     println!("WorldMap packet: {} bytes on the wire", packet.len());
     // Relief of the tiles with a landing spot.
-    let mut relief: Vec<f32> = map.tiles.iter().filter(|t| t.landing.is_some()).map(|t| t.relief_m).collect();
+    let mut relief: Vec<f32> = map
+        .tiles
+        .iter()
+        .filter(|t| t.landing.is_some())
+        .map(|t| t.relief_m)
+        .collect();
     relief.sort_by(f32::total_cmp);
     if !relief.is_empty() {
         let p = |q: f64| relief[((relief.len() - 1) as f64 * q).round() as usize];
@@ -382,8 +406,13 @@ fn write_tiles(a: &Args) {
     }
     for layer in MapLayer::ALL {
         let (w, h, px) = rasterize_layer(&map, layer);
-        let img = image::RgbaImage::from_raw(w, h, px.into_iter().flatten().collect()).expect("buffer size");
-        let out = format!("{}-tiles-{}.png", a.out.display(), layer.label().to_lowercase());
+        let img = image::RgbaImage::from_raw(w, h, px.into_iter().flatten().collect())
+            .expect("buffer size");
+        let out = format!(
+            "{}-tiles-{}.png",
+            a.out.display(),
+            layer.label().to_lowercase()
+        );
         img.save(&out).expect("write tiles png");
         println!("wrote {out}");
     }
@@ -422,7 +451,10 @@ fn main() {
             let dhdz = (at(x, zd) - at(x, zu)) / ((zd - zu) as f64 * step);
 
             let fresh = waters[z * n + x]; // lake or river surface above this column
-            let sample = PointSample { ground_y: h, water_y: (!fresh.is_nan()).then_some(fresh as f64) };
+            let sample = PointSample {
+                ground_y: h,
+                water_y: (!fresh.is_nan()).then_some(fresh as f64),
+            };
             let water = !is_dry(&sample);
             let shade = if water {
                 1.0 // the sea surface is flat; depth already carries the shape
@@ -444,7 +476,11 @@ fn main() {
             color.put_pixel(x as u32, z as u32, Rgb([px(c[0]), px(c[1]), px(c[2])]));
 
             let t = (h - HEIGHT_MIN_M) / (HEIGHT_MAX_M - HEIGHT_MIN_M);
-            gray.put_pixel(x as u32, z as u32, Luma([(t.clamp(0.0, 1.0) * 65535.0) as u16]));
+            gray.put_pixel(
+                x as u32,
+                z as u32,
+                Luma([(t.clamp(0.0, 1.0) * 65535.0) as u16]),
+            );
         }
     }
 
@@ -459,7 +495,9 @@ fn main() {
 
     if let Some(layer) = a.layer {
         let path = format!("{stem}-{}.png", layer.name());
-        write_layer(&a, layer, &heights).save(&path).expect("write habitat layer");
+        write_layer(&a, layer, &heights)
+            .save(&path)
+            .expect("write habitat layer");
         println!("wrote {path}");
     }
 
@@ -469,7 +507,9 @@ fn main() {
         } else {
             format!("{stem}-{}.png", layer.name())
         };
-        write_forged_layer(&a, layer).save(&path).expect("write forged layer");
+        write_forged_layer(&a, layer)
+            .save(&path)
+            .expect("write forged layer");
         println!("wrote {path}");
     }
 
@@ -482,7 +522,14 @@ fn main() {
         100.0 * land as f64 / (n * n) as f64
     );
     print!("surface height m:");
-    for (label, q) in [("min", 0.0), ("p10", 0.1), ("p50", 0.5), ("p90", 0.9), ("p99", 0.99), ("max", 1.0)] {
+    for (label, q) in [
+        ("min", 0.0),
+        ("p10", 0.1),
+        ("p50", 0.5),
+        ("p90", 0.9),
+        ("p99", 0.99),
+        ("max", 1.0),
+    ] {
         print!(" {label} {:.1}", percentile(&sorted, q));
     }
     println!();
@@ -500,9 +547,15 @@ fn main() {
 /// pixel's centre, in the world map's own colours (`Biome::map_rgb`,
 /// `tile_map` ramps and `region_color`); open sea dimmed on the climate layers.
 fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
-    use worldgen::tile_map::{drainage_color, precipitation_color, region_color, temperature_color, OCEAN_DIM};
-    let path = a.world.as_ref().expect("--layer biome|temperature|precipitation|drainage|regions needs --world <file>");
-    let world = worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    use worldgen::tile_map::{
+        OCEAN_DIM, drainage_color, precipitation_color, region_color, temperature_color,
+    };
+    let path = a
+        .world
+        .as_ref()
+        .expect("--layer biome|temperature|precipitation|drainage|regions needs --world <file>");
+    let world = worldgen::forged::ForgedWorld::load(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     // The window keeps the world's own proportions: `--size` columns over
     // `--span` meters, and as many rows as the world is tall for its width
     // (a 2:1 world gives a 2:1 picture), at the same meters per pixel.
@@ -510,7 +563,10 @@ fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<
     let (min, max) = world.artifact_bounds_engine_m();
     let nz = ((nx as f64 * (max[1] - min[1]) / (max[0] - min[0])).round() as usize).max(1);
     let step = a.span_m / nx as f64;
-    let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - step * nz as f64 * 0.5);
+    let (x0, z0) = (
+        a.center.0 - a.span_m * 0.5,
+        a.center.1 - step * nz as f64 * 0.5,
+    );
     let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(nx as u32, nz as u32);
     let m = month_of(a) - 1;
     if layer.is_monthly() {
@@ -521,7 +577,11 @@ fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<
             let (x, z) = (x0 + (ix as f64 + 0.5) * step, z0 + (iz as f64 + 0.5) * step);
             let c = world.cell_climate(x, z);
             let dim = |rgb: [f64; 3]| {
-                let k = if c.height_m < 0.0 && !c.is_lake { OCEAN_DIM } else { 1.0 };
+                let k = if c.height_m < 0.0 && !c.is_lake {
+                    OCEAN_DIM
+                } else {
+                    1.0
+                };
                 rgb.map(|v| (v * k).round().clamp(0.0, 255.0) as u8)
             };
             let rgb = match layer {
@@ -529,12 +589,12 @@ fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<
                 ForgedLayer::Temperature => dim(temperature_color(f64::from(c.temperature_c))),
                 ForgedLayer::Precipitation => dim(precipitation_color(f64::from(c.precip_mm))),
                 ForgedLayer::Drainage => dim(drainage_color(f64::from(c.drainage))),
-                ForgedLayer::MonthlyTemperature => {
-                    dim(temperature_color(f64::from(world.monthly_at_ground(x, z).temp_c[m])))
-                }
-                ForgedLayer::MonthlyRain => {
-                    dim(precipitation_color(12.0 * f64::from(world.monthly_at_ground(x, z).precip_mm[m])))
-                }
+                ForgedLayer::MonthlyTemperature => dim(temperature_color(f64::from(
+                    world.monthly_at_ground(x, z).temp_c[m],
+                ))),
+                ForgedLayer::MonthlyRain => dim(precipitation_color(
+                    12.0 * f64::from(world.monthly_at_ground(x, z).precip_mm[m]),
+                )),
                 ForgedLayer::Regions => {
                     let (id, kind) = world.region_cell(x, z);
                     region_color(id, kind)
@@ -559,7 +619,11 @@ fn print_monthly_latitudes(world: &worldgen::forged::ForgedWorld, layer: ForgedL
     for lat in [75.0, 45.0, 0.0, -45.0, -75.0] {
         let (x, z) = (min[0] + 0.5 * width, min[1] + (90.0 - lat) / 180.0 * height);
         let n = world.monthly_at_ground(x, z);
-        let v = if matches!(layer, ForgedLayer::MonthlyRain) { n.precip_mm[m] } else { n.temp_c[m] };
+        let v = if matches!(layer, ForgedLayer::MonthlyRain) {
+            n.precip_mm[m]
+        } else {
+            n.temp_c[m]
+        };
         print!(" {lat:+.0} deg {v:.1} {unit};");
     }
     println!();
@@ -569,7 +633,8 @@ fn print_monthly_latitudes(world: &worldgen::forged::ForgedWorld, layer: ForgedL
 /// generator will ask: the pixel's surface block from the map's own heights.
 fn write_layer(a: &Args, layer: Layer, heights: &[f32]) -> ImageBuffer<Luma<u8>, Vec<u8>> {
     let forged = a.world.as_ref().map(|path| {
-        worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        worldgen::forged::ForgedWorld::load(path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     });
     let procedural = ProceduralHabitat::new(a.seed);
     let source: &(dyn HabitatSource + Sync) = match &forged {
@@ -607,12 +672,20 @@ fn write_layer(a: &Args, layer: Layer, heights: &[f32]) -> ImageBuffer<Luma<u8>,
 /// Trees per pixel (white at `TREES_PER_PIXEL_FULL`), placed exactly as the
 /// generator will: `trees_in` over the map window, surface from the map's own
 /// heights (lakes are not modelled here; open sea columns count as water).
-fn write_trees(a: &Args, source: &(dyn HabitatSource + Sync), heights: &[f32]) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+fn write_trees(
+    a: &Args,
+    source: &(dyn HabitatSource + Sync),
+    heights: &[f32],
+) -> ImageBuffer<Luma<u8>, Vec<u8>> {
     const TREES_PER_PIXEL_FULL: f64 = 4.0;
     let n = a.size;
     let step = a.span_m / n as f64;
     let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - a.span_m * 0.5);
-    let pixel = |v: i32, origin: f64| (((v as f64 + 0.5 - origin) / step).floor().clamp(0.0, n as f64 - 1.0)) as usize;
+    let pixel = |v: i32, origin: f64| {
+        (((v as f64 + 0.5 - origin) / step)
+            .floor()
+            .clamp(0.0, n as f64 - 1.0)) as usize
+    };
     let surface = |x: i32, z: i32| {
         let block = surface_block(heights[pixel(z, z0) * n + pixel(x, x0)] as f64);
         (block >= SEA_TOP_BLOCK).then_some(block)
@@ -633,6 +706,9 @@ fn write_trees(a: &Args, source: &(dyn HabitatSource + Sync), heights: &[f32]) -
         counts[r * n + c] += 1;
     }
     println!("{} trees", trees.len());
-    let pixels = counts.iter().map(|&c| ((c as f64 / TREES_PER_PIXEL_FULL).min(1.0) * 255.0) as u8).collect();
+    let pixels = counts
+        .iter()
+        .map(|&c| ((c as f64 / TREES_PER_PIXEL_FULL).min(1.0) * 255.0) as u8)
+        .collect();
     ImageBuffer::from_raw(n as u32, n as u32, pixels).expect("pixel buffer matches the image size")
 }

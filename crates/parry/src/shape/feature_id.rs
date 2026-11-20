@@ -121,8 +121,7 @@ pub type SubShapeId = u32;
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, Default)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, Default, state_hash::StateHash)] // mmo-fork: StateHash
 pub enum FeatureId {
     /// Shape-dependent identifier of a vertex (0-dimensional corner point).
     ///
@@ -450,8 +449,7 @@ impl FeatureId {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct PackedFeatureId(pub u32);
 
 impl PackedFeatureId {

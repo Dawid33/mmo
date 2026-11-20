@@ -6,7 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{decode_packet, encode_packet, BlockId, Chunk, PacketError, RegionCoords, WorldMap, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS};
+use crate::{
+    BLOCK_VOXELS, BlockId, CHUNK_BLOCKS, Chunk, PacketError, REGION_BLOCKS, RegionCoords, WorldMap,
+    decode_packet, encode_packet,
+};
 
 /// Samples along a tile's edge.
 pub const MAP_TILE_SAMPLES: u32 = 256;
@@ -46,12 +49,20 @@ impl MapTileKey {
     /// The tile of `level` holding block `(bx, bz)` (floors toward −∞).
     pub fn containing(level: u8, bx: i64, bz: i64) -> MapTileKey {
         let span = MAP_TILE_SAMPLES as i64 * (1i64 << level);
-        MapTileKey { level, x: bx.div_euclid(span) as i32, z: bz.div_euclid(span) as i32 }
+        MapTileKey {
+            level,
+            x: bx.div_euclid(span) as i32,
+            z: bz.div_euclid(span) as i32,
+        }
     }
 
     /// The tile one level up holding this one (`None` at [`MAP_LEVEL_LIMIT`]).
     pub fn parent(self) -> Option<MapTileKey> {
-        (self.level < MAP_LEVEL_LIMIT).then(|| MapTileKey { level: self.level + 1, x: self.x.div_euclid(2), z: self.z.div_euclid(2) })
+        (self.level < MAP_LEVEL_LIMIT).then(|| MapTileKey {
+            level: self.level + 1,
+            x: self.x.div_euclid(2),
+            z: self.z.div_euclid(2),
+        })
     }
 
     /// Every region the tile overlaps (derived from `REGION_BLOCKS`; unwrapped coordinates).
@@ -74,7 +85,9 @@ pub fn top_level(map: &WorldMap) -> u8 {
 /// [`top_level`] of an extent.
 pub fn top_level_of(e: crate::MapExtent) -> u8 {
     let side = e.width.max(e.height).max(1) as i64 * REGION_BLOCKS as i64;
-    (0..MAP_LEVEL_LIMIT).find(|&level| (MAP_TILE_SAMPLES as i64) << level >= side).unwrap_or(MAP_LEVEL_LIMIT)
+    (0..MAP_LEVEL_LIMIT)
+        .find(|&level| (MAP_TILE_SAMPLES as i64) << level >= side)
+        .unwrap_or(MAP_LEVEL_LIMIT)
 }
 
 /// Bits of [`MapSample::flags`].
@@ -145,7 +158,10 @@ fn frame(bytes: &[u8]) -> Vec<u8> {
 impl MapTile {
     /// An empty tile: every sample default.
     pub fn blank(key: MapTileKey) -> MapTile {
-        MapTile { key, samples: vec![MapSample::default(); SAMPLES] }
+        MapTile {
+            key,
+            samples: vec![MapSample::default(); SAMPLES],
+        }
     }
 
     /// The sample at column `sx`, row `sz` (each `0..MAP_TILE_SAMPLES`).
@@ -154,7 +170,11 @@ impl MapTile {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        assert_eq!(self.samples.len(), SAMPLES, "a map tile holds MAP_TILE_SAMPLES² samples");
+        assert_eq!(
+            self.samples.len(),
+            SAMPLES,
+            "a map tile holds MAP_TILE_SAMPLES² samples"
+        );
         let mut height = Vec::with_capacity(SAMPLES * 2);
         for row in self.samples.chunks_exact(EDGE) {
             let mut prev = 0i16;
@@ -163,9 +183,23 @@ impl MapTile {
                 prev = s.height;
             }
         }
-        let block: Vec<u8> = self.samples.iter().flat_map(|s| s.block.0.to_le_bytes()).collect();
-        let water_flags: Vec<u8> = self.samples.iter().map(|s| s.water).chain(self.samples.iter().map(|s| s.flags)).collect();
-        let wire = TileWire { key: self.key, height: frame(&height), block: frame(&block), water_flags: frame(&water_flags) };
+        let block: Vec<u8> = self
+            .samples
+            .iter()
+            .flat_map(|s| s.block.0.to_le_bytes())
+            .collect();
+        let water_flags: Vec<u8> = self
+            .samples
+            .iter()
+            .map(|s| s.water)
+            .chain(self.samples.iter().map(|s| s.flags))
+            .collect();
+        let wire = TileWire {
+            key: self.key,
+            height: frame(&height),
+            block: frame(&block),
+            water_flags: frame(&water_flags),
+        };
         encode_packet(&wire).expect("a map tile always serialises")
     }
 
@@ -174,7 +208,10 @@ impl MapTile {
         let height: Vec<u8> = decode_packet(&wire.height)?;
         let block: Vec<u8> = decode_packet(&wire.block)?;
         let water_flags: Vec<u8> = decode_packet(&wire.water_flags)?;
-        if height.len() != SAMPLES * 2 || block.len() != SAMPLES * 2 || water_flags.len() != SAMPLES * 2 {
+        if height.len() != SAMPLES * 2
+            || block.len() != SAMPLES * 2
+            || water_flags.len() != SAMPLES * 2
+        {
             return Err(MapTileDecodeError::Length);
         }
         let mut samples = Vec::with_capacity(SAMPLES);
@@ -191,7 +228,10 @@ impl MapTile {
                 });
             }
         }
-        Ok(MapTile { key: wire.key, samples })
+        Ok(MapTile {
+            key: wire.key,
+            samples,
+        })
     }
 }
 
@@ -211,7 +251,9 @@ pub fn chunk_top(chunk: &Chunk) -> ChunkTop {
     for bz in 0..CHUNK_BLOCKS {
         for bx in 0..CHUNK_BLOCKS {
             let (vx, vz) = (bx * BLOCK_VOXELS + centre, bz * BLOCK_VOXELS + centre);
-            tops[bx + CHUNK_BLOCKS * bz] = chunk.column_top(vx as u32, vz as u32).map(|(y, id)| ((y + 1) as u16, id));
+            tops[bx + CHUNK_BLOCKS * bz] = chunk
+                .column_top(vx as u32, vz as u32)
+                .map(|(y, id)| ((y + 1) as u16, id));
         }
     }
     // Slopes count as full blocks (the centre-column sample is half height on some facings).

@@ -1,0 +1,19 @@
+{% if let Some(e) = error %}<p class="problems">{{ e }}</p>{% endif %}
+{% if rows.is_empty() && error.is_none() %}<p class="muted">No world namespace found.</p>{% endif %}
+{% if !rows.is_empty() %}
+<div class="scroll"><table>
+<tr><th>World</th><th>Namespace</th><th>State</th><th>Replicas (ready/desired)</th><th>Generation</th><th>Last cut</th><th>Build</th><th>Last operation</th></tr>
+{% for r in rows %}
+<tr>
+  <td><a href="/worlds/{{ r.namespace }}"><strong>{{ r.id }}</strong></a></td>
+  <td class="mono">{{ r.namespace }}</td>
+  <td><span class="pill {{ r.state_class }}">{{ r.state }}</span></td>
+  <td class="num">{{ r.summary }}</td>
+  <td class="num">{{ r.generation }}</td>
+  <td>{{ r.last_cut }}</td>
+  <td class="mono">{{ r.revision }}</td>
+  <td class="muted">{{ r.operation }}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}

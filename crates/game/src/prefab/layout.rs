@@ -5,19 +5,28 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::Shape;
 use super::file::Marker;
 use super::resolve::{Cell, ResolvedPrefab, ResolvedShape};
 use super::turn::{turn_voxel, turn_xz};
-use super::Shape;
 use crate::registry::BlockId;
-use crate::{Block, BlockIndex, ChiselData, BLOCK_VOXELS, CHUNK_BLOCKS};
+use crate::{BLOCK_VOXELS, Block, BlockIndex, CHUNK_BLOCKS, ChiselData};
 
 const CB: i32 = CHUNK_BLOCKS as i32;
 
 /// Where a prefab goes: its anchor cell lands on world block `anchor`. Mirror (x -> -x about the anchor)
 /// is applied first, then `turn` quarter turns clockwise seen from above (`turn_xz`).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, state_hash::StateHash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    state_hash::StateHash,
 )]
 pub struct Placement {
     pub anchor: [i32; 3],
@@ -45,9 +54,17 @@ pub fn world_of_cell(p: &ResolvedPrefab, at: &Placement, cell: [i32; 3]) -> [i32
 }
 
 pub fn cell_of_world(p: &ResolvedPrefab, at: &Placement, world: [i32; 3]) -> [i32; 3] {
-    let (x, z) = turn_xz(world[0] - at.anchor[0], world[2] - at.anchor[2], (4 - at.turn % 4) % 4);
+    let (x, z) = turn_xz(
+        world[0] - at.anchor[0],
+        world[2] - at.anchor[2],
+        (4 - at.turn % 4) % 4,
+    );
     let x = if at.mirror { -x } else { x };
-    [x + p.anchor[0], world[1] - at.anchor[1] + p.anchor[1], z + p.anchor[2]]
+    [
+        x + p.anchor[0],
+        world[1] - at.anchor[1] + p.anchor[1],
+        z + p.anchor[2],
+    ]
 }
 
 /// World-block bounds of the whole prefab box: (min inclusive, max exclusive).
@@ -55,12 +72,20 @@ pub fn placement_bounds(p: &ResolvedPrefab, at: &Placement) -> ([i32; 3], [i32; 
     let last = [0, 1, 2].map(|a| p.size[a] as i32 - 1);
     let a = world_of_cell(p, at, [0, 0, 0]);
     let b = world_of_cell(p, at, last);
-    ([0, 1, 2].map(|i| a[i].min(b[i])), [0, 1, 2].map(|i| a[i].max(b[i]) + 1))
+    (
+        [0, 1, 2].map(|i| a[i].min(b[i])),
+        [0, 1, 2].map(|i| a[i].max(b[i]) + 1),
+    )
 }
 
 /// The highest solid block of the prefab over world column (x, z) under this placement:
 /// (world y, top material). None when the column is outside the prefab or empty.
-pub fn column_top_world(p: &ResolvedPrefab, at: &Placement, x: i32, z: i32) -> Option<(i32, BlockId)> {
+pub fn column_top_world(
+    p: &ResolvedPrefab,
+    at: &Placement,
+    x: i32,
+    z: i32,
+) -> Option<(i32, BlockId)> {
     let c = cell_of_world(p, at, [x, at.anchor[1], z]);
     let (cell_y, id) = p.column_top(c[0], c[2])?;
     Some((at.anchor[1] + cell_y - p.anchor[1], id))
@@ -89,7 +114,11 @@ pub fn chunks_touched(p: &ResolvedPrefab, at: &Placement) -> Vec<[i32; 3]> {
     out
 }
 
-fn voxel_chisel(cuboids: &[([u8; 3], [u8; 3], u8)], mats: &[BlockId], at: &Placement) -> ChiselData {
+fn voxel_chisel(
+    cuboids: &[([u8; 3], [u8; 3], u8)],
+    mats: &[BlockId],
+    at: &Placement,
+) -> ChiselData {
     let n = BLOCK_VOXELS;
     let mut table: Vec<Option<u8>> = vec![None; n * n * n];
     for (lo, hi, m) in cuboids {
@@ -116,19 +145,40 @@ pub fn cell_write(cell: Cell<'_>, at: &Placement) -> Option<Option<Write>> {
     cell_write_cached(cell, at, &mut ChiselCache::new())
 }
 
-fn cell_write_cached(cell: Cell<'_>, at: &Placement, chisels: &mut ChiselCache) -> Option<Option<Write>> {
+fn cell_write_cached(
+    cell: Cell<'_>,
+    at: &Placement,
+    chisels: &mut ChiselCache,
+) -> Option<Option<Write>> {
     match cell {
         Cell::Keep => None,
         Cell::Carve => Some(None),
         Cell::Block(id) => Some(Some((Block { id, data: [0; 3] }, None))),
         Cell::Shaped(ResolvedShape::Named { shape, mat }) => {
-            let s = if at.mirror { shape.mirrored_x() } else { *shape }.turned(at.turn);
-            let chisel = chisels.entry((s, *mat)).or_insert_with(|| s.chisel(*mat)).clone();
-            Some(Some((Block { id: *mat, data: [0; 3] }, Some(chisel))))
+            let s = if at.mirror {
+                shape.mirrored_x()
+            } else {
+                *shape
+            }
+            .turned(at.turn);
+            let chisel = chisels
+                .entry((s, *mat))
+                .or_insert_with(|| s.chisel(*mat))
+                .clone();
+            Some(Some((
+                Block {
+                    id: *mat,
+                    data: [0; 3],
+                },
+                Some(chisel),
+            )))
         }
         Cell::Shaped(ResolvedShape::Cuboids { cuboids, mats }) => {
             let id = mats.first().copied().unwrap_or_default();
-            Some(Some((Block { id, data: [0; 3] }, Some(voxel_chisel(cuboids, mats, at)))))
+            Some(Some((
+                Block { id, data: [0; 3] },
+                Some(voxel_chisel(cuboids, mats, at)),
+            )))
         }
     }
 }
@@ -149,7 +199,9 @@ pub fn layout_chunk(p: &ResolvedPrefab, at: &Placement, chunk: [i32; 3]) -> Opti
         let w = world_of_cell(p, at, cell);
         let [x, y, z] = [0, 1, 2].map(|i| (w[i] - wmin[i]) as usize);
         debug_assert!(x < CHUNK_BLOCKS && y < CHUNK_BLOCKS && z < CHUNK_BLOCKS);
-        let Some(entry) = cell_write_cached(c, at, &mut chisels) else { return };
+        let Some(entry) = cell_write_cached(c, at, &mut chisels) else {
+            return;
+        };
         cells.insert(BlockIndex::from_xyz(x, y, z), entry);
     });
     if cells.is_empty() {

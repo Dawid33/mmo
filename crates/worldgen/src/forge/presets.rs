@@ -91,7 +91,8 @@ pub fn apply(preset: &Preset) -> Knobs {
 pub fn matching(knobs: &Knobs) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| {
         let candidate = apply(p);
-        SPECS.iter().all(|s| candidate.get(s.key) == knobs.get(s.key))
+        SPECS
+            .iter()
+            .all(|s| candidate.get(s.key) == knobs.get(s.key))
     })
 }
-

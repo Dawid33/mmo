@@ -63,7 +63,9 @@ fn split_address(address: &str) -> Result<(&str, Option<u16>), String> {
     }
     let rest = rest.split('/').next().unwrap_or("");
     let (host, port) = if let Some(v6) = rest.strip_prefix('[') {
-        let Some(end) = v6.find(']') else { return Err(format!("bad address {address:?}")) };
+        let Some(end) = v6.find(']') else {
+            return Err(format!("bad address {address:?}"));
+        };
         let host = &rest[..end + 2];
         (host, rest[end + 2..].strip_prefix(':'))
     } else {
@@ -93,7 +95,9 @@ pub fn web_server_for(address: &str) -> Result<WebServer, String> {
         return Ok(WebServer::PinnedLocal);
     }
     let port = port.unwrap_or(DEFAULT_WEBTRANSPORT_PORT);
-    Ok(WebServer::Trusted { url: format!("https://{host}:{port}/") })
+    Ok(WebServer::Trusted {
+        url: format!("https://{host}:{port}/"),
+    })
 }
 
 /// The server a login ticket names (`JoinTicket::webtransport` +
@@ -124,7 +128,8 @@ pub fn web_server_for_host(endpoint: &game::HostEndpoint) -> Result<WebServer, S
         .as_deref()
         .ok_or_else(|| format!("host {} offers no WebTransport address", endpoint.id))?;
     let url = webtransport_url(url)?;
-    Ok(pinned(url, endpoint.cert_hash.as_deref())?.unwrap_or_else(|| WebServer::Trusted { url: url.into() }))
+    Ok(pinned(url, endpoint.cert_hash.as_deref())?
+        .unwrap_or_else(|| WebServer::Trusted { url: url.into() }))
 }
 
 /// `url` trimmed, if it is an https URL.
@@ -141,7 +146,10 @@ fn pinned(url: &str, cert_hash: Option<&str>) -> Result<Option<WebServer>, Strin
     match cert_hash.map(str::trim).filter(|h| !h.is_empty()) {
         None => Ok(None),
         Some(hash) if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
-            Ok(Some(WebServer::Pinned { url: url.into(), cert_hash: hash.to_ascii_lowercase() }))
+            Ok(Some(WebServer::Pinned {
+                url: url.into(),
+                cert_hash: hash.to_ascii_lowercase(),
+            }))
         }
         Some(hash) => Err(format!("bad certificate hash {hash:?}")),
     }
@@ -159,4 +167,3 @@ pub fn default_server_address(built_for: Option<&str>, protocol: &str, hostname:
     }
     LOCAL_SERVER_ADDRESS.to_string()
 }
-

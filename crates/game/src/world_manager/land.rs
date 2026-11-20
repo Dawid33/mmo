@@ -96,18 +96,36 @@ impl<S: RegionSpawner> WorldManager<S> {
         let mut by: BTreeMap<crate::SuperRegion, crate::SrLoad> = BTreeMap::new();
         for rc in self.regions.keys() {
             let sr = crate::super_region_of(*rc, side);
-            let l = by.entry(sr).or_insert(crate::SrLoad { sr, players: 0, regions: 0, tick_permille: 0 });
+            let l = by.entry(sr).or_insert(crate::SrLoad {
+                sr,
+                players: 0,
+                regions: 0,
+                tick_permille: 0,
+            });
             l.regions += 1;
             l.tick_permille = l.tick_permille.max(ticks.get(rc).copied().unwrap_or(0));
         }
         for (client, rc) in &self.homes {
-            if self.sessions.get(client).is_some_and(|s| matches!(s.kind, SessionKind::Home)) {
+            if self
+                .sessions
+                .get(client)
+                .is_some_and(|s| matches!(s.kind, SessionKind::Home))
+            {
                 let sr = crate::super_region_of(*rc, side);
-                by.entry(sr).or_insert(crate::SrLoad { sr, players: 0, regions: 0, tick_permille: 0 }).players += 1;
+                by.entry(sr)
+                    .or_insert(crate::SrLoad {
+                        sr,
+                        players: 0,
+                        regions: 0,
+                        tick_permille: 0,
+                    })
+                    .players += 1;
             }
         }
-        let mut out: Vec<crate::SrLoad> =
-            by.into_values().filter(|l| matches!(self.owner_of_sr(l.sr), crate::Owner::Me)).collect();
+        let mut out: Vec<crate::SrLoad> = by
+            .into_values()
+            .filter(|l| matches!(self.owner_of_sr(l.sr), crate::Owner::Me))
+            .collect();
         out.sort_by(crate::SrLoad::busiest_first);
         out.truncate(crate::LAND_LOAD_MAX);
         out
@@ -129,26 +147,52 @@ impl<S: RegionSpawner> WorldManager<S> {
         needs.extend(self.unowned_waiting.keys().copied());
         // Elastic 5: land a move brings here, or masked by a move, is not asked for.
         needs.retain(|sr| !self.expects_land(*sr) && !self.move_masked(*sr));
-        let scan = !self.left_peers.is_empty() && !self.land_scanned_ms.is_some_and(|at| now_ms < at + LAND_NEEDED_EVERY_MS);
+        let scan = !self.left_peers.is_empty()
+            && !self
+                .land_scanned_ms
+                .is_some_and(|at| now_ms < at + LAND_NEEDED_EVERY_MS);
         if scan {
             self.land_scanned_ms = Some(now_ms);
             for &o in self.left_peers.keys() {
-                let session = self.peers.get(&o).into_iter().flat_map(|p| p.session.unreceived());
+                let session = self
+                    .peers
+                    .get(&o)
+                    .into_iter()
+                    .flat_map(|p| p.session.unreceived());
                 let waiting = self.peer_waiting.get(&o).into_iter().flatten();
-                needs.extend(session.chain(waiting).filter_map(reliable_target).map(|rc| crate::super_region_of(rc, s)));
+                needs.extend(
+                    session
+                        .chain(waiting)
+                        .filter_map(reliable_target)
+                        .map(|rc| crate::super_region_of(rc, s)),
+                );
             }
             // A subscribe waiting for that land (`Session::asked_elsewhere`, R4 Task 16).
-            needs.extend(self.sessions.values().flat_map(|x| x.asked_elsewhere.iter()).map(|rc| crate::super_region_of(*rc, s)));
+            needs.extend(
+                self.sessions
+                    .values()
+                    .flat_map(|x| x.asked_elsewhere.iter())
+                    .map(|rc| crate::super_region_of(*rc, s)),
+            );
         }
         // Land masked for a release is still this host's: its needs wait for the decision
         // (asked once it is free, `land_released`; dropped as owned at an abort).
-        let masked: BTreeSet<SuperRegion> = needs.iter().copied().filter(|sr| self.releasing.contains_key(sr)).collect();
+        let masked: BTreeSet<SuperRegion> = needs
+            .iter()
+            .copied()
+            .filter(|sr| self.releasing.contains_key(sr))
+            .collect();
         needs.retain(|sr| self.asks_for(*sr));
         // Kept a second period: a need still there at the next ask is not logged again.
-        self.land_needed_sent.retain(|sr, at| needs.contains(sr) && now_ms < *at + 2 * LAND_NEEDED_EVERY_MS);
+        self.land_needed_sent
+            .retain(|sr, at| needs.contains(sr) && now_ms < *at + 2 * LAND_NEEDED_EVERY_MS);
         if self.world_attached() {
             for &sr in &needs {
-                if self.land_needed_sent.get(&sr).is_some_and(|&at| now_ms < at + LAND_NEEDED_EVERY_MS) {
+                if self
+                    .land_needed_sent
+                    .get(&sr)
+                    .is_some_and(|&at| now_ms < at + LAND_NEEDED_EVERY_MS)
+                {
                     continue;
                 }
                 let owner = self.owner_of_sr(sr);
@@ -158,7 +202,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     continue;
                 }
                 if !self.land_needed_sent.contains_key(&sr) {
-                    log::debug!("[server] super-region {sr:?} is needed here and is {owner:?}: asking the coordinator for it");
+                    log::debug!(
+                        "[server] super-region {sr:?} is needed here and is {owner:?}: asking the coordinator for it"
+                    );
                 }
                 self.land_needed_sent.insert(sr, now_ms);
                 self.world_send(HostMsg::LandNeeded { sr });
@@ -190,7 +236,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A spawn placement here needs `rc`, whose owner left cleanly (`placement.rs`): its land is
     /// asked for ([`Self::ask_for_land`]).
     pub(super) fn note_land_needed(&mut self, rc: crate::RegionCoords) {
-        self.land_needed.insert(crate::super_region_of(rc, self.ownership.1));
+        self.land_needed
+            .insert(crate::super_region_of(rc, self.ownership.1));
     }
 
     /// `sr` has an owner now: nothing here asks for it any more.
@@ -205,15 +252,24 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ([`Self::take_assigned`]), never applied here — the fence comes first.
     pub(super) fn assigned(&mut self, rows: Vec<(SuperRegion, u64)>) {
         let Some(directory) = self.ownership.0.directory() else {
-            log::warn!("[server] {} super-region(s) assigned, but this host keeps no directory: ignored", rows.len());
+            log::warn!(
+                "[server] {} super-region(s) assigned, but this host keeps no directory: ignored",
+                rows.len()
+            );
             return;
         };
         for (sr, epoch) in rows {
             if directory.epoch(sr).is_some_and(|known| known >= epoch) {
-                log::debug!("[server] assigned {sr:?} at epoch {epoch}, known at that epoch or newer: dropped");
+                log::debug!(
+                    "[server] assigned {sr:?} at epoch {epoch}, known at that epoch or newer: dropped"
+                );
                 continue;
             }
-            if self.assigned_rows.iter().any(|&(q, e)| q == sr && e >= epoch) {
+            if self
+                .assigned_rows
+                .iter()
+                .any(|&(q, e)| q == sr && e >= epoch)
+            {
                 continue;
             }
             self.assigned_rows.retain(|&(q, _)| q != sr);
@@ -232,10 +288,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// row (that comes as an `Assigned`, through the fence): one naming this host is ignored.
     pub(super) fn land_is(&mut self, sr: SuperRegion, owner: HostId, epoch: u64) {
         if owner == self.ordinal() {
-            log::warn!("[server] the coordinator named this host the owner of {sr:?} (epoch {epoch}) without an assignment: ignored");
+            log::warn!(
+                "[server] the coordinator named this host the owner of {sr:?} (epoch {epoch}) without an assignment: ignored"
+            );
             return;
         }
-        let Some(directory) = self.ownership.0.directory_mut() else { return };
+        let Some(directory) = self.ownership.0.directory_mut() else {
+            return;
+        };
         directory.set(sr, Some(owner), epoch);
         log::debug!("[server] super-region {sr:?} is host {owner}'s (epoch {epoch})");
         self.forget_land_need(sr);
@@ -267,8 +327,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         let sr = |rc: &RegionCoords| crate::super_region_of(*rc, s);
         let mut busy: BTreeSet<SuperRegion> = BTreeSet::new();
         busy.extend(self.regions.keys().map(sr));
-        busy.extend(self.pending_arrivals.iter().filter(|(_, l)| !l.is_empty()).map(|(rc, _)| sr(rc)));
-        busy.extend(self.intent_mailbox.iter().filter(|(_, l)| !l.is_empty()).map(|(rc, _)| sr(rc)));
+        busy.extend(
+            self.pending_arrivals
+                .iter()
+                .filter(|(_, l)| !l.is_empty())
+                .map(|(rc, _)| sr(rc)),
+        );
+        busy.extend(
+            self.intent_mailbox
+                .iter()
+                .filter(|(_, l)| !l.is_empty())
+                .map(|(rc, _)| sr(rc)),
+        );
         busy.extend(self.in_flight.values().map(|f| sr(&f.target)));
         for f in &self.in_flight_intents {
             busy.insert(sr(&f.target));
@@ -282,7 +352,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             busy.insert(sr(&m.from));
             busy.insert(sr(&m.target));
         }
-        let held = self.spawn_held.iter().map(|(_, r)| r).chain(&self.spawn_here);
+        let held = self
+            .spawn_held
+            .iter()
+            .map(|(_, r)| r)
+            .chain(&self.spawn_here);
         busy.extend(held.map(|r| sr(&self.spawn_region(r.record_region))));
         // An order already placed here pins its region until the session comes.
         busy.extend(self.pinned_regions().map(|rc| sr(&rc)));
@@ -296,7 +370,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// or one no longer owned, loses its stamp. Never under `static` / all-in-one. A busy spell
     /// shorter than one scan between two scans leaves the stamp as it was (bounded early release).
     pub(super) fn scan_idle_land(&mut self, now_ms: u64) {
-        if self.idle_scanned_ms != 0 && now_ms < self.idle_scanned_ms.saturating_add(LAND_IDLE_SCAN_MS) {
+        if self.idle_scanned_ms != 0
+            && now_ms < self.idle_scanned_ms.saturating_add(LAND_IDLE_SCAN_MS)
+        {
             return;
         }
         self.idle_scanned_ms = now_ms;
@@ -308,7 +384,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         let owned: BTreeSet<SuperRegion> = directory.owned_by(me).into_iter().collect();
         let busy = self.busy_land();
-        self.land_idle_since.retain(|sr, _| owned.contains(sr) && !busy.contains(sr));
+        self.land_idle_since
+            .retain(|sr, _| owned.contains(sr) && !busy.contains(sr));
         for sr in owned.difference(&busy) {
             self.land_idle_since.entry(*sr).or_insert(now_ms);
         }
@@ -321,7 +398,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// leaver's), or while any succession run is open on this host (heir, survivor or adopting).
     pub(super) fn begin_release(&mut self, cut: CutId, now_ms: u64) {
         let me = self.ordinal();
-        let Some(directory) = self.ownership.0.directory() else { return };
+        let Some(directory) = self.ownership.0.directory() else {
+            return;
+        };
         if self.leave_parked || self.leaving_cut == Some(cut) {
             return;
         }
@@ -334,14 +413,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         let idle: Vec<(SuperRegion, u64)> = self
             .land_idle_since
             .iter()
-            .filter(|(sr, since)| now_ms.saturating_sub(**since) >= self.land_idle_ms && !busy.contains(*sr))
-            .filter(|(sr, _)| directory.get(**sr, me) == Owner::Me && !self.releasing.contains_key(*sr))
+            .filter(|(sr, since)| {
+                now_ms.saturating_sub(**since) >= self.land_idle_ms && !busy.contains(*sr)
+            })
+            .filter(|(sr, _)| {
+                directory.get(**sr, me) == Owner::Me && !self.releasing.contains_key(*sr)
+            })
             .map(|(sr, _)| (*sr, directory.epoch(*sr).unwrap_or(0)))
             .collect();
         if idle.is_empty() {
             return;
         }
-        log::info!("[server] world cut {}: {} idle super-region(s) released in this host's part (masked until it is decided)", cut.0, idle.len());
+        log::info!(
+            "[server] world cut {}: {} idle super-region(s) released in this host's part (masked until it is decided)",
+            cut.0,
+            idle.len()
+        );
         log::debug!("[server] world cut {}: releasing {idle:?}", cut.0);
         for (sr, epoch) in idle {
             self.releasing.insert(sr, (cut, epoch));
@@ -368,8 +455,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// rows without waiting for an ask (`coordinator/succession.rs`), and its heir adopts them.
     pub(super) fn leave_release(&mut self, cut: CutId, in_flight_rows: usize) {
         let me = self.ordinal();
-        let Some(directory) = self.ownership.0.directory() else { return };
-        let land: Vec<(SuperRegion, u64)> = directory.owned_by(me).into_iter().map(|sr| (sr, directory.epoch(sr).unwrap_or(0))).collect();
+        let Some(directory) = self.ownership.0.directory() else {
+            return;
+        };
+        let land: Vec<(SuperRegion, u64)> = directory
+            .owned_by(me)
+            .into_iter()
+            .map(|sr| (sr, directory.epoch(sr).unwrap_or(0)))
+            .collect();
         if land.is_empty() {
             if in_flight_rows > 0 {
                 log::warn!(
@@ -398,7 +491,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             );
             return;
         }
-        log::info!("[server] world cut {}: this host leaves: its {} super-region(s) are released in its part", cut.0, land.len());
+        log::info!(
+            "[server] world cut {}: this host leaves: its {} super-region(s) are released in its part",
+            cut.0,
+            land.len()
+        );
         for (sr, epoch) in land {
             self.releasing.insert(sr, (cut, epoch));
         }
@@ -406,7 +503,11 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The super-regions masked for cut `cut`'s release (what its part carries).
     pub fn releases_of(&self, cut: CutId) -> Vec<SuperRegion> {
-        self.releasing.iter().filter(|(_, (c, _))| *c == cut).map(|(sr, _)| *sr).collect()
+        self.releasing
+            .iter()
+            .filter(|(_, (c, _))| *c == cut)
+            .map(|(sr, _)| *sr)
+            .collect()
     }
 
     /// [`Self::releases_of`], each with the epoch it was masked — and is released — at (the
@@ -415,8 +516,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Elastic 5: and the rows its part MOVES to a taker, each at its masked epoch (they leave this
     /// host's fence with the commit exactly as released ones do).
     pub fn release_epochs_of(&self, cut: CutId) -> Vec<(SuperRegion, u64)> {
-        let mut rows: Vec<(SuperRegion, u64)> =
-            self.releasing.iter().filter(|(_, (c, _))| *c == cut).map(|(sr, (_, epoch))| (*sr, *epoch)).collect();
+        let mut rows: Vec<(SuperRegion, u64)> = self
+            .releasing
+            .iter()
+            .filter(|(_, (c, _))| *c == cut)
+            .map(|(sr, (_, epoch))| (*sr, *epoch))
+            .collect();
         rows.extend(self.move_epochs_of(cut));
         rows
     }
@@ -438,9 +543,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         if released.is_empty() {
             return;
         }
+        let span = tracing::info_span!("host.land.release", rows = released.len());
+        let _entered = span.enter();
         let s = self.ownership.1;
         let Some(directory) = self.ownership.0.directory_mut() else {
-            log::error!("[server] world cut {}: {} super-region(s) released, but this host keeps no directory", cut.0, released.len());
+            log::error!(
+                "[server] world cut {}: {} super-region(s) released, but this host keeps no directory",
+                cut.0,
+                released.len()
+            );
             for (sr, _) in &released {
                 self.releasing.remove(sr);
             }
@@ -461,7 +572,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.recently_released.insert(sr, free);
             rows.push((sr, free));
         }
-        let of_released = |rc: &RegionCoords| released.iter().any(|(sr, _)| *sr == crate::super_region_of(*rc, s));
+        let of_released = |rc: &RegionCoords| {
+            released
+                .iter()
+                .any(|(sr, _)| *sr == crate::super_region_of(*rc, s))
+        };
         self.parked.retain(|rc, _| !of_released(rc));
         self.terrain_cache.retain(|rc, _| !of_released(rc));
         self.pristine_terrain.retain(|rc, _| !of_released(rc));
@@ -471,12 +586,22 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.releasing.remove(sr);
         }
         self.land_released_total += released.len() as u64;
-        log::info!("[server] world cut {} committed: {} super-region(s) released ({} free now)", cut.0, released.len(), rows.len());
+        log::info!(
+            "[server] world cut {} committed: {} super-region(s) released ({} free now)",
+            cut.0,
+            released.len(),
+            rows.len()
+        );
         // Every peer learns it now (a peer that links later, at its hello): nothing it sends
         // for that land comes here any more — a need asks the coordinator, an arrival waits
         // on the peer for the land's next owner. Not a host that left (its session is held).
         if !rows.is_empty() {
-            let peers: Vec<HostId> = self.peers.keys().copied().filter(|p| !self.left_peers.contains_key(p)).collect();
+            let peers: Vec<HostId> = self
+                .peers
+                .keys()
+                .copied()
+                .filter(|p| !self.left_peers.contains_key(p))
+                .collect();
             for p in peers {
                 self.queue_to_peer(p, crate::Reliable::Released { rows: rows.clone() });
             }
@@ -528,7 +653,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Land this host inherits and has not adopted yet is its own already.
     pub(super) fn parks_on_foreign_land(&self, record: &crate::PlayerRecord) -> bool {
         let region = self.spawn_region(Some(record.region));
-        if self.inheriting.contains_key(&crate::super_region_of(region, self.ownership.1)) {
+        if self
+            .inheriting
+            .contains_key(&crate::super_region_of(region, self.ownership.1))
+        {
             return false;
         }
         self.owner_of(region) != Owner::Me
@@ -543,10 +671,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         if kept.is_empty() {
             return;
         }
+        let span = tracing::info_span!("host.land.release_aborted", rows = kept.len());
+        let _entered = span.enter();
         for sr in &kept {
             self.releasing.remove(sr);
         }
-        log::info!("[server] world cut {} aborted: {} super-region(s) it would have released stay this host's", cut.0, kept.len());
+        log::info!(
+            "[server] world cut {} aborted: {} super-region(s) it would have released stay this host's",
+            cut.0,
+            kept.len()
+        );
         self.flush_unowned();
     }
 
@@ -557,7 +691,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.recently_released.clear();
             return;
         };
-        self.recently_released.retain(|sr, _| directory.get(*sr, me) == Owner::Free);
+        self.recently_released
+            .retain(|sr, _| directory.get(*sr, me) == Owner::Free);
     }
 
     /// Whether `rc`'s land is masked here (inherited and not adopted, or released in a pending
@@ -565,7 +700,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// it is expected (a peer not told yet), not a disagreement — logged below error.
     pub(super) fn masked_or_released(&self, rc: RegionCoords) -> bool {
         let sr = crate::super_region_of(rc, self.ownership.1);
-        self.inheriting.contains_key(&sr) || self.releasing.contains_key(&sr) || self.recently_released.contains_key(&sr)
+        self.inheriting.contains_key(&sr)
+            || self.releasing.contains_key(&sr)
+            || self.recently_released.contains_key(&sr)
     }
 
     /// Test support and the `[server]` line: the super-regions masked for a release now.

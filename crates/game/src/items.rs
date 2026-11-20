@@ -2,7 +2,7 @@
 //! that `BlockId` (a block item); ids from there up are the non-block items
 //! of [`EXTRA_ITEMS`]. Block drops come from the manifest (`block_props()`).
 
-use crate::{block_props, Block, BlockId, ItemStack};
+use crate::{Block, BlockId, ItemStack, block_props};
 
 /// Item ids below this are block items (the item's id is the `BlockId`).
 pub const ITEM_BLOCK_LIMIT: u16 = 1024;
@@ -14,8 +14,18 @@ pub const EXTRA_ITEMS: &[&str] = &["stick"];
 pub const STICK: ItemId = ItemId(ITEM_BLOCK_LIMIT);
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, state_hash::StateHash,
-    serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Default,
+    state_hash::StateHash,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct ItemId(pub u16);
 
@@ -33,7 +43,10 @@ impl ItemId {
 
     /// The id of the extra item called `name`.
     pub fn extra_named(name: &str) -> Option<ItemId> {
-        EXTRA_ITEMS.iter().position(|n| *n == name).map(|i| ItemId(ITEM_BLOCK_LIMIT + i as u16))
+        EXTRA_ITEMS
+            .iter()
+            .position(|n| *n == name)
+            .map(|i| ItemId(ITEM_BLOCK_LIMIT + i as u16))
     }
 }
 
@@ -52,7 +65,10 @@ pub enum BlockDrop {
 pub fn item_name(item: ItemId) -> &'static str {
     match item.as_block() {
         Some(b) => block_props().name_of(b).unwrap_or("unknown"),
-        None => EXTRA_ITEMS.get((item.0 - ITEM_BLOCK_LIMIT) as usize).copied().unwrap_or("unknown"),
+        None => EXTRA_ITEMS
+            .get((item.0 - ITEM_BLOCK_LIMIT) as usize)
+            .copied()
+            .unwrap_or("unknown"),
     }
 }
 

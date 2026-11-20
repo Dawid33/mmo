@@ -150,7 +150,10 @@ fn joint_link_sort_key(k: &JointLinkKey) -> (u8, u64, u64) {
 
 // mmo-fork: StateHash — `joint_link_locs` in its serialized (sorted) order: the
 // map's iteration order doesn't survive a round trip, so it isn't state.
-fn hash_joint_link_locs<H: core::hash::Hasher>(locs: &HashMap<JointLinkKey, (u32, u32)>, h: &mut H) {
+fn hash_joint_link_locs<H: core::hash::Hasher>(
+    locs: &HashMap<JointLinkKey, (u32, u32)>,
+    h: &mut H,
+) {
     use state_hash::StateHash;
     let mut entries: Vec<_> = locs.iter().collect();
     entries.sort_unstable_by_key(|(k, _)| joint_link_sort_key(k));

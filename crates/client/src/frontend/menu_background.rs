@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 use crossbeam::channel::{self, Receiver};
-use slint_ui::slint::{Image as SlintImage, Rgba8Pixel, SharedPixelBuffer};
 use slint_ui::FrontendUi;
+use slint_ui::slint::{Image as SlintImage, Rgba8Pixel, SharedPixelBuffer};
 use worldgen::{forged, world_store};
 
 use crate::renderer::slint_overlay::SlintLayer;
@@ -46,7 +46,9 @@ impl Plugin for MenuBackgroundPlugin {
 
 /// A seed that differs per call, for the pick (no RNG state to keep).
 fn pick_seed() -> u64 {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     // splitmix64 finaliser, so consecutive calls spread over the list.
     let mut z = (nanos as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -67,12 +69,19 @@ fn decode(path: &Path) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
         image
     };
     let rgba = image.to_rgba8();
-    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba.as_raw(), rgba.width(), rgba.height()))
+    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        rgba.as_raw(),
+        rgba.width(),
+        rgba.height(),
+    ))
 }
 
 fn pick_background(mut bg: ResMut<MenuBackground>) {
     let root = forged::from_repo_root(Path::new(world_store::WORLDS_DIR));
-    let previews: Vec<PathBuf> = world_store::list(&root).into_iter().filter_map(|e| e.preview).collect();
+    let previews: Vec<PathBuf> = world_store::list(&root)
+        .into_iter()
+        .filter_map(|e| e.preview)
+        .collect();
     let Some(path) = choose(&previews, pick_seed()).cloned() else {
         if bg.shown.take().is_some() {
             bg.dirty = true;
@@ -85,10 +94,12 @@ fn pick_background(mut bg: ResMut<MenuBackground>) {
     }
     let (tx, rx) = channel::bounded(1);
     let job = path.clone();
-    let spawned = std::thread::Builder::new().name("menu-background".into()).spawn(move || {
-        let picture = decode(&job);
-        let _ = tx.send((job, picture));
-    });
+    let spawned = std::thread::Builder::new()
+        .name("menu-background".into())
+        .spawn(move || {
+            let picture = decode(&job);
+            let _ = tx.send((job, picture));
+        });
     match spawned {
         Ok(_) => bg.pending = Some((path, rx)),
         Err(e) => warn!("menu background: could not spawn the decode thread: {e}"),
@@ -96,8 +107,12 @@ fn pick_background(mut bg: ResMut<MenuBackground>) {
 }
 
 fn receive_background(mut bg: ResMut<MenuBackground>) {
-    let Some((want, rx)) = &bg.pending else { return };
-    let Ok((path, picture)) = rx.try_recv() else { return };
+    let Some((want, rx)) = &bg.pending else {
+        return;
+    };
+    let Ok((path, picture)) = rx.try_recv() else {
+        return;
+    };
     if path != *want {
         return;
     }
@@ -117,7 +132,10 @@ fn push_background(mut bg: ResMut<MenuBackground>, layer: Option<NonSend<SlintLa
         return;
     }
     bg.dirty = false;
-    let image = bg.shown.as_ref().map(|(_, p)| SlintImage::from_rgba8(p.clone())).unwrap_or_default();
+    let image = bg
+        .shown
+        .as_ref()
+        .map(|(_, p)| SlintImage::from_rgba8(p.clone()))
+        .unwrap_or_default();
     layer.overlay.ui().set_menu_background(image);
 }
-

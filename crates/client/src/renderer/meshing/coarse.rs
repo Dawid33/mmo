@@ -37,11 +37,11 @@ use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::NoAutoAabb;
 use bevy::math::Vec3A;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, Task};
+use bevy::tasks::{Task, block_on, futures_lite::future};
 
 use super::super::block_textures::BlockTextureLayers;
 use super::super::bricks::SimChunk;
-use super::super::voxel_pull::{near_detail_distance_m, ChunkQuads, DetailBand};
+use super::super::voxel_pull::{ChunkQuads, DetailBand, near_detail_distance_m};
 use super::records::{self, QuadRecord};
 
 /// Cell size of a coarse twin in voxels: one block (`game::lod` factor 16).
@@ -80,7 +80,12 @@ pub const BAND_HANDOVER_FRAMES: u32 = 6;
 /// Count the handovers down and switch the bands at the end.
 pub fn finish_band_handovers(
     mut commands: Commands,
-    mut chunks: Query<(Entity, &mut BandHandover, Option<&CoarseTwin>, Has<ChunkQuads>)>,
+    mut chunks: Query<(
+        Entity,
+        &mut BandHandover,
+        Option<&CoarseTwin>,
+        Has<ChunkQuads>,
+    )>,
 ) {
     for (chunk, mut left, twin, has_quads) in &mut chunks {
         if left.0 > 0 {
@@ -99,7 +104,10 @@ pub fn finish_band_handovers(
 /// A chunk landed without bricks (`bricks::FineDeferred`) whose twin — all it
 /// draws — is not built yet: it counts as unmeshed wherever a region's
 /// terrain is waited for (the loading cover, the LOD hand-over).
-pub type AwaitingTwinFilter = (With<super::super::bricks::FineDeferred>, Or<(With<CoarseDirty>, With<CoarseTask>)>);
+pub type AwaitingTwinFilter = (
+    With<super::super::bricks::FineDeferred>,
+    Or<(With<CoarseDirty>, With<CoarseTask>)>,
+);
 
 /// Whether coarse twins are built at all (`VOXEL_NEAR_DETAIL_M` > 0).
 pub fn coarse_twins_enabled() -> bool {
@@ -107,7 +115,14 @@ pub fn coarse_twins_enabled() -> bool {
 }
 
 /// Face directions of a chunk's neighbours, in [`CoarseMeshJob::slabs`] order.
-pub const FACE_DIRS: [[i32; 3]; 6] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+pub const FACE_DIRS: [[i32; 3]; 6] = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 1, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+];
 
 /// Which of a neighbour's boundary blocks (the layer touching our face) are
 /// solid, `CHUNK_BLOCKS`² of them indexed `u + CHUNK_BLOCKS * v` over the two
@@ -146,7 +161,11 @@ const PAD: game::BlockId = game::BlockId(u16::MAX);
 /// quads are dropped), the −x/−y/−z ones in the mesher's padding shell. A
 /// missing chunk below is implied ground (solid, as the near mesher assumes);
 /// missing elsewhere is air.
-pub fn coarse_records(chunk: game::Chunk, slabs: &[Slab; 6], layers: &BlockTextureLayers) -> Vec<QuadRecord> {
+pub fn coarse_records(
+    chunk: game::Chunk,
+    slabs: &[Slab; 6],
+    layers: &BlockTextureLayers,
+) -> Vec<QuadRecord> {
     const N: usize = game::CHUNK_BLOCKS;
     const G: usize = game::BRICK_VOXELS;
     let cells = game::lod::block_scale_cells(vec![(game::ChunkCoords::new(0, 0, 0), chunk)]);
@@ -172,7 +191,11 @@ pub fn coarse_records(chunk: game::Chunk, slabs: &[Slab; 6], layers: &BlockTextu
             None => *dir == [0, -1, 0],
         };
         let positive = dir[axis] > 0;
-        let shell = (!positive).then(|| shells.entry(*dir).or_insert_with(|| vec![game::Voxel::default(); G * G * G]));
+        let shell = (!positive).then(|| {
+            shells
+                .entry(*dir)
+                .or_insert_with(|| vec![game::Voxel::default(); G * G * G])
+        });
         let mut shell = shell;
         for v in 0..N {
             for u in 0..N {
@@ -220,7 +243,9 @@ pub fn boundary_slab(neighbour: &game::Chunk, dir: [i32; 3]) -> Vec<bool> {
             let id = neighbour.block_at(c[0], c[1], c[2]).id;
             out[u + N * v] = game::block_props().blocks_ray(id)
                 && !game::block_props().is_cutout(id)
-                && !neighbour.chisel.contains_key(&game::BlockIndex::from_xyz(c[0], c[1], c[2]));
+                && !neighbour
+                    .chisel
+                    .contains_key(&game::BlockIndex::from_xyz(c[0], c[1], c[2]));
         }
     }
     out
@@ -249,7 +274,10 @@ pub fn twin_transform() -> Transform {
 /// band test sees the same rect as the chunk's) plus the skirt's cell of y.
 pub fn twin_aabb() -> Aabb {
     let half = game::CHUNK_BLOCKS as f32 / 2.0;
-    Aabb { center: Vec3A::new(half, half + 0.5, half), half_extents: Vec3A::new(half, half + 0.5, half) }
+    Aabb {
+        center: Vec3A::new(half, half + 0.5, half),
+        half_extents: Vec3A::new(half, half + 0.5, half),
+    }
 }
 
 /// Start twin builds for dirty chunks, nearest to the camera first: a chunk
@@ -257,7 +285,10 @@ pub fn twin_aabb() -> Aabb {
 /// its twin is built, and the near ones are the ones in view.
 pub fn spawn_coarse_tasks(
     mut commands: Commands,
-    dirty: Query<(Entity, &SimChunk, &Transform, &ChildOf, Option<&CoarseTwin>), (With<CoarseDirty>, Without<CoarseTask>)>,
+    dirty: Query<
+        (Entity, &SimChunk, &Transform, &ChildOf, Option<&CoarseTwin>),
+        (With<CoarseDirty>, Without<CoarseTask>),
+    >,
     // A chunk may ask for its twin on the frame it lands, before its
     // `GlobalTransform` is propagated: its origin is root + own translation.
     roots: Query<&Transform, Without<SimChunk>>,
@@ -270,10 +301,20 @@ pub fn spawn_coarse_tasks(
         return;
     }
     let eye = camera.iter().next().map(|t| t.translation());
-    let origin = |tf: &Transform, parent: &ChildOf| roots.get(parent.parent()).map_or(Vec3::ZERO, |r| r.translation) + tf.translation;
+    let origin = |tf: &Transform, parent: &ChildOf| {
+        roots
+            .get(parent.parent())
+            .map_or(Vec3::ZERO, |r| r.translation)
+            + tf.translation
+    };
     let mut order: Vec<(f32, Entity)> = dirty
         .iter()
-        .map(|(e, _, tf, parent, _)| (eye.map_or(0.0, |eye| eye.distance_squared(origin(tf, parent))), e))
+        .map(|(e, _, tf, parent, _)| {
+            (
+                eye.map_or(0.0, |eye| eye.distance_squared(origin(tf, parent))),
+                e,
+            )
+        })
         .collect();
     if order.len() > COARSE_SPAWNS_PER_FRAME {
         order.select_nth_unstable_by(COARSE_SPAWNS_PER_FRAME, |a, b| a.0.total_cmp(&b.0));
@@ -281,9 +322,17 @@ pub fn spawn_coarse_tasks(
     }
     order.sort_by(|a, b| a.0.total_cmp(&b.0));
     for (_, e) in order {
-        let Ok((_, sim, tf, parent, twin)) = dirty.get(e) else { continue };
+        let Ok((_, sim, tf, parent, twin)) = dirty.get(e) else {
+            continue;
+        };
         // All air (most of the sky's chunks): no twin, and no job to find out.
-        if sim.0.chisel.is_empty() && sim.0.blocks.uniform().is_some_and(|b| b.id == game::BlockId::AIR) {
+        if sim.0.chisel.is_empty()
+            && sim
+                .0
+                .blocks
+                .uniform()
+                .is_some_and(|b| b.id == game::BlockId::AIR)
+        {
             commands.entity(e).remove::<CoarseDirty>();
             drop_twin(&mut commands, e, twin);
             continue;
@@ -291,12 +340,22 @@ pub fn spawn_coarse_tasks(
         let key = chunk_key(origin(tf, parent));
         let slabs: [Slab; 6] = FACE_DIRS.map(|d| {
             let n = [key[0] + d[0], key[1] + d[1], key[2] + d[2]];
-            let neighbour = index.as_deref().and_then(|i| i.0.get(&n)).and_then(|&ne| all.get(ne).ok())?;
+            let neighbour = index
+                .as_deref()
+                .and_then(|i| i.0.get(&n))
+                .and_then(|&ne| all.get(ne).ok())?;
             Some(boundary_slab(&neighbour.0, d))
         });
-        let job = CoarseMeshJob { chunk: sim.0.clone(), slabs, layers: layers.clone() };
+        let job = CoarseMeshJob {
+            chunk: sim.0.clone(),
+            slabs,
+            layers: layers.clone(),
+        };
         let task = super::super::compute::spawn(job, |records| records);
-        commands.entity(e).remove::<CoarseDirty>().insert(CoarseTask(task));
+        commands
+            .entity(e)
+            .remove::<CoarseDirty>()
+            .insert(CoarseTask(task));
     }
 }
 
@@ -309,7 +368,13 @@ pub fn spawn_coarse_tasks(
 /// its band through a [`BandHandover`].
 pub fn apply_coarse_tasks(
     mut commands: Commands,
-    mut tasks: Query<(Entity, &mut CoarseTask, Option<&CoarseTwin>, Has<ChunkQuads>, Has<BandHandover>)>,
+    mut tasks: Query<(
+        Entity,
+        &mut CoarseTask,
+        Option<&CoarseTwin>,
+        Has<ChunkQuads>,
+        Has<BandHandover>,
+    )>,
 ) {
     for (chunk, mut task, twin, has_quads, handing_over) in &mut tasks {
         let Some(records) = block_on(future::poll_once(&mut task.0)) else {
@@ -332,7 +397,14 @@ pub fn apply_coarse_tasks(
             }
             None => {
                 let t = commands
-                    .spawn((twin_transform(), twin_aabb(), NoAutoAabb, quads, DetailBand::Always, ChildOf(chunk)))
+                    .spawn((
+                        twin_transform(),
+                        twin_aabb(),
+                        NoAutoAabb,
+                        quads,
+                        DetailBand::Always,
+                        ChildOf(chunk),
+                    ))
                     .id();
                 let mut ec = commands.entity(chunk);
                 ec.insert(CoarseTwin(t));
@@ -344,12 +416,12 @@ pub fn apply_coarse_tasks(
     }
 }
 
-
 fn drop_twin(commands: &mut Commands, chunk: Entity, twin: Option<&CoarseTwin>) {
     if let Some(&CoarseTwin(t)) = twin {
         commands.entity(t).try_despawn();
     }
     if let Ok(mut ec) = commands.get_entity(chunk) {
-        ec.remove::<(CoarseTwin, BandHandover)>().insert(DetailBand::Always);
+        ec.remove::<(CoarseTwin, BandHandover)>()
+            .insert(DetailBand::Always);
     }
 }

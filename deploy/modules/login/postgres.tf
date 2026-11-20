@@ -1,9 +1,15 @@
-# The login service's own PostgreSQL: one pod, one volume, one database and one
-# role (`login`), no extensions, no custom config. Plain on purpose: the cluster's
-# PostgreSQL instances are to be consolidated later. Nothing backs it up yet.
+# The login service's old PostgreSQL and its retained password. During a move
+# `database` points at pg-management, own_postgres becomes stopped, and the old
+# Secret is kept as login-db-old alongside the stopped volume.
 
 locals {
-  pg_labels = { "app.kubernetes.io/name" = "login-postgres" }
+  pg_labels   = { "app.kubernetes.io/name" = "login-postgres" }
+  db_host     = var.database == null ? kubernetes_service_v1.postgres[0].metadata[0].name : var.database.host
+  db_port     = var.database == null ? 5432 : var.database.port
+  db_name     = var.database == null ? "login" : var.database.database
+  db_user     = var.database == null ? "login" : var.database.user
+  db_password = var.database == null ? random_password.db.result : var.database.password
+  db_url      = "postgres://${local.db_user}:$(PGPASSWORD)@${local.db_host}:${local.db_port}/${local.db_name}"
 }
 
 # Changing this does NOT change the password inside an existing volume.
@@ -18,11 +24,23 @@ resource "kubernetes_secret_v1" "db" {
     namespace = local.ns
   }
   data = {
+    password = local.db_password
+  }
+}
+
+resource "kubernetes_secret_v1" "db_old" {
+  count = var.own_postgres == "stopped" ? 1 : 0
+  metadata {
+    name      = "login-db-old"
+    namespace = local.ns
+  }
+  data = {
     password = random_password.db.result
   }
 }
 
 resource "kubernetes_service_v1" "postgres" {
+  count = var.own_postgres == "absent" ? 0 : 1
   metadata {
     name      = "login-postgres"
     namespace = local.ns
@@ -40,14 +58,15 @@ resource "kubernetes_service_v1" "postgres" {
 }
 
 resource "kubernetes_stateful_set_v1" "postgres" {
+  count = var.own_postgres == "absent" ? 0 : 1
   metadata {
     name      = "login-postgres"
     namespace = local.ns
     labels    = local.pg_labels
   }
   spec {
-    service_name = kubernetes_service_v1.postgres.metadata[0].name
-    replicas     = 1
+    service_name = kubernetes_service_v1.postgres[0].metadata[0].name
+    replicas     = var.own_postgres == "running" ? 1 : 0
     selector {
       match_labels = local.pg_labels
     }
@@ -73,7 +92,7 @@ resource "kubernetes_stateful_set_v1" "postgres" {
             name = "POSTGRES_PASSWORD"
             value_from {
               secret_key_ref {
-                name = kubernetes_secret_v1.db.metadata[0].name
+                name = var.own_postgres == "running" ? kubernetes_secret_v1.db.metadata[0].name : kubernetes_secret_v1.db_old[0].metadata[0].name
                 key  = "password"
               }
             }
@@ -118,5 +137,5 @@ resource "kubernetes_stateful_set_v1" "postgres" {
     }
   }
   # local-path binds on first consumer; the pod becomes Ready once the volume is bound and PostgreSQL answers.
-  wait_for_rollout = true
+  wait_for_rollout = var.own_postgres == "running"
 }

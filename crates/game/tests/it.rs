@@ -17,8 +17,8 @@
 //! - `voxel_body`: flips the process-global HASH_MODE to Delta.
 //! - `state_hash_check`: sets the process-global state hash interval.
 
-mod common;
 mod body;
+mod common;
 mod handoff_state;
 mod history_handover;
 mod lod_streaming;
@@ -28,3 +28,4 @@ mod region_runner;
 mod rollback_restore;
 mod shape_cast_grazing;
 mod spawn_surface;
+mod terrain_stairs;

@@ -227,4 +227,3 @@ pub fn write_result_atomic(path: &Path, result: &BenchmarkResult) -> io::Result<
     }
     write_result
 }
-

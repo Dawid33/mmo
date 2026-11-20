@@ -76,8 +76,8 @@
 
 use game::HostId;
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, RecvTimeoutError, Select, Sender, TryRecvError};
@@ -179,8 +179,21 @@ pub fn channel_link() -> (ChannelWorldLink, HostEnd) {
     let (wake_tx, wake_rx) = crossbeam::channel::bounded(1);
     let up = Arc::new(AtomicBool::new(true));
     (
-        ChannelWorldLink { tx: host_tx, rx: coord_rx, up: up.clone(), wake: wake_rx },
-        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false, ordinal: HostId::SOLO, attach: None },
+        ChannelWorldLink {
+            tx: host_tx,
+            rx: coord_rx,
+            up: up.clone(),
+            wake: wake_rx,
+        },
+        HostEnd {
+            rx: host_rx,
+            tx: coord_tx,
+            up,
+            wake: wake_tx,
+            gone: false,
+            ordinal: HostId::SOLO,
+            attach: None,
+        },
     )
 }
 
@@ -255,6 +268,15 @@ fn attached_as(core: &Coordinator, host: HostId, boot: u64, epoch: u64) -> bool 
     core.attachment(host) == Some(boot) && core.newest_attach(host) == Some((boot, epoch))
 }
 
+fn transition_answer_kind(answer: &Result<TransitionWritten, StoreError>) -> &'static str {
+    match answer {
+        Ok(_) => "committed",
+        Err(StoreError::Conflict) => "conflict",
+        Err(StoreError::Fenced { .. }) => "fenced",
+        Err(_) => "error",
+    }
+}
+
 /// At most this many login orders wait in a replica for the transition carrying their mailbox
 /// row ([`HeldOrder`]); one more is answered 503 `not_ready` at once (the login service answers
 /// the join 503, a kick is resent by its sweeper).
@@ -275,6 +297,7 @@ pub const LOGIN_ANSWER_PRUNE_EVERY_MS: u64 = 60_000;
 /// the gate chosen again from the new core (a host takes a repeated epoch as the same order).
 struct HeldOrder {
     order: game::LoginOrder,
+    trace: Option<game::coordinator::TraceCarrier>,
     done: tokio::sync::oneshot::Sender<Result<(), ApiRefusal>>,
     /// Its row is in the transition being written.
     in_write: bool,
@@ -285,11 +308,24 @@ struct HeldOrder {
 fn describe(msg: &CoordMsg) -> String {
     match msg {
         CoordMsg::View { sites, .. } => format!("View ({} sites)", sites.len()),
-        CoordMsg::SpawnPeople { rc, incarnation, events } => {
-            format!("SpawnPeople for {rc:?} incarnation {incarnation} ({} events)", events.len())
+        CoordMsg::SpawnPeople {
+            rc,
+            incarnation,
+            events,
+        } => {
+            format!(
+                "SpawnPeople for {rc:?} incarnation {incarnation} ({} events)",
+                events.len()
+            )
         }
-        CoordMsg::Directive { directive, incarnation } => {
-            format!("Directive for {:?} incarnation {incarnation}", directive.region)
+        CoordMsg::Directive {
+            directive,
+            incarnation,
+        } => {
+            format!(
+                "Directive for {:?} incarnation {incarnation}",
+                directive.region
+            )
         }
         CoordMsg::Reply { id, .. } => format!("Reply to {id:?}"),
         CoordMsg::Calendar(t) => format!("Calendar({})", t.0),
@@ -297,29 +333,79 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::SiteMarkers(s) => format!("SiteMarkers ({})", s.len()),
         CoordMsg::Notice { region, .. } => format!("Notice for {region:?}"),
         CoordMsg::Attached { epoch } => format!("Attached {{ epoch: {epoch} }}"),
-        CoordMsg::ClaimIs { player, claim, report } => format!("ClaimIs {player:?} {claim:?} (report {report})"),
-        CoordMsg::HopIs { player, reported, hop } => format!("HopIs {player:?} {reported} -> {hop}"),
-        CoordMsg::BeginCut { cut, tick, hosts, leaving, .. } => {
-            format!("BeginCut {} at {tick} of {hosts:?} leaving {leaving:?}", cut.0)
+        CoordMsg::ClaimIs {
+            player,
+            claim,
+            report,
+        } => format!("ClaimIs {player:?} {claim:?} (report {report})"),
+        CoordMsg::HopIs {
+            player,
+            reported,
+            hop,
+        } => format!("HopIs {player:?} {reported} -> {hop}"),
+        CoordMsg::BeginCut {
+            cut,
+            tick,
+            hosts,
+            leaving,
+            ..
+        } => {
+            format!(
+                "BeginCut {} at {tick} of {hosts:?} leaving {leaving:?}",
+                cut.0
+            )
         }
-        CoordMsg::CutDone { cut, committed } => format!("CutDone {} (committed {committed})", cut.0),
-        CoordMsg::Succession { id, predecessor, heir, base_cut, moved, survivors, .. } => format!(
+        CoordMsg::CutDone { cut, committed } => {
+            format!("CutDone {} (committed {committed})", cut.0)
+        }
+        CoordMsg::Succession {
+            id,
+            predecessor,
+            heir,
+            base_cut,
+            moved,
+            survivors,
+            ..
+        } => format!(
             "Succession {} (host {predecessor} → heir {heir}, base cut {}, {} super-regions, survivors {survivors:?})",
             id.0,
             base_cut.0,
             moved.len()
         ),
-        CoordMsg::SuccessionDone { id, settled } => format!("SuccessionDone {} (settled {settled})", id.0),
+        CoordMsg::SuccessionDone { id, settled } => {
+            format!("SuccessionDone {} (settled {settled})", id.0)
+        }
         CoordMsg::Generation(g) => format!("Generation({g})"),
-        CoordMsg::CutPeerCount { cut, from, received_through, boot } => {
-            format!("CutPeerCount {} from host {from}: {received_through} of boot {boot:#x}", cut.0)
+        CoordMsg::CutPeerCount {
+            cut,
+            from,
+            received_through,
+            boot,
+        } => {
+            format!(
+                "CutPeerCount {} from host {from}: {received_through} of boot {boot:#x}",
+                cut.0
+            )
         }
         // Its `Debug` hides the player token.
         CoordMsg::Login(order) => format!("Login({order:?})"),
+        CoordMsg::LoginTraced { order, .. } => format!("LoginTraced({order:?})"),
         CoordMsg::Assigned { rows } => format!("Assigned {rows:?}"),
-        CoordMsg::LandIs { sr, owner, epoch } => format!("LandIs {sr:?}: host {owner} at epoch {epoch}"),
-        CoordMsg::MoveLand { id, sr, taker, at_tick } => format!("MoveLand {} {sr:?} to host {taker} at {at_tick}", id.0),
-        CoordMsg::ExpectLand { id, sr, giver, at_tick } => format!("ExpectLand {} {sr:?} from host {giver} at {at_tick}", id.0),
+        CoordMsg::LandIs { sr, owner, epoch } => {
+            format!("LandIs {sr:?}: host {owner} at epoch {epoch}")
+        }
+        CoordMsg::MoveLand {
+            id,
+            sr,
+            taker,
+            at_tick,
+        } => format!("MoveLand {} {sr:?} to host {taker} at {at_tick}", id.0),
+        CoordMsg::ExpectLand {
+            id,
+            sr,
+            giver,
+            at_tick,
+        } => format!("ExpectLand {} {sr:?} from host {giver} at {at_tick}", id.0),
         CoordMsg::MoveOff { id, sr } => format!("MoveOff {} {sr:?}", id.0),
     }
 }
@@ -327,7 +413,19 @@ fn describe(msg: &CoordMsg) -> String {
 /// A host message's kind and region, for logs (an `Attach` or `Positions` can be large).
 pub(crate) fn describe_host(msg: &HostMsg) -> String {
     match msg {
-        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed, pending_cut, successions, policy } => {
+        HostMsg::Attach {
+            host,
+            epoch,
+            running,
+            online,
+            generation,
+            boot,
+            settled_below,
+            handed,
+            pending_cut,
+            successions,
+            policy,
+        } => {
             format!(
                 "Attach {{ host: {host}, epoch: {epoch}, generation: {generation}, boot: {boot}, settled_below: {settled_below}, \
                  pending_cut: {pending_cut:?}, successions: {successions:?}, policy: {policy:?} }} ({} regions, {} online, {} handed)",
@@ -336,15 +434,29 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
                 handed.len()
             )
         }
-        HostMsg::RegionStarted { rc, incarnation } => format!("RegionStarted {rc:?} incarnation {incarnation}"),
+        HostMsg::RegionStarted { rc, incarnation } => {
+            format!("RegionStarted {rc:?} incarnation {incarnation}")
+        }
         HostMsg::RegionStopping { rc } => format!("RegionStopping {rc:?}"),
-        HostMsg::RegionParked { rc, people } => format!("RegionParked {rc:?} ({} people)", people.len()),
-        HostMsg::PersonCrossed { person, to, delivered } => {
+        HostMsg::RegionParked { rc, people } => {
+            format!("RegionParked {rc:?} ({} people)", people.len())
+        }
+        HostMsg::PersonCrossed {
+            person,
+            to,
+            delivered,
+        } => {
             format!("PersonCrossed {person:?} into {to:?} (delivered {delivered})")
         }
         HostMsg::Positions(people) => format!("Positions ({})", people.len()),
-        HostMsg::DirectiveBounced { directive, incarnation } => {
-            format!("DirectiveBounced for {:?} incarnation {incarnation}", directive.region)
+        HostMsg::DirectiveBounced {
+            directive,
+            incarnation,
+        } => {
+            format!(
+                "DirectiveBounced for {:?} incarnation {incarnation}",
+                directive.region
+            )
         }
         HostMsg::Request { id, .. } => format!("Request {id:?}"),
         HostMsg::Settle { id, .. } => format!("Settle {id:?}"),
@@ -352,15 +464,25 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::PlayerOnline(p) => format!("PlayerOnline {:?} hop {}", p.player, p.hop),
         HostMsg::PlayerOffline { player, hop } => format!("PlayerOffline {player:?} hop {hop}"),
         HostMsg::ReleaseClaim { player } => format!("ReleaseClaim {player:?}"),
-        HostMsg::PlayerHandedTo { player, to, hop } => format!("PlayerHandedTo {player:?} to host {to} hop {hop}"),
+        HostMsg::PlayerHandedTo { player, to, hop } => {
+            format!("PlayerHandedTo {player:?} to host {to} hop {hop}")
+        }
         HostMsg::CutPrepared { cut } => format!("CutPrepared {}", cut.0),
         HostMsg::CutFailed { cut, why } => format!("CutFailed {} ({why:?})", cut.0),
         HostMsg::LeaveRequest => "LeaveRequest".to_string(),
         HostMsg::SuccessionApplied { id } => format!("SuccessionApplied {}", id.0),
         HostMsg::SuccessionAdopted { id } => format!("SuccessionAdopted {}", id.0),
         HostMsg::LandWanted { sr } => format!("LandWanted {sr:?}"),
-        HostMsg::CutPeerCount { cut, peer, received_through, boot } => {
-            format!("CutPeerCount {} toward host {peer}: {received_through} of boot {boot:#x}", cut.0)
+        HostMsg::CutPeerCount {
+            cut,
+            peer,
+            received_through,
+            boot,
+        } => {
+            format!(
+                "CutPeerCount {} toward host {peer}: {received_through} of boot {boot:#x}",
+                cut.0
+            )
         }
         // Its `Debug` hides the player token.
         HostMsg::Login(out) => format!("Login({out:?})"),
@@ -385,9 +507,14 @@ fn after_store_read<T>(value: T) -> T {
 /// once, never again), so `reg` is the row's id.
 fn stored_registration(store: &StoreHandle, ordinal: HostId) -> Option<(u64, i64)> {
     match store.hosts() {
-        Ok(rows) => rows.into_iter().find(|r| r.id == ordinal).map(|r| (r.id.0, r.state)),
+        Ok(rows) => rows
+            .into_iter()
+            .find(|r| r.id == ordinal)
+            .map(|r| (r.id.0, r.state)),
         Err(e) => {
-            log::error!("[coordinator] host {ordinal}'s hosts row could not be read ({e}); its Attach is refused");
+            log::error!(
+                "[coordinator] host {ordinal}'s hosts row could not be read ({e}); its Attach is refused"
+            );
             None
         }
     }
@@ -399,7 +526,11 @@ fn stored_registration(store: &StoreHandle, ordinal: HostId) -> Option<(u64, i64
 /// tell it, e.g. while no peer of the newer generation dials it) and ignored from then on.
 /// A store that cannot be read refuses it too (`Err(None)`: answered `attached: false`, the
 /// host attaches again).
-fn generation_current(store: &StoreHandle, ordinal: HostId, generation: u64) -> Result<(), Option<u64>> {
+fn generation_current(
+    store: &StoreHandle,
+    ordinal: HostId,
+    generation: u64,
+) -> Result<(), Option<u64>> {
     match store.world_generation() {
         Ok(stored) if generation < stored => {
             log::error!(
@@ -410,7 +541,9 @@ fn generation_current(store: &StoreHandle, ordinal: HostId, generation: u64) -> 
         }
         Ok(_) => Ok(()),
         Err(e) => {
-            log::error!("[coordinator] the world generation could not be read ({e}); host {ordinal}'s Attach is refused");
+            log::error!(
+                "[coordinator] the world generation could not be read ({e}); host {ordinal}'s Attach is refused"
+            );
             Err(None)
         }
     }
@@ -424,11 +557,20 @@ fn generation_current(store: &StoreHandle, ordinal: HostId, generation: u64) -> 
 /// coordinator a `static` host's crash would be given to an heir its fixed layout does not
 /// know.
 fn policy_agrees(coordinator: game::CrashPolicy, host: game::CrashPolicy) -> Result<(), String> {
-    let (wants, declares) = (host == game::CrashPolicy::Succession, coordinator == game::CrashPolicy::Succession);
+    let (wants, declares) = (
+        host == game::CrashPolicy::Succession,
+        coordinator == game::CrashPolicy::Succession,
+    );
     if wants == declares {
         return Ok(());
     }
-    let word = |succession: bool| if succession { "claim" } else { "static (or unset)" };
+    let word = |succession: bool| {
+        if succession {
+            "claim"
+        } else {
+            "static (or unset)"
+        }
+    };
     Err(format!(
         "the host runs {env}={}, this coordinator {env}={}: set the same {env} on the coordinator and on every host",
         word(wants),
@@ -684,6 +826,7 @@ struct AfterJob {
     a: AfterCommit,
     /// The answer awaited (`None`: waiting to try again at `retry_at`).
     rx: Option<Answer<()>>,
+    span: Option<tracing::Span>,
     retry_at: u64,
 }
 
@@ -717,7 +860,11 @@ pub fn start_all_in_one(
     start: CoordinatorStart,
     fenced: Fenced,
 ) -> Result<(ChannelWorldLink, CoordinatorThread), String> {
-    log::info!("[coordinator] the world coordinator (row version {}), state {:?}", start.version, start.source);
+    log::info!(
+        "[coordinator] the world coordinator (row version {}), state {:?}",
+        start.version,
+        start.source
+    );
     let (link, host) = channel_link();
     let thread = CoordinatorRuntime::spawn(store, start, Hosts::Channels(vec![host]), fenced);
     Ok((link, thread))
@@ -760,13 +907,21 @@ pub fn start_listening_as(
     policy: game::CrashPolicy,
     world: &str,
 ) -> Result<ListeningCoordinator, String> {
-    if let Some(dir) = cert_hash_file.parent().filter(|d| !d.as_os_str().is_empty()) {
+    if let Some(dir) = cert_hash_file
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     // Unbounded: the API's handlers `try_send` and never wait on the coordinator's thread.
     let (calls_tx, calls) = crossbeam::channel::unbounded();
     let (row_version, row_version_rx) = tokio::sync::watch::channel(start.version);
-    let config = crate::coordinator_api::ApiConfig { bind, token, world: world.to_string(), cert_file: cert_hash_file.clone() };
+    let config = crate::coordinator_api::ApiConfig {
+        bind,
+        token,
+        world: world.to_string(),
+        cert_file: cert_hash_file.clone(),
+    };
     let listener = crate::coordinator_api::serve(config, store.clone(), calls_tx, row_version_rx)
         .map_err(|e| format!("the coordinator's HTTP API on {bind}: {e}"))?;
     let (addr, cert_sha256) = (listener.local_addr(), listener.cert_sha256().to_string());
@@ -787,7 +942,11 @@ pub fn start_listening_as(
         login_held: Vec::new(),
     });
     let thread = CoordinatorRuntime::spawn_as(store, start, hosts, fenced, cuts, policy);
-    Ok(ListeningCoordinator { thread, addr, cert_sha256 })
+    Ok(ListeningCoordinator {
+        thread,
+        addr,
+        cert_sha256,
+    })
 }
 
 /// The coordinator core with its store (see the module docs).
@@ -795,7 +954,11 @@ pub struct CoordinatorRuntime {
     core: Coordinator,
     store: StoreHandle,
     /// The transition being written and the store's answer on its way (one at a time).
-    writing: Option<(game::coordinator::Transition, Receiver<Result<TransitionWritten, StoreError>>)>,
+    writing: Option<(
+        game::coordinator::Transition,
+        Receiver<Result<TransitionWritten, StoreError>>,
+        tracing::Span,
+    )>,
     /// The writes that failed since the last commit (at most [`COORDINATOR_UNACKED_MAX`]), by
     /// their cores' hashes: one of them may have committed with its answer lost. While any is
     /// remembered a rebase could apply that write's inputs twice: none is done.
@@ -912,7 +1075,10 @@ struct SuccessionPump {
     generation_retry_at: u64,
     /// The owners read for the super-regions hosts asked for (`LandNeeded`), with
     /// them and their askers.
-    land_rx: Option<(Vec<(game::SuperRegion, Vec<HostId>)>, Answer<Vec<(game::SuperRegion, i64, u64)>>)>,
+    land_rx: Option<(
+        Vec<(game::SuperRegion, Vec<HostId>)>,
+        Answer<Vec<(game::SuperRegion, i64, u64)>>,
+    )>,
     /// No end of a landless host is handed out before this (after a refused one).
     end_retry_at: u64,
 }
@@ -1005,7 +1171,9 @@ enum Settled {
     Released(Vec<(Target, CoordMsg)>),
     /// Not committed: the transition is back in the core; `now` = retry at once (a `Conflict`
     /// with this process's own lost commit), else after [`COORDINATOR_SAVE_RETRY_MS`].
-    Held { now: bool },
+    Held {
+        now: bool,
+    },
     End(End),
 }
 
@@ -1031,8 +1199,9 @@ struct Unacked {
 /// durable changed: an answer replayed from the memo or to a query (`Reply`), an answer about land
 /// (`LandIs`, an `Assigned` repeated for a row the host already owns), a player's claim or hop as
 /// known (`ClaimIs`, `HopIs`), a cut's stored outcome (`CutDone`), a relayed peer count
-/// (`CutPeerCount`), a history notice (`Notice`), a relayed login order (`Login`: a repeated epoch
-/// is the same order), the generation told a refused `Attach` (`Generation`), and the world's
+/// (`CutPeerCount`), a history notice (`Notice`), a relayed login order (`Login` or
+/// `LoginTraced`: a repeated epoch is the same order), the generation told a refused `Attach`
+/// (`Generation`), and the world's
 /// snapshots (`View`, `Calendar`, `Sites`, `SiteMarkers`). Anything else (a `SpawnPeople`, a
 /// `Directive`, an `Attached`, a cut's or a succession's order) comes with a durable change.
 ///
@@ -1053,6 +1222,7 @@ fn core_less_kind(msg: &CoordMsg) -> bool {
             | CoordMsg::CutPeerCount { .. }
             | CoordMsg::Notice { .. }
             | CoordMsg::Login(_)
+            | CoordMsg::LoginTraced { .. }
             | CoordMsg::Generation(_)
             | CoordMsg::View { .. }
             | CoordMsg::Calendar(_)
@@ -1081,7 +1251,13 @@ fn core_less_kind(msg: &CoordMsg) -> bool {
 /// The fleet's decisions keep no durable state (process fields in `projection!`).
 fn core_less_decision(d: &game::coordinator::StoreDecision) -> bool {
     use game::coordinator::StoreDecision;
-    matches!(d, StoreDecision::AssignLand(_) | StoreDecision::AddHost(_) | StoreDecision::DrainHost(_) | StoreDecision::RemoveHost(_))
+    matches!(
+        d,
+        StoreDecision::AssignLand(_)
+            | StoreDecision::AddHost(_)
+            | StoreDecision::DrainHost(_)
+            | StoreDecision::RemoveHost(_)
+    )
 }
 
 /// A transition about to be written without a core carries only [`core_less_kind`] messages and
@@ -1097,8 +1273,13 @@ fn check_core_less(t: &game::coordinator::Transition) {
         debug_assert!(false, "a core-less transition carries {}", describe(&o.msg));
     }
     for d in t.decisions.iter().filter(|d| !core_less_decision(d)) {
-        log::error!("[coordinator] a transition with nothing durable changed carries the store decision {d:?}: it could run twice");
-        debug_assert!(false, "a core-less transition carries the store decision {d:?}");
+        log::error!(
+            "[coordinator] a transition with nothing durable changed carries the store decision {d:?}: it could run twice"
+        );
+        debug_assert!(
+            false,
+            "a core-less transition carries the store decision {d:?}"
+        );
     }
 }
 
@@ -1114,8 +1295,20 @@ impl CoordinatorRuntime {
     /// Runs `start`'s coordinator on a new `coordinator` thread serving `hosts` (role `all`'s
     /// channel link: no world cuts, no successions), saving into `store` under its fence. A
     /// migrated or bootstrapped state is written by its first transition.
-    fn spawn(store: StoreHandle, start: CoordinatorStart, hosts: Hosts, fenced: Fenced) -> CoordinatorThread {
-        Self::spawn_as(store, start, hosts, fenced, None, game::CrashPolicy::Rollback)
+    fn spawn(
+        store: StoreHandle,
+        start: CoordinatorStart,
+        hosts: Hosts,
+        fenced: Fenced,
+    ) -> CoordinatorThread {
+        Self::spawn_as(
+            store,
+            start,
+            hosts,
+            fenced,
+            None,
+            game::CrashPolicy::Rollback,
+        )
     }
 
     /// [`Self::spawn`] for a world whose hosts' crashes cost `policy`: `Succession` with
@@ -1166,7 +1359,11 @@ impl CoordinatorRuntime {
         // committed transition released. Set on the core loaded here, BEFORE its first input; a
         // rebase and a refresh keep it (only a fresh load starts at `Direct`, and this runtime
         // loads none after this).
-        let delivery = if split { Delivery::Mailbox } else { Delivery::Direct };
+        let delivery = if split {
+            Delivery::Mailbox
+        } else {
+            Delivery::Direct
+        };
         core.set_delivery(delivery);
         // Its first input: this replica registered (Elastic 2b Task 4) — live from its first
         // transition on; alone, every replica registered before it is gone.
@@ -1286,7 +1483,11 @@ impl CoordinatorRuntime {
         self.clock.now(self.mono_ms())
     }
 
-    fn run(mut self, stop: Receiver<Stop>, #[cfg(feature = "test-hooks")] inspect: Receiver<Inspect>) -> ServerExit {
+    fn run(
+        mut self,
+        stop: Receiver<Stop>,
+        #[cfg(feature = "test-hooks")] inspect: Receiver<Inspect>,
+    ) -> ServerExit {
         loop {
             self.wait(
                 &stop,
@@ -1352,7 +1553,10 @@ impl CoordinatorRuntime {
             self.report_writes();
             if matches!(self.hosts, Hosts::Api(_)) {
                 let live = self.core.replicas_live();
-                health.coordinator_replicas(live.len() as u64, self.core.ticker() == Some(self.core.replica()));
+                health.coordinator_replicas(
+                    live.len() as u64,
+                    self.core.ticker() == Some(self.core.replica()),
+                );
             }
             health.world_generation(self.core.world_generation());
             health.successions_open(self.core.successions_open_count() as u64);
@@ -1365,7 +1569,11 @@ impl CoordinatorRuntime {
 
     /// Block until a host message, the write's answer or a stop arrives, at most
     /// [`COORDINATOR_TICK_MS`]. Nothing is taken off the channels here.
-    fn wait(&self, stop: &Receiver<Stop>, #[cfg(feature = "test-hooks")] inspect: &Receiver<Inspect>) {
+    fn wait(
+        &self,
+        stop: &Receiver<Stop>,
+        #[cfg(feature = "test-hooks")] inspect: &Receiver<Inspect>,
+    ) {
         let mut sel = Select::new();
         sel.recv(stop);
         #[cfg(feature = "test-hooks")]
@@ -1383,7 +1591,7 @@ impl CoordinatorRuntime {
                 }
             }
         }
-        if let Some((_, written)) = &self.writing {
+        if let Some((_, written, _)) = &self.writing {
             sel.recv(written);
         }
         if let Some(notices) = &self.notices {
@@ -1394,23 +1602,44 @@ impl CoordinatorRuntime {
 
     /// Hand every queued message of a channel link's host to the core, in its order (role `all`).
     fn drain_hosts(&mut self, now: u64) {
-        let Hosts::Channels(hosts) = &mut self.hosts else { return };
+        let Hosts::Channels(hosts) = &mut self.hosts else {
+            return;
+        };
         for host in hosts.iter_mut() {
             while !host.gone {
                 match host.rx.try_recv() {
                     Ok(msg) => {
-                        if let HostMsg::Attach { host: ordinal, boot, epoch, .. } = &msg {
+                        if let HostMsg::Attach {
+                            host: ordinal,
+                            boot,
+                            epoch,
+                            ..
+                        } = &msg
+                        {
                             host.ordinal = *ordinal;
                             host.attach = Some((*boot, *epoch));
                         }
-                        self.core.apply(Input::Host { host: host.ordinal, msg }, now)
+                        self.core.apply(
+                            Input::Host {
+                                host: host.ordinal,
+                                msg,
+                            },
+                            now,
+                        )
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         log::info!("[coordinator] a host closed its link");
                         host.gone = true;
                         if let Some((boot, epoch)) = host.attach {
-                            self.core.apply(Input::HostStalled { host: host.ordinal, boot, epoch }, now);
+                            self.core.apply(
+                                Input::HostStalled {
+                                    host: host.ordinal,
+                                    boot,
+                                    epoch,
+                                },
+                                now,
+                            );
                         }
                     }
                 }
@@ -1454,7 +1683,13 @@ impl CoordinatorRuntime {
                         continue;
                     }
                     match msgs.first() {
-                        Some(HostMsg::Attach { boot: b, epoch: e, generation, policy, .. }) => {
+                        Some(HostMsg::Attach {
+                            boot: b,
+                            epoch: e,
+                            generation,
+                            policy,
+                            ..
+                        }) => {
                             if (*b, *e) != (boot, epoch) {
                                 log::warn!(
                                     "[coordinator] host {host}'s batch is stamped ({boot:#x}, {epoch}), its Attach names ({b:#x}, {e}): taken as the Attach's"
@@ -1477,14 +1712,24 @@ impl CoordinatorRuntime {
                         }
                     }
                 }
-                ApiCall::LoginOrder { order, done } => {
+                ApiCall::LoginOrder { order, trace, done } => {
                     let Hosts::Api(api) = &self.hosts else { return };
                     if api.login_held.len() >= LOGIN_ORDERS_HELD_MAX {
-                        log::warn!("[coordinator] {LOGIN_ORDERS_HELD_MAX} login orders wait for their transition: one more answered not_ready");
+                        log::warn!(
+                            "[coordinator] {LOGIN_ORDERS_HELD_MAX} login orders wait for their transition: one more answered not_ready"
+                        );
                         let _ = done.send(Err(ApiRefusal::NotReady));
                         continue;
                     }
-                    self.issue_login_order(HeldOrder { order, done, in_write: false }, now);
+                    self.issue_login_order(
+                        HeldOrder {
+                            order,
+                            trace,
+                            done,
+                            in_write: false,
+                        },
+                        now,
+                    );
                 }
             }
         }
@@ -1504,9 +1749,17 @@ impl CoordinatorRuntime {
         for msg in msgs {
             self.core.apply(Input::Host { host, msg }, now);
         }
-        let Hosts::Api(api) = &mut self.hosts else { return };
+        let Hosts::Api(api) = &mut self.hosts else {
+            return;
+        };
         api.applied += 1;
-        api.waiters.push_back(BatchWaiter { seq: api.applied, host, boot, epoch, done });
+        api.waiters.push_back(BatchWaiter {
+            seq: api.applied,
+            host,
+            boot,
+            epoch,
+            done,
+        });
     }
 
     /// Whether host `host`'s `Attach` of `(boot, epoch)`, world generation `generation`, crash
@@ -1517,7 +1770,15 @@ impl CoordinatorRuntime {
     /// [`CoordMsg::Generation`], as a row of its mailbox at that boot: it exits for the rollback),
     /// and its policy is this coordinator's ([`policy_agrees`]). Refused, the attachment it held
     /// as that boot, if any, is detached (as its link's close detached it) and the reason logged.
-    fn admit_attach(&mut self, host: HostId, boot: u64, epoch: u64, generation: u64, policy: game::CrashPolicy, now: u64) -> bool {
+    fn admit_attach(
+        &mut self,
+        host: HostId,
+        boot: u64,
+        epoch: u64,
+        generation: u64,
+        policy: game::CrashPolicy,
+        now: u64,
+    ) -> bool {
         let refused = match after_store_read(stored_registration(&self.store, host)) {
             Some((_, state)) if state == game::HOST_LIVE => None,
             stored => {
@@ -1528,13 +1789,16 @@ impl CoordinatorRuntime {
                 Some(())
             }
         };
-        let refused = refused.or_else(|| match after_store_read(generation_current(&self.store, host, generation)) {
-            Ok(()) => None,
-            Err(stored) => {
-                if let Some(stored) = stored {
-                    self.core.tell_refused_attach(host, boot, CoordMsg::Generation(stored));
+        let refused = refused.or_else(|| {
+            match after_store_read(generation_current(&self.store, host, generation)) {
+                Ok(()) => None,
+                Err(stored) => {
+                    if let Some(stored) = stored {
+                        self.core
+                            .tell_refused_attach(host, boot, CoordMsg::Generation(stored));
+                    }
+                    Some(())
                 }
-                Some(())
             }
         });
         let refused = refused.or_else(|| match policy_agrees(self.policy, policy) {
@@ -1549,8 +1813,19 @@ impl CoordinatorRuntime {
         }
         // Only an `Attach` at least as new as the newest applied detaches it: a late POST of an
         // older one must not end the host's current attachment.
-        if let Some((b, e)) = self.core.newest_attach(host).filter(|(b, e)| *b == boot && epoch >= *e) {
-            self.core.apply(Input::HostStalled { host, boot: b, epoch: e }, now);
+        if let Some((b, e)) = self
+            .core
+            .newest_attach(host)
+            .filter(|(b, e)| *b == boot && epoch >= *e)
+        {
+            self.core.apply(
+                Input::HostStalled {
+                    host,
+                    boot: b,
+                    epoch: e,
+                },
+                now,
+            );
         }
         false
     }
@@ -1564,18 +1839,29 @@ impl CoordinatorRuntime {
     /// login service's sweeper).
     fn issue_login_order(&mut self, held: HeldOrder, now: u64) {
         let spawn = matches!(held.order, game::LoginOrder::Spawn { .. });
-        match self.core.relay_login_order(held.order.clone()) {
+        match self
+            .core
+            .relay_login_order_traced(held.order.clone(), held.trace.clone())
+        {
             Some(_gate) => {
                 if let Hosts::Api(api) = &mut self.hosts {
-                    api.login_held.push(HeldOrder { in_write: false, ..held });
+                    api.login_held.push(HeldOrder {
+                        in_write: false,
+                        ..held
+                    });
                 }
             }
-            None if spawn && self.core.fleet_dials().is_some() && self.core.login_gate() == Gate::Nobody => {
+            None if spawn
+                && self.core.fleet_dials().is_some()
+                && self.core.login_gate() == Gate::Nobody =>
+            {
                 let _ = held.done.send(Err(ApiRefusal::Starting));
                 self.core.apply(Input::StartWanted, now);
             }
             None => {
-                log::debug!("[coordinator] a login order with no host taking logins: answered no_gate");
+                log::debug!(
+                    "[coordinator] a login order with no host taking logins: answered no_gate"
+                );
                 let _ = held.done.send(Err(ApiRefusal::NoGate));
             }
         }
@@ -1585,10 +1871,15 @@ impl CoordinatorRuntime {
     /// held login orders' rows with it (those of the dropped transition too). Each is issued again
     /// for the gate host of the new core's moment ([`Self::issue_login_order`]).
     fn reissue_login_orders(&mut self, now: u64) {
-        let Hosts::Api(api) = &mut self.hosts else { return };
+        let Hosts::Api(api) = &mut self.hosts else {
+            return;
+        };
         let held = std::mem::take(&mut api.login_held);
         if !held.is_empty() {
-            log::debug!("[coordinator] {} login order(s) issued again after a rebase", held.len());
+            log::debug!(
+                "[coordinator] {} login order(s) issued again after a rebase",
+                held.len()
+            );
         }
         for h in held {
             self.issue_login_order(h, now);
@@ -1698,7 +1989,12 @@ impl CoordinatorRuntime {
             let issued_mono = *issued_mono;
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                Ok(Ok(world_store::HostsRead { rows, store_ms, next_host_id, desired })) => {
+                Ok(Ok(world_store::HostsRead {
+                    rows,
+                    store_ms,
+                    next_host_id,
+                    desired,
+                })) => {
                     // The lease watch's receipt stamp: the monotonic clock, taken before the
                     // sample below (a forward step of the store's clock never reaches the watch).
                     let received_mono = self.mono_ms();
@@ -1708,7 +2004,10 @@ impl CoordinatorRuntime {
                     // and the lease watch's spans would grow by). The core's `now` follows from
                     // the next pass.
                     self.sample_store_clock(store_ms);
-                    let live = rows.iter().filter(|r| !r.clean && r.state == world_store::HOST_LIVE).count();
+                    let live = rows
+                        .iter()
+                        .filter(|r| !r.clean && r.state == world_store::HOST_LIVE)
+                        .count();
                     crate::health::Health::global().hosts_live(live as u64);
                     let seen: Vec<game::coordinator::HostSeen> = rows
                         .iter()
@@ -1733,14 +2032,16 @@ impl CoordinatorRuntime {
                     // dead runs nothing (`decide_in` reads the same predicate).
                     if fleet {
                         let draining = desired.iter().filter(|d| d.draining).count() as u64;
-                        crate::health::Health::global().fleet_rows(desired.len() as u64 - draining, draining);
+                        crate::health::Health::global()
+                            .fleet_rows(desired.len() as u64 - draining, draining);
                     }
                     // Under `Delivery::Direct` there is no mailbox (none read).
                     let mailbox_oldest: Vec<(HostId, u64, u64)> = match self.mailbox_read.take() {
                         Some(Ok(oldest)) => {
                             let rows = oldest.iter().map(|&(_, _, _, n)| n).sum();
                             let first = oldest.iter().map(|&(_, _, at, _)| at).min();
-                            crate::health::Health::global().mailbox_seen(rows, first.map_or(0, |at| now.saturating_sub(at)));
+                            crate::health::Health::global()
+                                .mailbox_seen(rows, first.map_or(0, |at| now.saturating_sub(at)));
                             oldest.into_iter().map(|(h, b, at, _)| (h, b, at)).collect()
                         }
                         Some(Err(e)) => {
@@ -1752,8 +2053,11 @@ impl CoordinatorRuntime {
                     // The hosts the read may find stalled: attached as the boot of a waiting row.
                     // Only the stall rule detaches while a `hosts` read is applied, so those of
                     // them detached after it are the stalled ones (`stalled=`, the counter).
-                    let stall_candidates: Vec<(HostId, u64)> =
-                        mailbox_oldest.iter().filter(|&&(h, b, _)| self.core.attachment(h) == Some(b)).map(|&(h, b, _)| (h, b)).collect();
+                    let stall_candidates: Vec<(HostId, u64)> = mailbox_oldest
+                        .iter()
+                        .filter(|&&(h, b, _)| self.core.attachment(h) == Some(b))
+                        .map(|&(h, b, _)| (h, b))
+                        .collect();
                     let read = Input::HostsRead {
                         rows: seen,
                         desired,
@@ -1764,7 +2068,10 @@ impl CoordinatorRuntime {
                         world_tick,
                     };
                     self.core.apply(read, now);
-                    let stalled = stall_candidates.iter().filter(|&&(h, b)| self.core.attachment(h) != Some(b)).count() as u64;
+                    let stalled = stall_candidates
+                        .iter()
+                        .filter(|&&(h, b)| self.core.attachment(h) != Some(b))
+                        .count() as u64;
                     if stalled > 0 {
                         self.tally.stalled += stalled;
                         crate::health::Health::global().hosts_stalled(stalled);
@@ -1773,7 +2080,10 @@ impl CoordinatorRuntime {
                 Ok(Err(e)) => {
                     self.core.expected_hosts_unknown();
                     self.core.leases_unread();
-                    self.warn_cuts(now, &format!("the hosts could not be read ({e}); no world cut until they are"));
+                    self.warn_cuts(
+                        now,
+                        &format!("the hosts could not be read ({e}); no world cut until they are"),
+                    );
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.core.expected_hosts_unknown();
@@ -1784,7 +2094,10 @@ impl CoordinatorRuntime {
             self.hosts_rx = None;
             self.mailbox_read = None;
         }
-        if self.hosts_read_ms.is_none_or(|at| now >= at + WORLD_CUT_HOSTS_REFRESH_MS) {
+        if self
+            .hosts_read_ms
+            .is_none_or(|at| now >= at + WORLD_CUT_HOSTS_REFRESH_MS)
+        {
             self.hosts_read_ms = Some(now);
             self.hosts_rx = Some((self.mono_ms(), self.store.hosts_later()));
             self.mailbox_read = None;
@@ -1795,7 +2108,10 @@ impl CoordinatorRuntime {
     /// A warning about a failing world-cut store call, at most once per
     /// [`WORLD_CUT_RETRY_LOG_MS`].
     fn warn_cuts(&mut self, now: u64, what: &str) {
-        if self.warned_ms.is_none_or(|at| now >= at + WORLD_CUT_RETRY_LOG_MS) {
+        if self
+            .warned_ms
+            .is_none_or(|at| now >= at + WORLD_CUT_RETRY_LOG_MS)
+        {
             self.warned_ms = Some(now);
             log::warn!("[coordinator] {what}");
         }
@@ -1814,19 +2130,45 @@ impl CoordinatorRuntime {
         // only once every survivor applied and the heir ADOPTED (the heir's part then carries
         // `WorldCut::adopts`, Task 9); the store does not check that pairing.
         if let Some(d) = self.core.take_decision() {
-            log::debug!("[coordinator] world cut {}: its decision ({}) goes with the next transition", d.cut.0, d.commit);
+            log::debug!(
+                "[coordinator] world cut {}: its decision ({}) goes with the next transition",
+                d.cut.0,
+                d.commit
+            );
         }
         self.pump_after_commit(now);
         if let Some((cut, tick)) = self.core.take_decision_lookup() {
-            if !self.lookups.iter().any(|l| l.host.is_none() && l.cut == cut) {
+            if !self
+                .lookups
+                .iter()
+                .any(|l| l.host.is_none() && l.cut == cut)
+            {
                 let rx = Some(self.store.cut_decision_later(cut));
-                self.lookups.push(Lookup { host: None, cut, tick, rx, abort_rx: None, retry_at: now });
+                self.lookups.push(Lookup {
+                    host: None,
+                    cut,
+                    tick,
+                    rx,
+                    abort_rx: None,
+                    retry_at: now,
+                });
             }
         }
         for (host, cut) in self.core.take_cut_lookups() {
-            if !self.lookups.iter().any(|l| l.host == Some(host) && l.cut == cut) {
+            if !self
+                .lookups
+                .iter()
+                .any(|l| l.host == Some(host) && l.cut == cut)
+            {
                 let rx = Some(self.store.cut_decision_later(cut));
-                self.lookups.push(Lookup { host: Some(host), cut, tick: 0, rx, abort_rx: None, retry_at: now });
+                self.lookups.push(Lookup {
+                    host: Some(host),
+                    cut,
+                    tick: 0,
+                    rx,
+                    abort_rx: None,
+                    retry_at: now,
+                });
             }
         }
         let mut answered = Vec::new();
@@ -1847,14 +2189,18 @@ impl CoordinatorRuntime {
                         l.abort_rx = Some(self.store.abort_cut_later(l.cut, l.tick));
                     }
                     Ok(Err(e)) => failed.push((i, e.to_string())),
-                    Err(TryRecvError::Disconnected) => failed.push((i, "the world-store thread has stopped".into())),
+                    Err(TryRecvError::Disconnected) => {
+                        failed.push((i, "the world-store thread has stopped".into()))
+                    }
                 }
             } else if let Some(rx) = &l.abort_rx {
                 match rx.try_recv() {
                     Err(TryRecvError::Empty) => {}
                     Ok(Ok(stored)) => answered.push((i, stored)),
                     Ok(Err(e)) => failed.push((i, e.to_string())),
-                    Err(TryRecvError::Disconnected) => failed.push((i, "the world-store thread has stopped".into())),
+                    Err(TryRecvError::Disconnected) => {
+                        failed.push((i, "the world-store thread has stopped".into()))
+                    }
                 }
             }
         }
@@ -1863,8 +2209,17 @@ impl CoordinatorRuntime {
             l.rx = None;
             l.abort_rx = None;
             l.retry_at = now + WORLD_CUT_LOOKUP_RETRY_MS;
-            let (cut, host) = (l.cut.0, l.host.map_or_else(|| "the coordinator".to_string(), |h| format!("host {h}")));
-            self.warn_cuts(now, &format!("the outcome of cut {cut} for {host} could not be read ({e}); asking again"));
+            let (cut, host) = (
+                l.cut.0,
+                l.host
+                    .map_or_else(|| "the coordinator".to_string(), |h| format!("host {h}")),
+            );
+            self.warn_cuts(
+                now,
+                &format!(
+                    "the outcome of cut {cut} for {host} could not be read ({e}); asking again"
+                ),
+            );
         }
         for (i, stored) in answered.iter().rev() {
             let l = self.lookups.remove(*i);
@@ -1873,18 +2228,44 @@ impl CoordinatorRuntime {
                 // have run (the answer that carried them was lost) — run again, idempotent.
                 self.cut_decided(l.cut, l.tick, *stored, &[]);
                 // A committed one is announced by the finish, once its parts are committed.
-                self.after.push(AfterJob { a: AfterCommit::FinishCut { cut: l.cut, tick: l.tick, committed: *stored }, rx: None, retry_at: now });
+                self.after.push(AfterJob {
+                    a: AfterCommit::FinishCut {
+                        cut: l.cut,
+                        tick: l.tick,
+                        committed: *stored,
+                    },
+                    rx: None,
+                    span: None,
+                    retry_at: now,
+                });
             }
             // A recorded decision never changes: a logged input (Elastic 2b Task 6).
-            self.core.apply(Input::CutLookedUp { host: l.host, cut: l.cut, committed: *stored }, now);
+            self.core.apply(
+                Input::CutLookedUp {
+                    host: l.host,
+                    cut: l.cut,
+                    committed: *stored,
+                },
+                now,
+            );
         }
         Ok(())
     }
 
     /// A decision on cut `cut` stored as `committed` reached this runtime (with its transition,
     /// or by a lookup): counted. `settles`: the successions its commit settles (when known).
-    fn cut_decided(&mut self, cut: game::CutId, tick: game::Tick, committed: bool, settles: &[game::SuccessionId]) {
-        game::perf_event!("world_cut_decided", "cut={} tick={tick} committed={committed}", cut.0);
+    fn cut_decided(
+        &mut self,
+        cut: game::CutId,
+        tick: game::Tick,
+        committed: bool,
+        settles: &[game::SuccessionId],
+    ) {
+        game::perf_event!(
+            "world_cut_decided",
+            "cut={} tick={tick} committed={committed}",
+            cut.0
+        );
         let health = crate::health::Health::global();
         health.cut_decided(committed);
         if committed {
@@ -1909,12 +2290,22 @@ impl CoordinatorRuntime {
                 let answer = match rx.try_recv() {
                     Err(TryRecvError::Empty) => return true,
                     Ok(answer) => answer,
-                    Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                    Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                        "the world-store thread has stopped".into(),
+                    )),
                 };
                 job.rx = None;
                 match answer {
-                    Ok(()) => return false,
+                    Ok(()) => {
+                        if let Some(span) = job.span.take() {
+                            span.record("outcome", "ok");
+                        }
+                        return false;
+                    }
                     Err(e) => {
+                        if let Some(span) = job.span.take() {
+                            span.record("outcome", "retry");
+                        }
                         failed.push(format!("{:?}: {e}", job.a));
                         if held {
                             return false;
@@ -1927,9 +2318,21 @@ impl CoordinatorRuntime {
             true
         });
         for e in failed {
-            self.warn_cuts(now, &format!("a decided cut's post-commit effect failed ({e}); trying again"));
+            self.warn_cuts(
+                now,
+                &format!("a decided cut's post-commit effect failed ({e}); trying again"),
+            );
         }
-        for job in self.after.iter_mut().filter(|j| j.rx.is_none() && now >= j.retry_at) {
+        for job in self
+            .after
+            .iter_mut()
+            .filter(|j| j.rx.is_none() && now >= j.retry_at)
+        {
+            job.span = Some(tracing::info_span!(
+                "coordinator.post_commit",
+                operation = "finish_cut",
+                outcome = tracing::field::Empty
+            ));
             job.rx = Some(self.store.after_commit_later(job.a));
         }
     }
@@ -1943,7 +2346,9 @@ impl CoordinatorRuntime {
     /// decision refused (a lock timeout behind a staged part, the store down), is tried again
     /// after [`WORLD_CUT_DECISION_RETRY_MS`]. `Err`: fenced.
     fn pump_successions(&mut self, now: u64) -> Result<(), ()> {
-        let Some(p) = self.successions.as_mut() else { return Ok(()) };
+        let Some(p) = self.successions.as_mut() else {
+            return Ok(());
+        };
         // The ticker's work (Elastic 2b Task 6): another replica reads, looks up and hands out
         // nothing (its core refuses the answers anyway); a new ticker owes the read below.
         let ticker = self.core.is_ticker();
@@ -1971,12 +2376,23 @@ impl CoordinatorRuntime {
                 Some((issued_at_version, Ok(Ok(list)))) => {
                     p.open_known = true;
                     p.open_rx = None;
-                    log::info!("[coordinator] {} open succession(s) in the store", list.len());
-                    self.core.apply(Input::SuccessionsOpen { list, issued_at_version }, now);
+                    log::info!(
+                        "[coordinator] {} open succession(s) in the store",
+                        list.len()
+                    );
+                    self.core.apply(
+                        Input::SuccessionsOpen {
+                            list,
+                            issued_at_version,
+                        },
+                        now,
+                    );
                     None
                 }
                 Some((_, Ok(Err(e)))) => Some(e.to_string()),
-                Some((_, Err(TryRecvError::Disconnected))) => Some("the world-store thread has stopped".into()),
+                Some((_, Err(TryRecvError::Disconnected))) => {
+                    Some("the world-store thread has stopped".into())
+                }
             };
             if let Some(e) = failed {
                 p.open_rx = None;
@@ -1995,14 +2411,26 @@ impl CoordinatorRuntime {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => None,
                 Ok(answer) => Some(answer),
-                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                ))),
             };
             if let Some(answer) = answer {
                 match answer {
                     Ok(rows) => {
-                        let srs: BTreeSet<game::SuperRegion> = asked.iter().map(|(sr, _)| *sr).collect();
-                        let rows: Vec<(game::SuperRegion, i64, u64)> = rows.into_iter().filter(|(sr, _, _)| srs.contains(sr)).collect();
-                        self.core.apply(Input::LandOwners { asked: std::mem::take(asked), rows }, now);
+                        let srs: BTreeSet<game::SuperRegion> =
+                            asked.iter().map(|(sr, _)| *sr).collect();
+                        let rows: Vec<(game::SuperRegion, i64, u64)> = rows
+                            .into_iter()
+                            .filter(|(sr, _, _)| srs.contains(sr))
+                            .collect();
+                        self.core.apply(
+                            Input::LandOwners {
+                                asked: std::mem::take(asked),
+                                rows,
+                            },
+                            now,
+                        );
                     }
                     Err(e) => failed = Some(e),
                 }
@@ -2017,16 +2445,25 @@ impl CoordinatorRuntime {
         }
         if let Some(e) = failed {
             // Throttled; the rest of the pump runs on as usual.
-            self.warn_cuts(now, &format!("the owners of land asked for could not be read ({e}); the hosts ask again"));
+            self.warn_cuts(
+                now,
+                &format!(
+                    "the owners of land asked for could not be read ({e}); the hosts ask again"
+                ),
+            );
         }
-        let Some(p) = self.successions.as_mut() else { return Ok(()) };
+        let Some(p) = self.successions.as_mut() else {
+            return Ok(());
+        };
         // A rollback whose answer was lost: the world generation is read (the rollback is
         // conditional on its generation: the core hands it out again only if it did not commit).
         if let Some(rx) = &p.generation_rx {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return Ok(()),
                 Ok(answer) => answer,
-                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                )),
             };
             p.generation_rx = None;
             match answer {
@@ -2035,14 +2472,19 @@ impl CoordinatorRuntime {
                     p.generation_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
                     // Asked again: the core's lookup is taken once.
                     self.core.generation_lookup_failed();
-                    self.warn_cuts(now, &format!("the world generation could not be read ({e}); asking again"));
+                    self.warn_cuts(
+                        now,
+                        &format!("the world generation could not be read ({e}); asking again"),
+                    );
                 }
             }
             return Ok(());
         }
         if now >= p.generation_retry_at {
             if let Some(from) = self.core.take_generation_lookup() {
-                log::info!("[coordinator] a rollback from generation {from} lost its answer: reading the world generation");
+                log::info!(
+                    "[coordinator] a rollback from generation {from} lost its answer: reading the world generation"
+                );
                 p.generation_rx = Some(self.store.world_generation_later());
                 return Ok(());
             }
@@ -2050,7 +2492,9 @@ impl CoordinatorRuntime {
         if self.core.rollback_wanted() {
             // Handed out (paced by the core after a refused one); it runs in the next transition.
             if let Some(from) = self.core.take_rollback() {
-                log::warn!("[coordinator] the world rolls back from generation {from} with the next transition");
+                log::warn!(
+                    "[coordinator] the world rolls back from generation {from} with the next transition"
+                );
             }
             return Ok(());
         }
@@ -2060,13 +2504,21 @@ impl CoordinatorRuntime {
         // ([`Self::answered`]). The core holds one of each in flight at most.
         if now >= p.end_retry_at {
             if let Some(end) = self.core.take_end_landless(now) {
-                log::debug!("[coordinator] host {} is ended with the next transition", end.host);
+                log::debug!(
+                    "[coordinator] host {} is ended with the next transition",
+                    end.host
+                );
             }
         }
-        let Some(p) = self.successions.as_mut() else { return Ok(()) };
+        let Some(p) = self.successions.as_mut() else {
+            return Ok(());
+        };
         if now >= p.declare_retry_at {
             if let Some(d) = self.core.declare_wanted(now) {
-                log::debug!("[coordinator] hosts {:?} are declared with the next transition", d.dead);
+                log::debug!(
+                    "[coordinator] hosts {:?} are declared with the next transition",
+                    d.dead
+                );
             }
         }
         Ok(())
@@ -2078,46 +2530,86 @@ impl CoordinatorRuntime {
         use game::coordinator::DecisionAnswer;
         for a in answers {
             match a {
-                DecisionAnswer::Cut { cut, committed: Ok(committed), .. } => {
+                DecisionAnswer::Cut {
+                    cut,
+                    committed: Ok(committed),
+                    ..
+                } => {
                     let settles = self.core.settles_of_running(*cut);
                     let tick = self.core.world_cut_running().map_or(0, |(_, t)| t);
                     self.cut_decided(*cut, tick, *committed, &settles);
                 }
-                DecisionAnswer::Cut { cut, committed: Err(e), .. } => {
-                    self.warn_cuts(now, &format!("world cut {}: its decision could not be recorded ({e}); looking it up", cut.0));
+                DecisionAnswer::Cut {
+                    cut,
+                    committed: Err(e),
+                    ..
+                } => {
+                    self.warn_cuts(
+                        now,
+                        &format!(
+                            "world cut {}: its decision could not be recorded ({e}); looking it up",
+                            cut.0
+                        ),
+                    );
                 }
-                DecisionAnswer::Assigned { outcome: Ok(game::coordinator::Assigned::Done { .. }), .. } => {
+                DecisionAnswer::Assigned {
+                    outcome: Ok(game::coordinator::Assigned::Done { .. }),
+                    ..
+                } => {
                     crate::health::Health::global().land_assigned();
                     self.tally.assigned += 1;
                 }
-                DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } | DecisionAnswer::Assigned { .. } => {}
+                DecisionAnswer::Begin { .. }
+                | DecisionAnswer::ReplicaEnded { .. }
+                | DecisionAnswer::Assigned { .. } => {}
                 // Elastic 4: the fleet's decisions that wrote, counted (the core still awaits the
                 // answer here: `fleet_why` is the rule it came from).
-                DecisionAnswer::HostAdded { outcome: Ok(game::coordinator::HostAdded::Done { .. }), .. } => {
+                DecisionAnswer::HostAdded {
+                    outcome: Ok(game::coordinator::HostAdded::Done { .. }),
+                    ..
+                } => {
                     crate::health::Health::global().fleet_added();
                     self.tally.added += 1;
-                    self.tally.scale.extend(self.core.fleet_why().and_then(|w| w.scale_word()));
+                    self.tally
+                        .scale
+                        .extend(self.core.fleet_why().and_then(|w| w.scale_word()));
                 }
                 // Every slot held when a host is wanted (rule 4, or a starting login) — draining
                 // hosts hold the slots; rule 5 never asks at the maximum (`WorldFleetNoFreeSlot`).
-                DecisionAnswer::HostAdded { outcome: Ok(game::coordinator::HostAdded::Full), .. } => {
+                DecisionAnswer::HostAdded {
+                    outcome: Ok(game::coordinator::HostAdded::Full),
+                    ..
+                } => {
                     crate::health::Health::global().fleet_full();
                 }
                 DecisionAnswer::HostDrained {
-                    outcome: Ok(game::coordinator::HostDrained::Marked | game::coordinator::HostDrained::RowOnly),
+                    outcome:
+                        Ok(
+                            game::coordinator::HostDrained::Marked
+                            | game::coordinator::HostDrained::RowOnly,
+                        ),
                     ..
                 } => {
                     crate::health::Health::global().fleet_drained();
                     self.tally.drained += 1;
-                    self.tally.scale.extend(self.core.fleet_why().and_then(|w| w.scale_word()));
+                    self.tally
+                        .scale
+                        .extend(self.core.fleet_why().and_then(|w| w.scale_word()));
                 }
-                DecisionAnswer::HostRemoved { outcome: Ok(game::coordinator::HostRemoved::Done), .. } => {
+                DecisionAnswer::HostRemoved {
+                    outcome: Ok(game::coordinator::HostRemoved::Done),
+                    ..
+                } => {
                     crate::health::Health::global().fleet_removed();
                     self.tally.removed += 1;
                 }
-                DecisionAnswer::HostAdded { .. } | DecisionAnswer::HostDrained { .. } | DecisionAnswer::HostRemoved { .. } => {}
+                DecisionAnswer::HostAdded { .. }
+                | DecisionAnswer::HostDrained { .. }
+                | DecisionAnswer::HostRemoved { .. } => {}
                 DecisionAnswer::Declared { outcome, .. } => {
-                    let Some(p) = self.successions.as_mut() else { continue };
+                    let Some(p) = self.successions.as_mut() else {
+                        continue;
+                    };
                     match outcome {
                         Ok(declared) => {
                             p.declare_failing_since = None;
@@ -2143,7 +2635,9 @@ impl CoordinatorRuntime {
                                 );
                                 self.warn_cuts(now, &what);
                             } else {
-                                log::debug!("[coordinator] a succession could not be declared yet ({e}); trying again");
+                                log::debug!(
+                                    "[coordinator] a succession could not be declared yet ({e}); trying again"
+                                );
                             }
                         }
                     }
@@ -2154,7 +2648,10 @@ impl CoordinatorRuntime {
                         if let Some(p) = self.successions.as_mut() {
                             p.end_retry_at = now + WORLD_CUT_DECISION_RETRY_MS;
                         }
-                        self.warn_cuts(now, &format!("host {} could not be ended ({e}); trying again", end.host));
+                        self.warn_cuts(
+                            now,
+                            &format!("host {} could not be ended ({e}); trying again", end.host),
+                        );
                     }
                 },
                 DecisionAnswer::RolledBack { outcome, .. } => match outcome {
@@ -2162,7 +2659,10 @@ impl CoordinatorRuntime {
                         game::perf_event!("world_rollback", "generation={generation}");
                         crate::health::Health::global().world_generation(*generation);
                     }
-                    Err(e) => self.warn_cuts(now, &format!("the world rollback could not be recorded ({e}); trying again")),
+                    Err(e) => self.warn_cuts(
+                        now,
+                        &format!("the world rollback could not be recorded ({e}); trying again"),
+                    ),
                 },
             }
         }
@@ -2174,7 +2674,7 @@ impl CoordinatorRuntime {
     /// leaves at once. Returns what may be sent now, in order; `Err`: the thread ends.
     fn pump_transition(&mut self, now: u64) -> Result<Vec<(Target, CoordMsg)>, End> {
         let mut out = Vec::new();
-        if let Some((_, written)) = &self.writing {
+        if let Some((_, written, _)) = &self.writing {
             let answer = match written.try_recv() {
                 Err(TryRecvError::Empty) => {
                     // Final review S-I1: whatever `wait` selects on is taken off its channel before
@@ -2185,10 +2685,23 @@ impl CoordinatorRuntime {
                     return Ok(out);
                 }
                 Ok(answer) => answer,
-                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                )),
             };
-            let (t, _) = self.writing.take().expect("checked");
-            match self.settle(t, answer, now, None) {
+            let (t, _, span) = self.writing.take().expect("checked");
+            span.record("store_result", transition_answer_kind(&answer));
+            let settled = self.settle(t, answer, now, None);
+            span.record(
+                "outcome",
+                match &settled {
+                    Settled::Released(_) => "committed",
+                    Settled::Held { now } if *now => "retry_now",
+                    Settled::Held { .. } => "retry",
+                    Settled::End(_) => "ended",
+                },
+            );
+            match settled {
                 Settled::Released(released) => out = released,
                 Settled::Held { .. } => {}
                 Settled::End(end) => return Err(end),
@@ -2229,7 +2742,9 @@ impl CoordinatorRuntime {
     fn pump_clean_batches(&mut self) -> bool {
         let several = self.core.replicas_live().len() > 1;
         let version = self.core.version();
-        let Hosts::Api(api) = &mut self.hosts else { return true };
+        let Hosts::Api(api) = &mut self.hosts else {
+            return true;
+        };
         if api.waiters.is_empty() {
             api.clean_check = None;
             return true;
@@ -2247,7 +2762,9 @@ impl CoordinatorRuntime {
         let answer = match rx.try_recv() {
             Err(TryRecvError::Empty) => return false,
             Ok(answer) => answer,
-            Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                "the world-store thread has stopped".into(),
+            )),
         };
         api.clean_check = None;
         match answer {
@@ -2257,12 +2774,16 @@ impl CoordinatorRuntime {
                 covers == api.applied
             }
             Ok(v) => {
-                log::info!("[coordinator] batch answers: the row is at {v}, this cache at {version}: refreshing first");
+                log::info!(
+                    "[coordinator] batch answers: the row is at {v}, this cache at {version}: refreshing first"
+                );
                 self.refresh_wanted = true;
                 false
             }
             Err(e) => {
-                log::warn!("[coordinator] batch answers: the row's version could not be read ({e}); asking again");
+                log::warn!(
+                    "[coordinator] batch answers: the row's version could not be read ({e}); asking again"
+                );
                 false
             }
         }
@@ -2284,7 +2805,9 @@ impl CoordinatorRuntime {
             if gone {
                 // Its listener ended: a disconnected receiver would wake every wait at once (a
                 // busy loop). Without notices a resync read stands in.
-                log::warn!("[coordinator] the coordinator_row listener stopped; relying on the backstop poll");
+                log::warn!(
+                    "[coordinator] the coordinator_row listener stopped; relying on the backstop poll"
+                );
                 self.notices = None;
                 notices.push(world_store::Notice::Resync);
             }
@@ -2299,7 +2822,9 @@ impl CoordinatorRuntime {
                             // waiting polls read again.
                             self.note_row_version(v);
                         }
-                        Err(_) => log::debug!("[coordinator] a malformed coordinator_row notice ({p:?}) ignored"),
+                        Err(_) => log::debug!(
+                            "[coordinator] a malformed coordinator_row notice ({p:?}) ignored"
+                        ),
                     },
                     world_store::Notice::Resync => {
                         // Notices may have been missed: the row's version read (a refresh if it
@@ -2339,7 +2864,11 @@ impl CoordinatorRuntime {
             return;
         }
         self.joined = true;
-        log::info!("[coordinator] replica {} joined the live set (live {:?})", self.core.replica(), self.core.replicas_live());
+        log::info!(
+            "[coordinator] replica {} joined the live set (live {:?})",
+            self.core.replica(),
+            self.core.replicas_live()
+        );
         if let Hosts::Api(api) = &self.hosts {
             crate::health::Health::global().set_registered(true);
             if let Some(l) = &api.listener {
@@ -2358,7 +2887,9 @@ impl CoordinatorRuntime {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return Ok(()),
                 Ok(answer) => answer,
-                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                )),
             };
             self.refresh_rx = None;
             let for_stale = std::mem::take(&mut self.refresh_for_stale);
@@ -2391,7 +2922,9 @@ impl CoordinatorRuntime {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return Ok(()),
                 Ok(answer) => answer,
-                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                )),
             };
             self.version_rx = None;
             match answer {
@@ -2417,17 +2950,24 @@ impl CoordinatorRuntime {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return Ok(()),
                 Ok(answer) => answer,
-                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                )),
             };
             self.resync_rx = None;
             match answer {
                 Ok(v) if v > self.core.version() => {
-                    log::info!("[coordinator] after missed notices the row is at {v}, this cache at {}: refreshing", self.core.version());
+                    log::info!(
+                        "[coordinator] after missed notices the row is at {v}, this cache at {}: refreshing",
+                        self.core.version()
+                    );
                     self.refresh_wanted = true;
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    log::warn!("[coordinator] the row's version could not be read after missed notices ({e}); asking again");
+                    log::warn!(
+                        "[coordinator] the row's version could not be read after missed notices ({e}); asking again"
+                    );
                     self.resync_wanted = true;
                 }
             }
@@ -2441,7 +2981,11 @@ impl CoordinatorRuntime {
         if self.refresh_wanted {
             self.refresh_wanted = false;
             self.refresh_for_stale = std::mem::take(&mut self.stale_refresh);
-            let since = if self.core.history_dirty() { 0 } else { self.history_version };
+            let since = if self.core.history_dirty() {
+                0
+            } else {
+                self.history_version
+            };
             self.refresh_rx = Some(self.store.load_coordinator_since_later(since));
             return Ok(());
         }
@@ -2477,7 +3021,10 @@ impl CoordinatorRuntime {
             }
             Ok(false) => {}
             Err(e) => {
-                log::error!("[coordinator] the row at version {} does not load ({e}); stopping as fenced", row.version);
+                log::error!(
+                    "[coordinator] the row at version {} does not load ({e}); stopping as fenced",
+                    row.version
+                );
                 return Err(End::Conflict);
             }
         }
@@ -2499,13 +3046,17 @@ impl CoordinatorRuntime {
     fn pump_replica(&mut self, now: u64) -> Result<(), End> {
         let mono = self.mono_ms();
         let me = self.core.replica();
-        let Some(r) = self.replication.as_mut() else { return Ok(()) };
+        let Some(r) = self.replication.as_mut() else {
+            return Ok(());
+        };
         if let Some(rx) = &r.beat_rx {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => {}
                 Ok(Ok(true)) => r.beat_rx = None,
                 Ok(Ok(false)) => {
-                    log::error!("[coordinator] replica {me}'s row is ended (another replica found it lapsed): stopping as fenced");
+                    log::error!(
+                        "[coordinator] replica {me}'s row is ended (another replica found it lapsed): stopping as fenced"
+                    );
                     return Err(End::Evicted);
                 }
                 Ok(Err(e)) => {
@@ -2528,7 +3079,9 @@ impl CoordinatorRuntime {
                     r.read_rx = None;
                 }
                 Ok(Err(e)) => {
-                    log::warn!("[coordinator] the replicas could not be read ({e}); the watch starts over");
+                    log::warn!(
+                        "[coordinator] the replicas could not be read ({e}); the watch starts over"
+                    );
                     r.watch.observe_failed();
                     r.read_rx = None;
                 }
@@ -2540,8 +3093,12 @@ impl CoordinatorRuntime {
             r.next_read_mono = mono + game::coordinator::REPLICA_BEAT_MS;
         }
         if r.watch.ends_lapsed(me, mono) {
-            let lapsed: Vec<_> =
-                r.watch.lapsed(mono).into_iter().filter(|l| *l != me && self.core.replicas_live().contains(l)).collect();
+            let lapsed: Vec<_> = r
+                .watch
+                .lapsed(mono)
+                .into_iter()
+                .filter(|l| *l != me && self.core.replicas_live().contains(l))
+                .collect();
             for l in lapsed {
                 log::warn!("[coordinator] replica {l}'s row stood still for a lease: ending it");
                 self.core.apply(Input::ReplicaLapsed(l), now);
@@ -2549,7 +3106,9 @@ impl CoordinatorRuntime {
             // Fix round 1 (I1): a replica a registration ended (its row dead, or pruned) that no
             // watch saw stand still — dropped too (its row is dead already: the end is a no-op).
             for g in r.watch.gone(self.core.replicas_live(), me) {
-                log::warn!("[coordinator] replica {g}'s row is ended (a registration found it lapsed): dropping it");
+                log::warn!(
+                    "[coordinator] replica {g}'s row is ended (a registration found it lapsed): dropping it"
+                );
                 self.core.apply(Input::ReplicaLapsed(g), now);
             }
         }
@@ -2560,8 +3119,54 @@ impl CoordinatorRuntime {
     /// `false` when nothing durable changed.
     fn write_next(&mut self) -> bool {
         debug_assert!(self.writing.is_none());
-        debug_assert_eq!(self.core.delivery(), self.delivery, "the core's delivery is the runtime's (a rebase keeps it)");
-        let Some(t) = self.core.take_transition() else { return false };
+        debug_assert_eq!(
+            self.core.delivery(),
+            self.delivery,
+            "the core's delivery is the runtime's (a rebase keeps it)"
+        );
+        let Some(t) = self.core.take_transition() else {
+            return false;
+        };
+        let decision_cut = t
+            .decisions
+            .iter()
+            .filter(|decision| {
+                matches!(
+                    decision,
+                    game::coordinator::StoreDecision::BeginCut { .. }
+                        | game::coordinator::StoreDecision::DecideCut(_)
+                )
+            })
+            .count();
+        let decision_land = t
+            .decisions
+            .iter()
+            .filter(|decision| matches!(decision, game::coordinator::StoreDecision::AssignLand(_)))
+            .count();
+        let decision_fleet = t
+            .decisions
+            .iter()
+            .filter(|decision| {
+                matches!(
+                    decision,
+                    game::coordinator::StoreDecision::AddHost(_)
+                        | game::coordinator::StoreDecision::DrainHost(_)
+                        | game::coordinator::StoreDecision::RemoveHost(_)
+                )
+            })
+            .count();
+        let span = tracing::info_span!(
+            "coordinator.transition",
+            decisions = t.decisions.len(),
+            cut_decisions = decision_cut,
+            land_decisions = decision_land,
+            fleet_decisions = decision_fleet,
+            mailbox_rows = t.outbox.len(),
+            login_rows = t.login_outbox.len(),
+            core_changed = t.core_changed,
+            store_result = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        );
         self.login_orders_in_write();
         if let Hosts::Api(api) = &mut self.hosts {
             // Every batch applied so far is in this transition's inputs: its commit answers them.
@@ -2585,7 +3190,7 @@ impl CoordinatorRuntime {
             if self.hooks.fail.load(Ordering::SeqCst) {
                 let (tx, rx) = crossbeam::channel::bounded(1);
                 let _ = tx.send(Err(StoreError::Backend(HOOK_REFUSED.into())));
-                self.writing = Some((t, rx));
+                self.writing = Some((t, rx, span));
                 return true;
             }
             if self.hooks.conflict_once.swap(false, Ordering::SeqCst) {
@@ -2600,7 +3205,10 @@ impl CoordinatorRuntime {
                         ..Default::default()
                     };
                     let moved = self.store.write_transition_later(foreign).recv();
-                    log::warn!("[coordinator] test hook: another writer moved the row from version {}: {moved:?}", row.version);
+                    log::warn!(
+                        "[coordinator] test hook: another writer moved the row from version {}: {moved:?}",
+                        row.version
+                    );
                 }
             }
         }
@@ -2627,24 +3235,38 @@ impl CoordinatorRuntime {
         let outbox = t
             .outbox
             .iter()
-            .map(|o| (o.host, o.boot, game::encode_packet(&o.msg).expect("a coordinator message encodes")))
+            .map(|o| {
+                (
+                    o.host,
+                    o.boot,
+                    game::encode_packet(&o.msg).expect("a coordinator message encodes"),
+                )
+            })
             .collect();
         let mailbox = self.delivery == Delivery::Mailbox;
         let login_outbox: Vec<Vec<u8>> = if mailbox {
             t.login_outbox
                 .iter()
-                .map(|o| game::encode_packet(&crate::login_link::answer_from(o.clone())).expect("a login answer encodes"))
+                .map(|o| {
+                    game::encode_packet(&crate::login_link::answer_from(o.clone()))
+                        .expect("a login answer encodes")
+                })
                 .collect()
         } else {
             if !t.login_outbox.is_empty() {
-                log::debug!("[coordinator] {} login answer(s) with no login service reading this coordinator: dropped", t.login_outbox.len());
+                log::debug!(
+                    "[coordinator] {} login answer(s) with no login service reading this coordinator: dropped",
+                    t.login_outbox.len()
+                );
             }
             Vec::new()
         };
         let now = self.now_ms();
         let login_prune_before_ms = (mailbox
             && self.core.is_ticker()
-            && self.login_pruned_ms.is_none_or(|at| now >= at + LOGIN_ANSWER_PRUNE_EVERY_MS))
+            && self
+                .login_pruned_ms
+                .is_none_or(|at| now >= at + LOGIN_ANSWER_PRUNE_EVERY_MS))
         .then(|| {
             self.login_pruned_ms = Some(now);
             now.saturating_sub(LOGIN_ANSWER_TTL_MS)
@@ -2681,20 +3303,25 @@ impl CoordinatorRuntime {
         } else {
             written
         };
-        self.writing = Some((t, written));
+        self.writing = Some((t, written, span));
         true
     }
 
     /// The row as it stands now (a `Conflict`'s re-read), waiting at most until `deadline` (the
     /// orderly stop's; `None`: as long as the store takes).
-    fn reread_row(&self, deadline: Option<Instant>) -> Result<Option<world_store::StoredCoordinator>, StoreError> {
+    fn reread_row(
+        &self,
+        deadline: Option<Instant>,
+    ) -> Result<Option<world_store::StoredCoordinator>, StoreError> {
         let rx = self.store.load_coordinator_later();
         let stopped = || StoreError::Backend("the world-store thread has stopped".into());
         match deadline {
             None => rx.recv().unwrap_or_else(|_| Err(stopped())),
             Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                 Ok(answer) => answer,
-                Err(RecvTimeoutError::Timeout) => Err(StoreError::Backend("the row was not re-read before the stop's deadline".into())),
+                Err(RecvTimeoutError::Timeout) => Err(StoreError::Backend(
+                    "the row was not re-read before the stop's deadline".into(),
+                )),
                 Err(RecvTimeoutError::Disconnected) => Err(stopped()),
             },
         }
@@ -2717,9 +3344,9 @@ impl CoordinatorRuntime {
     ) -> Settled {
         #[cfg(feature = "test-hooks")]
         let answer = match answer {
-            Ok(_) if self.hooks.lose_answer.swap(false, Ordering::SeqCst) => {
-                Err(StoreError::Backend("test hook: the commit's answer was lost".into()))
-            }
+            Ok(_) if self.hooks.lose_answer.swap(false, Ordering::SeqCst) => Err(
+                StoreError::Backend("test hook: the commit's answer was lost".into()),
+            ),
             answer => answer,
         };
         match answer {
@@ -2761,11 +3388,19 @@ impl CoordinatorRuntime {
                     if self.core.answer_awaited(&a) {
                         self.answered(std::slice::from_ref(&a), now);
                     } else {
-                        log::debug!("[coordinator] a decision's answer no mark awaits: no side effects ({a:?})");
+                        log::debug!(
+                            "[coordinator] a decision's answer no mark awaits: no side effects ({a:?})"
+                        );
                     }
                     self.core.apply(Input::Decision(a), now);
                 }
-                self.after.extend(w.after_commit.into_iter().map(|a| AfterJob { a, rx: None, retry_at: now }));
+                self.after
+                    .extend(w.after_commit.into_iter().map(|a| AfterJob {
+                        a,
+                        rx: None,
+                        span: None,
+                        retry_at: now,
+                    }));
                 // Durable now: the login orders whose rows it carried are answered (the login
                 // answers it held are `login_outbox` rows, read by the login service).
                 self.login_orders_committed();
@@ -2787,7 +3422,8 @@ impl CoordinatorRuntime {
                 let mine = self.core.version();
                 match self.reread_row(deadline) {
                     Ok(Some(row))
-                        if row.version == mine + 1 && self.unacked.iter().any(|u| u.hash == core_hash(&row.core)) =>
+                        if row.version == mine + 1
+                            && self.unacked.iter().any(|u| u.hash == core_hash(&row.core)) =>
                     {
                         // Lost-commit recognition (decision 1): our own write; the cached core
                         // holds it and every input applied since — written over it at once. (That
@@ -2801,7 +3437,11 @@ impl CoordinatorRuntime {
                         // Its entry stays remembered (as every failed write's, until a commit): the
                         // log still holds that write's inputs, so a rebase now would apply them twice.
                         let hash = core_hash(&row.core);
-                        let committed = self.unacked.iter_mut().find(|u| u.hash == hash).map(|u| std::mem::take(&mut u.shape));
+                        let committed = self
+                            .unacked
+                            .iter_mut()
+                            .find(|u| u.hash == hash)
+                            .map(|u| std::mem::take(&mut u.shape));
                         self.core.set_version(row.version);
                         self.history_version = row.history_version;
                         self.core.transition_refused(t);
@@ -2816,13 +3456,19 @@ impl CoordinatorRuntime {
                     }
                     Ok(Some(row)) => self.rebase_onto(t, row, now),
                     Ok(None) => {
-                        log::error!("[coordinator] write conflict, and the coordinator row is gone; stopping as fenced");
+                        log::error!(
+                            "[coordinator] write conflict, and the coordinator row is gone; stopping as fenced"
+                        );
                         Settled::End(End::Conflict)
                     }
                     // Not known yet: `t` met the conflict, so it provably did not commit — handed
                     // back without being remembered as a write that may be in the row (the next
                     // write meets the conflict again).
-                    Err(e) => self.refused(t, &format!("a conflict, and the row could not be re-read: {e}"), now),
+                    Err(e) => self.refused(
+                        t,
+                        &format!("a conflict, and the row could not be re-read: {e}"),
+                        now,
+                    ),
                 }
             }
             Err(StoreError::Backend(e)) if e == HOOK_REFUSED => self.refused(t, &e, now),
@@ -2837,7 +3483,12 @@ impl CoordinatorRuntime {
     /// and hand-outs, Elastic 2b Task 6) is dropped and derived again. A failed write that may be
     /// in the row (its inputs would apply twice) cannot be rebased through: the process stops as
     /// Elastic 2a did, and the next start loads the row.
-    fn rebase_onto(&mut self, t: game::coordinator::Transition, row: world_store::StoredCoordinator, now: u64) -> Settled {
+    fn rebase_onto(
+        &mut self,
+        t: game::coordinator::Transition,
+        row: world_store::StoredCoordinator,
+        now: u64,
+    ) -> Settled {
         let mine = self.core.version();
         if !self.unacked.is_empty() {
             log::error!(
@@ -2850,7 +3501,10 @@ impl CoordinatorRuntime {
         }
         drop(t);
         if let Err(e) = self.core.rebase(&row.core, Some(&row.history), row.version) {
-            log::error!("[coordinator] write conflict: the row at version {} does not load ({e}); stopping as fenced", row.version);
+            log::error!(
+                "[coordinator] write conflict: the row at version {} does not load ({e}); stopping as fenced",
+                row.version
+            );
             return Settled::End(End::Conflict);
         }
         // The dropped transition's login order rows, and those queued since, are decided again.
@@ -2890,7 +3544,10 @@ impl CoordinatorRuntime {
         if self.unacked.len() == COORDINATOR_UNACKED_MAX {
             self.unacked.pop_front();
         }
-        self.unacked.push_back(Unacked { hash: core_hash(&t.core), shape: t.shape() });
+        self.unacked.push_back(Unacked {
+            hash: core_hash(&t.core),
+            shape: t.shape(),
+        });
         self.core.transition_failed(t);
         self.login_orders_handed_back();
         self.held_back(why, now)
@@ -2919,7 +3576,10 @@ impl CoordinatorRuntime {
             );
             game::perf_event!("coordinator_save_stuck", "failed={}", self.failed_in_a_row);
         } else {
-            log::warn!("[coordinator] write failed ({} in a row): {why}; retrying", self.failed_in_a_row);
+            log::warn!(
+                "[coordinator] write failed ({} in a row): {why}; retrying",
+                self.failed_in_a_row
+            );
         }
         Settled::Held { now: false }
     }
@@ -2968,7 +3628,11 @@ impl CoordinatorRuntime {
             t.added,
             t.drained,
             t.removed,
-            if t.scale.is_empty() { "-".to_string() } else { t.scale.join(",") },
+            if t.scale.is_empty() {
+                "-".to_string()
+            } else {
+                t.scale.join(",")
+            },
             t.stalled,
             t.mailbox_rows,
             t.login_rows,
@@ -2996,8 +3660,15 @@ impl CoordinatorRuntime {
             }
             // `Delivery::Mailbox`: every message is a mailbox row, nothing is released here.
             Hosts::Api(_) => {
-                debug_assert!(false, "{} message(s) released under Delivery::Mailbox", out.len());
-                log::error!("[coordinator] {} message(s) released outside a transition under the mailbox delivery: dropped", out.len());
+                debug_assert!(
+                    false,
+                    "{} message(s) released under Delivery::Mailbox",
+                    out.len()
+                );
+                log::error!(
+                    "[coordinator] {} message(s) released outside a transition under the mailbox delivery: dropped",
+                    out.len()
+                );
             }
         }
     }
@@ -3015,23 +3686,40 @@ impl CoordinatorRuntime {
             if self.writing.is_none() && !self.write_next() {
                 break;
             }
-            let (t, written) = self.writing.take().expect("a write in flight");
+            let (t, written, span) = self.writing.take().expect("a write in flight");
             let left = deadline.saturating_duration_since(Instant::now());
             let answer = match written.recv_timeout(left) {
                 Ok(answer) => answer,
                 Err(RecvTimeoutError::Timeout) => {
                     // Not committed (as far as anyone knows): nothing it decided, nor anything
                     // decided after it, leaves (the core's `take_out` refuses while it is in flight).
-                    log::error!("[coordinator] the world store did not answer the write at exit within {timeout:?}");
+                    log::error!(
+                        "[coordinator] the world store did not answer the write at exit within {timeout:?}"
+                    );
                     break;
                 }
-                Err(RecvTimeoutError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                Err(RecvTimeoutError::Disconnected) => Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                )),
             };
-            match self.settle(t, answer, 0, Some(deadline)) {
+            span.record("store_result", transition_answer_kind(&answer));
+            let settled = self.settle(t, answer, 0, Some(deadline));
+            span.record(
+                "outcome",
+                match &settled {
+                    Settled::Released(_) => "committed",
+                    Settled::Held { now } if *now => "retry_now",
+                    Settled::Held { .. } => "retry",
+                    Settled::End(_) => "ended",
+                },
+            );
+            match settled {
                 Settled::Released(released) => out.extend(released),
                 Settled::Held { now: true } => {}
                 Settled::Held { now: false } => {
-                    log::error!("[coordinator] the coordinator state was not written at exit; it restarts from its last write");
+                    log::error!(
+                        "[coordinator] the coordinator state was not written at exit; it restarts from its last write"
+                    );
                     break;
                 }
                 Settled::End(end) => return self.end(end),
@@ -3056,12 +3744,17 @@ impl CoordinatorRuntime {
             }
             #[cfg(feature = "test-hooks")]
             End::Killed => {
-                log::warn!("[coordinator] test kill: the transition committed, nothing it released leaves");
+                log::warn!(
+                    "[coordinator] test kill: the transition committed, nothing it released leaves"
+                );
                 self.down(ApiRefusal::NotReady);
                 ServerExit::CoordinatorFailed
             }
             End::Evicted => {
-                log::error!("[coordinator] replica {} was ended by another replica: it writes nothing more; stopping as fenced", self.core.replica());
+                log::error!(
+                    "[coordinator] replica {} was ended by another replica: it writes nothing more; stopping as fenced",
+                    self.core.replica()
+                );
                 self.fenced.set();
                 self.down(ApiRefusal::Fenced);
                 ServerExit::Fenced
@@ -3070,7 +3763,9 @@ impl CoordinatorRuntime {
     }
 
     fn fence_out(&mut self) -> ServerExit {
-        log::error!("[coordinator] the coordinator's write was refused as fenced: another coordinator took over; stopping");
+        log::error!(
+            "[coordinator] the coordinator's write was refused as fenced: another coordinator took over; stopping"
+        );
         self.fenced.set();
         self.down(ApiRefusal::Fenced);
         ServerExit::Fenced
@@ -3107,4 +3802,3 @@ impl CoordinatorRuntime {
         }
     }
 }
-

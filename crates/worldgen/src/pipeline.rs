@@ -14,8 +14,8 @@ use crate::density::NoiseSet;
 #[cfg(test)]
 use crate::density::{DensityFn, IslandValue};
 use crate::islands::{
-    IslandField, FULL_RELIEF_M, ISLAND_COAST_WARP, ISLAND_COAST_WAVELENGTH, ISLAND_MIN_RELIEF,
-    ISLAND_REACH, ISLAND_RELIEF_FRAC,
+    FULL_RELIEF_M, ISLAND_COAST_WARP, ISLAND_COAST_WAVELENGTH, ISLAND_MIN_RELIEF, ISLAND_REACH,
+    ISLAND_RELIEF_FRAC, IslandField,
 };
 use crate::noise::OctaveNoise;
 use crate::spline::{FlatSpline, Spline};
@@ -129,9 +129,13 @@ const ISLAND_CORE_C: f64 = COAST_C * ISLAND_REACH / (ISLAND_REACH - 1.0);
 /// function (bit-exact by construction).
 pub(crate) fn island_terms(field: &IslandField, noises: &NoiseSet, sx: f64, sz: f64) -> (f64, f64) {
     let (x, z) = (sx - SAMPLE_OFFSET_X_M, sz - SAMPLE_OFFSET_Z_M);
-    let Some(island) = field.island_at(x, z) else { return (0.0, 1.0) };
+    let Some(island) = field.island_at(x, z) else {
+        return (0.0, 1.0);
+    };
     let scale = NOISE_UNIT_WAVELENGTH_M / (ISLAND_COAST_WAVELENGTH * island.radius);
-    let coast = noises.0[N_CONTINENTS].sample2(x * scale, z * scale).clamp(-1.0, 1.0);
+    let coast = noises.0[N_CONTINENTS]
+        .sample2(x * scale, z * scale)
+        .clamp(-1.0, 1.0);
     let radius = island.radius * (1.0 + ISLAND_COAST_WARP * coast);
     let (dx, dz) = (x - island.centre[0], z - island.centre[1]);
     let d = (dx * dx + dz * dz).sqrt() / radius;
@@ -152,22 +156,34 @@ pub(crate) fn island_terms(field: &IslandField, noises: &NoiseSet, sx: f64, sz: 
 /// coasts, inside `island_terms`).
 #[cfg(test)]
 fn island_continent(f: &Arc<IslandField>) -> DensityFn {
-    DensityFn::Island { field: f.clone(), value: IslandValue::Continent }
+    DensityFn::Island {
+        field: f.clone(),
+        value: IslandValue::Continent,
+    }
 }
 #[cfg(test)]
 fn island_relief(f: &Arc<IslandField>) -> DensityFn {
-    DensityFn::Island { field: f.clone(), value: IslandValue::Relief }
+    DensityFn::Island {
+        field: f.clone(),
+        value: IslandValue::Relief,
+    }
 }
 #[cfg(test)]
 fn erosion() -> DensityFn {
-    DensityFn::Noise { idx: N_EROSION, xz_scale: XZ_SCALE_EROSION }
+    DensityFn::Noise {
+        idx: N_EROSION,
+        xz_scale: XZ_SCALE_EROSION,
+    }
 }
 /// Ridge noise, domain-warped by two independent low-frequency noises.
 #[cfg(test)]
 fn ridges() -> DensityFn {
     let shift = |idx| {
         Box::new(DensityFn::mul(
-            DensityFn::Noise { idx, xz_scale: XZ_SCALE_WARP },
+            DensityFn::Noise {
+                idx,
+                xz_scale: XZ_SCALE_WARP,
+            },
             DensityFn::Const(RIDGE_WARP_M),
         ))
     };
@@ -180,14 +196,19 @@ fn ridges() -> DensityFn {
 }
 #[cfg(test)]
 fn jagged() -> DensityFn {
-    DensityFn::Noise { idx: N_JAGGED, xz_scale: XZ_SCALE_JAGGED }
+    DensityFn::Noise {
+        idx: N_JAGGED,
+        xz_scale: XZ_SCALE_JAGGED,
+    }
 }
 
 fn curve(points: &[(f64, f64, f64)]) -> Spline {
     Spline::Curve {
         points: points
             .iter()
-            .map(|&(location, value, derivative)| Spline::point(location, Spline::constant(value), derivative))
+            .map(|&(location, value, derivative)| {
+                Spline::point(location, Spline::constant(value), derivative)
+            })
             .collect(),
     }
 }
@@ -240,13 +261,23 @@ fn inland_gate_spline() -> Spline {
 /// partly. The floor is what keeps inland lowlands rolling (ridge lines ~20 m
 /// high) instead of dead flat.
 fn erosion_gate_spline() -> Spline {
-    curve(&[(-0.9, 1.0, 0.0), (-0.35, 0.75, -0.8), (0.1, 0.25, -0.8), (0.6, 0.12, 0.0)])
+    curve(&[
+        (-0.9, 1.0, 0.0),
+        (-0.35, 0.75, -0.8),
+        (0.1, 0.25, -0.8),
+        (0.6, 0.12, 0.0),
+    ])
 }
 
 /// peaks-and-valleys -> height share: flat valley floors (slope 0 at pv = -1),
 /// broad shoulders, sharp crests (slope stays positive into pv = 1).
 fn peaks_spline() -> Spline {
-    curve(&[(-1.0, 0.0, 0.0), (-0.3, 0.12, 0.4), (0.4, 0.55, 0.9), (1.0, 1.0, 0.6)])
+    curve(&[
+        (-1.0, 0.0, 0.0),
+        (-0.3, 0.12, 0.4),
+        (0.4, 0.55, 0.9),
+        (1.0, 1.0, 0.6),
+    ])
 }
 
 fn factor_spline() -> Spline {
@@ -288,8 +319,14 @@ fn peaks_and_valleys() -> DensityFn {
 #[cfg(test)]
 fn mountains(f: &Arc<IslandField>) -> DensityFn {
     DensityFn::mul(
-        DensityFn::mul(DensityFn::spline_of(raw_continents(f), inland_gate_spline()), erosion_gate()),
-        DensityFn::spline_of(DensityFn::clamp(peaks_and_valleys(), -1.0, 1.0), peaks_spline()),
+        DensityFn::mul(
+            DensityFn::spline_of(raw_continents(f), inland_gate_spline()),
+            erosion_gate(),
+        ),
+        DensityFn::spline_of(
+            DensityFn::clamp(peaks_and_valleys(), -1.0, 1.0),
+            peaks_spline(),
+        ),
     )
 }
 
@@ -451,7 +488,12 @@ impl TerrainPipeline {
         let factor = self.factor_curve.eval(offset);
         let jaggedness = self.jaggedness_gate.eval(offset) * jag.abs();
 
-        ColumnProfile { offset_h: offset * HEIGHT_SCALE, factor, jaggedness, unbounded: false }
+        ColumnProfile {
+            offset_h: offset * HEIGHT_SCALE,
+            factor,
+            jaggedness,
+            unbounded: false,
+        }
     }
 }
 
@@ -492,14 +534,22 @@ impl TerrainPipeline {
         let mut jaggedness = Vec::with_capacity(n * n);
         for i in 0..n {
             for j in 0..n {
-                let prof =
-                    self.column(origin_x + i as f64 * step, origin_z + j as f64 * step);
+                let prof = self.column(origin_x + i as f64 * step, origin_z + j as f64 * step);
                 offset_h.push(prof.offset_h);
                 factor.push(prof.factor);
                 jaggedness.push(prof.jaggedness);
             }
         }
-        ProfileGrid { origin_x, origin_z, step, n, offset_h, factor, jaggedness, unbounded: false }
+        ProfileGrid {
+            origin_x,
+            origin_z,
+            step,
+            n,
+            offset_h,
+            factor,
+            jaggedness,
+            unbounded: false,
+        }
     }
 }
 
@@ -531,7 +581,16 @@ impl ProfileGrid {
             }
         }
         let unbounded = unbounded.unwrap_or(false);
-        ProfileGrid { origin_x, origin_z, step, n, offset_h, factor, jaggedness, unbounded }
+        ProfileGrid {
+            origin_x,
+            origin_z,
+            step,
+            n,
+            offset_h,
+            factor,
+            jaggedness,
+            unbounded,
+        }
     }
 
     /// Bilinear profile at world meters (x, z); must lie within the sampled span.
@@ -588,7 +647,12 @@ impl ColumnProfile {
     /// jaggedness: what a forged world (`forged.rs`) hands the generator, which
     /// knows the height outright instead of deriving it from noise.
     pub fn from_surface(surface_y: f64) -> Self {
-        ColumnProfile { offset_h: surface_y - SEA_LEVEL, factor: 1.0, jaggedness: 0.0, unbounded: true }
+        ColumnProfile {
+            offset_h: surface_y - SEA_LEVEL,
+            factor: 1.0,
+            jaggedness: 0.0,
+            unbounded: true,
+        }
     }
 
     /// Whether this is an unbounded (forged) profile — see the field.
@@ -627,7 +691,10 @@ mod tests {
     /// its coast into the sea.
     fn oracle(seed: u64) -> (TerrainPipeline, Arc<IslandField>) {
         let field = IslandField::with_spawn_cells(seed, 4);
-        (TerrainPipeline::with_islands(seed, field.clone()), Arc::new(field))
+        (
+            TerrainPipeline::with_islands(seed, field.clone()),
+            Arc::new(field),
+        )
     }
 
     /// Gate: the column profile matches the `#[cfg(test)]` DensityFn graph bit for bit
@@ -656,21 +723,30 @@ mod tests {
         }
     }
 
-    fn worldgen_test_seed() -> u64 { 0x00D5_C0DE_8D78 } // test helper, next to the test
+    fn worldgen_test_seed() -> u64 {
+        0x00D5_C0DE_8D78
+    } // test helper, next to the test
 
     /// Gate: the fused `column()` matches the `#[cfg(test)]` DensityFn graph bit for bit
     #[test]
     fn fused_column_matches_density_graphs_bit_exact() {
         let (p, field) = oracle(worldgen_test_seed());
         let noises = pipeline_noises(worldgen_test_seed());
-        let (graph, offset_g, factor_g, jaggedness_g) =
-            (final_density_graph(&field), offset(&field), factor(&field), jaggedness(&field));
+        let (graph, offset_g, factor_g, jaggedness_g) = (
+            final_density_graph(&field),
+            offset(&field),
+            factor(&field),
+            jaggedness(&field),
+        );
         for i in 0..64 {
             for j in 0..64 {
                 let (x, z) = (i as f64 * 7.3 - 200.0, j as f64 * 11.1 - 150.0);
                 let (sx, sz) = (x + SAMPLE_OFFSET_X_M, z + SAMPLE_OFFSET_Z_M);
                 let prof = p.column(x, z);
-                assert_eq!(prof.offset_h, offset_g.eval(sx, 0.0, sz, &noises) * HEIGHT_SCALE);
+                assert_eq!(
+                    prof.offset_h,
+                    offset_g.eval(sx, 0.0, sz, &noises) * HEIGHT_SCALE
+                );
                 assert_eq!(prof.factor, factor_g.eval(sx, 0.0, sz, &noises));
                 assert_eq!(prof.jaggedness, jaggedness_g.eval(sx, 0.0, sz, &noises));
                 for y in [-64.0, 0.0, 63.5, 64.5, 200.0, 320.0] {

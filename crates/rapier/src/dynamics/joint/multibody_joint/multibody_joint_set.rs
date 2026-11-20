@@ -53,8 +53,7 @@ impl Default for MultibodyLinkId {
 #[derive(Default)]
 /// A set of rigid bodies that can be handled by a physics pipeline.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyJointSet {
     pub(crate) multibodies: Arena<Multibody>, // NOTE: a Slab would be sufficient.
     pub(crate) rb2mb: Coarena<MultibodyLinkId>,

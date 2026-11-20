@@ -49,6 +49,10 @@ fn main() {
     println!("state hash build #2: {h2:#010x}");
     println!(
         "determinism: {}",
-        if h1 == h2 { "OK (identical)" } else { "FAIL (hash drift!)" }
+        if h1 == h2 {
+            "OK (identical)"
+        } else {
+            "FAIL (hash drift!)"
+        }
     );
 }

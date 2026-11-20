@@ -16,8 +16,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bevy::prelude::*;
 use bevy::light::NotShadowCaster;
+use bevy::prelude::*;
 use game::lod::{LodKey, LodWater};
 use game::{LodPayload, RegionCoords};
 
@@ -303,7 +303,8 @@ pub fn lod_water_mesh(key: &LodKey, water: &LodWater) -> Option<WaterMeshData> {
     let keys: Vec<Option<(i16, u32)>> = tops
         .iter()
         .map(|&(top, depth)| {
-            (top != game::NO_WATER).then(|| (top, super::water::water_alpha(f32::from(depth)).to_bits()))
+            (top != game::NO_WATER)
+                .then(|| (top, super::water::water_alpha(f32::from(depth)).to_bits()))
         })
         .collect();
     let cell = key.factor as f32;
@@ -374,15 +375,20 @@ fn spawn_lod_water(
         warn!("lod: dropping undecodable water layer for {key:?}");
         return;
     }
-    let (Some(meshes), Some(materials), Some(handle)) =
-        (assets.meshes.as_mut(), assets.materials.as_mut(), assets.handle.as_mut())
-    else {
+    let (Some(meshes), Some(materials), Some(handle)) = (
+        assets.meshes.as_mut(),
+        assets.materials.as_mut(),
+        assets.handle.as_mut(),
+    ) else {
         return;
     };
     let Some(mesh) = lod_water_mesh(key, water).and_then(super::water::tile_mesh) else {
         return;
     };
-    let material = handle.get_or_add(materials, assets.fortress.as_deref().copied().unwrap_or_default());
+    let material = handle.get_or_add(
+        materials,
+        assets.fortress.as_deref().copied().unwrap_or_default(),
+    );
     commands.spawn((
         Name::new(format!("lod water {:?} x{}", key.coords, key.factor)),
         Mesh3d(meshes.add(mesh)),
@@ -496,11 +502,7 @@ pub fn retire_lod_roots(
 /// A meshed terrain cell. The water surface child has a `Mesh3d` too, but
 /// it is not terrain: a root showing only water has not replaced anything.
 type ReadyLodCellFilter = (
-    Or<(
-        With<Mesh3d>,
-        With<ChunkQuads>,
-        With<LodRasterReady>,
-    )>,
+    Or<(With<Mesh3d>, With<ChunkQuads>, With<LodRasterReady>)>,
     Without<LodWaterSurface>,
 );
 /// A near chunk not yet on screen: its snapshot voxels are still being
@@ -554,4 +556,3 @@ fn near_regions_meshed(
     }
     ready
 }
-

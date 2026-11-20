@@ -1,18 +1,18 @@
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use crate::connections::{ConnEvent, ConnHandle, ConnOpener};
+use crate::quic_verify::{VerifyPolicy, client_crypto, host_of, policy_for};
 use crossbeam::channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use game::{ClientPacket, ServerPacket};
 use log::{error, info, warn};
-use crate::quic_verify::{client_crypto, host_of, policy_for, VerifyPolicy};
-use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, Endpoint, TransportConfig};
+use quinn::{ClientConfig, Endpoint, TransportConfig, crypto::rustls::QuicClientConfig};
 
 /// Longest one connect attempt may take. A localhost handshake is
 /// milliseconds; without this an attempt against a not-yet-listening server
@@ -41,7 +41,11 @@ const _: () = assert!(CLIENT_KEEP_ALIVE.as_millis() * 3 <= CLIENT_IDLE_TIMEOUT.a
 pub fn client_transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport.keep_alive_interval(Some(CLIENT_KEEP_ALIVE));
-    transport.max_idle_timeout(Some(CLIENT_IDLE_TIMEOUT.try_into().expect("the idle timeout fits a VarInt")));
+    transport.max_idle_timeout(Some(
+        CLIENT_IDLE_TIMEOUT
+            .try_into()
+            .expect("the idle timeout fits a VarInt"),
+    ));
     transport
 }
 
@@ -118,20 +122,33 @@ impl NetThread {
         cancel: Receiver<()>,
         policy: ConnectPolicy,
     ) -> std::io::Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("netcode").build()?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("netcode")
+            .build()?;
         let handle = runtime.handle().clone();
         let live = Arc::new(AtomicUsize::new(0));
         let (left, open) = (cancel.clone(), live.clone());
-        std::thread::Builder::new().name("netcode".into()).spawn(move || {
-            runtime.block_on(async move {
-                // Each connection flushes its last packets (the `Leave`) as it
-                // ends: the runtime outlives the session until they all have.
-                while !(matches!(left.try_recv(), Err(TryRecvError::Disconnected)) && open.load(Ordering::SeqCst) == 0) {
-                    tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
-                }
-            });
-        })?;
-        Ok(Self { runtime: handle, events, cancel, policy, live })
+        std::thread::Builder::new()
+            .name("netcode".into())
+            .spawn(move || {
+                runtime.block_on(async move {
+                    // Each connection flushes its last packets (the `Leave`) as it
+                    // ends: the runtime outlives the session until they all have.
+                    while !(matches!(left.try_recv(), Err(TryRecvError::Disconnected))
+                        && open.load(Ordering::SeqCst) == 0)
+                    {
+                        tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+                    }
+                });
+            })?;
+        Ok(Self {
+            runtime: handle,
+            events,
+            cancel,
+            policy,
+            live,
+        })
     }
 
     /// Open a connection keyed `key` to `target`, presenting `credential` (`None`
@@ -174,15 +191,27 @@ impl NetThread {
 }
 
 impl ConnOpener for NetThread {
-    fn open(&mut self, key: u32, endpoint: &game::HostEndpoint, credential: game::Credential) -> ConnHandle {
+    fn open(
+        &mut self,
+        key: u32,
+        endpoint: &game::HostEndpoint,
+        credential: game::Credential,
+    ) -> ConnHandle {
         let (send, outgoing) = crossbeam::channel::unbounded();
         match &endpoint.quic {
-            Some(quic) => {
-                self.connect(key, ConnTarget::Name(quic.clone()), Some(credential), outgoing, endpoint.cert_hash.clone())
-            }
+            Some(quic) => self.connect(
+                key,
+                ConnTarget::Name(quic.clone()),
+                Some(credential),
+                outgoing,
+                endpoint.cert_hash.clone(),
+            ),
             None => {
                 let ordinal = endpoint.id;
-                let _ = self.events.send((key, ConnEvent::Closed(format!("host {ordinal} offers no QUIC address"))));
+                let _ = self.events.send((
+                    key,
+                    ConnEvent::Closed(format!("host {ordinal} offers no QUIC address")),
+                ));
             }
         }
         ConnHandle { send }
@@ -201,7 +230,12 @@ async fn resolve(name: String) -> std::io::Result<SocketAddr> {
     })
     .await
     .map_err(std::io::Error::other)??;
-    found.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{shown} resolves to no address")))
+    found.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{shown} resolves to no address"),
+        )
+    })
 }
 
 pub struct ServerConnection {
@@ -328,7 +362,12 @@ impl ServerConnection {
             }
             let connecting = endpoint
                 .connect(self.server, &self.server_name)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("cannot connect to {}: {e}", self.server)))?;
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("cannot connect to {}: {e}", self.server),
+                    )
+                })?;
             let failure = match self.race_cancel(connecting, policy.attempt_timeout).await {
                 Raced::Cancelled => {
                     info!(
@@ -350,10 +389,16 @@ impl ServerConnection {
                 {
                     // The same certificate comes back on every attempt: fail now, with the reason
                     // (not a timeout two minutes later).
-                    error!("[client] {} presented a certificate this client refuses: {error}", self.server);
+                    error!(
+                        "[client] {} presented a certificate this client refuses: {error}",
+                        self.server
+                    );
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("the server {} presented a certificate this client refuses: {}", self.server, error.reason),
+                        format!(
+                            "the server {} presented a certificate this client refuses: {}",
+                            self.server, error.reason
+                        ),
                     ));
                 }
                 Raced::Done(Err(error)) => error.to_string(),
@@ -391,7 +436,8 @@ impl ServerConnection {
     /// Connect to the server and handle sending / receiving.
     pub async fn connect_and_handle(&mut self) -> Result<(), std::io::Error> {
         let mut config = ClientConfig::new(Arc::new(
-            QuicClientConfig::try_from(client_crypto(&self.verify)).expect("ring offers the QUIC initial cipher suite"),
+            QuicClientConfig::try_from(client_crypto(&self.verify))
+                .expect("ring offers the QUIC initial cipher suite"),
         ));
         config.transport_config(Arc::new(client_transport()));
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
@@ -479,16 +525,18 @@ impl ServerConnection {
         // connections). It ends with the game's sender, or with this loop.
         let (bridge, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<ClientPacket>();
         let from_game = self.recv.clone();
-        tokio::task::spawn_blocking(move || loop {
-            match from_game.recv_timeout(CLOSE_POLL_INTERVAL) {
-                Ok(packet) => {
-                    if bridge.send(packet).is_err() {
-                        return;
+        tokio::task::spawn_blocking(move || {
+            loop {
+                match from_game.recv_timeout(CLOSE_POLL_INTERVAL) {
+                    Ok(packet) => {
+                        if bridge.send(packet).is_err() {
+                            return;
+                        }
                     }
+                    Err(RecvTimeoutError::Timeout) if bridge.is_closed() => return,
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return,
                 }
-                Err(RecvTimeoutError::Timeout) if bridge.is_closed() => return,
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return,
             }
         });
         // Forward the game thread's packets until it closes this connection
@@ -553,4 +601,3 @@ fn connection_lost(reason: impl std::fmt::Display) -> std::io::Error {
         format!("connection to server lost: {reason}"),
     )
 }
-

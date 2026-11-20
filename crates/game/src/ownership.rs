@@ -65,11 +65,18 @@ impl SrLoad {
     /// The order a beat keeps: most players, then the worst tick, then most regions, then the
     /// super-region (a total order: a beat's list is deterministic).
     pub fn busiest_first(a: &SrLoad, b: &SrLoad) -> std::cmp::Ordering {
-        (b.players, b.tick_permille, b.regions, a.sr).cmp(&(a.players, a.tick_permille, a.regions, b.sr))
+        (b.players, b.tick_permille, b.regions, a.sr).cmp(&(
+            a.players,
+            a.tick_permille,
+            a.regions,
+            b.sr,
+        ))
     }
 }
 /// Elastic 5: one move of occupied land in place, numbered by the coordinator's move runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct MoveId(pub u64);
 
 /// Elastic 5: one move a world cut carries — `sr` passes from `giver` to `taker` (the taker's
@@ -113,7 +120,9 @@ pub const NO_OWNER: i64 = -1;
 /// A region host's identity: what the store's `hosts` / `super_regions` rows, the peer links
 /// and the coordinator name a host by: the number the store issued at its registration
 /// (`register_host`, from 1, never reused; [`HostId::SOLO`] for role `all`); it prints as `h7`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct HostId(pub u64);
 
 impl HostId {
@@ -128,12 +137,16 @@ impl std::fmt::Display for HostId {
 }
 
 /// A succession's id (R4, the store's `successions.id`): one host's land given to one heir.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct SuccessionId(pub u64);
 
 /// Why a host's land moved to an heir (R4): it crashed (its lease lapsed, or its next boot
 /// vouched it dead) or it left clean. Stored as `successions.kind`: 0 crash, 1 leave.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum SuccessionKind {
     Crash,
     Leave,
@@ -310,11 +323,16 @@ pub trait Ownership: Send + std::fmt::Debug {
     /// The super-regions this process claims at start: those of the map `extent` it owns
     /// now (a procedural world has no extent and claims none).
     fn claim_set(&self, extent: Option<crate::MapExtent>, s: u32) -> BTreeSet<SuperRegion> {
-        let Some(extent) = extent else { return BTreeSet::new() };
+        let Some(extent) = extent else {
+            return BTreeSet::new();
+        };
         let (w, h) = (extent.width as i32, extent.height as i32);
         let (lo, hi) = (
             super_region_of(extent.origin, s),
-            super_region_of(RegionCoords::new(extent.origin.x + w - 1, extent.origin.z + h - 1), s),
+            super_region_of(
+                RegionCoords::new(extent.origin.x + w - 1, extent.origin.z + h - 1),
+                s,
+            ),
         );
         let mut set = BTreeSet::new();
         for sx in lo.0..=hi.0 {
@@ -431,7 +449,11 @@ impl Directory {
     /// Row `sr` is `owner` (`None`: free) at `epoch`; ignored when `epoch` is lower than
     /// the stored one (a late message never undoes a newer claim).
     pub fn set(&mut self, sr: SuperRegion, owner: Option<HostId>, epoch: u64) {
-        if self.rows.get(&sr).is_some_and(|&(_, stored)| epoch < stored) {
+        if self
+            .rows
+            .get(&sr)
+            .is_some_and(|&(_, stored)| epoch < stored)
+        {
             return;
         }
         self.rows.insert(sr, (owner, epoch));
@@ -472,7 +494,11 @@ impl Directory {
 
     /// The super-regions host `ordinal` holds, in order.
     pub fn owned_by(&self, ordinal: HostId) -> Vec<SuperRegion> {
-        self.rows.iter().filter(|(_, (owner, _))| *owner == Some(ordinal)).map(|(sr, _)| *sr).collect()
+        self.rows
+            .iter()
+            .filter(|(_, (owner, _))| *owner == Some(ordinal))
+            .map(|(sr, _)| *sr)
+            .collect()
     }
 
     /// The hosts that hold their lease now.
@@ -526,7 +552,10 @@ impl PgClaim {
     /// Host `me` (its id issued at registration), its directory not read yet (everything
     /// `Unknown`).
     pub fn new(me: HostId) -> PgClaim {
-        PgClaim { id: me, directory: Directory::default() }
+        PgClaim {
+            id: me,
+            directory: Directory::default(),
+        }
     }
 }
 
@@ -552,10 +581,16 @@ impl Ownership for PgClaim {
 /// `allinone`): `claim` → `Succession`, `allinone` / `static` → `Rollback`. For a process
 /// that has no ordinal of its own (the coordinator); hosts ask their [`Ownership::policy`].
 pub fn crash_policy_from_value(ownership: Option<&str>) -> Result<CrashPolicy, String> {
-    match ownership.map(str::trim).filter(|v| !v.is_empty()).unwrap_or("allinone") {
+    match ownership
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("allinone")
+    {
         "allinone" | "static" => Ok(CrashPolicy::Rollback),
         "claim" => Ok(CrashPolicy::Succession),
-        other => Err(format!("{OWNERSHIP_ENV}={other:?} is none of allinone, static, claim")),
+        other => Err(format!(
+            "{OWNERSHIP_ENV}={other:?} is none of allinone, static, claim"
+        )),
     }
 }
 
@@ -567,9 +602,13 @@ pub fn crash_policy_from_value(ownership: Option<&str>) -> Result<CrashPolicy, S
 pub fn ownership_for(policy: &str, me: HostId) -> Result<Box<dyn Ownership>, String> {
     match policy.trim() {
         "" | "allinone" => Ok(Box::new(AllInOne)),
-        "static" => Ok(Box::new(Static { me, layout: vec![me] })),
+        "static" => Ok(Box::new(Static {
+            me,
+            layout: vec![me],
+        })),
         "claim" => Ok(Box::new(PgClaim::new(me))),
-        other => Err(format!("{OWNERSHIP_ENV}={other:?} is none of allinone, static, claim")),
+        other => Err(format!(
+            "{OWNERSHIP_ENV}={other:?} is none of allinone, static, claim"
+        )),
     }
 }
-

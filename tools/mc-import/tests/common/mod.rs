@@ -14,7 +14,12 @@ pub enum V {
 }
 
 pub fn c(fields: Vec<(&str, V)>) -> V {
-    V::Compound(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    V::Compound(
+        fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 pub fn s(x: &str) -> V {
@@ -101,4 +106,3 @@ pub fn varints(cells: &[u32]) -> Vec<u8> {
     }
     out
 }
-

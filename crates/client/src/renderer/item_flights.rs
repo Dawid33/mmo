@@ -21,7 +21,10 @@ use game::edit::BlockPos;
 use game::{EntityKey, ItemStack, RegionId};
 
 use super::bridge::SimEntityMap;
-use super::item_piles::{cube_layout, pile_world_position, ItemPileAssets, ItemPileMsg, ItemPileRoots, ITEM_SPIN_RAD_PER_S};
+use super::item_piles::{
+    ITEM_SPIN_RAD_PER_S, ItemPileAssets, ItemPileMsg, ItemPileRoots, cube_layout,
+    pile_world_position,
+};
 use crate::session::SessionScoped;
 
 /// How long a pickup flight takes, seconds.
@@ -57,7 +60,10 @@ pub struct ItemFlight {
 enum FlightTarget {
     Point(Vec3),
     /// A sim body (its render entity); `last` is where it was last seen.
-    Body { entity: Entity, last: Vec3 },
+    Body {
+        entity: Entity,
+        last: Vec3,
+    },
 }
 
 /// Hides a pile root until its landing flight has arrived (seconds left).
@@ -102,9 +108,21 @@ pub fn landing_at(from: Vec3, to: Vec3, p: f32) -> Vec3 {
     let unit = game::movement::UNITS_PER_METER;
     let side = Vec2::new(to.x - from.x, to.z - from.z).length();
     // Falls accelerate (gravity), rises ease out.
-    let v = if to.y < from.y { p * p } else { 1.0 - (1.0 - p) * (1.0 - p) };
-    let arc = if side > 0.5 * unit { THROW_ARC_M * unit * 4.0 * p * (1.0 - p) } else { 0.0 };
-    Vec3::new(from.x + (to.x - from.x) * p, from.y + (to.y - from.y) * v + arc, from.z + (to.z - from.z) * p)
+    let v = if to.y < from.y {
+        p * p
+    } else {
+        1.0 - (1.0 - p) * (1.0 - p)
+    };
+    let arc = if side > 0.5 * unit {
+        THROW_ARC_M * unit * 4.0 * p * (1.0 - p)
+    } else {
+        0.0
+    };
+    Vec3::new(
+        from.x + (to.x - from.x) * p,
+        from.y + (to.y - from.y) * v + arc,
+        from.z + (to.z - from.z) * p,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -121,7 +139,14 @@ fn spawn_flight(
 ) {
     for (_, offset, mesh, material) in cube_layout(assets, images, mats, stacks) {
         commands.spawn((
-            ItemFlight { from, to, offset, elapsed: 0.0, duration, pickup },
+            ItemFlight {
+                from,
+                to,
+                offset,
+                elapsed: 0.0,
+                duration,
+                pickup,
+            },
             SessionScoped,
             Mesh3d(mesh),
             MeshMaterial3d(material),
@@ -134,7 +159,7 @@ fn spawn_flight(
 /// Turns pickup / landing events into flights (after `apply_pile_msgs`, so a
 /// landing's destination pile already exists and can be held hidden).
 #[allow(clippy::too_many_arguments)]
-pub fn start_flights(
+pub(crate) fn start_flights(
     mut commands: Commands,
     mut msgs: MessageReader<ItemPileMsg>,
     mut recent: ResMut<RecentFlights>,
@@ -154,9 +179,22 @@ pub fn start_flights(
                     if !recent.first((*region, f.tick, f.from, f.to, false)) {
                         continue;
                     }
-                    let (from, to) = (pile_world_position(&frame, *region, f.from), pile_world_position(&frame, *region, f.to));
+                    let (from, to) = (
+                        pile_world_position(&frame, *region, f.from),
+                        pile_world_position(&frame, *region, f.to),
+                    );
                     let secs = landing_secs(from, to);
-                    spawn_flight(&mut commands, &mut assets, &mut images, &mut mats, &f.stacks, from, FlightTarget::Point(to), secs, false);
+                    spawn_flight(
+                        &mut commands,
+                        &mut assets,
+                        &mut images,
+                        &mut mats,
+                        &f.stacks,
+                        from,
+                        FlightTarget::Point(to),
+                        secs,
+                        false,
+                    );
                     if let Some(&root) = roots.0.get(&(*region, f.to)) {
                         commands.entity(root).insert(LandingHold(secs));
                     }
@@ -169,12 +207,23 @@ pub fn start_flights(
                     }
                     let from = pile_world_position(&frame, *region, p.cell);
                     let body = body_entity(sim_entities.as_deref(), *region, p.entity);
-                    let to = match body.and_then(|e| bodies.get(e).ok().map(|g| (e, g.translation()))) {
-                        Some((entity, at)) => FlightTarget::Body { entity, last: at },
-                        // Not drawn here: the items just vanish where they lay.
-                        None => FlightTarget::Point(from),
-                    };
-                    spawn_flight(&mut commands, &mut assets, &mut images, &mut mats, &p.stacks, from, to, PICKUP_FLIGHT_SECS, true);
+                    let to =
+                        match body.and_then(|e| bodies.get(e).ok().map(|g| (e, g.translation()))) {
+                            Some((entity, at)) => FlightTarget::Body { entity, last: at },
+                            // Not drawn here: the items just vanish where they lay.
+                            None => FlightTarget::Point(from),
+                        };
+                    spawn_flight(
+                        &mut commands,
+                        &mut assets,
+                        &mut images,
+                        &mut mats,
+                        &p.stacks,
+                        from,
+                        to,
+                        PICKUP_FLIGHT_SECS,
+                        true,
+                    );
                 }
             }
             _ => {}
@@ -228,4 +277,3 @@ pub fn fly(
         }
     }
 }
-

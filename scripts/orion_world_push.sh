@@ -13,7 +13,9 @@
 # (target/web), SERVER_REPOSITORY / WEB_REPOSITORY (default: the registry root's
 # `repository_urls` output, read with $TOFU, default tofu).
 # The deploy orchestrator sets DIGEST_OUT=<file> to receive `name=<digest ref>`
-# lines (server and web) instead of parsing stdout. Each image is labelled with
+# lines instead of parsing stdout. PUSH_IMAGES is an optional comma-separated
+# subset (server,web by default), so an unchanged half is not rebuilt/pushed.
+# Each image is labelled with
 # mmo.content-sha256 (the staged files' hash) so `just deploy --game` can skip a
 # release whose content did not change.
 # The ECR password goes through a pipe (`--password-stdin`), never argv.
@@ -28,6 +30,7 @@ for f in "$bindir/server" "$bindir/worldctl"; do
     [ -x "$f" ] || { echo "orion-world-push: no $f (run just world-images-build)" >&2; exit 1; }
 done
 [ -f "$webdir/index.html" ] || { echo "orion-world-push: no $webdir/index.html (run just world-images-build)" >&2; exit 1; }
+PYTHONPATH="$PWD/scripts" python3 -m deploy.images verify-dials server web
 
 server_repo="${SERVER_REPOSITORY:-}"
 web_repo="${WEB_REPOSITORY:-}"
@@ -58,9 +61,11 @@ stage_server=$(mktemp -d)
 stage_web=$(mktemp -d)
 trap 'rm -rf "$stage_server" "$stage_web"' EXIT
 cp "$bindir/server" "$bindir/worldctl" "$stage_server/"
+cp target/world-images/build-dials "$stage_server/build-dials"
 cp deploy/images/server/Dockerfile "$stage_server/Dockerfile"
 mkdir "$stage_web/web"
 cp -R "$webdir/." "$stage_web/web/"
+cp target/world-images/build-dials "$stage_web/build-dials"
 cp deploy/images/web/Dockerfile deploy/images/web/nginx.conf "$stage_web/"
 
 aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry" > /dev/null
@@ -86,6 +91,11 @@ build_push() {
     echo "orion-world: pushed $name $digest_ref (revision $rev, content $content)"
 }
 
-build_push server "$server_repo" "$stage_server"
-build_push web "$web_repo" "$stage_web"
+push_images="${PUSH_IMAGES:-server,web}"
+case ",$push_images," in
+    *,server,*) build_push server "$server_repo" "$stage_server" ;;
+esac
+case ",$push_images," in
+    *,web,*) build_push web "$web_repo" "$stage_web" ;;
+esac
 echo "orion-world: pushed only; nothing was rolled out. Release with: just orion-world-update <server digest ref> <web digest ref>"

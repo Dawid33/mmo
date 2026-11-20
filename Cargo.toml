@@ -12,6 +12,8 @@ members = [
   "crates/macros",
   "crates/map-tiles",
   "crates/mc-import",
+  "crates/observability",
+  "crates/panel",
   "crates/pg-test-support",
   "crates/physics-next",
   "crates/server",
@@ -178,22 +180,26 @@ crossbeam = { version = "0.8.4", features = [
 serde = { version = "1.0.216", features = ["derive"], default-features = false }
 bytemuck = { version = "1.23.2", default-features = false }
 borrow = { version = "1.3.0", default-features = false }
-float-derive = { version = "0.1.0", default-features = false }
 derive_more = { version = "2.0.1", features = [
   "debug",
 ], default-features = false }
 crc32fast = { version = "1.5.0", default-features = false }
 simplelog = { version = "0.12.2", default-features = false }
+tracing = "0.1"
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-opentelemetry = "0.28"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "reqwest-client"] }
+observability = { path = "crates/observability" }
 quinn = { version = "0.11.6", features = ["rustls-ring", "runtime-tokio"], default-features = false }
 tokio = { version = "1.42.0", features = [
   "rt-multi-thread",
 ], default-features = false }
-arrayvec = { version = "0.7.6", default-features = false }
-grid = { version = "1.0.0", default-features = false }
 syn = { version = "2.0.106", features = ["full"] }
 quote = { version = "1.0.40", default-features = false }
 proc-macro2 = { version = "1.0.101", default-features = false }
-linkme = { version = "0.3.33", default-features = false }
 rcgen = { version = "0.14", features = [
   "crypto",
   "ring",
@@ -201,7 +207,6 @@ rcgen = { version = "0.14", features = [
 dashmap = { version = "6.1.0", default-features = false }
 serde_json = "1.0.93"
 login-api = { path = "crates/login-api" }
-login = { path = "crates/login" }
 auth = { path = "crates/auth" }
 # The game server's JWKS fetch (crates/server, VOXEL_AUTH=jwt).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -221,12 +226,6 @@ assert-json-diff = "=2.0.2"
 pyroscope = { version = "0.5.8" }
 pyroscope_pprofrs = { version = "0.2.10" }
 image = { version = "0.25.9", default-features = false, features = ["png"] }
-spade = { version = "2.9", default-features = false, features = ["serde"] }
-oorandom = "11.1.5"
-ordermap = { version = "1.0.0", features = ["serde"] }
-hashbrown = { version = "0.16", default-features = false, features = [
-  "default-hasher",
-] }
 parry3d = { path = "crates/parry/crates/parry3d" }
 rapier3d = { path = "crates/rapier/crates/rapier3d", features = ["enhanced-determinism", "serde-serialize", "debug-render"] }
 state-hash = { path = "crates/state-hash" }

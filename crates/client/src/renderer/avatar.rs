@@ -40,7 +40,12 @@ struct SlimeAssets {
 pub fn attach_avatars(
     mut commands: Commands,
     added: Query<
-        (Entity, &SimKind, Has<super::rigs::SimAnimator>, Has<VoxelBodyModel>),
+        (
+            Entity,
+            &SimKind,
+            Has<super::rigs::SimAnimator>,
+            Has<VoxelBodyModel>,
+        ),
         (Added<SimKind>, Without<Camera3d>, Without<SlimeAvatar>),
     >,
     modelled: Query<Entity, (Added<VoxelBodyModel>, With<BodyBox>)>,
@@ -49,7 +54,9 @@ pub fn attach_avatars(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for e in &modelled {
-        commands.entity(e).remove::<(BodyBox, Mesh3d, MeshMaterial3d<StandardMaterial>)>();
+        commands
+            .entity(e)
+            .remove::<(BodyBox, Mesh3d, MeshMaterial3d<StandardMaterial>)>();
     }
     for (e, kind, rigged, modelled) in &added {
         match kind.0 {
@@ -74,7 +81,9 @@ pub fn attach_avatars(
                         )
                     })
                     .clone();
-                commands.entity(e).insert((BodyBox, Mesh3d(mesh), MeshMaterial3d(material)));
+                commands
+                    .entity(e)
+                    .insert((BodyBox, Mesh3d(mesh), MeshMaterial3d(material)));
             }
             EntityKind::Player => {
                 let (mesh, material) = assets
@@ -94,7 +103,9 @@ pub fn attach_avatars(
                         )
                     })
                     .clone();
-                commands.entity(e).insert((Mesh3d(mesh), MeshMaterial3d(material)));
+                commands
+                    .entity(e)
+                    .insert((Mesh3d(mesh), MeshMaterial3d(material)));
             }
             EntityKind::Slime { size } => {
                 let a = assets
@@ -134,38 +145,42 @@ pub struct SlimeAvatar;
 /// opaque 6-px core, with eyes and a mouth on the core's front (−Z, the
 /// sim's forward). Each part is (centre, size, is-face).
 const SLIME_PARTS: [([f32; 3], [f32; 3], bool); 5] = [
-    ([0.0, 0.5, 0.0], [1.0, 1.0, 1.0], false),         // gel
-    ([0.0, 0.5, 0.0], [0.75, 0.75, 0.75], false),      // core
-    ([-0.19, 0.6, -0.39], [0.19, 0.19, 0.06], true),   // eye
-    ([0.19, 0.6, -0.39], [0.19, 0.19, 0.06], true),    // eye
-    ([0.1, 0.34, -0.39], [0.1, 0.1, 0.06], true),      // mouth
+    ([0.0, 0.5, 0.0], [1.0, 1.0, 1.0], false),       // gel
+    ([0.0, 0.5, 0.0], [0.75, 0.75, 0.75], false),    // core
+    ([-0.19, 0.6, -0.39], [0.19, 0.19, 0.06], true), // eye
+    ([0.19, 0.6, -0.39], [0.19, 0.19, 0.06], true),  // eye
+    ([0.1, 0.34, -0.39], [0.1, 0.1, 0.06], true),    // mouth
 ];
 
 fn spawn_slime_body(commands: &mut Commands, e: Entity, size: u8, a: &SlimeAssets) {
     let edge = game::slime::slime_edge_units(size);
-    commands.entity(e).insert(SlimeAvatar).with_children(|parent| {
-        parent
-            .spawn((
-                // The sim pose is the body centre; the pivot sits at the feet.
-                Transform::from_xyz(0.0, -edge / 2.0, 0.0).with_scale(Vec3::splat(edge)),
-                Visibility::default(),
-                SlimeSquish::new(size),
-            ))
-            .with_children(|pivot| {
-                for (i, (centre, dims, face)) in SLIME_PARTS.iter().enumerate() {
-                    let material = match (i, face) {
-                        (0, _) => a.gel.clone(),
-                        (_, false) => a.core.clone(),
-                        (_, true) => a.face.clone(),
-                    };
-                    pivot.spawn((
-                        Mesh3d(a.cube.clone()),
-                        MeshMaterial3d(material),
-                        Transform::from_translation(Vec3::from(*centre)).with_scale(Vec3::from(*dims)),
-                    ));
-                }
-            });
-    });
+    commands
+        .entity(e)
+        .insert(SlimeAvatar)
+        .with_children(|parent| {
+            parent
+                .spawn((
+                    // The sim pose is the body centre; the pivot sits at the feet.
+                    Transform::from_xyz(0.0, -edge / 2.0, 0.0).with_scale(Vec3::splat(edge)),
+                    Visibility::default(),
+                    SlimeSquish::new(size),
+                ))
+                .with_children(|pivot| {
+                    for (i, (centre, dims, face)) in SLIME_PARTS.iter().enumerate() {
+                        let material = match (i, face) {
+                            (0, _) => a.gel.clone(),
+                            (_, false) => a.core.clone(),
+                            (_, true) => a.face.clone(),
+                        };
+                        pivot.spawn((
+                            Mesh3d(a.cube.clone()),
+                            MeshMaterial3d(material),
+                            Transform::from_translation(Vec3::from(*centre))
+                                .with_scale(Vec3::from(*dims)),
+                        ));
+                    }
+                });
+        });
 }
 
 // Minecraft's squish spring (RenderSlime / EntitySlime), per 50 ms tick —
@@ -202,12 +217,20 @@ pub struct SlimeSquish {
 
 impl SlimeSquish {
     fn new(size: u8) -> Self {
-        Self { size, squish: 0.0, target: 0.0, phase: HopPhase::Ground, last_y: None }
+        Self {
+            size,
+            squish: 0.0,
+            target: 0.0,
+            phase: HopPhase::Ground,
+            last_y: None,
+        }
     }
 
     /// Feed one sim pose update (once per tick): detects take-off/landing.
     fn observe(&mut self, y: f32) {
-        let Some(last) = self.last_y.replace(y) else { return };
+        let Some(last) = self.last_y.replace(y) else {
+            return;
+        };
         let dy = y - last;
         self.phase = match self.phase {
             HopPhase::Ground if dy > SQUISH_MOVE_EPS => {
@@ -262,7 +285,9 @@ pub fn squish_slimes(
         }
         squish.advance(dt);
         let edge = game::slime::slime_edge_units(squish.size);
-        tf.set_if_neq(Transform { scale: squish.scale() * edge, ..*tf });
+        tf.set_if_neq(Transform {
+            scale: squish.scale() * edge,
+            ..*tf
+        });
     }
 }
-

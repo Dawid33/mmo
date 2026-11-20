@@ -6,9 +6,9 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    ClientId, Column, ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, HaloEntityMsg, Region,
-    RegionCoords, RegionId, Rollback, Tick,
-    TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
+    ClientId, Column, ColumnCoords, EntityBundle, GameEvent, GameEventKind, HaloEntityMsg, Region,
+    RegionCoords, RegionId, Rollback, TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE, TerrainSnapshot,
+    Tick,
 };
 use crossbeam::channel::Sender;
 
@@ -114,14 +114,22 @@ pub enum RegionOutput {
     Terrain(ClientId, TerrainSnapshot),
     /// Throttled push when this region's terrain changed; manager fans out.
     TerrainChanged(TerrainSnapshot),
-    SyncClock { tick_rate: u64, tick: Tick },
+    SyncClock {
+        tick_rate: u64,
+        tick: Tick,
+    },
     /// The parked state, its final terrain, and its final stamp (its
     /// `current_tick()` at `Shutdown`: what the manager stamps the final
     /// terrain's halo reseed with, so it lands after every delta this region
     /// sent before), and its final portable snapshot (against the terms of
     /// its previous one): a pending save cut takes it as this region's
     /// answer, and the manager keeps it uncommitted until a cut commits it.
-    Stopped(SerializedRegion, TerrainSnapshot, Tick, Box<crate::PortableRegion>),
+    Stopped(
+        SerializedRegion,
+        TerrainSnapshot,
+        Tick,
+        Box<crate::PortableRegion>,
+    ),
     /// Boundary crossings this tick: bundles + ABSOLUTE target regions.
     /// Isometries are still source-local; the manager rebases. The stamp is
     /// the source's `current_tick()` right after the tick that produced
@@ -148,7 +156,11 @@ pub enum RegionOutput {
     /// when the client had no body here (it had just crossed a seam). The
     /// parked body's `EntityId`: a reply still owed to it (items a pile
     /// grant carries) is folded into the record by the manager.
-    PlayerParked(ClientId, Option<Box<crate::PlayerRecord>>, Option<crate::EntityId>),
+    PlayerParked(
+        ClientId,
+        Option<Box<crate::PlayerRecord>>,
+        Option<crate::EntityId>,
+    ),
     /// A client input that reached this region after the client's body left
     /// it (within [`MAX_INPUT_LEAD_TICKS`]): the manager sends it on to the
     /// client's home as `EventAfterTick(kind, stamp)`. The stamp is the
@@ -246,7 +258,9 @@ impl RegionSeed {
     /// `generates_columns`).
     pub fn into_region(self, id: RegionId) -> Result<Region, String> {
         self.into_region_with(id, &|rc| {
-            unreachable!("Deferred seed for {rc:?} reached a spawner that does not generate columns")
+            unreachable!(
+                "Deferred seed for {rc:?} reached a spawner that does not generate columns"
+            )
         })
     }
 
@@ -268,7 +282,9 @@ impl RegionSeed {
         };
         match self {
             RegionSeed::Fresh(columns) => Ok(Region::from_columns(id, columns)),
-            RegionSeed::Parked(serialized) | RegionSeed::Deferred(Some(serialized)) => restore(serialized),
+            RegionSeed::Parked(serialized) | RegionSeed::Deferred(Some(serialized)) => {
+                restore(serialized)
+            }
             RegionSeed::Deferred(None) => Ok(Region::from_columns(id, generate(id))),
         }
     }
@@ -278,7 +294,13 @@ impl RegionSeed {
 /// frame) for a halo seed (`RegionInput::SeedHaloFromWorldgen`): the same
 /// columns its own generation makes.
 pub type HaloGenerator = std::sync::Arc<
-    dyn Fn(RegionCoords, std::ops::Range<usize>, std::ops::Range<usize>) -> Vec<(ColumnCoords, Column)> + Send + Sync,
+    dyn Fn(
+            RegionCoords,
+            std::ops::Range<usize>,
+            std::ops::Range<usize>,
+        ) -> Vec<(ColumnCoords, Column)>
+        + Send
+        + Sync,
 >;
 
 /// A client's body buffered in a runner's inbox: its arrival (stamp, entity),
@@ -416,10 +438,14 @@ impl RegionRunner {
         }
         let people = self.region.data().people_here();
         if !people.is_empty() {
-            let _ = self.out.send((self.id, RegionOutput::PeoplePositions(people)));
+            let _ = self
+                .out
+                .send((self.id, RegionOutput::PeoplePositions(people)));
         }
         let snapshot = self.portable_snapshot();
-        let _ = self.out.send((self.id, RegionOutput::CutSnapshot(id, tick, snapshot)));
+        let _ = self
+            .out
+            .send((self.id, RegionOutput::CutSnapshot(id, tick, snapshot)));
     }
 
     /// Worldgen for [`RegionInput::SeedHaloFromWorldgen`]; without one such a
@@ -442,7 +468,10 @@ impl RegionRunner {
 
     /// The slot-start hashes recorded since the last call.
     pub fn take_slot_start_hashes(&mut self) -> Vec<(Tick, u32)> {
-        self.slot_start_hashes.as_mut().map(std::mem::take).unwrap_or_default()
+        self.slot_start_hashes
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// `(checks, total, slowest)` of the every-`state_hash_interval()` state
@@ -479,7 +508,9 @@ impl RegionRunner {
     /// Returns false when the runner should stop (after Shutdown).
     pub fn handle_input(&mut self, input: RegionInput) -> bool {
         match input {
-            RegionInput::Event(kind) if kind.input_client().is_some() => self.route_input(kind, None),
+            RegionInput::Event(kind) if kind.input_client().is_some() => {
+                self.route_input(kind, None)
+            }
             RegionInput::Event(kind) => match self.behind_held_body(&kind) {
                 Some(body) => self.queue_behind(kind, body, body.stamp()),
                 None => self.apply_input(kind),
@@ -502,10 +533,9 @@ impl RegionRunner {
                 ));
             }
             RegionInput::RequestTerrain(client_id) => {
-                let _ = self.out.send((
-                    self.id,
-                    RegionOutput::Terrain(client_id, self.terrain()),
-                ));
+                let _ = self
+                    .out
+                    .send((self.id, RegionOutput::Terrain(client_id, self.terrain())));
             }
             RegionInput::StartAt(tick) => self.region.start_at(tick),
             RegionInput::SetRouteMap(route) => self.region.set_route_map(route),
@@ -525,10 +555,14 @@ impl RegionRunner {
             RegionInput::HaloRequest(to) => {
                 if let Some(seed) = self.region.data().halo_seed_for(to) {
                     let stamp = self.region.current_tick();
-                    let _ = self.out.send((self.id, RegionOutput::HaloDeltas(vec![(seed, to)], stamp)));
+                    let _ = self
+                        .out
+                        .send((self.id, RegionOutput::HaloDeltas(vec![(seed, to)], stamp)));
                 }
             }
-            RegionInput::SeedHaloFromWorldgen(neighbours) => self.seed_halo_from_worldgen(neighbours),
+            RegionInput::SeedHaloFromWorldgen(neighbours) => {
+                self.seed_halo_from_worldgen(neighbours)
+            }
             RegionInput::SeedHaloFromStore(neighbours) => self.seed_halo_from_store(neighbours),
             RegionInput::ListPeople(epoch) => match self.inbox.latest_stamp() {
                 // Answered once every buffered transfer has been applied: at the
@@ -564,12 +598,17 @@ impl RegionRunner {
                 let stamp = self.region.current_tick();
                 let gone = self.region.data().halo_entities_gone_all();
                 if !gone.is_empty() {
-                    let _ = self.out.send((self.id, RegionOutput::HaloEntities(gone, stamp)));
+                    let _ = self
+                        .out
+                        .send((self.id, RegionOutput::HaloEntities(gone, stamp)));
                 }
                 let serialized = SerializedRegion::from_rollback(self.region.data());
                 let far = self.terrain();
                 let portable = self.portable_snapshot();
-                let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far, stamp, portable)));
+                let _ = self.out.send((
+                    self.id,
+                    RegionOutput::Stopped(serialized, far, stamp, portable),
+                ));
                 return false;
             }
         }
@@ -582,9 +621,9 @@ impl RegionRunner {
     fn held_body(&self, client: ClientId) -> Option<HeldBody> {
         let (stamp, kind) = self.inbox.holds_entry(|k| match k {
             GameEventKind::EntityArrived(b) => b.client.as_ref().is_some_and(|(c, _)| *c == client),
-            GameEventKind::CreateClient(c) | GameEventKind::CreateClientAt(c, ..) | GameEventKind::RestorePlayer(c, _) => {
-                *c == client
-            }
+            GameEventKind::CreateClient(c)
+            | GameEventKind::CreateClientAt(c, ..)
+            | GameEventKind::RestorePlayer(c, _) => *c == client,
             _ => false,
         })?;
         Some(match kind {
@@ -600,7 +639,9 @@ impl RegionRunner {
     /// creation, among class `Other` (`push_behind`).
     fn queue_behind(&mut self, kind: GameEventKind, body: HeldBody, stamp: Tick) {
         match body {
-            HeldBody::Arrival(arrives, id) if stamp <= arrives => self.inbox.push_after_arrival(kind, arrives, id),
+            HeldBody::Arrival(arrives, id) if stamp <= arrives => {
+                self.inbox.push_after_arrival(kind, arrives, id)
+            }
             held => self.inbox.push_behind(kind, held.stamp().max(stamp)),
         }
     }
@@ -628,7 +669,9 @@ impl RegionRunner {
         let before = before.unwrap_or(Tick::MAX);
         loop {
             let transfers = self.inbox.drain_before(before);
-            let (inputs, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held).into_iter().partition(|(_, t)| *t < before);
+            let (inputs, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
+                .into_iter()
+                .partition(|(_, t)| *t < before);
             self.held = rest.into();
             if inputs.is_empty() && transfers.is_empty() {
                 return;
@@ -653,13 +696,21 @@ impl RegionRunner {
             let snap = match &self.stored_terrain {
                 Some(stored) => crate::load_stored_or_warn(stored.as_ref(), n, "halo seed"),
                 None => {
-                    log::warn!("region {:?}: no stored terrain source; halo of {n:?} from worldgen", self.id);
+                    log::warn!(
+                        "region {:?}: no stored terrain source; halo of {n:?} from worldgen",
+                        self.id
+                    );
                     None
                 }
             };
             match snap {
                 Some(snap) => {
-                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.region.map_extent(), n, self.id, &snap) {
+                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(
+                        self.region.map_extent(),
+                        n,
+                        self.id,
+                        &snap,
+                    ) {
                         self.apply(GameEventKind::HaloUpdate(seed));
                     }
                 }
@@ -667,7 +718,10 @@ impl RegionRunner {
             }
         }
         if !generate.is_empty() && self.opened.is_some() {
-            log::warn!("region {:?}: halo of {generate:?} not re-seeded (the store could not serve it); kept", self.id);
+            log::warn!(
+                "region {:?}: halo of {generate:?} not re-seeded (the store could not serve it); kept",
+                self.id
+            );
         } else if !generate.is_empty() {
             self.seed_halo_from_worldgen(generate);
         }
@@ -679,8 +733,16 @@ impl RegionRunner {
         // such spawner hands its runners a halo generator (server
         // `ThreadRegionSpawner::with_generator` takes both).
         let Some(generate) = self.halo_generator.clone() else {
-            debug_assert!(false, "region {:?}: halo seed from worldgen without a halo generator", self.id);
-            log::error!("region {:?}: no halo generator; {} neighbour seeds skipped", self.id, neighbours.len());
+            debug_assert!(
+                false,
+                "region {:?}: halo seed from worldgen without a halo generator",
+                self.id
+            );
+            log::error!(
+                "region {:?}: no halo generator; {} neighbour seeds skipped",
+                self.id,
+                neighbours.len()
+            );
             return;
         };
         for n in neighbours {
@@ -689,7 +751,9 @@ impl RegionRunner {
                 .flat_map(|(xs, zs)| generate(n, xs, zs))
                 .collect();
             let snap = TerrainSnapshot::from_columns(columns);
-            if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.region.map_extent(), n, self.id, &snap) {
+            if let Some(seed) =
+                crate::halo::halo_seed_from_snapshot(self.region.map_extent(), n, self.id, &snap)
+            {
                 self.apply(GameEventKind::HaloUpdate(seed));
             }
         }
@@ -715,7 +779,9 @@ impl RegionRunner {
     /// - body left recently: sent back as [`RegionOutput::Forward`];
     /// - otherwise (no such client here at all) handled as before.
     fn route_input(&mut self, kind: GameEventKind, stamp: Option<u64>) {
-        let client = kind.input_client().expect("route_input takes client inputs");
+        let client = kind
+            .input_client()
+            .expect("route_input takes client inputs");
         if !self.region.data().clients.contains_key(&client) {
             // Its arrival, or its creation held past a save cut
             // (`WorldManager::send_play_event`).
@@ -766,11 +832,20 @@ impl RegionRunner {
             // An input queued behind its client's arrival.
             kind if kind.input_client().is_some() => self.route_input(kind, None),
             GameEventKind::ParkPlayer(client) => {
-                let record = self.region.data().player_record(client, self.id).map(Box::new);
+                let record = self
+                    .region
+                    .data()
+                    .player_record(client, self.id)
+                    .map(Box::new);
                 let data = self.region.data();
-                let body = data.player_entites.get(&client).and_then(|&k| data.entity_id(k));
+                let body = data
+                    .player_entites
+                    .get(&client)
+                    .and_then(|&k| data.entity_id(k));
                 self.apply(GameEventKind::ParkPlayer(client));
-                let _ = self.out.send((self.id, RegionOutput::PlayerParked(client, record, body)));
+                let _ = self
+                    .out
+                    .send((self.id, RegionOutput::PlayerParked(client, record, body)));
             }
             kind => self.apply(kind),
         }
@@ -785,13 +860,17 @@ impl RegionRunner {
             .handle_event(kind)
             .expect("region event processing failed");
         self.region.commit_server_event();
-        let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
+        let _ = self
+            .out
+            .send((self.id, RegionOutput::EventProcessed(event)));
     }
 
     /// [`RegionOutput::PeopleListed`]: the people with a body here now.
     fn send_people_listed(&mut self, epoch: u64) {
         let people = self.region.data().people_here();
-        let _ = self.out.send((self.id, RegionOutput::PeopleListed(epoch, people)));
+        let _ = self
+            .out
+            .send((self.id, RegionOutput::PeopleListed(epoch, people)));
     }
 
     /// One sim tick + the every-10-ticks SyncClock self-report. The caller
@@ -818,7 +897,10 @@ impl RegionRunner {
             .expect("region tick failed");
         self.region.commit_server_event();
         if let Some(hashes) = self.slot_start_hashes.as_mut() {
-            hashes.push((self.region.current_tick(), crate::state_hash(self.region.data())));
+            hashes.push((
+                self.region.current_tick(),
+                crate::state_hash(self.region.data()),
+            ));
         }
         // Hashed before the held events below, so it describes the state the
         // client holds right after confirming this Tick.
@@ -840,9 +922,12 @@ impl RegionRunner {
         // This tick's crossings, before the slot opens: a departing client's
         // inputs held for this slot or later go with its body.
         let (mut departures, mut halo_entities) = self.region.take_transfers();
-        self.departed.retain(|_, (_, left)| now - *left <= MAX_INPUT_LEAD_TICKS);
+        self.departed
+            .retain(|_, (_, left)| now - *left <= MAX_INPUT_LEAD_TICKS);
         for (bundle, target) in &mut departures {
-            let Some(client) = bundle.client.as_ref().map(|(c, _)| *c) else { continue };
+            let Some(client) = bundle.client.as_ref().map(|(c, _)| *c) else {
+                continue;
+            };
             let (follow, stay): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
                 .into_iter()
                 .partition(|(k, t)| k.input_client() == Some(client) && *t >= now);
@@ -859,7 +944,10 @@ impl RegionRunner {
                 self.pending_cut = None;
                 departed_ids.extend(departures.iter().map(|(b, _)| b.id));
                 if !departures.is_empty() {
-                    let _ = self.out.send((self.id, RegionOutput::Departures(std::mem::take(&mut departures), now)));
+                    let _ = self.out.send((
+                        self.id,
+                        RegionOutput::Departures(std::mem::take(&mut departures), now),
+                    ));
                 }
                 self.send_cut_snapshot(id, tick);
             }
@@ -890,13 +978,19 @@ impl RegionRunner {
         let halo = self.region.take_halo_updates();
         departed_ids.extend(departures.iter().map(|(b, _)| b.id));
         if !departures.is_empty() {
-            let _ = self.out.send((self.id, RegionOutput::Departures(departures, stamp)));
+            let _ = self
+                .out
+                .send((self.id, RegionOutput::Departures(departures, stamp)));
         }
         if !halo_entities.is_empty() {
-            let _ = self.out.send((self.id, RegionOutput::HaloEntities(halo_entities, stamp)));
+            let _ = self
+                .out
+                .send((self.id, RegionOutput::HaloEntities(halo_entities, stamp)));
         }
         if !halo.is_empty() {
-            let _ = self.out.send((self.id, RegionOutput::HaloDeltas(halo, stamp)));
+            let _ = self
+                .out
+                .send((self.id, RegionOutput::HaloDeltas(halo, stamp)));
         }
         self.report_ids(&departed_ids);
         let intents = self.region.take_intents();
@@ -940,9 +1034,15 @@ impl RegionRunner {
     /// now and not then (`Spawned`), and then and not now except `departed`
     /// (`Despawned` — a departure's new place comes with the `Departures`).
     fn report_ids(&mut self, departed: &[crate::EntityId]) {
-        let now: std::collections::BTreeSet<crate::EntityId> = self.region.data().id_index.keys().copied().collect();
+        let now: std::collections::BTreeSet<crate::EntityId> =
+            self.region.data().id_index.keys().copied().collect();
         let spawned: Vec<_> = now.difference(&self.known_ids).copied().collect();
-        let gone: Vec<_> = self.known_ids.difference(&now).filter(|id| !departed.contains(id)).copied().collect();
+        let gone: Vec<_> = self
+            .known_ids
+            .difference(&now)
+            .filter(|id| !departed.contains(id))
+            .copied()
+            .collect();
         self.known_ids = now;
         if !spawned.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Spawned(spawned)));

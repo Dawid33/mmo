@@ -81,11 +81,11 @@
 use std::net::SocketAddr;
 
 use bevy::prelude::*;
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use login_api::{ApiErrorCode, JoinTicket, LoginConfigResponse, LoginResponse, WorldEntry};
 
 use super::oidc::{self, DevicePoll, DeviceStart};
-use super::{store, LoginApi, LoginFailure};
+use super::{LoginApi, LoginFailure, store};
 use crate::session::{AppState, PendingJoin};
 
 /// The login screen's line when the device sign-in ran out (the provider said
@@ -147,9 +147,12 @@ const _: () = assert!(WORLD_START_WAIT_MS > REJOIN_MAX_MS);
 /// A join call must wait longer than the service waits for the host's spawn
 /// ack: a slow 503 (the token not spent) must not look like a lost answer.
 #[cfg(not(target_arch = "wasm32"))]
-const _: () = assert!(super::api::REQUEST_TIMEOUT.as_millis() > login_api::SPAWN_ACK_TIMEOUT_MS as u128 * 2);
+const _: () =
+    assert!(super::api::REQUEST_TIMEOUT.as_millis() > login_api::SPAWN_ACK_TIMEOUT_MS as u128 * 2);
 #[cfg(target_arch = "wasm32")]
-const _: () = assert!(super::api::WASM_REQUEST_TIMEOUT_SECS as u64 * 1000 > login_api::SPAWN_ACK_TIMEOUT_MS * 2);
+const _: () = assert!(
+    super::api::WASM_REQUEST_TIMEOUT_SECS as u64 * 1000 > login_api::SPAWN_ACK_TIMEOUT_MS * 2
+);
 
 /// Whether a session that ended with `reason` (`None`: the player left) is
 /// rejoined: its home connection closed without a refusal (a crash, a silent
@@ -164,8 +167,13 @@ pub fn rejoinable(reason: Option<&str>) -> bool {
         return true;
     }
     reason.strip_prefix(REFUSED_PREFIX).is_some_and(|why| {
-        [game::FENCED_REFUSAL, game::ROLLBACK_REFUSAL, game::LEAVING_REFUSAL, game::PLAYER_PARKED_ELSEWHERE]
-            .contains(&why)
+        [
+            game::FENCED_REFUSAL,
+            game::ROLLBACK_REFUSAL,
+            game::LEAVING_REFUSAL,
+            game::PLAYER_PARKED_ELSEWHERE,
+        ]
+        .contains(&why)
     })
 }
 
@@ -207,7 +215,9 @@ impl Rejoin {
     /// be starting, whichever is later.
     pub fn deadline(&self) -> f64 {
         let rejoin = self.started + REJOIN_MAX_MS as f64 / 1000.0;
-        self.starting_since.map_or(rejoin, |since| rejoin.max(since + WORLD_START_WAIT_MS as f64 / 1000.0))
+        self.starting_since.map_or(rejoin, |since| {
+            rejoin.max(since + WORLD_START_WAIT_MS as f64 / 1000.0)
+        })
     }
 }
 
@@ -284,17 +294,33 @@ pub const REFRESH_AT_STARTUP: bool = cfg!(target_arch = "wasm32");
 pub enum LoginCall {
     /// Where the service's players sign in, then a device sign-in there with
     /// the PKCE challenge of `verifier`.
-    DeviceStart { verifier: String },
+    DeviceStart {
+        verifier: String,
+    },
     /// One poll of the pending device sign-in.
-    DevicePoll { provider: LoginConfigResponse, device_code: String, verifier: String },
+    DevicePoll {
+        provider: LoginConfigResponse,
+        device_code: String,
+        verifier: String,
+    },
     /// The provider's access token traded for the service's refresh token.
-    LoginOidc { access_token: String },
+    LoginOidc {
+        access_token: String,
+    },
     /// `silent`: the refresh of a kept token (the browser's startup, or Play
     /// online with a kept token) rather than a sign-in.
-    Refresh { token: String, silent: bool },
+    Refresh {
+        token: String,
+        silent: bool,
+    },
     Worlds,
-    Join { token: String, world: String },
-    Logout { token: String },
+    Join {
+        token: String,
+        world: String,
+    },
+    Logout {
+        token: String,
+    },
 }
 
 /// A join's answer: the ticket, the rotated refresh token and (native) the
@@ -309,13 +335,22 @@ pub struct Joined {
 /// One answer of the login service. Holds secrets: no `Debug`.
 pub enum LoginReply {
     /// A sign-in or a refresh (`silent`: of a kept token).
-    Session { silent: bool, result: Result<LoginResponse, LoginFailure> },
+    Session {
+        silent: bool,
+        result: Result<LoginResponse, LoginFailure>,
+    },
     /// A device sign-in started (`verifier`: the one its call sent the
     /// challenge of), with the provider it runs at.
-    DeviceStarted { verifier: String, result: Result<(LoginConfigResponse, DeviceStart), LoginFailure> },
+    DeviceStarted {
+        verifier: String,
+        result: Result<(LoginConfigResponse, DeviceStart), LoginFailure>,
+    },
     /// One poll's answer, for the sign-in of `device_code`. `Err`: the poll
     /// did not get through (the sign-in goes on).
-    DevicePolled { device_code: String, result: Result<DevicePoll, LoginFailure> },
+    DevicePolled {
+        device_code: String,
+        result: Result<DevicePoll, LoginFailure>,
+    },
     Worlds(Result<Vec<WorldEntry>, LoginFailure>),
     Joined(Result<Joined, LoginFailure>),
     /// Logout is fire-and-forget: the local login is gone already.
@@ -332,7 +367,10 @@ fn refused_token(failure: &LoginFailure) -> bool {
 /// not: nothing waits for it; nor does a device poll: the sign-in's waiting
 /// is [`LoginSession::waiting_for_sign_in`], and its polls come and go).
 fn awaited(call: &LoginCall) -> bool {
-    !matches!(call, LoginCall::Logout { .. } | LoginCall::DevicePoll { .. })
+    !matches!(
+        call,
+        LoginCall::Logout { .. } | LoginCall::DevicePoll { .. }
+    )
 }
 
 /// A device sign-in started and not finished: the code the player confirms
@@ -363,32 +401,53 @@ pub async fn perform(api: &LoginApi, call: LoginCall) -> LoginReply {
             let result = async {
                 let provider = api.config().await?;
                 let challenge = oidc::pkce_challenge(&verifier);
-                let start = api.device_start(&provider.oidc_issuer, &provider.oidc_client_id, &challenge).await?;
+                let start = api
+                    .device_start(&provider.oidc_issuer, &provider.oidc_client_id, &challenge)
+                    .await?;
                 Ok((provider, start))
             }
             .await;
             LoginReply::DeviceStarted { verifier, result }
         }
-        LoginCall::DevicePoll { provider, device_code, verifier } => {
-            let result =
-                api.device_poll(&provider.oidc_issuer, &provider.oidc_client_id, &device_code, &verifier).await;
-            LoginReply::DevicePolled { device_code, result }
-        }
-        LoginCall::LoginOidc { access_token } => {
-            LoginReply::Session { silent: false, result: api.login_oidc(&access_token).await }
-        }
-        LoginCall::Refresh { token, silent } => LoginReply::Session { silent, result: api.refresh(&token).await },
-        LoginCall::Worlds => LoginReply::Worlds(api.worlds().await),
-        LoginCall::Join { token, world } => LoginReply::Joined(api.join(&token, &world).await.map(|response| {
-            #[cfg(not(target_arch = "wasm32"))]
-            let quic = resolve_quic(response.ticket.quic.as_deref());
-            Joined {
-                ticket: response.ticket,
-                refresh_token: response.refresh_token,
-                #[cfg(not(target_arch = "wasm32"))]
-                quic,
+        LoginCall::DevicePoll {
+            provider,
+            device_code,
+            verifier,
+        } => {
+            let result = api
+                .device_poll(
+                    &provider.oidc_issuer,
+                    &provider.oidc_client_id,
+                    &device_code,
+                    &verifier,
+                )
+                .await;
+            LoginReply::DevicePolled {
+                device_code,
+                result,
             }
-        })),
+        }
+        LoginCall::LoginOidc { access_token } => LoginReply::Session {
+            silent: false,
+            result: api.login_oidc(&access_token).await,
+        },
+        LoginCall::Refresh { token, silent } => LoginReply::Session {
+            silent,
+            result: api.refresh(&token).await,
+        },
+        LoginCall::Worlds => LoginReply::Worlds(api.worlds().await),
+        LoginCall::Join { token, world } => {
+            LoginReply::Joined(api.join(&token, &world).await.map(|response| {
+                #[cfg(not(target_arch = "wasm32"))]
+                let quic = resolve_quic(response.ticket.quic.as_deref());
+                Joined {
+                    ticket: response.ticket,
+                    refresh_token: response.refresh_token,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    quic,
+                }
+            }))
+        }
         LoginCall::Logout { token } => {
             let _ = api.logout(&token).await; // errors ignored: the login is gone locally
             LoginReply::LoggedOut
@@ -439,30 +498,47 @@ impl LoginWorker {
     fn start(api: LoginApi) -> Self {
         let (call_send, call_recv) = unbounded::<(Generation, LoginCall)>();
         let (reply_send, replies) = unbounded();
-        let spawned = std::thread::Builder::new().name("login-http".into()).spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(runtime) => runtime,
-                Err(e) => {
-                    error!("[login] no runtime for the login client: {e}");
-                    return;
+        let spawned = std::thread::Builder::new()
+            .name("login-http".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        error!("[login] no runtime for the login client: {e}");
+                        return;
+                    }
+                };
+                for (generation, call) in call_recv {
+                    if reply_send
+                        .send((generation, runtime.block_on(perform(&api, call))))
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-            };
-            for (generation, call) in call_recv {
-                if reply_send.send((generation, runtime.block_on(perform(&api, call)))).is_err() {
-                    break;
-                }
-            }
-        });
+            });
         if let Err(e) = spawned {
             error!("[login] cannot start the login-http thread: {e}");
         }
-        Self { calls: CallSink(call_send), replies }
+        Self {
+            calls: CallSink(call_send),
+            replies,
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
     fn start(api: LoginApi) -> Self {
         let (reply_send, replies) = unbounded();
-        Self { calls: CallSink { api, replies: reply_send }, replies }
+        Self {
+            calls: CallSink {
+                api,
+                replies: reply_send,
+            },
+            replies,
+        }
     }
 
     /// Sends `call`; `false` if the worker is gone (the reply never comes).
@@ -508,17 +584,33 @@ pub struct Step {
 
 impl Step {
     fn none() -> Self {
-        Self { goto: None, store: StoreOp::Keep, calls: Vec::new(), join: None, open: None, leave: false }
+        Self {
+            goto: None,
+            store: StoreOp::Keep,
+            calls: Vec::new(),
+            join: None,
+            open: None,
+            leave: false,
+        }
     }
     fn goto(state: AppState) -> Self {
-        Self { goto: Some(state), ..Self::none() }
+        Self {
+            goto: Some(state),
+            ..Self::none()
+        }
     }
     fn call(call: LoginCall) -> Self {
-        Self { calls: vec![call], ..Self::none() }
+        Self {
+            calls: vec![call],
+            ..Self::none()
+        }
     }
     /// Opens `url` where this platform opens pages itself, else nothing.
     fn open(url: &str) -> Self {
-        Self { open: OPENS_BROWSER.then(|| url.to_string()), ..Self::none() }
+        Self {
+            open: OPENS_BROWSER.then(|| url.to_string()),
+            ..Self::none()
+        }
     }
 }
 
@@ -638,7 +730,10 @@ impl LoginSession {
     fn abandon_first_join(&mut self) {
         if let Some(first) = self.first_join.take() {
             if first.calling && first.starting() {
-                info!("[login] the join of world {:?} stops waiting for it to start", first.world);
+                info!(
+                    "[login] the join of world {:?} stops waiting for it to start",
+                    first.world
+                );
                 self.abandoned_join = Some((self.generation, self.clock + JOIN_ANSWER_MAX_SECS));
             }
         }
@@ -652,7 +747,11 @@ impl LoginSession {
     /// The world list's status line ("" = none): [`WORLD_STARTING_STATUS`]
     /// while a first join waits for its world to start.
     pub fn status(&self) -> &'static str {
-        if self.waiting_for_world() { WORLD_STARTING_STATUS } else { "" }
+        if self.waiting_for_world() {
+            WORLD_STARTING_STATUS
+        } else {
+            ""
+        }
     }
 
     /// A device sign-in is waiting for the player to confirm it at the
@@ -663,12 +762,16 @@ impl LoginSession {
 
     /// The pending sign-in's code for the player to type ("" = none).
     pub fn user_code(&self) -> &str {
-        self.pending_device.as_ref().map_or("", |p| p.start.user_code.as_str())
+        self.pending_device
+            .as_ref()
+            .map_or("", |p| p.start.user_code.as_str())
     }
 
     /// The pending sign-in's page with the code filled in ("" = none).
     pub fn verification_uri_complete(&self) -> &str {
-        self.pending_device.as_ref().map_or("", |p| p.start.verification_uri_complete.as_str())
+        self.pending_device
+            .as_ref()
+            .map_or("", |p| p.start.verification_uri_complete.as_str())
     }
 
     pub fn logged_in(&self) -> bool {
@@ -686,7 +789,11 @@ impl LoginSession {
 
     /// Where Log out lands: the browser's online screen is its front door.
     pub fn logged_out_state() -> AppState {
-        if cfg!(target_arch = "wasm32") { AppState::Login } else { AppState::MainMenu }
+        if cfg!(target_arch = "wasm32") {
+            AppState::Login
+        } else {
+            AppState::MainMenu
+        }
     }
 
     /// Forget the login locally.
@@ -705,9 +812,14 @@ impl LoginSession {
     /// The browser's startup step ([`REFRESH_AT_STARTUP`]): a kept refresh
     /// token is refreshed silently.
     pub fn resume(&mut self, kept: Option<String>) -> Step {
-        let Some(token) = kept else { return Step::none() };
+        let Some(token) = kept else {
+            return Step::none();
+        };
         self.refresh = Some(token.clone());
-        Step::call(LoginCall::Refresh { token, silent: true })
+        Step::call(LoginCall::Refresh {
+            token,
+            silent: true,
+        })
     }
 
     /// A button on the login screens (`state`: the screen it was pressed on).
@@ -723,7 +835,10 @@ impl LoginSession {
                 // A kept login (native: never refreshed yet; browser: its
                 // startup refresh failed): refresh it now.
                 if let (Some(token), false) = (self.refresh.clone(), busy) {
-                    step.calls.push(LoginCall::Refresh { token, silent: true });
+                    step.calls.push(LoginCall::Refresh {
+                        token,
+                        silent: true,
+                    });
                 }
                 step
             }
@@ -757,7 +872,9 @@ impl LoginSession {
                     return Step::none();
                 }
                 self.error.clear();
-                Step::call(LoginCall::DeviceStart { verifier: oidc::new_pkce_verifier() })
+                Step::call(LoginCall::DeviceStart {
+                    verifier: oidc::new_pkce_verifier(),
+                })
             }
             LoginIntent::JoinWorld(world) => {
                 self.error.clear();
@@ -785,7 +902,8 @@ impl LoginSession {
                 if state == AppState::Login {
                     step.goto = None;
                 }
-                step.calls.extend(token.map(|token| LoginCall::Logout { token }));
+                step.calls
+                    .extend(token.map(|token| LoginCall::Logout { token }));
                 step
             }
         }
@@ -798,7 +916,9 @@ impl LoginSession {
     /// leaves the screens' lines alone.
     pub fn receive(&mut self, generation: Generation, reply: LoginReply, state: AppState) -> Step {
         if generation != self.generation {
-            if matches!(reply, LoginReply::Joined(_)) && self.abandoned_join.is_some_and(|(g, _)| g == generation) {
+            if matches!(reply, LoginReply::Joined(_))
+                && self.abandoned_join.is_some_and(|(g, _)| g == generation)
+            {
                 self.abandoned_join = None; // recorded below: the screens may join again
             }
             // Nor does it touch the join from the world list of this generation.
@@ -809,7 +929,10 @@ impl LoginSession {
             self.first_join = first;
             return step;
         }
-        if !matches!(reply, LoginReply::LoggedOut | LoginReply::DevicePolled { .. }) {
+        if !matches!(
+            reply,
+            LoginReply::LoggedOut | LoginReply::DevicePolled { .. }
+        ) {
             self.in_flight = self.in_flight.saturating_sub(1);
         }
         self.apply(reply, state)
@@ -847,7 +970,10 @@ impl LoginSession {
 
     fn apply_reply(&mut self, reply: LoginReply, state: AppState) -> Step {
         match reply {
-            LoginReply::Session { silent, result: Ok(response) } => {
+            LoginReply::Session {
+                silent,
+                result: Ok(response),
+            } => {
                 self.refresh = Some(response.refresh_token.clone());
                 self.account = Some(response.account_email);
                 self.account_name = response.account_name;
@@ -861,7 +987,10 @@ impl LoginSession {
                 }
                 step
             }
-            LoginReply::Session { silent, result: Err(failure) } => {
+            LoginReply::Session {
+                silent,
+                result: Err(failure),
+            } => {
                 self.account = None;
                 self.account_name.clear();
                 self.error = failure.to_string();
@@ -874,8 +1003,13 @@ impl LoginSession {
                 }
                 step
             }
-            LoginReply::DeviceStarted { verifier, result } => self.device_started(verifier, result, state),
-            LoginReply::DevicePolled { device_code, result } => self.device_polled(&device_code, result, state),
+            LoginReply::DeviceStarted { verifier, result } => {
+                self.device_started(verifier, result, state)
+            }
+            LoginReply::DevicePolled {
+                device_code,
+                result,
+            } => self.device_polled(&device_code, result, state),
             LoginReply::Worlds(Ok(worlds)) => {
                 self.worlds = worlds;
                 Step::none()
@@ -896,7 +1030,11 @@ impl LoginSession {
                 self.error = failure.to_string();
                 if matches!(&failure, LoginFailure::Api(e) if e.code == ApiErrorCode::Revoked) {
                     self.sign_out();
-                    return Step { goto: Some(AppState::Login), store: StoreOp::Clear, ..Step::none() };
+                    return Step {
+                        goto: Some(AppState::Login),
+                        store: StoreOp::Clear,
+                        ..Step::none()
+                    };
                 }
                 Step::none()
             }
@@ -919,19 +1057,29 @@ impl LoginSession {
             _ => None,
         };
         let waiting = self.first_join.as_ref().is_some_and(|f| f.starting());
-        let repeats = code == Some(ApiErrorCode::WorldStarting) || (waiting && code == Some(ApiErrorCode::WorldUnavailable));
-        let Some(first) = self.first_join.as_mut().filter(|_| repeats && state == AppState::Worlds && self.rejoin.is_none())
+        let repeats = code == Some(ApiErrorCode::WorldStarting)
+            || (waiting && code == Some(ApiErrorCode::WorldUnavailable));
+        let Some(first) = self
+            .first_join
+            .as_mut()
+            .filter(|_| repeats && state == AppState::Worlds && self.rejoin.is_none())
         else {
             return false;
         };
         first.calling = false;
         let since = *first.starting_since.get_or_insert(now);
         if now >= since + WORLD_START_WAIT_MS as f64 / 1000.0 {
-            warn!("[login] world {:?} did not start within {WORLD_START_WAIT_MS} ms", first.world);
+            warn!(
+                "[login] world {:?} did not start within {WORLD_START_WAIT_MS} ms",
+                first.world
+            );
             return false;
         }
         if since == now {
-            info!("[login] world {:?} is starting a host; joining again every {REJOIN_RETRY_MS} ms", first.world);
+            info!(
+                "[login] world {:?} is starting a host; joining again every {REJOIN_RETRY_MS} ms",
+                first.world
+            );
         }
         first.why = failure.to_string();
         first.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
@@ -944,9 +1092,16 @@ impl LoginSession {
     /// and none is on its way, the kept token re-read first (`kept`, as a
     /// rejoin does); past [`WORLD_START_WAIT_MS`] the ordinary error. Off the
     /// world list it stops.
-    pub fn tick_first_join(&mut self, now: f64, state: AppState, kept: impl FnOnce() -> Option<String>) -> Step {
+    pub fn tick_first_join(
+        &mut self,
+        now: f64,
+        state: AppState,
+        kept: impl FnOnce() -> Option<String>,
+    ) -> Step {
         self.clock = now;
-        let Some(first) = self.first_join.as_mut().filter(|f| f.starting()) else { return Step::none() };
+        let Some(first) = self.first_join.as_mut().filter(|f| f.starting()) else {
+            return Step::none();
+        };
         if state != AppState::Worlds {
             self.back();
             return Step::none();
@@ -956,7 +1111,10 @@ impl LoginSession {
         }
         let since = first.starting_since.unwrap_or(now);
         if now >= since + WORLD_START_WAIT_MS as f64 / 1000.0 {
-            warn!("[login] world {:?} did not start within {WORLD_START_WAIT_MS} ms", first.world);
+            warn!(
+                "[login] world {:?} did not start within {WORLD_START_WAIT_MS} ms",
+                first.world
+            );
             let why = std::mem::take(&mut first.why);
             self.first_join = None;
             self.error = why;
@@ -1017,11 +1175,20 @@ impl LoginSession {
     /// One poll's answer. Dropped unless it is for the pending sign-in (one
     /// cancelled, expired or replaced since is gone) and the player is on the
     /// login screen.
-    fn device_polled(&mut self, device_code: &str, result: Result<DevicePoll, LoginFailure>, state: AppState) -> Step {
+    fn device_polled(
+        &mut self,
+        device_code: &str,
+        result: Result<DevicePoll, LoginFailure>,
+        state: AppState,
+    ) -> Step {
         if state != AppState::Login {
             return Step::none();
         }
-        let Some(pending) = self.pending_device.as_mut().filter(|p| p.start.device_code == device_code) else {
+        let Some(pending) = self
+            .pending_device
+            .as_mut()
+            .filter(|p| p.start.device_code == device_code)
+        else {
             return Step::none();
         };
         pending.polling = false;
@@ -1070,7 +1237,9 @@ impl LoginSession {
         if self.abandoned_join.is_some_and(|(_, until)| now >= until) {
             self.abandoned_join = None;
         }
-        let Some(pending) = self.pending_device.as_mut() else { return Step::none() };
+        let Some(pending) = self.pending_device.as_mut() else {
+            return Step::none();
+        };
         if state != AppState::Login {
             self.pending_device = None;
             return Step::none();
@@ -1122,7 +1291,11 @@ impl LoginSession {
     /// ticket's session connects (that sets its own line).
     pub fn rejoin_status(&self) -> Option<&'static str> {
         let rejoin = self.rejoin.as_ref().filter(|r| !r.connecting)?;
-        Some(if rejoin.starting_now { WORLD_STARTING_STATUS } else { REJOIN_STATUS })
+        Some(if rejoin.starting_now {
+            WORLD_STARTING_STATUS
+        } else {
+            REJOIN_STATUS
+        })
     }
 
     /// An online session ended (`reason`: why, `None` = the player left) on
@@ -1132,7 +1305,12 @@ impl LoginSession {
     /// its deadline. Anything else: as before, the world list (with the
     /// reason on it). Not online (a local or single-player session): never a
     /// rejoin.
-    pub fn session_lost(&mut self, reason: Option<&str>, state: AppState, now: f64) -> AfterSession {
+    pub fn session_lost(
+        &mut self,
+        reason: Option<&str>,
+        state: AppState,
+        now: f64,
+    ) -> AfterSession {
         self.clock = now;
         let online = self.playing_online && self.logged_in();
         if let Some(rejoin) = self.rejoin.as_mut() {
@@ -1144,7 +1322,9 @@ impl LoginSession {
                 return AfterSession::Rejoin;
             }
             if online && rejoinable(reason) && now < rejoin.deadline() {
-                info!("[login] the rejoined session was lost before it was in the world; joining again");
+                info!(
+                    "[login] the rejoined session was lost before it was in the world; joining again"
+                );
                 rejoin.connecting = false;
                 rejoin.calling = false;
                 rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
@@ -1198,7 +1378,9 @@ impl LoginSession {
     /// join still on its way keeps the screens busy until its answer is
     /// recorded or [`JOIN_ANSWER_MAX_SECS`] pass.
     fn abandon_rejoin(&mut self) {
-        let Some(rejoin) = self.rejoin.take() else { return };
+        let Some(rejoin) = self.rejoin.take() else {
+            return;
+        };
         if rejoin.calling {
             self.abandoned_join = Some((self.generation, self.clock + JOIN_ANSWER_MAX_SECS));
         }
@@ -1234,9 +1416,16 @@ impl LoginSession {
     /// store keeps, read only when the last answer may have been lost), or
     /// the world list once [`REJOIN_MAX_MS`] have passed. Off the starting
     /// screen (and out of the world it is leaving) the rejoin is dropped.
-    pub fn tick_rejoin(&mut self, now: f64, state: AppState, kept: impl FnOnce() -> Option<String>) -> Step {
+    pub fn tick_rejoin(
+        &mut self,
+        now: f64,
+        state: AppState,
+        kept: impl FnOnce() -> Option<String>,
+    ) -> Step {
         self.clock = now;
-        let Some(rejoin) = self.rejoin.as_mut() else { return Step::none() };
+        let Some(rejoin) = self.rejoin.as_mut() else {
+            return Step::none();
+        };
         match state {
             AppState::Starting => {}
             // The frame the lost session's world is left.
@@ -1260,7 +1449,9 @@ impl LoginSession {
             // Its host does not answer: tear that session down and ask for a
             // new join. The ticket's join did answer, and its rotated token is
             // kept (memory and store): the next call presents it.
-            warn!("[login] the rejoined session did not reach the world in {REJOIN_CONNECT_MS} ms; asking for a new join");
+            warn!(
+                "[login] the rejoined session did not reach the world in {REJOIN_CONNECT_MS} ms; asking for a new join"
+            );
             rejoin.connecting = false;
             rejoin.next_call = now;
             rejoin.why = "The server did not answer \u{2014} try again shortly".into();
@@ -1284,7 +1475,11 @@ impl LoginSession {
         if self.refresh != presented {
             info!(
                 "[login] rejoin: the kept refresh token is not the one this session last used ({}); presenting the kept one",
-                if after_lost_answer { "the last answer was lost" } else { "another client on this machine rotated it" }
+                if after_lost_answer {
+                    "the last answer was lost"
+                } else {
+                    "another client on this machine rotated it"
+                }
             );
         }
         let Some(token) = self.refresh.clone() else {
@@ -1313,9 +1508,12 @@ impl LoginSession {
     /// - anything else (the world closed or unknown): the world list.
     pub fn rejoin_answer(&mut self, result: Result<Joined, LoginFailure>) -> Step {
         let now = self.clock;
-        let Some(rejoin) = self.rejoin.as_mut() else { return Step::none() };
+        let Some(rejoin) = self.rejoin.as_mut() else {
+            return Step::none();
+        };
         rejoin.calling = false;
-        rejoin.starting_now = matches!(&result, Err(LoginFailure::Api(e)) if e.code == ApiErrorCode::WorldStarting);
+        rejoin.starting_now =
+            matches!(&result, Err(LoginFailure::Api(e)) if e.code == ApiErrorCode::WorldStarting);
         let failure = match result {
             Ok(joined) => {
                 self.refresh = Some(joined.refresh_token.clone());
@@ -1323,7 +1521,10 @@ impl LoginSession {
                 step.store = StoreOp::Save(joined.refresh_token.clone());
                 match pending_join(joined) {
                     Ok(pending) => {
-                        info!("[login] rejoin: a new ticket for world {:?}; connecting", pending.ticket.world);
+                        info!(
+                            "[login] rejoin: a new ticket for world {:?}; connecting",
+                            pending.ticket.world
+                        );
                         rejoin.connecting = true;
                         rejoin.connect_started = now;
                         step.join = Some(pending);
@@ -1345,20 +1546,26 @@ impl LoginSession {
             }
             LoginFailure::Api(e) if e.code == ApiErrorCode::WorldStarting => {
                 if rejoin.starting_since.is_none() {
-                    info!("[login] rejoin: the world is starting a host; waiting up to {WORLD_START_WAIT_MS} ms");
+                    info!(
+                        "[login] rejoin: the world is starting a host; waiting up to {WORLD_START_WAIT_MS} ms"
+                    );
                     rejoin.starting_since = Some(now);
                 }
                 rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
                 Step::none()
             }
             LoginFailure::Network(_) | LoginFailure::Protocol(_) => {
-                warn!("[login] rejoin: a join got no answer ({failure:?}); adopting the kept login before the next");
+                warn!(
+                    "[login] rejoin: a join got no answer ({failure:?}); adopting the kept login before the next"
+                );
                 rejoin.adopt_first = true;
                 rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
                 Step::none()
             }
             LoginFailure::Api(e) if e.code == ApiErrorCode::Internal => {
-                warn!("[login] rejoin: the login service failed; adopting the kept login before the next");
+                warn!(
+                    "[login] rejoin: the login service failed; adopting the kept login before the next"
+                );
                 rejoin.adopt_first = true;
                 rejoin.next_call = now + REJOIN_RETRY_MS as f64 / 1000.0;
                 Step::none()
@@ -1368,7 +1575,11 @@ impl LoginSession {
                 self.sign_out();
                 self.error = failure.to_string();
                 self.rejoin_ended = Some(RejoinEnd::SignedOut);
-                Step { goto: Some(AppState::Login), store: StoreOp::Clear, ..Step::none() }
+                Step {
+                    goto: Some(AppState::Login),
+                    store: StoreOp::Clear,
+                    ..Step::none()
+                }
             }
             _ => {
                 let why = failure.to_string();
@@ -1381,7 +1592,9 @@ impl LoginSession {
     /// Sends `calls` (starting the worker on first use).
     fn send(&mut self, calls: Vec<LoginCall>) {
         for call in calls {
-            let worker = self.worker.get_or_insert_with(|| LoginWorker::start(self.api.clone()));
+            let worker = self
+                .worker
+                .get_or_insert_with(|| LoginWorker::start(self.api.clone()));
             let counted = awaited(&call);
             if worker.send(self.generation, call) {
                 self.in_flight += u32::from(counted);
@@ -1400,18 +1613,28 @@ impl LoginSession {
 fn pending_join(joined: Joined) -> Result<PendingJoin, String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        joined.quic.map(|addr| PendingJoin { ticket: joined.ticket, addr })
+        joined.quic.map(|addr| PendingJoin {
+            ticket: joined.ticket,
+            addr,
+        })
     }
     #[cfg(target_arch = "wasm32")]
     match joined.ticket.webtransport.as_deref().map(str::trim) {
-        Some(url) if !url.is_empty() => Ok(PendingJoin { ticket: joined.ticket }),
+        Some(url) if !url.is_empty() => Ok(PendingJoin {
+            ticket: joined.ticket,
+        }),
         _ => Err(NO_ADDRESS_ERROR.to_string()),
     }
 }
 
 /// Carries out a step's effects outside the session: the kept token, the
 /// pending join, the screen.
-fn perform_step(step: Step, login: &mut LoginSession, commands: &mut Commands, next: &mut NextState<AppState>) {
+fn perform_step(
+    step: Step,
+    login: &mut LoginSession,
+    commands: &mut Commands,
+    next: &mut NextState<AppState>,
+) {
     match &step.store {
         StoreOp::Keep => {}
         StoreOp::Save(token) => store::save_refresh(token),
@@ -1438,7 +1661,10 @@ fn perform_step(step: Step, login: &mut LoginSession, commands: &mut Commands, n
 #[cfg(not(target_arch = "wasm32"))]
 fn open_browser(url: &str) {
     if let Err(e) = open::that_detached(url) {
-        warn!("[login] cannot open the browser for the sign-in ({:?})", e.kind());
+        warn!(
+            "[login] cannot open the browser for the sign-in ({:?})",
+            e.kind()
+        );
     }
 }
 
@@ -1450,7 +1676,9 @@ fn open_browser(_url: &str) {}
 /// browser ([`REFRESH_AT_STARTUP`]) a kept refresh token is refreshed
 /// silently.
 pub fn setup_login(mut commands: Commands) {
-    let Some(url) = super::login_url() else { return };
+    let Some(url) = super::login_url() else {
+        return;
+    };
     info!("[login] login service at {url}");
     let mut login = LoginSession::new(LoginApi::new(url));
     if REFRESH_AT_STARTUP {
@@ -1463,7 +1691,10 @@ pub fn setup_login(mut commands: Commands) {
 /// Whether `intent` presents the refresh token (so the kept one is re-read
 /// first).
 fn presents_token(intent: &LoginIntent) -> bool {
-    matches!(intent, LoginIntent::PlayOnline | LoginIntent::JoinWorld(_) | LoginIntent::Logout)
+    matches!(
+        intent,
+        LoginIntent::PlayOnline | LoginIntent::JoinWorld(_) | LoginIntent::Logout
+    )
 }
 
 /// The frontend's [`LoginIntent`]s, sent.
@@ -1504,7 +1735,10 @@ pub fn poll_login(
     let (replies, lost): (Vec<(Generation, LoginReply)>, bool) = match &login.worker {
         Some(worker) => {
             let replies = worker.replies.try_iter().collect();
-            let lost = matches!(worker.replies.try_recv(), Err(crossbeam::channel::TryRecvError::Disconnected));
+            let lost = matches!(
+                worker.replies.try_recv(),
+                Err(crossbeam::channel::TryRecvError::Disconnected)
+            );
             (replies, lost)
         }
         None => (Vec::new(), false),
@@ -1556,4 +1790,3 @@ pub fn refresh_worlds(login: Option<ResMut<LoginSession>>) {
         login.send(vec![LoginCall::Worlds]);
     }
 }
-

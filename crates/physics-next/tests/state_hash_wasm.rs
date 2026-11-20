@@ -26,37 +26,85 @@ const SCENE_TICKS: usize = 120;
 
 /// Runs the scene; returns the combined hash and each part's own.
 fn scene() -> (u32, [u64; 8]) {
-    let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
+    let mut w = PhysicsWorld {
+        gravity: Vector::new(0.0, -9.81, 0.0),
+        ..Default::default()
+    };
     w.params.dt = 0.05;
     let floor = w.bodies.insert(RigidBodyBuilder::fixed());
-    let keys: Vec<IVector> = (0..24).flat_map(|x| (0..24).map(move |z| IVector::new(x, 0, z))).collect();
-    w.colliders.insert_with_parent(ColliderBuilder::voxels(Vector::splat(1.0), &keys), floor, &mut w.bodies);
+    let keys: Vec<IVector> = (0..24)
+        .flat_map(|x| (0..24).map(move |z| IVector::new(x, 0, z)))
+        .collect();
+    w.colliders.insert_with_parent(
+        ColliderBuilder::voxels(Vector::splat(1.0), &keys),
+        floor,
+        &mut w.bodies,
+    );
     for i in 0..3 {
-        let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(6.0 + i as f32, 2.0 + i as f32, 6.0)));
-        w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+        let b = w
+            .bodies
+            .insert(RigidBodyBuilder::dynamic().translation(Vector::new(
+                6.0 + i as f32,
+                2.0 + i as f32,
+                6.0,
+            )));
+        w.colliders
+            .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
     }
-    let a = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(12.0, 1.5, 4.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), a, &mut w.bodies);
-    let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(13.2, 1.5, 4.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
-    let joint = SphericalJointBuilder::new().local_anchor1(Vector::new(0.6, 0.0, 0.0)).local_anchor2(Vector::new(-0.6, 0.0, 0.0));
+    let a = w
+        .bodies
+        .insert(RigidBodyBuilder::dynamic().translation(Vector::new(12.0, 1.5, 4.0)));
+    w.colliders
+        .insert_with_parent(ColliderBuilder::ball(0.4), a, &mut w.bodies);
+    let b = w
+        .bodies
+        .insert(RigidBodyBuilder::dynamic().translation(Vector::new(13.2, 1.5, 4.0)));
+    w.colliders
+        .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+    let joint = SphericalJointBuilder::new()
+        .local_anchor1(Vector::new(0.6, 0.0, 0.0))
+        .local_anchor2(Vector::new(-0.6, 0.0, 0.0));
     w.impulse_joints.insert(a, b, joint, true);
     // A tilted box off its body's origin: a non-diagonal inertia tensor.
-    let offset = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(16.0, 3.0, 12.0)));
-    let tilt = Pose::from_parts(Vector::new(0.7, 0.2, -0.3), Rotation::from_scaled_axis(Vector::new(0.4, 0.9, 0.2)));
-    w.colliders.insert_with_parent(ColliderBuilder::cuboid(0.8, 0.3, 0.5).position(tilt), offset, &mut w.bodies);
-    let k = w.bodies.insert(RigidBodyBuilder::kinematic_position_based().translation(Vector::new(2.0, 1.9, 6.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::capsule_y(0.5, 0.4), k, &mut w.bodies);
+    let offset = w
+        .bodies
+        .insert(RigidBodyBuilder::dynamic().translation(Vector::new(16.0, 3.0, 12.0)));
+    let tilt = Pose::from_parts(
+        Vector::new(0.7, 0.2, -0.3),
+        Rotation::from_scaled_axis(Vector::new(0.4, 0.9, 0.2)),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(0.8, 0.3, 0.5).position(tilt),
+        offset,
+        &mut w.bodies,
+    );
+    let k = w.bodies.insert(
+        RigidBodyBuilder::kinematic_position_based().translation(Vector::new(2.0, 1.9, 6.0)),
+    );
+    w.colliders
+        .insert_with_parent(ColliderBuilder::capsule_y(0.5, 0.4), k, &mut w.bodies);
 
     let mut pipeline = PhysicsPipeline::new();
     for tick in 0..SCENE_TICKS {
         let x = 2.0 + (tick as f32 * 0.15).min(16.0);
-        w.bodies.get_mut(k).unwrap().set_next_kinematic_translation(Vector::new(x, 1.9, 6.0));
+        w.bodies
+            .get_mut(k)
+            .unwrap()
+            .set_next_kinematic_translation(Vector::new(x, 1.9, 6.0));
         w.step(&mut pipeline);
     }
-    assert!(w.bodies[k].translation().x > 17.0, "the capsule must walk the floor");
-    assert!(w.bodies[offset].translation().y < 3.0, "the offset body must fall");
-    assert!(w.narrow_phase.contact_pairs().next().is_some(), "the scene must be in contact");
+    assert!(
+        w.bodies[k].translation().x > 17.0,
+        "the capsule must walk the floor"
+    );
+    assert!(
+        w.bodies[offset].translation().y < 3.0,
+        "the offset body must fall"
+    );
+    assert!(
+        w.narrow_phase.contact_pairs().next().is_some(),
+        "the scene must be in contact"
+    );
 
     let parts = w.state_hashes();
     let mut all = crc32fast::Hasher::new();
@@ -101,7 +149,10 @@ fn log(line: &str) {
 #[test]
 fn scene_state_hash_native() {
     let (hash, _) = scene();
-    assert_eq!(hash, SCENE_STATE_HASH, "native scene StateHash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
+    assert_eq!(
+        hash, SCENE_STATE_HASH,
+        "native scene StateHash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}"
+    );
 }
 
 /// Gate: pins the `mmo-fork` hunk: the physics state hash matches across native and wasm32 (`just determinism-wasm`)
@@ -109,5 +160,8 @@ fn scene_state_hash_native() {
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn scene_state_hash_wasm() {
     let (hash, _) = scene();
-    assert_eq!(hash, SCENE_STATE_HASH, "wasm32 scene StateHash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
+    assert_eq!(
+        hash, SCENE_STATE_HASH,
+        "wasm32 scene StateHash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}"
+    );
 }

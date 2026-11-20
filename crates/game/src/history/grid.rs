@@ -81,7 +81,11 @@ impl SocietyGrid {
             let cap = if !has_landing || dry_pm < MIN_DRY_FRACTION_PER_MILLE {
                 0
             } else {
-                let lake = if t.lake_fraction > 0.0 { CAPACITY_LAKE } else { 0 };
+                let lake = if t.lake_fraction > 0.0 {
+                    CAPACITY_LAKE
+                } else {
+                    0
+                };
                 let raw = (CAPACITY_BASE + u32::from(t.rivers) * CAPACITY_PER_RIVER + lake)
                     .saturating_sub(relief_pen)
                     .min(CAPACITY_MAX);
@@ -97,8 +101,15 @@ impl SocietyGrid {
         // world, which must be the same whatever role opens it, and a split
         // role installs the map with the seam closed (`wrap_x` cleared).
         // `wrap_x` is derived from the same world, so it adds nothing.
-        let bytes = bincode::serialize(&(map.origin, map.width, map.height, &map.tiles, &map.rock_names, &map.region_types))
-            .expect("world map serialises");
+        let bytes = bincode::serialize(&(
+            map.origin,
+            map.width,
+            map.height,
+            &map.tiles,
+            &map.rock_names,
+            &map.region_types,
+        ))
+        .expect("world map serialises");
         SocietyGrid {
             origin: map.origin,
             width: map.width,
@@ -115,7 +126,12 @@ impl SocietyGrid {
 
     /// The regions the grid covers.
     fn extent(&self) -> MapExtent {
-        MapExtent { origin: self.origin, width: self.width, height: self.height, wrap_x: self.wrap_x }
+        MapExtent {
+            origin: self.origin,
+            width: self.width,
+            height: self.height,
+            wrap_x: self.wrap_x,
+        }
     }
 
     /// Whether x wraps east–west.
@@ -166,7 +182,8 @@ impl SocietyGrid {
     /// row-major order of their first region). `None` off the grid or on impassable ground.
     /// Two regions in different components have no route between them.
     pub fn component(&self, rc: RegionCoords) -> Option<u32> {
-        self.index(rc).and_then(|i| self.passable[i].then(|| self.component[i]))
+        self.index(rc)
+            .and_then(|i| self.passable[i].then(|| self.component[i]))
     }
 
     /// The region's landing column (region-local blocks, `TileSummary::landing`); `None`
@@ -205,9 +222,7 @@ pub fn route(
         return None;
     }
     let n = grid.passable.len();
-    let h = |rc: RegionCoords| -> u64 {
-        grid.distance(rc, to) as u64 * 1000
-    };
+    let h = |rc: RegionCoords| -> u64 { grid.distance(rc, to) as u64 * 1000 };
     let mut g = vec![u64::MAX; n];
     let mut prev = vec![usize::MAX; n];
     let mut closed = vec![false; n];
@@ -245,7 +260,9 @@ pub fn route(
                 if dx == 0 && dz == 0 {
                     continue;
                 }
-                let Some(nb) = grid.extent().neighbour(cur, dx, dz) else { continue };
+                let Some(nb) = grid.extent().neighbour(cur, dx, dz) else {
+                    continue;
+                };
                 let Some(ni) = grid.index(nb) else { continue };
                 if !grid.passable[ni] || closed[ni] {
                     continue;

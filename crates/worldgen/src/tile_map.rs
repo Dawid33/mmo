@@ -10,7 +10,10 @@
 //! world block Y metres (`SEA_LEVEL + height`).
 
 use game::movement::UNITS_PER_METER;
-use game::{Biome, RegionCoords, RegionType, TileSummary, WorldMap, BLOCK_VOXELS, REGION_BLOCKS, REGION_SIZE};
+use game::{
+    BLOCK_VOXELS, Biome, REGION_BLOCKS, REGION_SIZE, RegionCoords, RegionType, TileSummary,
+    WorldMap,
+};
 
 use crate::forged::{ForgedWorld, PointSample};
 use crate::pipeline::{SEA_LEVEL, SEA_TOP_BLOCK};
@@ -31,7 +34,8 @@ pub fn surface_block(ground_y: f64) -> i32 {
 /// wants [`LANDING_MIN_BLOCKS_ABOVE_SEA`], see [`is_landing`]) and
 /// `examples/world_map.rs`.
 pub fn is_dry(sample: &PointSample) -> bool {
-    surface_block(sample.ground_y) >= SEA_TOP_BLOCK && sample.water_y.is_none_or(|w| w <= sample.ground_y)
+    surface_block(sample.ground_y) >= SEA_TOP_BLOCK
+        && sample.water_y.is_none_or(|w| w <= sample.ground_y)
 }
 
 /// Blocks a landing column's surface block must stand above the sea's top
@@ -85,8 +89,11 @@ pub(crate) fn map_extent(world: &ForgedWorld) -> (RegionCoords, u32, u32) {
     // The last tile whose start lies before the (exclusive) max edge.
     let last = |v: f64| (v / t).ceil() as i32 - 1;
     let origin = RegionCoords::new(first(min[0]), first(min[1]));
-    let width =
-        if wraps(world) { (world.globals().width_m / t).round() as u32 } else { (last(max[0]) - origin.x + 1) as u32 };
+    let width = if wraps(world) {
+        (world.globals().width_m / t).round() as u32
+    } else {
+        (last(max[0]) - origin.x + 1) as u32
+    };
     (origin, width, (last(max[1]) - origin.z + 1) as u32)
 }
 
@@ -102,7 +109,11 @@ pub fn build_world_map(world: &ForgedWorld) -> WorldMap {
         for dx in 0..width as i32 {
             let rc = RegionCoords::new(origin.x + dx, origin.z + dz);
             let rivers = reaches.get(&(rc.x, rc.z)).map_or(&[][..], Vec::as_slice);
-            tiles.push(summarize_tile_with(world, rc, rivers.iter().map(|&k| &a.rivers[k]).collect()));
+            tiles.push(summarize_tile_with(
+                world,
+                rc,
+                rivers.iter().map(|&k| &a.rivers[k]).collect(),
+            ));
         }
     }
     WorldMap {
@@ -124,7 +135,11 @@ fn in_footprint(world: &ForgedWorld, rc: RegionCoords, x: f32, z: f32) -> bool {
     let t = tile_m();
     let (fx0, fz0) = (f64::from(rc.x) * t - min[0], f64::from(rc.z) * t - min[1]);
     let (x, z) = (f64::from(x), f64::from(z));
-    let x = if wraps(world) { fx0 + (x - fx0).rem_euclid(world.globals().width_m) } else { x };
+    let x = if wraps(world) {
+        fx0 + (x - fx0).rem_euclid(world.globals().width_m)
+    } else {
+        x
+    };
     x >= fx0 && x < fx0 + t && z >= fz0 && z < fz0 + t
 }
 
@@ -138,16 +153,38 @@ fn reaches_by_tile(world: &ForgedWorld) -> std::collections::HashMap<(i32, i32),
     // map's canonical columns (a point past the last column's end lies in
     // the first's image).
     let (origin, width, _) = map_extent(world);
-    let fold = |x: i32| if wraps(world) { origin.x + (x - origin.x).rem_euclid(width as i32) } else { x };
+    let fold = |x: i32| {
+        if wraps(world) {
+            origin.x + (x - origin.x).rem_euclid(width as i32)
+        } else {
+            x
+        }
+    };
     let mut by_tile: std::collections::HashMap<(i32, i32), Vec<usize>> = Default::default();
-    for (k, reach) in world.artifact().expect("whole world").rivers.iter().enumerate() {
+    for (k, reach) in world
+        .artifact()
+        .expect("whole world")
+        .rivers
+        .iter()
+        .enumerate()
+    {
         for p in &reach.points {
             let guess = (
                 ((min[0] + f64::from(p.x)) / t).floor() as i32,
                 ((min[1] + f64::from(p.z)) / t).floor() as i32,
             );
             // The guess, or a neighbour when it rounds across a tile edge.
-            for (dx, dz) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)] {
+            for (dx, dz) in [
+                (0, 0),
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (-1, 1),
+                (1, -1),
+                (1, 1),
+            ] {
                 let rc = RegionCoords::new(fold(guess.0 + dx), guess.1 + dz);
                 if in_footprint(world, rc, p.x, p.z) {
                     let list = by_tile.entry((rc.x, rc.z)).or_default();
@@ -186,12 +223,19 @@ struct Cell {
 /// with no cell centre inside the artifact reads the nearest edge cell.
 pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
     let rivers = &world.artifact().expect("whole world").rivers;
-    let reaches = rivers.iter().filter(|r| r.points.iter().any(|p| in_footprint(world, rc, p.x, p.z))).collect();
+    let reaches = rivers
+        .iter()
+        .filter(|r| r.points.iter().any(|p| in_footprint(world, rc, p.x, p.z)))
+        .collect();
     summarize_tile_with(world, rc, reaches)
 }
 
 /// [`summarize_tile`] with the tile's river reaches already found.
-fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crate::forged::RiverReach>) -> TileSummary {
+fn summarize_tile_with(
+    world: &ForgedWorld,
+    rc: RegionCoords,
+    reaches: Vec<&crate::forged::RiverReach>,
+) -> TileSummary {
     let a = world.artifact().expect("whole world");
     let (nx, nz) = (i64::from(a.nx), i64::from(a.nz));
     let cell_m = a.cell_m;
@@ -204,7 +248,12 @@ fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crat
         let first = ((lo - origin) / cell_m - 0.5).ceil() as i64;
         let end = ((lo + t - origin) / cell_m - 0.5).ceil() as i64;
         // A tile narrower than a cell still gets the cell holding its centre.
-        if end > first { first..end } else { let i = ((lo + 0.5 * t - origin) / cell_m).floor() as i64; i..i + 1 }
+        if end > first {
+            first..end
+        } else {
+            let i = ((lo + 0.5 * t - origin) / cell_m).floor() as i64;
+            i..i + 1
+        }
     };
     let (xs, zs) = (range(tile_min[0], min[0]), range(tile_min[1], min[1]));
     // On a world that wraps east–west a column index is taken round the
@@ -233,7 +282,10 @@ fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crat
 
     // Ground, sea and slope over every cell.
     let mut grounds: Vec<f64> = cells.iter().map(|c| height(c.ix, c.iz)).collect();
-    let sea = grounds.iter().filter(|&&g| surface_block(SEA_LEVEL + g) < SEA_TOP_BLOCK).count();
+    let sea = grounds
+        .iter()
+        .filter(|&&g| surface_block(SEA_LEVEL + g) < SEA_TOP_BLOCK)
+        .count();
     let mean = grounds.iter().sum::<f64>() / count;
     let mut slope = [0.0; 2];
     for c in &cells {
@@ -249,7 +301,6 @@ fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crat
         .filter(|c| c.inside)
         .filter_map(|c| world.lake_level_of((c.iz * nx + c.ix) as usize))
         .collect();
-
 
     // Surface rock: the mode over the in-artifact cell centres (lowest index wins a tie).
     let mut rock_counts = vec![0u32; a.rock_names.len()];
@@ -268,7 +319,10 @@ fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crat
         .map(|(i, _)| i as u8);
 
     let climate = climate(world, &cells);
-    let volcano = a.volcanoes.iter().any(|v| in_footprint(world, rc, v[0], v[1]));
+    let volcano = a
+        .volcanoes
+        .iter()
+        .any(|v| in_footprint(world, rc, v[0], v[1]));
 
     TileSummary {
         ground_min_m: grounds[0] as f32,
@@ -308,8 +362,11 @@ struct TileClimate {
 fn climate(world: &ForgedWorld, cells: &[Cell]) -> TileClimate {
     let a = world.artifact().expect("whole world");
     let (nx, nz) = (i64::from(a.nx), i64::from(a.nz));
-    let mut index: Vec<usize> =
-        cells.iter().filter(|c| c.inside).map(|c| (c.iz * nx + c.ix) as usize).collect();
+    let mut index: Vec<usize> = cells
+        .iter()
+        .filter(|c| c.inside)
+        .map(|c| (c.iz * nx + c.ix) as usize)
+        .collect();
     if index.is_empty() {
         // No cell centre inside: the nearest edge cell stands in.
         let c = &cells[cells.len() / 2];
@@ -322,16 +379,22 @@ fn climate(world: &ForgedWorld, cells: &[Cell]) -> TileClimate {
     let biome = Biome::ALL[mode_index(biomes.iter().copied().enumerate())];
     let mut regions: Vec<u16> = index.iter().map(|&i| a.region[i]).collect();
     regions.sort_unstable();
-    let runs = regions.chunk_by(|p, q| p == q).map(|run| (usize::from(run[0]), run.len() as u32));
+    let runs = regions
+        .chunk_by(|p, q| p == q)
+        .map(|run| (usize::from(run[0]), run.len() as u32));
     let region = mode_index(runs) as u16;
-    let mean = |f: &dyn Fn(usize) -> f64| index.iter().map(|&i| f(i)).sum::<f64>() / index.len() as f64;
+    let mean =
+        |f: &dyn Fn(usize) -> f64| index.iter().map(|&i| f(i)).sum::<f64>() / index.len() as f64;
     TileClimate {
         biome,
         region,
         temperature_c: mean(&|i| f64::from(a.temperature_c.get(i))) as f32,
         precip_mm: mean(&|i| f64::from(a.precip_mm.get(i))) as f32,
         savagery: mean(&|i| f64::from(a.savagery[i])).round() as u8,
-        alignment: a.regions.get(usize::from(region)).map_or(0, |r| r.alignment),
+        alignment: a
+            .regions
+            .get(usize::from(region))
+            .map_or(0, |r| r.alignment),
     }
 }
 
@@ -354,20 +417,30 @@ fn landing(world: &ForgedWorld, cells: &[Cell], tile_min: [f64; 2]) -> Option<[u
     let centre = [tile_min[0] + 0.5 * tile_m(), tile_min[1] + 0.5 * tile_m()];
     let mut order: Vec<&Cell> = cells.iter().filter(|c| c.inside).collect();
     let dist2 = |c: &Cell| (c.x - centre[0]).powi(2) + (c.z - centre[1]).powi(2);
-    order.sort_by(|p, q| dist2(p).total_cmp(&dist2(q)).then(p.iz.cmp(&q.iz)).then(p.ix.cmp(&q.ix)));
+    order.sort_by(|p, q| {
+        dist2(p)
+            .total_cmp(&dist2(q))
+            .then(p.iz.cmp(&q.iz))
+            .then(p.ix.cmp(&q.ix))
+    });
     let (bounds_min, bounds_max) = world.artifact_bounds_engine_m();
     let wrap = wraps(world);
     let in_artifact = |x: f64, z: f64| {
-        (wrap || (x >= bounds_min[0] && x < bounds_max[0])) && z >= bounds_min[1] && z < bounds_max[1]
+        (wrap || (x >= bounds_min[0] && x < bounds_max[0]))
+            && z >= bounds_min[1]
+            && z < bounds_max[1]
     };
-    let column = |v: f64, lo: f64| (((v - lo) / block_m()).floor().max(0.0) as u32).min(REGION_BLOCKS as u32 - 1);
+    let column = |v: f64, lo: f64| {
+        (((v - lo) / block_m()).floor().max(0.0) as u32).min(REGION_BLOCKS as u32 - 1)
+    };
     let at = |b: u32, lo: f64| lo + (f64::from(b) + 0.5) * block_m();
     std::iter::once(centre)
         .filter(|c| in_artifact(c[0], c[1]))
         .chain(order.into_iter().map(|c| [c.x, c.z]))
         .find_map(|[x, z]| {
             let col = [column(x, tile_min[0]), column(z, tile_min[1])];
-            is_landing(&world.sample(at(col[0], tile_min[0]), at(col[1], tile_min[1]))).then_some(col)
+            is_landing(&world.sample(at(col[0], tile_min[0]), at(col[1], tile_min[1])))
+                .then_some(col)
         })
 }
 
@@ -422,7 +495,11 @@ pub fn terrain_class(t: &TileSummary) -> TerrainClass {
 
 fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     let t = t.clamp(0.0, 1.0);
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 /// Piecewise-linear colour ramp over ascending `(value, rgb)` stops.
@@ -453,7 +530,10 @@ pub fn sea_color(depth_m: f64) -> [f64; 3] {
 
 /// Fresh-water colour at `depth_m` below the lake or river surface.
 pub fn lake_color(depth_m: f64) -> [f64; 3] {
-    ramp(&[(0.0, [120.0, 185.0, 225.0]), (3.0, [60.0, 130.0, 205.0])], depth_m)
+    ramp(
+        &[(0.0, [120.0, 185.0, 225.0]), (3.0, [60.0, 130.0, 205.0])],
+        depth_m,
+    )
 }
 
 /// Land colour (RGB 0..255) at `height_m` above sea level. Follows
@@ -523,7 +603,10 @@ pub fn tile_color(t: &TileSummary) -> [u8; 3] {
         (sea_color(-mean), 1.0)
     } else {
         let base = lerp3(land_color(mean), LAKE_RGB, f64::from(t.lake_fraction));
-        (base, hillshade([f64::from(t.slope[0]), f64::from(t.slope[1])]))
+        (
+            base,
+            hillshade([f64::from(t.slope[0]), f64::from(t.slope[1])]),
+        )
     };
     let px = |v: f64| (v * shade).clamp(0.0, 255.0) as u8;
     [px(base[0]), px(base[1]), px(base[2])]
@@ -546,8 +629,13 @@ pub enum MapLayer {
 
 impl MapLayer {
     /// Every layer in the map window's button order (the first is the default).
-    pub const ALL: [MapLayer; 5] =
-        [MapLayer::Biome, MapLayer::Relief, MapLayer::Temperature, MapLayer::Precipitation, MapLayer::Regions];
+    pub const ALL: [MapLayer; 5] = [
+        MapLayer::Biome,
+        MapLayer::Relief,
+        MapLayer::Temperature,
+        MapLayer::Precipitation,
+        MapLayer::Regions,
+    ];
 
     /// The layer button's caption.
     pub fn label(self) -> &'static str {
@@ -656,7 +744,10 @@ pub fn layer_color(map: &WorldMap, t: &TileSummary, layer: MapLayer) -> [u8; 3] 
         MapLayer::Relief => tile_color(t),
         MapLayer::Temperature => dim(temperature_color(f64::from(t.temperature_c))),
         MapLayer::Precipitation => dim(precipitation_color(f64::from(t.precip_mm))),
-        MapLayer::Regions => region_color(t.region, map.region_types.get(usize::from(t.region)).copied()),
+        MapLayer::Regions => region_color(
+            t.region,
+            map.region_types.get(usize::from(t.region)).copied(),
+        ),
     }
 }
 
@@ -676,33 +767,54 @@ pub fn rasterize_layer(map: &WorldMap, layer: MapLayer) -> (u32, u32, Vec<[u8; 4
 
 /// The side-panel facts of tile `rc` (empty off the map), absent facts omitted.
 pub fn tile_info_lines(map: &WorldMap, rc: RegionCoords) -> Vec<String> {
-    let Some(t) = map.tile(rc) else { return Vec::new() };
-    let mut lines = vec![format!("Region ({}, {})", rc.x, rc.z), format!("Biome: {}", t.biome.name())];
+    let Some(t) = map.tile(rc) else {
+        return Vec::new();
+    };
+    let mut lines = vec![
+        format!("Region ({}, {})", rc.x, rc.z),
+        format!("Biome: {}", t.biome.name()),
+    ];
     if let Some(kind) = map.region_types.get(usize::from(t.region)) {
         let alignment = match t.alignment {
             a if a > 0 => " (good)",
             a if a < 0 => " (evil)",
             _ => "",
         };
-        lines.push(format!("Biome region: {} #{}{alignment}", kind.name(), t.region));
+        lines.push(format!(
+            "Biome region: {} #{}{alignment}",
+            kind.name(),
+            t.region
+        ));
     }
-    lines.push(format!("Terrain: {} (provisional)", terrain_class(t).label()));
+    lines.push(format!(
+        "Terrain: {} (provisional)",
+        terrain_class(t).label()
+    ));
     lines.push(format!(
         "Elevation: {:.0}\u{2013}{:.0} m (mean {:.0} m)",
         t.ground_min_m, t.ground_max_m, t.ground_mean_m
     ));
-    lines.push(format!("Climate: {:.0} \u{b0}C, {:.0} mm rain a year", t.temperature_c, t.precip_mm));
+    lines.push(format!(
+        "Climate: {:.0} \u{b0}C, {:.0} mm rain a year",
+        t.temperature_c, t.precip_mm
+    ));
     lines.push(format!("Savagery: {}", t.savagery));
     if t.volcano {
         lines.push("Volcano".to_string());
     }
     if t.rivers > 0 {
-        lines.push(format!("Rivers: {} (largest {:.0} m wide)", t.rivers, t.river_max_width_m));
+        lines.push(format!(
+            "Rivers: {} (largest {:.0} m wide)",
+            t.rivers, t.river_max_width_m
+        ));
     }
     if let Some(level) = t.lake_level_m {
         lines.push(format!("Lake: level {level:.0} m"));
     }
-    if let Some(name) = t.surface_rock.and_then(|r| map.rock_names.get(usize::from(r))) {
+    if let Some(name) = t
+        .surface_rock
+        .and_then(|r| map.rock_names.get(usize::from(r)))
+    {
         lines.push(format!("Rock: {name}"));
     }
     lines

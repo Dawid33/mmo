@@ -56,12 +56,15 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{Receiver, Sender};
 use game::coordinator::{BatchAck, CoordMsg, HostBatch, HostMsg, MailboxPage};
 use game::{HostId, WorldLink};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::StatusCode;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use svc_link::error_chain;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{Notify, mpsc, oneshot};
+use tracing::Instrument;
 
-use crate::coordinator_api::{HEADER_LINK_VERSION, HEADER_WORLD, MAILBOX_WAIT_MS, PATH_HOST_MAILBOX, PATH_HOST_MESSAGES};
+use crate::coordinator_api::{
+    HEADER_LINK_VERSION, HEADER_WORLD, MAILBOX_WAIT_MS, PATH_HOST_MAILBOX, PATH_HOST_MESSAGES,
+};
 
 /// The longest one POST of a batch may take.
 pub const LINK_POST_TIMEOUT_MS: u64 = 5_000;
@@ -117,8 +120,14 @@ impl HttpWorldLink {
         token: String,
         world: String,
     ) -> HttpWorldLink {
-        assert!(!urls.is_empty(), "the world link needs at least one coordinator URL");
-        let urls: Vec<String> = urls.into_iter().map(|u| u.trim().trim_end_matches('/').to_string()).collect();
+        assert!(
+            !urls.is_empty(),
+            "the world link needs at least one coordinator URL"
+        );
+        let urls: Vec<String> = urls
+            .into_iter()
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .collect();
         let (out, out_rx) = mpsc::unbounded_channel();
         let (events_tx, events) = crossbeam::channel::unbounded();
         let (wake_tx, wake) = crossbeam::channel::bounded(1);
@@ -126,7 +135,10 @@ impl HttpWorldLink {
         std::thread::Builder::new()
             .name("world-link".into())
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
                     Ok(rt) => rt,
                     Err(e) => {
                         log::error!("[world-link] no runtime: {e}");
@@ -189,12 +201,18 @@ impl HttpWorldLink {
 impl WorldLink for HttpWorldLink {
     fn send(&mut self, msg: HostMsg) {
         if !self.up {
-            log::debug!("world link down: {} lost", crate::coordinator_rt::describe_host(&msg));
+            log::debug!(
+                "world link down: {} lost",
+                crate::coordinator_rt::describe_host(&msg)
+            );
             return;
         }
         let attach = matches!(msg, HostMsg::Attach { .. });
         if !attach && !self.attach_sent {
-            log::debug!("world link not attached yet: {} lost", crate::coordinator_rt::describe_host(&msg));
+            log::debug!(
+                "world link not attached yet: {} lost",
+                crate::coordinator_rt::describe_host(&msg)
+            );
             return;
         }
         self.attach_sent |= attach;
@@ -342,8 +360,15 @@ impl Failure {
         match self {
             Failure::NoPin => "the coordinator's certificate pin cannot be read yet".into(),
             Failure::Transport(e) => format!("{url}: {e}"),
-            Failure::Status(s, body) if matches!(*s, StatusCode::UNAUTHORIZED | StatusCode::PRECONDITION_FAILED) => {
-                format!("{url} refused this host's configuration ({s} {body}): check VOXEL_SERVICE_TOKEN, VOXEL_WORLD_ID and that both run one build")
+            Failure::Status(s, body)
+                if matches!(
+                    *s,
+                    StatusCode::UNAUTHORIZED | StatusCode::PRECONDITION_FAILED
+                ) =>
+            {
+                format!(
+                    "{url} refused this host's configuration ({s} {body}): check VOXEL_SERVICE_TOKEN, VOXEL_WORLD_ID and that both run one build"
+                )
             }
             Failure::Status(s, body) => format!("{url}: {s} {body}"),
             Failure::Body(e) => format!("{url}: undecodable answer: {e}"),
@@ -366,7 +391,9 @@ impl Thread {
             Ok(pin) => pin,
             Err(e) => {
                 if !st.pin_said {
-                    log::info!("[world-link] waiting for the world coordinator's certificate pin: {e}");
+                    log::info!(
+                        "[world-link] waiting for the world coordinator's certificate pin: {e}"
+                    );
                     st.pin_said = true;
                 }
                 return None;
@@ -392,8 +419,14 @@ impl Thread {
         if let Ok(v) = HeaderValue::from_str(&self.world) {
             h.insert(HEADER_WORLD, v);
         }
-        h.insert(HEADER_LINK_VERSION, HeaderValue::from(svc_link::LINK_PROTOCOL_VERSION));
-        h.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+        h.insert(
+            HEADER_LINK_VERSION,
+            HeaderValue::from(svc_link::LINK_PROTOCOL_VERSION),
+        );
+        h.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
         h
     }
 
@@ -420,45 +453,108 @@ impl Thread {
     }
 
     /// POST one batch at `url`. The answer and the remote address.
-    async fn post(&self, url: &str, batch: &HostBatch) -> Result<(BatchAck, Option<std::net::SocketAddr>), Failure> {
-        let client = self.client().ok_or(Failure::NoPin)?;
-        let path = PATH_HOST_MESSAGES.replace("{host}", &self.host.0.to_string());
-        let body = game::encode_packet(batch).map_err(|e| Failure::Body(format!("encode: {e}")))?;
-        let resp = client
-            .post(format!("{url}{path}"))
-            .headers(self.headers())
-            .timeout(Duration::from_millis(LINK_POST_TIMEOUT_MS))
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| Failure::Transport(error_chain(&e)))?;
-        let remote = resp.remote_addr();
-        let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| Failure::Transport(error_chain(&e)))?;
-        if status != StatusCode::OK {
-            return Err(Failure::Status(status, String::from_utf8_lossy(&bytes).chars().take(64).collect()));
+    async fn post(
+        &self,
+        url: &str,
+        batch: &HostBatch,
+    ) -> Result<(BatchAck, Option<std::net::SocketAddr>), Failure> {
+        let span = tracing::info_span!(
+            "host.world_link.post",
+            operation = "host_messages",
+            messages = batch.msgs.len(),
+            bytes = tracing::field::Empty,
+            "http.response.status_class" = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        );
+        let result = async {
+            let client = self.client().ok_or(Failure::NoPin)?;
+            let path = PATH_HOST_MESSAGES.replace("{host}", &self.host.0.to_string());
+            let body =
+                game::encode_packet(batch).map_err(|e| Failure::Body(format!("encode: {e}")))?;
+            tracing::Span::current().record("bytes", body.len());
+            let resp = client
+                .post(format!("{url}{path}"))
+                .headers(self.headers())
+                .timeout(Duration::from_millis(LINK_POST_TIMEOUT_MS))
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| Failure::Transport(error_chain(&e)))?;
+            let remote = resp.remote_addr();
+            let status = resp.status();
+            tracing::Span::current().record("http.response.status_class", status.as_u16() / 100);
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| Failure::Transport(error_chain(&e)))?;
+            if status != StatusCode::OK {
+                return Err(Failure::Status(
+                    status,
+                    String::from_utf8_lossy(&bytes).chars().take(64).collect(),
+                ));
+            }
+            let ack = game::decode_packet::<BatchAck>(&bytes)
+                .map_err(|e| Failure::Body(e.to_string()))?;
+            Ok((ack, remote))
         }
-        let ack = game::decode_packet::<BatchAck>(&bytes).map_err(|e| Failure::Body(e.to_string()))?;
-        Ok((ack, remote))
+        .instrument(span.clone())
+        .await;
+        span.record("outcome", Self::failure_outcome(&result));
+        result
     }
 
     /// GET one mailbox page at `url` for `boot` past `after`.
     async fn mailbox(&self, url: &str, boot: u64, after: u64) -> Result<MailboxPage, Failure> {
-        let client = self.client().ok_or(Failure::NoPin)?;
-        let path = PATH_HOST_MAILBOX.replace("{host}", &self.host.0.to_string());
-        let resp = client
-            .get(format!("{url}{path}?boot={boot}&after={after}&wait_ms={MAILBOX_WAIT_MS}"))
-            .headers(self.headers())
-            .timeout(Duration::from_millis(LINK_MAILBOX_TIMEOUT_MS))
-            .send()
-            .await
-            .map_err(|e| Failure::Transport(error_chain(&e)))?;
-        let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| Failure::Transport(error_chain(&e)))?;
-        if status != StatusCode::OK {
-            return Err(Failure::Status(status, String::from_utf8_lossy(&bytes).chars().take(64).collect()));
+        let span = tracing::info_span!(
+            "host.world_link.mailbox",
+            operation = "host_mailbox",
+            "http.response.status_class" = tracing::field::Empty,
+            rows = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        );
+        let result = async {
+            let client = self.client().ok_or(Failure::NoPin)?;
+            let path = PATH_HOST_MAILBOX.replace("{host}", &self.host.0.to_string());
+            let resp = client
+                .get(format!(
+                    "{url}{path}?boot={boot}&after={after}&wait_ms={MAILBOX_WAIT_MS}"
+                ))
+                .headers(self.headers())
+                .timeout(Duration::from_millis(LINK_MAILBOX_TIMEOUT_MS))
+                .send()
+                .await
+                .map_err(|e| Failure::Transport(error_chain(&e)))?;
+            let status = resp.status();
+            tracing::Span::current().record("http.response.status_class", status.as_u16() / 100);
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| Failure::Transport(error_chain(&e)))?;
+            if status != StatusCode::OK {
+                return Err(Failure::Status(
+                    status,
+                    String::from_utf8_lossy(&bytes).chars().take(64).collect(),
+                ));
+            }
+            let page = game::decode_packet::<MailboxPage>(&bytes)
+                .map_err(|e| Failure::Body(e.to_string()))?;
+            tracing::Span::current().record("rows", page.rows.len());
+            Ok(page)
         }
-        game::decode_packet::<MailboxPage>(&bytes).map_err(|e| Failure::Body(e.to_string()))
+        .instrument(span.clone())
+        .await;
+        span.record("outcome", Self::failure_outcome(&result));
+        result
+    }
+
+    fn failure_outcome<T>(result: &Result<T, Failure>) -> &'static str {
+        match result {
+            Ok(_) => "ok",
+            Err(Failure::NoPin) => "pin",
+            Err(Failure::Transport(_)) => "transport",
+            Err(Failure::Status(_, _)) => "status",
+            Err(Failure::Body(_)) => "body",
+        }
     }
 
     /// The link goes down (if it was up): the gate closes, the main loop is told, the line
@@ -497,7 +593,10 @@ impl FailureLog {
         if matches!(failure, Failure::NoPin) {
             return; // said once by `Thread::client`
         }
-        if self.last.is_some_and(|t| t.elapsed() < Duration::from_secs(svc_link::LINK_DIAL_LOG_EVERY_SECS)) {
+        if self
+            .last
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(svc_link::LINK_DIAL_LOG_EVERY_SECS))
+        {
             return;
         }
         self.last = Some(Instant::now());
@@ -525,7 +624,10 @@ struct FlapLog {
 
 impl FlapLog {
     fn down(&mut self, why: &str) {
-        if self.last_down.is_some_and(|t| t.elapsed() < Duration::from_secs(svc_link::LINK_DIAL_LOG_EVERY_SECS)) {
+        if self
+            .last_down
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(svc_link::LINK_DIAL_LOG_EVERY_SECS))
+        {
             self.unlogged += 1;
             self.log_up = false;
             return;
@@ -534,7 +636,9 @@ impl FlapLog {
         self.log_up = true;
         match std::mem::take(&mut self.unlogged) {
             0 => log::warn!("[world-link] down: {why}"),
-            n => log::warn!("[world-link] down: {why} ({n} more down/up cycles since the last line)"),
+            n => {
+                log::warn!("[world-link] down: {why} ({n} more down/up cycles since the last line)")
+            }
         }
     }
 
@@ -592,7 +696,11 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
     let mut carry: Option<HostMsg> = None;
     let mut backoff = svc_link::LINK_RETRY_MIN_MS;
     let mut fails = FailureLog { last: None };
-    let mut flaps = FlapLog { last_down: None, unlogged: 0, log_up: true };
+    let mut flaps = FlapLog {
+        last_down: None,
+        unlogged: 0,
+        log_up: true,
+    };
     // An `Attach` was posted already: each later one is a re-attach (`mmo_world_link_reattach_total`).
     let mut attached_once = false;
     loop {
@@ -601,7 +709,17 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
             drain(&mut out, &mut carry);
             let (boot, epoch) = link.state.borrow().stamp.unwrap_or((0, 0));
             let url = link.url();
-            match link.post(&url, &HostBatch { boot, epoch, msgs: Vec::new() }).await {
+            match link
+                .post(
+                    &url,
+                    &HostBatch {
+                        boot,
+                        epoch,
+                        msgs: Vec::new(),
+                    },
+                )
+                .await
+            {
                 Ok((_, remote)) => {
                     // Whatever was queued while the probe was out is of the old generation.
                     drain(&mut out, &mut carry);
@@ -623,7 +741,11 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
                 Err(f) => {
                     fails.note("probe failed", &f, &url);
                     link.failed(&f, &url);
-                    let wait = if matches!(f, Failure::NoPin) { PIN_RETRY_MS } else { backoff };
+                    let wait = if matches!(f, Failure::NoPin) {
+                        PIN_RETRY_MS
+                    } else {
+                        backoff
+                    };
                     backoff = next_backoff(backoff);
                     tokio::time::sleep(Duration::from_millis(wait)).await;
                 }
@@ -685,7 +807,10 @@ async fn send_loop(link: &Thread, mut out: mpsc::UnboundedReceiver<(u64, HostMsg
             Err(f) => {
                 let n = drain(&mut out, &mut carry);
                 link.failed(&f, &url);
-                link.down(&format!("{}; {n} queued dropped", f.describe(&url)), &mut flaps);
+                link.down(
+                    &format!("{}; {n} queued dropped", f.describe(&url)),
+                    &mut flaps,
+                );
                 fails.reset(); // the first probe failure of this down period is logged at once
                 tokio::time::sleep(Duration::from_millis(backoff)).await;
                 backoff = next_backoff(backoff);
@@ -726,7 +851,11 @@ async fn mailbox_loop(link: &Thread) {
             Err(f) => {
                 fails.note("mailbox read failed", &f, &url);
                 link.failed(&f, &url);
-                let wait = if matches!(f, Failure::NoPin) { PIN_RETRY_MS } else { backoff };
+                let wait = if matches!(f, Failure::NoPin) {
+                    PIN_RETRY_MS
+                } else {
+                    backoff
+                };
                 backoff = next_backoff(backoff);
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(wait)) => {}
@@ -737,4 +866,3 @@ async fn mailbox_loop(link: &Thread) {
         }
     }
 }
-

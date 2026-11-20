@@ -4,11 +4,11 @@
 //! `thread` runs the `world-store` thread that every other thread reaches through
 //! [`StoreHandle`]; `fence` is the owner-epoch fencing of writes; `rows` is the SQL.
 
-pub mod ctl;
 mod assign;
 mod codec;
 mod coordinator_tx;
 mod counters;
+pub mod ctl;
 mod fence;
 mod fleet;
 mod forged;
@@ -29,26 +29,31 @@ use std::fmt;
 
 pub use codec::*;
 pub use coordinator_tx::{AfterCommit, Bootstrapped, TransitionWrite, TransitionWritten};
-pub use mailbox::MailboxHead;
 pub use counters::StoreCounters;
 pub use fence::{Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
-pub use handle::{
-    Beat, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, HostsRead, NO_OWNER, NewHost, Registered, StoreHandle, StoredCoordinator, WorldInfo,
-};
-pub use listen::{
-    COORDINATOR_POLL_MS, COORDINATOR_ROW_CHANNEL, CutNotice, Notice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV,
-    TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL, WORLD_DB_DIRECT_ENV,
-};
-pub use open::{LockGuard, MIGRATE_LOCK_TIMEOUT_MS, OpenMode, Pool, newest_migration, open_pool, set_migrate_lock_timeout_ms};
-pub use operator::Vouched;
-pub use replicas::{REPLICA_PRUNE_MS, ReplicaRegistered};
 /// A `coordinator_replicas` row as a replicas read returns it (defined in `game`: the
 /// coordinator's [`game::coordinator::ReplicaWatch`] reads it).
 pub use game::coordinator::ReplicaRow;
+pub use handle::{
+    Beat, CutCommitted, HOST_DEAD, HOST_ID_MAX, HOST_LIVE, HostRow, HostsRead, NO_OWNER, NewHost,
+    Registered, StoreHandle, StoredCoordinator, WorldInfo,
+};
+pub use listen::{
+    COORDINATOR_POLL_MS, COORDINATOR_ROW_CHANNEL, CutNotice, Notice, NotifyMode,
+    TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,
+    WORLD_DB_DIRECT_ENV,
+};
+pub use mailbox::MailboxHead;
+pub use open::{
+    LockGuard, MIGRATE_LOCK_TIMEOUT_MS, OpenMode, Pool, newest_migration, open_pool,
+    set_migrate_lock_timeout_ms,
+};
+pub use operator::Vouched;
+pub use replicas::{REPLICA_PRUNE_MS, ReplicaRegistered};
 pub use succession::{Declared, LandlessEnd, Succession, SuccessionId, SuccessionKind};
 pub use terrain::TerrainFromStore;
-pub use two_phase::{cut_gid, SWEEP_ABORT_TICK};
+pub use two_phase::{SWEEP_ABORT_TICK, cut_gid};
 pub use url::{StoreUrl, redact_url};
 
 /// The schema/format generation this build writes and reads.
@@ -115,7 +120,11 @@ impl Dials {
 
 impl fmt::Display for Dials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "region_blocks={} chunk_blocks={}", self.region_blocks, self.chunk_blocks)
+        write!(
+            f,
+            "region_blocks={} chunk_blocks={}",
+            self.region_blocks, self.chunk_blocks
+        )
     }
 }
 
@@ -190,7 +199,10 @@ impl FormatKind {
     /// the archived forge file: a tile format or world map of another
     /// version, with the archive row stored.
     pub fn retileable(self) -> bool {
-        matches!(self, FormatKind::Tiles { archived: true } | FormatKind::WorldMap { archived: true })
+        matches!(
+            self,
+            FormatKind::Tiles { archived: true } | FormatKind::WorldMap { archived: true }
+        )
     }
 }
 
@@ -198,15 +210,23 @@ impl FormatKind {
 pub enum StoreError {
     Backend(String),
     Locked(String),
-    OtherDials { stored: Dials, built: Dials },
+    OtherDials {
+        stored: Dials,
+        built: Dials,
+    },
     /// A world this build cannot open: saved on stud terrain (`stored` [`TerrainKind::Studs`]),
     /// or on voxel terrain before the stud switch (`stored` [`TerrainKind::Voxels`]; the
     /// stud-era migration `0005` would drop its chunks). Refused at open, by a writer and a
     /// read-only handle alike, before any migration runs: nothing in it is changed.
-    OtherTerrain { stored: TerrainKind },
+    OtherTerrain {
+        stored: TerrainKind,
+    },
     /// A stored format this build does not read: the store's own
     /// (`world.format_version`) or the forged tiles' (`forged_meta`).
-    OtherFormat { found: u32, kind: FormatKind },
+    OtherFormat {
+        found: u32,
+        kind: FormatKind,
+    },
     /// A world this store cannot hold, refused before anything is written
     /// (e.g. a forged world whose cell size the tiled store does not
     /// support); the message says why.
@@ -216,10 +236,15 @@ pub enum StoreError {
     /// another process claimed the super-region (`sr`) since; also (`sr` `None`) a host's
     /// claim whose boot's `hosts` row is no longer live (declared dead or replaced). Nothing
     /// was written. (The coordinator is fenced by its row's version instead: [`Self::Conflict`].)
-    Fenced { sr: Option<SuperRegion> },
+    Fenced {
+        sr: Option<SuperRegion>,
+    },
     /// A cut prepared by a host whose generation (`mine`) is behind the world's
     /// (`stored`): the world restarted from another save since; nothing was written.
-    StaleGeneration { stored: u64, mine: u64 },
+    StaleGeneration {
+        stored: u64,
+        mine: u64,
+    },
     /// A write asked of a handle opened [`OpenMode::ReadOnly`].
     ReadOnly,
     /// A host's part of a two-phase cut prepared after the cut was decided aborted:
@@ -232,15 +257,23 @@ pub enum StoreError {
     /// A claim by a handle opened when the world's super-region side was `opened`, after
     /// `worldctl super-region` changed it to `stored`: its super-regions are of the old
     /// side. Nothing was written; restart the process (with `VOXEL_SUPER_REGION_REGIONS`).
-    OtherSuperRegionSide { stored: u32, opened: u32 },
+    OtherSuperRegionSide {
+        stored: u32,
+        opened: u32,
+    },
     /// A statement lost a row-lock conflict (Postgres): it was chosen in a deadlock
     /// (`sqlstate` `40P01`) or its `lock_timeout` ran out (`55P03`). Nothing was written;
     /// asking again may succeed ([`StoreError::is_lock_conflict`]). `detail` says what waited.
-    LockConflict { sqlstate: String, detail: String },
+    LockConflict {
+        sqlstate: String,
+        detail: String,
+    },
     /// A registration under [`game::CrashPolicy::Rollback`] (`static`: one host) while other
     /// hosts' rows are live (dirty, live, of the world's generation, beaten within the lease):
     /// `live`, by id. Nothing was written — no id issued.
-    NotAlone { live: Vec<game::HostId> },
+    NotAlone {
+        live: Vec<game::HostId>,
+    },
     /// A drain mark ([`StoreHandle::drain_host`]) for a row that is not a dirty live one —
     /// absent, dead or left cleanly: why, naming the host by its bare number. Nothing written.
     NotDrainable(String),
@@ -265,12 +298,16 @@ impl StoreError {
 
     /// `e` as a [`StoreError::LockConflict`] if its SQLSTATE is a deadlock (`40P01`) or a lock
     /// timeout (`55P03`), with `detail` (given the error's text).
-    pub(crate) fn lock_conflict_of(e: &sqlx::Error, detail: impl FnOnce(&str) -> String) -> Option<StoreError> {
+    pub(crate) fn lock_conflict_of(
+        e: &sqlx::Error,
+        detail: impl FnOnce(&str) -> String,
+    ) -> Option<StoreError> {
         match e {
             sqlx::Error::Database(d) => match d.code().as_deref() {
-                Some(code @ ("40P01" | "55P03")) => {
-                    Some(StoreError::LockConflict { sqlstate: code.to_string(), detail: detail(&e.to_string()) })
-                }
+                Some(code @ ("40P01" | "55P03")) => Some(StoreError::LockConflict {
+                    sqlstate: code.to_string(),
+                    detail: detail(&e.to_string()),
+                }),
                 _ => None,
             },
             _ => None,
@@ -282,7 +319,10 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StoreError::Backend(e) => write!(f, "world store backend error: {e}"),
-            StoreError::LockConflict { sqlstate, detail } => write!(f, "world store lock conflict (SQLSTATE {sqlstate}): {detail}"),
+            StoreError::LockConflict { sqlstate, detail } => write!(
+                f,
+                "world store lock conflict (SQLSTATE {sqlstate}): {detail}"
+            ),
             StoreError::Locked(what) => write!(
                 f,
                 "the world database is already in use by another process ({what}); stop that server first"
@@ -291,7 +331,9 @@ impl fmt::Display for StoreError {
                 f,
                 "this world was made with {stored} but this build has {built}; rebuild with the stored dials (just region_blocks=N chunk_blocks=N …) or use another world"
             ),
-            StoreError::OtherTerrain { stored: TerrainKind::Studs } => write!(
+            StoreError::OtherTerrain {
+                stored: TerrainKind::Studs,
+            } => write!(
                 f,
                 "this world was saved on stud terrain, which this build no longer serves — re-forge it \
                  (the debug world: `just run --reset`; a menu world: make a new one; the dev Postgres worlds: \
@@ -299,18 +341,26 @@ impl fmt::Display for StoreError {
                  converted; nothing in the world was changed, so a build from before the voxel return \
                  still opens it"
             ),
-            StoreError::OtherTerrain { stored: TerrainKind::Voxels } => write!(
+            StoreError::OtherTerrain {
+                stored: TerrainKind::Voxels,
+            } => write!(
                 f,
                 "this world was saved on voxel terrain by a build from before the stud switch; this build's \
                  schema cannot take it over (an intermediate migration would drop its chunks) — re-forge it \
                  (the debug world: `just run --reset`; a menu world: make a new one). Nothing in the world \
                  was changed, so a build from before the stud switch still opens it"
             ),
-            StoreError::OtherFormat { found, kind: FormatKind::Store } => write!(
+            StoreError::OtherFormat {
+                found,
+                kind: FormatKind::Store,
+            } => write!(
                 f,
                 "this world uses store format {found} but this build reads format {STORE_FORMAT_VERSION}; use a build that matches, or re-create the world"
             ),
-            StoreError::OtherFormat { found, kind: FormatKind::Tiles { archived } } => {
+            StoreError::OtherFormat {
+                found,
+                kind: FormatKind::Tiles { archived },
+            } => {
                 write!(
                     f,
                     "this world's forged tiles use format {found} but this build reads format {}; ",
@@ -318,9 +368,15 @@ impl fmt::Display for StoreError {
                 )?;
                 retile_hint(f, *archived)
             }
-            StoreError::OtherFormat { found, kind: FormatKind::WorldMap { archived } } => {
+            StoreError::OtherFormat {
+                found,
+                kind: FormatKind::WorldMap { archived },
+            } => {
                 if *found == 0 {
-                    write!(f, "this world's stored world map has an older row layout or is damaged; ")?;
+                    write!(
+                        f,
+                        "this world's stored world map has an older row layout or is damaged; "
+                    )?;
                 } else {
                     write!(
                         f,
@@ -330,7 +386,10 @@ impl fmt::Display for StoreError {
                 }
                 retile_hint(f, *archived)
             }
-            StoreError::OtherFormat { found, kind: FormatKind::Schema } => write!(
+            StoreError::OtherFormat {
+                found,
+                kind: FormatKind::Schema,
+            } => write!(
                 f,
                 "this world's schema is at migration {found} but this build reads migration {}; \
                  a read-only open never migrates — open it once with this build's server, or use a build that matches",
@@ -349,9 +408,16 @@ impl fmt::Display for StoreError {
                 "this host is at world generation {mine} but the world is at generation {stored}: the world restarted \
                  from another save; nothing was written"
             ),
-            StoreError::ReadOnly => write!(f, "this world store was opened read-only; it writes nothing"),
+            StoreError::ReadOnly => write!(
+                f,
+                "this world store was opened read-only; it writes nothing"
+            ),
             StoreError::CutAborted(cut) => {
-                write!(f, "cut {} was decided aborted before this part prepared; the part rolled itself back", cut.0)
+                write!(
+                    f,
+                    "cut {} was decided aborted before this part prepared; the part rolled itself back",
+                    cut.0
+                )
             }
             StoreError::CutPending(cut) => write!(
                 f,
@@ -366,7 +432,9 @@ impl fmt::Display for StoreError {
             StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
             StoreError::NotDrainable(why) => write!(f, "{why}"),
-            StoreError::Busy(what) => write!(f, "not yet: {what}; nothing was written, ask again later"),
+            StoreError::Busy(what) => {
+                write!(f, "not yet: {what}; nothing was written, ask again later")
+            }
             StoreError::Conflict => write!(
                 f,
                 "the world coordinator's row changed since this process read it (its version moved: another \
@@ -376,7 +444,10 @@ impl fmt::Display for StoreError {
                 f,
                 "a static host registers only when no other host runs, but hosts {} hold live rows; \
                  several hosts need VOXEL_OWNERSHIP=claim",
-                live.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(", ")
+                live.iter()
+                    .map(|h| h.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -390,7 +461,10 @@ fn retile_hint(f: &mut fmt::Formatter<'_>, archived: bool) -> fmt::Result {
             "re-tile it from its archived forge file: `just worldctl retile --db <db>` (lossless: saved regions, players and history are kept; the server does it by itself at start)"
         )
     } else {
-        write!(f, "it keeps no archived forge file this build can re-tile from, so re-forge the world")
+        write!(
+            f,
+            "it keeps no archived forge file this build can re-tile from, so re-forge the world"
+        )
     }
 }
 

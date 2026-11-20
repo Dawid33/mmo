@@ -1,10 +1,10 @@
 //! The player's side of the history: site markers, notices and person info.
 
+use super::History;
 use super::log::LogKind;
 use super::records::*;
-use super::History;
-use crate::protocol::{CivMarker, PersonInfo, SiteMarker};
 use crate::RegionCoords;
+use crate::protocol::{CivMarker, PersonInfo, SiteMarker};
 
 impl History {
     /// Every site, by id, as the world map shows it.
@@ -24,20 +24,33 @@ impl History {
 
     /// Every civilisation's name, by id.
     pub fn civ_markers(&self) -> Vec<CivMarker> {
-        self.civs.values().map(|c| CivMarker { civ: c.id, name: c.name.clone() }).collect()
+        self.civs
+            .values()
+            .map(|c| CivMarker {
+                civ: c.id,
+                name: c.name.clone(),
+            })
+            .collect()
     }
 
     /// `person` for the inspector; `None` for an unknown id.
     pub fn person_info(&self, person: PersonId) -> Option<PersonInfo> {
         let p = self.people.get(&person)?;
-        let name = |id: PersonId| self.people.get(&id).map_or_else(|| person_name(id), |q| q.name.clone());
+        let name = |id: PersonId| {
+            self.people
+                .get(&id)
+                .map_or_else(|| person_name(id), |q| q.name.clone())
+        };
         let at = p.died.map_or(self.now, |(t, _)| t);
         Some(PersonInfo {
             person,
             name: p.name.clone(),
             age_years: p.age_years(at),
             alive: p.alive(),
-            site: p.site.and_then(|s| self.sites.get(&s)).map(|s| s.name.clone()),
+            site: p
+                .site
+                .and_then(|s| self.sites.get(&s))
+                .map(|s| s.name.clone()),
             spouse: p.spouse.map(name),
             parents: p.mother.into_iter().chain(p.father).map(name).collect(),
             children: p.children.iter().copied().map(name).collect(),

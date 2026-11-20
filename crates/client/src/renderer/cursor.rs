@@ -2,7 +2,7 @@
 //! grab (fps-cam toggle via `SetFreeCam`, inventory via `SetCursorGrab`) —
 //! only first person does; the commander camera never holds the pointer, so it
 //! can leave the window freely, except while a right-drag turns it (`orbit`).
-//! Client-local overlays (the dev panel, later chat) hold the pointer on top
+//! Client-local overlays (none yet; later chat) hold the pointer on top
 //! of that. Both used to write `CursorOptions` directly, so an overlay would
 //! either fight the sim or lose its request on close.
 use bevy::prelude::*;
@@ -43,7 +43,18 @@ pub struct CursorPolicy {
     /// `text_entry::mute_keys_while_typing`): the pointer is free and the
     /// game behind takes no clicks, like an overlay.
     pub typing: bool,
+    /// E was pressed in first person to open the inventory, at this
+    /// `Time::elapsed` (written only by `input::forward_input`). Mouse look
+    /// stops and the pointer is freed on that frame, not a tick later when the
+    /// sim's open reaches the screen; the hold ends once the inventory is up
+    /// (`ui_modal`), or after [`INVENTORY_OPEN_WAIT`] if it never comes.
+    pub inventory_opening: Option<std::time::Duration>,
 }
+
+/// How long an E press holds mouse look waiting for the inventory to open (the
+/// local prediction opens it within a tick; a press the sim never took — the
+/// join replay drops input — gives the look back after this).
+pub const INVENTORY_OPEN_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl CursorPolicy {
     /// Mouse look is asked for (by the sim or first person), whatever holds
@@ -55,7 +66,25 @@ impl CursorPolicy {
     /// A menu, the map or the inventory frees the pointer whoever asked for
     /// it, and so does an overlay; a released pointer waits for a click.
     pub fn grabbed(&self) -> bool {
-        self.wants_grab() && !self.ui_modal && !self.overlay_open && !self.released && !self.loading && !self.typing
+        self.wants_grab()
+            && !self.ui_modal
+            && !self.overlay_open
+            && !self.released
+            && !self.loading
+            && !self.typing
+            && self.inventory_opening.is_none()
+    }
+
+    /// Mouse travel turns the body: the ONE rule both `input::forward_input`
+    /// (what the sim is sent) and `look::integrate_local_look` (what the
+    /// screen shows) apply. Gated apart, a frame one counted and the other
+    /// did not turned the view and then snapped it back to the sim's look
+    /// (`LOOK_RESYNC_IDLE`) — e.g. the frame the inventory went modal while
+    /// the pointer was still locked, often a long one.
+    pub fn look_live(&self) -> bool {
+        !(self.blocks_game()
+            || (self.released && self.wants_grab())
+            || self.inventory_opening.is_some())
     }
 
     /// A client-local overlay or a modal game screen is open: commander
@@ -76,11 +105,14 @@ impl CursorPolicy {
 
 /// Session reset: the world's grab requests go (the sim's grab, the menu or
 /// map being open, an orbit or a UI press in flight), so the next screen gets
-/// a free pointer. The client-local `overlay_open` (the dev panel) is not the
+/// a free pointer. The client-local `overlay_open` is not the
 /// world's and stays.
 pub fn reset_session_grab(world: &mut World) {
     if let Some(mut policy) = world.get_resource_mut::<CursorPolicy>() {
-        *policy = CursorPolicy { overlay_open: policy.overlay_open, ..CursorPolicy::default() };
+        *policy = CursorPolicy {
+            overlay_open: policy.overlay_open,
+            ..CursorPolicy::default()
+        };
     }
 }
 
@@ -135,12 +167,14 @@ pub fn apply_cursor_policy(
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     if let Ok((window, mut cursor)) = windows.single_mut() {
-        let (grab_mode, visible) =
-            if window.focused { policy.mode() } else { (CursorGrabMode::None, true) };
+        let (grab_mode, visible) = if window.focused {
+            policy.mode()
+        } else {
+            (CursorGrabMode::None, true)
+        };
         if cursor.grab_mode != grab_mode || cursor.visible != visible {
             cursor.grab_mode = grab_mode;
             cursor.visible = visible;
         }
     }
 }
-

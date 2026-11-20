@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::{CoordMsg, Coordinator, Target};
-use crate::{CutId, HostId, LandMove, MoveId, SuperRegion, Tick, HOST_LIVE};
+use crate::{CutId, HOST_LIVE, HostId, LandMove, MoveId, SuperRegion, Tick};
 
 /// How many cuts a move tries before it is abandoned (a missed lead or a transient abort retries
 /// at once).
@@ -60,7 +60,11 @@ enum MoveState {
     Warning,
     /// Cut `cut` carries the move (its `tries`-th); `doomed`: a party was lost meanwhile — an abort
     /// abandons the run instead of retrying.
-    Cutting { cut: CutId, tries: u32, doomed: bool },
+    Cutting {
+        cut: CutId,
+        tries: u32,
+        doomed: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,7 +116,10 @@ pub struct MoveDials {
 
 impl Default for MoveDials {
     fn default() -> Self {
-        MoveDials { warning_ms: crate::MOVE_WARNING_SECS * 1000, probe_ms: None }
+        MoveDials {
+            warning_ms: crate::MOVE_WARNING_SECS * 1000,
+            probe_ms: None,
+        }
     }
 }
 
@@ -146,7 +153,13 @@ impl Coordinator {
     }
 
     /// Rule 6 with players (`fleet.rs`): `victim` is emptied by moves before it drains.
-    pub(super) fn start_evacuation(&mut self, victim: HostId, boot: u64, name: String, now_ms: u64) {
+    pub(super) fn start_evacuation(
+        &mut self,
+        victim: HostId,
+        boot: u64,
+        name: String,
+        now_ms: u64,
+    ) {
         self.moves.evacuating.insert(victim, (boot, name, now_ms));
         self.moves.evac_abandoned.remove(&victim);
         self.clean_checked = false;
@@ -160,29 +173,57 @@ impl Coordinator {
         if self.moves.evacuating.is_empty() || self.moves.open.is_some() {
             return None;
         }
-        if self.move_settled_reads.is_some_and(|n| self.leases.reads() <= n) {
+        if self
+            .move_settled_reads
+            .is_some_and(|n| self.leases.reads() <= n)
+        {
             return None;
         }
-        let hosts: Vec<(HostId, (u64, String, u64))> = self.moves.evacuating.iter().map(|(h, v)| (*h, v.clone())).collect();
+        let hosts: Vec<(HostId, (u64, String, u64))> = self
+            .moves
+            .evacuating
+            .iter()
+            .map(|(h, v)| (*h, v.clone()))
+            .collect();
         for (h, (boot, name, since)) in hosts {
-            let Some(row) = self.leases.row(h).filter(|r| r.boot == boot && !r.clean && r.state == HOST_LIVE).cloned() else {
+            let Some(row) = self
+                .leases
+                .row(h)
+                .filter(|r| r.boot == boot && !r.clean && r.state == HOST_LIVE)
+                .cloned()
+            else {
                 log::info!("coordinator: evacuation of host {h} ({name}) ends: its row is gone");
                 self.moves.evacuating.remove(&h);
                 self.moves.evac_abandoned.remove(&h);
                 self.clean_checked = false;
                 continue;
             };
-            let occupied = row.load.land.iter().filter(|l| l.players > 0).max_by_key(|l| (l.players, std::cmp::Reverse(l.sr))).map(|l| l.sr);
-            let give_up = self.moves.evac_abandoned.get(&h).copied().unwrap_or(0) >= MOVE_ABANDON_MAX
+            let occupied = row
+                .load
+                .land
+                .iter()
+                .filter(|l| l.players > 0)
+                .max_by_key(|l| (l.players, std::cmp::Reverse(l.sr)))
+                .map(|l| l.sr);
+            let give_up = self.moves.evac_abandoned.get(&h).copied().unwrap_or(0)
+                >= MOVE_ABANDON_MAX
                 || now_ms.saturating_sub(since) >= EVACUATE_MAX_MS;
-            let drain = |in_ms: u64| super::DrainHost { name: name.clone(), host: Some((h, boot)), in_ms };
+            let drain = |in_ms: u64| super::DrainHost {
+                name: name.clone(),
+                host: Some((h, boot)),
+                in_ms,
+            };
             let Some(sr) = occupied.filter(|_| row.load.players > 0) else {
-                log::info!("coordinator: evacuation of host {h} ({name}) is done: no player left on its land; it drains now");
+                log::info!(
+                    "coordinator: evacuation of host {h} ({name}) is done: no player left on its land; it drains now"
+                );
                 self.end_evacuation(h);
                 return Some(drain(0));
             };
             if give_up {
-                log::warn!("coordinator: evacuation of host {h} ({name}) gives up (moves abandoned or {EVACUATE_MAX_MS} ms passed): the warned drain");
+                log::warn!(
+                    "coordinator: evacuation of host {h} ({name}) gives up (moves abandoned or {EVACUATE_MAX_MS} ms passed): the warned drain"
+                );
                 self.end_evacuation(h);
                 return Some(drain(crate::DRAIN_WARNING_SECS * 1000));
             }
@@ -191,7 +232,9 @@ impl Coordinator {
                     self.open_move(sr, h, taker, MoveWhy::ScaleDown);
                 }
                 None => {
-                    log::warn!("coordinator: evacuation of host {h} ({name}): no host can take {sr:?}: the warned drain");
+                    log::warn!(
+                        "coordinator: evacuation of host {h} ({name}): no host can take {sr:?}: the warned drain"
+                    );
                     self.end_evacuation(h);
                     return Some(drain(crate::DRAIN_WARNING_SECS * 1000));
                 }
@@ -237,21 +280,40 @@ impl Coordinator {
             .into_iter()
             .filter(|h| *h != giver && self.takes_logins(*h) && !self.evacuating(*h))
             .filter_map(|h| {
-                let r = self.leases.row(h).filter(|r| !r.clean && r.state == HOST_LIVE && !r.draining)?;
-                (self.leases.known_for(h, watch_now) >= super::ASSIGN_MIN_ATTACHED_MS).then_some(())?;
-                (r.load.tick_permille <= 1000 - super::ASSIGN_HEADROOM_MIN_PERMILLE).then_some(())?;
-                Some((h, r.boot, (r.load.tick_permille, r.load.players, r.load.regions)))
+                let r = self
+                    .leases
+                    .row(h)
+                    .filter(|r| !r.clean && r.state == HOST_LIVE && !r.draining)?;
+                (self.leases.known_for(h, watch_now) >= super::ASSIGN_MIN_ATTACHED_MS)
+                    .then_some(())?;
+                (r.load.tick_permille <= 1000 - super::ASSIGN_HEADROOM_MIN_PERMILLE)
+                    .then_some(())?;
+                Some((
+                    h,
+                    r.boot,
+                    (r.load.tick_permille, r.load.players, r.load.regions),
+                ))
             })
             .collect();
         let least = candidates.iter().map(|c| c.2).min()?;
-        let tied: Vec<HostId> = candidates.iter().filter(|c| c.2 == least).map(|c| c.0).collect();
+        let tied: Vec<HostId> = candidates
+            .iter()
+            .filter(|c| c.2 == least)
+            .map(|c| c.0)
+            .collect();
         let host = crate::rendezvous_among(sr, tied)?;
         candidates.iter().find(|c| c.0 == host).map(|c| (c.0, c.1))
     }
 
     /// Opens a move of `sr` from `giver` to `taker` (the ticker's; a change in the transition that
     /// carries its orders). `false` (nothing changed) unless decision 2's preconditions hold.
-    pub fn open_move(&mut self, sr: SuperRegion, giver: HostId, taker: HostId, why: MoveWhy) -> bool {
+    pub fn open_move(
+        &mut self,
+        sr: SuperRegion,
+        giver: HostId,
+        taker: HostId,
+        why: MoveWhy,
+    ) -> bool {
         let now_ms = self.clock_ms;
         if self.moves.open.is_some() || giver == taker || !self.ticking_now() {
             return false;
@@ -259,21 +321,51 @@ impl Coordinator {
         if !self.successions_quiet() {
             return false;
         }
-        if self.moves.abandoned.get(&sr).is_some_and(|(_, after)| now_ms < *after) {
+        if self
+            .moves
+            .abandoned
+            .get(&sr)
+            .is_some_and(|(_, after)| now_ms < *after)
+        {
             return false;
         }
-        let (Some(giver_boot), Some(taker_boot)) = (self.attachment(giver), self.attachment(taker)) else { return false };
+        let (Some(giver_boot), Some(taker_boot)) = (self.attachment(giver), self.attachment(taker))
+        else {
+            return false;
+        };
         let warning_ms = self.move_dials.warning_ms;
         let at_tick = self.world_tick_now() + warning_ms / crate::TICK_RATE;
         self.moves.next += 1;
         let id = MoveId(self.moves.next);
-        let mv = LandMove { id, sr, giver, taker, taker_boot };
+        let mv = LandMove {
+            id,
+            sr,
+            giver,
+            taker,
+            taker_boot,
+        };
         log::info!(
             "coordinator: move {} of super-region {sr:?}: host {giver} → host {taker} ({why:?}), warned until tick {at_tick}",
             id.0
         );
-        self.push(Target::Host(giver), CoordMsg::MoveLand { id, sr, taker, at_tick });
-        self.push(Target::Host(taker), CoordMsg::ExpectLand { id, sr, giver, at_tick });
+        self.push(
+            Target::Host(giver),
+            CoordMsg::MoveLand {
+                id,
+                sr,
+                taker,
+                at_tick,
+            },
+        );
+        self.push(
+            Target::Host(taker),
+            CoordMsg::ExpectLand {
+                id,
+                sr,
+                giver,
+                at_tick,
+            },
+        );
         self.moves.open = Some(MoveRun {
             mv,
             giver_boot,
@@ -292,7 +384,12 @@ impl Coordinator {
 
     /// The giver refused cut `cut`'s part for a move (`CutFailure::MoveRefused`, `world_cut.rs`).
     pub(super) fn move_refused(&mut self, cut: CutId) {
-        if let Some(run) = self.moves.open.as_mut().filter(|r| matches!(r.state, MoveState::Cutting { cut: c, .. } if c == cut)) {
+        if let Some(run) = self
+            .moves
+            .open
+            .as_mut()
+            .filter(|r| matches!(r.state, MoveState::Cutting { cut: c, .. } if c == cut))
+        {
             run.refused = true;
         }
     }
@@ -300,24 +397,45 @@ impl Coordinator {
     /// Whether the open move wants a cut now (`maintain_cuts`: a cut begins at once).
     pub(super) fn move_due(&self) -> bool {
         self.moves.open.as_ref().is_some_and(|r| {
-            r.state == MoveState::Warning && self.world_tick_now() + self.world_cut_lead() >= r.at_tick
+            r.state == MoveState::Warning
+                && self.world_tick_now() + self.world_cut_lead() >= r.at_tick
         })
     }
 
     /// The moves the cut `cut` beginning now carries (`maintain_cuts`): the open move if it is due
     /// and both parties take part (neither leaving); the run becomes `Cutting`.
-    pub(super) fn moves_for_cut(&mut self, cut: CutId, hosts: &[HostId], leaving: &[HostId]) -> Vec<LandMove> {
+    pub(super) fn moves_for_cut(
+        &mut self,
+        cut: CutId,
+        hosts: &[HostId],
+        leaving: &[HostId],
+    ) -> Vec<LandMove> {
         if !self.move_due() {
             return Vec::new();
         }
-        let Some(run) = self.moves.open.as_mut() else { return Vec::new() };
+        let Some(run) = self.moves.open.as_mut() else {
+            return Vec::new();
+        };
         let (g, t) = (run.mv.giver, run.mv.taker);
-        if !hosts.contains(&g) || !hosts.contains(&t) || leaving.contains(&g) || leaving.contains(&t) {
+        if !hosts.contains(&g)
+            || !hosts.contains(&t)
+            || leaving.contains(&g)
+            || leaving.contains(&t)
+        {
             return Vec::new();
         }
         run.tries += 1;
-        run.state = MoveState::Cutting { cut, tries: run.tries, doomed: false };
-        log::info!("coordinator: move {}: world cut {} carries it (try {})", run.mv.id.0, cut.0, run.tries);
+        run.state = MoveState::Cutting {
+            cut,
+            tries: run.tries,
+            doomed: false,
+        };
+        log::info!(
+            "coordinator: move {}: world cut {} carries it (try {})",
+            run.mv.id.0,
+            cut.0,
+            run.tries
+        );
         vec![run.mv]
     }
 
@@ -330,8 +448,17 @@ impl Coordinator {
             Some(r) => (attached(r.mv.giver), attached(r.mv.taker)),
             None => return,
         };
-        let Some(run) = self.moves.open.as_mut() else { return };
-        let MoveState::Cutting { cut: carried, doomed, .. } = run.state.clone() else { return };
+        let Some(run) = self.moves.open.as_mut() else {
+            return;
+        };
+        let MoveState::Cutting {
+            cut: carried,
+            doomed,
+            ..
+        } = run.state.clone()
+        else {
+            return;
+        };
         if carried != cut {
             return;
         }
@@ -356,18 +483,48 @@ impl Coordinator {
             run.tries = run.tries.saturating_sub(1);
         }
         if !doomed && parties_here && run.tries < MOVE_CUT_TRIES && now_ms < run.deadline_ms {
-            let wait = if refused { MOVE_REFUSED_RETRY_MS / crate::TICK_RATE } else { 0 };
-            log::info!("coordinator: move {}: cut {} aborted; tried again in {wait} ticks", run.mv.id.0, cut.0);
+            let wait = if refused {
+                MOVE_REFUSED_RETRY_MS / crate::TICK_RATE
+            } else {
+                0
+            };
+            log::info!(
+                "coordinator: move {}: cut {} aborted; tried again in {wait} ticks",
+                run.mv.id.0,
+                cut.0
+            );
             run.state = MoveState::Warning;
             run.at_tick = world_tick + wait;
             // The orders again (final review F-I3): a party that re-attached during the cut lost
             // them, and the clients' tick moves.
             let (mv, at_tick) = (run.mv, run.at_tick);
-            self.push(Target::Host(mv.giver), CoordMsg::MoveLand { id: mv.id, sr: mv.sr, taker: mv.taker, at_tick });
-            self.push(Target::Host(mv.taker), CoordMsg::ExpectLand { id: mv.id, sr: mv.sr, giver: mv.giver, at_tick });
+            self.push(
+                Target::Host(mv.giver),
+                CoordMsg::MoveLand {
+                    id: mv.id,
+                    sr: mv.sr,
+                    taker: mv.taker,
+                    at_tick,
+                },
+            );
+            self.push(
+                Target::Host(mv.taker),
+                CoordMsg::ExpectLand {
+                    id: mv.id,
+                    sr: mv.sr,
+                    giver: mv.giver,
+                    at_tick,
+                },
+            );
             return;
         }
-        let why = if doomed || !parties_here { "a party is gone" } else if run.tries >= MOVE_CUT_TRIES { "its cuts aborted" } else { "past its deadline" };
+        let why = if doomed || !parties_here {
+            "a party is gone"
+        } else if run.tries >= MOVE_CUT_TRIES {
+            "its cuts aborted"
+        } else {
+            "past its deadline"
+        };
         self.abandon_move(why);
     }
 
@@ -377,14 +534,22 @@ impl Coordinator {
     pub(super) fn maintain_moves(&mut self, now_ms: u64) {
         if let Some(run) = self.moves.open.as_ref() {
             match run.state {
-                MoveState::Warning if now_ms >= run.deadline_ms => self.abandon_move("past its deadline"),
-                MoveState::Cutting { cut, .. } if self.world_cut_running().is_none_or(|(c, _)| c != cut) => {
+                MoveState::Warning if now_ms >= run.deadline_ms => {
+                    self.abandon_move("past its deadline")
+                }
+                MoveState::Cutting { cut, .. }
+                    if self.world_cut_running().is_none_or(|(c, _)| c != cut) =>
+                {
                     match self.cut_outcome_remembered(cut) {
                         Some(committed) => self.move_cut_decided(cut, committed),
                         None => {
                             // The cut never began here (a rebase dropped it, or a new ticker): retried.
                             if let Some(run) = self.moves.open.as_mut() {
-                                log::info!("coordinator: move {}: cut {} is not running and has no outcome here; tried again", run.mv.id.0, cut.0);
+                                log::info!(
+                                    "coordinator: move {}: cut {} is not running and has no outcome here; tried again",
+                                    run.mv.id.0,
+                                    cut.0
+                                );
                                 run.state = MoveState::Warning;
                             }
                         }
@@ -400,17 +565,33 @@ impl Coordinator {
     /// `VOXEL_MOVE_PROBE_MS`: with no move open, every that many ms the ticker moves the most
     /// loaded host's super-region with the most players (else the most running regions).
     fn maintain_probe(&mut self, now_ms: u64) {
-        let Some(every) = self.move_dials.probe_ms else { return };
+        let Some(every) = self.move_dials.probe_ms else {
+            return;
+        };
         if self.moves.open.is_some() || !self.ticking_now() {
             return;
         }
-        if self.move_probe_ms.is_some_and(|at| now_ms.saturating_sub(at) < every) {
+        if self
+            .move_probe_ms
+            .is_some_and(|at| now_ms.saturating_sub(at) < every)
+        {
             return;
         }
         self.move_probe_ms = Some(now_ms);
-        let rows: Vec<crate::coordinator::HostSeen> =
-            self.leases.rows().filter(|r| !r.clean && r.state == HOST_LIVE && !r.load.land.is_empty()).cloned().collect();
-        let Some(giver) = rows.iter().max_by_key(|r| (r.load.tick_permille, r.load.players, r.load.regions, std::cmp::Reverse(r.ordinal))) else {
+        let rows: Vec<crate::coordinator::HostSeen> = self
+            .leases
+            .rows()
+            .filter(|r| !r.clean && r.state == HOST_LIVE && !r.load.land.is_empty())
+            .cloned()
+            .collect();
+        let Some(giver) = rows.iter().max_by_key(|r| {
+            (
+                r.load.tick_permille,
+                r.load.players,
+                r.load.regions,
+                std::cmp::Reverse(r.ordinal),
+            )
+        }) else {
             return;
         };
         let pick = giver
@@ -419,10 +600,19 @@ impl Coordinator {
             .iter()
             .filter(|l| l.players > 0)
             .max_by_key(|l| (l.players, std::cmp::Reverse(l.sr)))
-            .or_else(|| giver.load.land.iter().max_by_key(|l| (l.regions, std::cmp::Reverse(l.sr))));
+            .or_else(|| {
+                giver
+                    .load
+                    .land
+                    .iter()
+                    .max_by_key(|l| (l.regions, std::cmp::Reverse(l.sr)))
+            });
         let Some(sr) = pick.map(|l| l.sr) else { return };
         let Some((taker, _)) = self.pick_taker(sr, giver.ordinal) else {
-            log::info!("coordinator: move probe: no taker for super-region {sr:?} of host {}", giver.ordinal);
+            log::info!(
+                "coordinator: move probe: no taker for super-region {sr:?} of host {}",
+                giver.ordinal
+            );
             return;
         };
         self.open_move(sr, giver.ordinal, taker, MoveWhy::Probe);
@@ -431,7 +621,9 @@ impl Coordinator {
     /// Host `host` was lost (detached, ended, succeeded): an open move naming it is abandoned in
     /// `Warning`, doomed in `Cutting` (the cut's outcome decides).
     pub(super) fn move_party_gone(&mut self, host: HostId, why: &str) {
-        let Some(run) = self.moves.open.as_mut() else { return };
+        let Some(run) = self.moves.open.as_mut() else {
+            return;
+        };
         if run.mv.giver != host && run.mv.taker != host {
             return;
         }
@@ -442,7 +634,10 @@ impl Coordinator {
             }
             MoveState::Cutting { doomed, .. } => {
                 if !*doomed {
-                    log::info!("coordinator: move {}: host {host} {why} during its cut; the cut's outcome decides", run.mv.id.0);
+                    log::info!(
+                        "coordinator: move {}: host {host} {why} during its cut; the cut's outcome decides",
+                        run.mv.id.0
+                    );
                 }
                 *doomed = true;
             }
@@ -452,7 +647,9 @@ impl Coordinator {
     /// The world changed under every move (a succession declared, a rollback, a newer
     /// generation): an open move in `Warning` is abandoned; one in `Cutting` is doomed.
     pub(super) fn moves_world_changed(&mut self, why: &str) {
-        let Some(run) = self.moves.open.as_mut() else { return };
+        let Some(run) = self.moves.open.as_mut() else {
+            return;
+        };
         match &mut run.state {
             MoveState::Warning => self.abandon_move(why),
             MoveState::Cutting { doomed, .. } => *doomed = true,
@@ -462,13 +659,19 @@ impl Coordinator {
     /// An `Attach` of `host` at `boot` (after `cut_attach`): the order of a move naming it at that
     /// boot is sent again; another boot of a party is a new process — the run is lost to it.
     pub(super) fn move_attach(&mut self, host: HostId, boot: u64) {
-        let Some(run) = self.moves.open.as_ref() else { return };
+        let Some(run) = self.moves.open.as_ref() else {
+            return;
+        };
         let mv = run.mv;
         let (is_giver, is_taker) = (mv.giver == host, mv.taker == host);
         if !is_giver && !is_taker {
             return;
         }
-        let named = if is_giver { run.giver_boot } else { mv.taker_boot };
+        let named = if is_giver {
+            run.giver_boot
+        } else {
+            mv.taker_boot
+        };
         if named != boot {
             self.move_party_gone(host, "came back as another process");
             return;
@@ -477,9 +680,25 @@ impl Coordinator {
         // `BeginCut` among them; the host keeps a masked or cut entry of the same id as it is.
         let at_tick = run.at_tick;
         if is_giver {
-            self.push(Target::Host(host), CoordMsg::MoveLand { id: mv.id, sr: mv.sr, taker: mv.taker, at_tick });
+            self.push(
+                Target::Host(host),
+                CoordMsg::MoveLand {
+                    id: mv.id,
+                    sr: mv.sr,
+                    taker: mv.taker,
+                    at_tick,
+                },
+            );
         } else {
-            self.push(Target::Host(host), CoordMsg::ExpectLand { id: mv.id, sr: mv.sr, giver: mv.giver, at_tick });
+            self.push(
+                Target::Host(host),
+                CoordMsg::ExpectLand {
+                    id: mv.id,
+                    sr: mv.sr,
+                    giver: mv.giver,
+                    at_tick,
+                },
+            );
         }
     }
 
@@ -487,11 +706,31 @@ impl Coordinator {
     /// out for [`MOVE_RETRY_AFTER_MS`], counted against an evacuation of its giver.
     fn abandon_move(&mut self, why: &str) {
         let now_ms = self.clock_ms;
-        let Some(run) = self.moves.open.take() else { return };
+        let Some(run) = self.moves.open.take() else {
+            return;
+        };
         let mv = run.mv;
-        log::warn!("coordinator: move {} of super-region {:?} (host {} → host {}) abandoned: {why}", mv.id.0, mv.sr, mv.giver, mv.taker);
-        self.push(Target::Host(mv.giver), CoordMsg::MoveOff { id: mv.id, sr: mv.sr });
-        self.push(Target::Host(mv.taker), CoordMsg::MoveOff { id: mv.id, sr: mv.sr });
+        log::warn!(
+            "coordinator: move {} of super-region {:?} (host {} → host {}) abandoned: {why}",
+            mv.id.0,
+            mv.sr,
+            mv.giver,
+            mv.taker
+        );
+        self.push(
+            Target::Host(mv.giver),
+            CoordMsg::MoveOff {
+                id: mv.id,
+                sr: mv.sr,
+            },
+        );
+        self.push(
+            Target::Host(mv.taker),
+            CoordMsg::MoveOff {
+                id: mv.id,
+                sr: mv.sr,
+            },
+        );
         let held = self.moves.abandoned.entry(mv.sr).or_insert((0, 0));
         held.0 += 1;
         held.1 = now_ms + MOVE_RETRY_AFTER_MS;

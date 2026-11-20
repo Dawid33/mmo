@@ -116,7 +116,10 @@ impl ServerReport {
     /// The `| tiles …` section of the line: empty unless the served world is
     /// a tiled forged world.
     fn tiles_section(&mut self) -> String {
-        let Some(stats) = worldgen::forged::chosen().and_then(|w| w.tile_cache()).map(|c| c.stats()) else {
+        let Some(stats) = worldgen::forged::chosen()
+            .and_then(|w| w.tile_cache())
+            .map(|c| c.stats())
+        else {
             return String::new();
         };
         let (loads, errors) = self.tiles_seen;

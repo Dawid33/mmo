@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::turn::turn_voxel;
 use crate::registry::BlockId;
-use crate::{ChiselData, BLOCK_VOXELS};
+use crate::{BLOCK_VOXELS, ChiselData};
 
 const H: usize = BLOCK_VOXELS / 2;
 
@@ -93,13 +93,22 @@ impl Sides {
     fn turned(self, quarter_turns: u8) -> Self {
         let mut s = self;
         for _ in 0..quarter_turns % 4 {
-            s = Sides { north: s.west, east: s.north, south: s.east, west: s.south };
+            s = Sides {
+                north: s.west,
+                east: s.north,
+                south: s.east,
+                west: s.south,
+            };
         }
         s
     }
 
     fn mirrored_x(self) -> Self {
-        Sides { east: self.west, west: self.east, ..self }
+        Sides {
+            east: self.west,
+            west: self.east,
+            ..self
+        }
     }
 
     /// The arm of a set side, from the block's centre to that edge, `across` wide
@@ -114,15 +123,34 @@ impl Sides {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Shape {
-    Slab { half: Half },
-    Stairs { facing: Facing, half: Half, corner: StairCorner },
-    Wall { sides: Sides, post: bool },
-    Fence { sides: Sides },
-    Pane { sides: Sides },
-    Trapdoor { facing: Facing, half: Half, open: bool },
+    Slab {
+        half: Half,
+    },
+    Stairs {
+        facing: Facing,
+        half: Half,
+        corner: StairCorner,
+    },
+    Wall {
+        sides: Sides,
+        post: bool,
+    },
+    Fence {
+        sides: Sides,
+    },
+    Pane {
+        sides: Sides,
+    },
+    Trapdoor {
+        facing: Facing,
+        half: Half,
+        open: bool,
+    },
     Carpet,
     /// 1..=8 layers, each two voxels thick.
-    Layer { layers: u8 },
+    Layer {
+        layers: u8,
+    },
 }
 
 /// The voxel of a bottom/top-half shape in the bottom frame.
@@ -158,7 +186,11 @@ impl Shape {
         const N: usize = BLOCK_VOXELS;
         match self {
             Shape::Slab { half } => flip_y(half, y) < H,
-            Shape::Stairs { facing, half, corner } => {
+            Shape::Stairs {
+                facing,
+                half,
+                corner,
+            } => {
                 // Work in the north-facing, bottom frame.
                 let [x, _, z] = turn_voxel([x, y, z], (4 - facing.quarter_turns()) % 4);
                 let y = flip_y(half, y);
@@ -203,15 +235,30 @@ impl Shape {
     pub fn turned(self, quarter_turns: u8) -> Shape {
         let t = quarter_turns % 4;
         match self {
-            Shape::Stairs { facing, half, corner } => {
-                Shape::Stairs { facing: facing.turned(t), half, corner }
-            }
-            Shape::Wall { sides, post } => Shape::Wall { sides: sides.turned(t), post },
-            Shape::Fence { sides } => Shape::Fence { sides: sides.turned(t) },
-            Shape::Pane { sides } => Shape::Pane { sides: sides.turned(t) },
-            Shape::Trapdoor { facing, half, open } => {
-                Shape::Trapdoor { facing: facing.turned(t), half, open }
-            }
+            Shape::Stairs {
+                facing,
+                half,
+                corner,
+            } => Shape::Stairs {
+                facing: facing.turned(t),
+                half,
+                corner,
+            },
+            Shape::Wall { sides, post } => Shape::Wall {
+                sides: sides.turned(t),
+                post,
+            },
+            Shape::Fence { sides } => Shape::Fence {
+                sides: sides.turned(t),
+            },
+            Shape::Pane { sides } => Shape::Pane {
+                sides: sides.turned(t),
+            },
+            Shape::Trapdoor { facing, half, open } => Shape::Trapdoor {
+                facing: facing.turned(t),
+                half,
+                open,
+            },
             other => other,
         }
     }
@@ -219,15 +266,30 @@ impl Shape {
     /// The shape reflected x -> BLOCK_VOXELS-1-x.
     pub fn mirrored_x(self) -> Shape {
         match self {
-            Shape::Stairs { facing, half, corner } => {
-                Shape::Stairs { facing: facing.mirrored_x(), half, corner: corner.mirrored() }
-            }
-            Shape::Wall { sides, post } => Shape::Wall { sides: sides.mirrored_x(), post },
-            Shape::Fence { sides } => Shape::Fence { sides: sides.mirrored_x() },
-            Shape::Pane { sides } => Shape::Pane { sides: sides.mirrored_x() },
-            Shape::Trapdoor { facing, half, open } => {
-                Shape::Trapdoor { facing: facing.mirrored_x(), half, open }
-            }
+            Shape::Stairs {
+                facing,
+                half,
+                corner,
+            } => Shape::Stairs {
+                facing: facing.mirrored_x(),
+                half,
+                corner: corner.mirrored(),
+            },
+            Shape::Wall { sides, post } => Shape::Wall {
+                sides: sides.mirrored_x(),
+                post,
+            },
+            Shape::Fence { sides } => Shape::Fence {
+                sides: sides.mirrored_x(),
+            },
+            Shape::Pane { sides } => Shape::Pane {
+                sides: sides.mirrored_x(),
+            },
+            Shape::Trapdoor { facing, half, open } => Shape::Trapdoor {
+                facing: facing.mirrored_x(),
+                half,
+                open,
+            },
             other => other,
         }
     }

@@ -18,10 +18,12 @@
 //! encoder is the same one the meshing/LOD pipelines feed into `ChunkQuads`, so
 //! a green frame here means the whole extract -> prepare -> queue -> draw chain
 //! works against the locked `assets/shaders/voxel_pull.wgsl` layout.
+// The default 128 overflows the auto-trait checks of bevy's render resources (wgpu's nesting).
+#![recursion_limit = "256"]
 
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
     Arc,
+    atomic::{AtomicU32, Ordering},
 };
 
 use bevy::asset::RenderAssetUsages;
@@ -31,10 +33,12 @@ use bevy::render::render_resource::{
 };
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use client::renderer::config::{NearRenderBackend, TerrainRenderConfig};
-use client::renderer::meshing::binary::{mesh_quads, CutoutTable, Face, PaddedVoxels, Quad, PADDED};
-use client::renderer::meshing::records::{pack_record, QuadRecord};
+use client::renderer::meshing::binary::{
+    CutoutTable, Face, PADDED, PaddedVoxels, Quad, mesh_quads,
+};
+use client::renderer::meshing::records::{QuadRecord, pack_record};
 use client::renderer::voxel_pull::gpu::{
-    drain_near_telemetry_results, NearRendererMetrics, NearTelemetryEnabled,
+    NearRendererMetrics, NearTelemetryEnabled, drain_near_telemetry_results,
 };
 use client::renderer::voxel_pull::{BlockArrayTexture, ChunkQuads, VoxelPullPlugin};
 use game::{BlockId, Voxel};
@@ -162,7 +166,11 @@ fn array_texture(images: &mut Assets<Image>) -> Handle<Image> {
         for x in 0..TEX_SIZE {
             let edge = x == 0 || y == 0 || x == TEX_SIZE - 1 || y == TEX_SIZE - 1;
             let [r, g, b, a] = BODY_COLOR;
-            data.extend_from_slice(&if edge { [r / 2, g / 2, b / 2, a] } else { [r, g, b, a] });
+            data.extend_from_slice(&if edge {
+                [r / 2, g / 2, b / 2, a]
+            } else {
+                [r, g, b, a]
+            });
         }
     }
     let mut image = Image::new(
@@ -268,7 +276,10 @@ fn body_records() -> Vec<QuadRecord> {
             }
         }
     }
-    mesh_quads(&padded, &CutoutTable::NONE).iter().map(|q| pack_record(q, BODY_LAYER)).collect()
+    mesh_quads(&padded, &CutoutTable::NONE)
+        .iter()
+        .map(|q| pack_record(q, BODY_LAYER))
+        .collect()
 }
 
 fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
@@ -290,7 +301,12 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     // `voxel_bodies::brick_translation`.
     let body = commands
         .spawn((
-            Transform::from_xyz(42.0, 10.0, -6.0).with_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, 2.6, 0.35)),
+            Transform::from_xyz(42.0, 10.0, -6.0).with_rotation(Quat::from_euler(
+                EulerRot::YXZ,
+                0.6,
+                2.6,
+                0.35,
+            )),
             Visibility::Visible,
         ))
         .id();
@@ -415,7 +431,9 @@ fn analyze_screenshot(
     let encoded_indirect_count = indirect.0.load(Ordering::Acquire);
     let indirect_count = encoded_indirect_count.saturating_sub(1);
     info!("pull_smoke: maximum observed GPU indirect count {indirect_count}");
-    info!("pull_smoke: rotated body fraction {body_fraction:.4} (threshold {MIN_BODY_FRACTION:.3})");
+    info!(
+        "pull_smoke: rotated body fraction {body_fraction:.4} (threshold {MIN_BODY_FRACTION:.3})"
+    );
     result.0 = Some(
         fraction >= MIN_TERRAIN_FRACTION
             && cutout_fraction >= MIN_CUTOUT_FRACTION

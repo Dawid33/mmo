@@ -37,4 +37,3 @@ pub fn decode_server_frame(bytes: &[u8]) -> Option<(u32, &[u8])> {
     }
     Some((u32::from_le_bytes(key.try_into().ok()?), frame))
 }
-

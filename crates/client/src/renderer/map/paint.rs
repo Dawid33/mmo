@@ -5,8 +5,8 @@
 //! painted again from whatever is loaded), so nothing un-digs when regions unload or restart elsewhere.
 
 use bevy::prelude::*;
-use game::map_tile::{sample_flags, MapTile, MapTileKey, MAP_TILE_SAMPLES};
 use game::CHUNK_BLOCKS;
+use game::map_tile::{MAP_TILE_SAMPLES, MapTile, MapTileKey, sample_flags};
 
 use super::store::MapTiles;
 use crate::renderer::commander::height::{HeightGrid, MapColumn};
@@ -46,7 +46,10 @@ fn paint_near_window(
         let (x0, z0) = (cx as i64 * cb, cz as i64 * cb);
         for level in 0..=MAP_PAINT_MAX_LEVEL {
             // A chunk column lies inside one tile at every level (a tile is a whole number of chunks).
-            work.push((MapTileKey::containing(level, x0, z0), [x0, z0, x0 + cb, z0 + cb]));
+            work.push((
+                MapTileKey::containing(level, x0, z0),
+                [x0, z0, x0 + cb, z0 + cb],
+            ));
         }
     }
     for key in tiles.take_replaced() {
@@ -55,12 +58,18 @@ fn paint_near_window(
         work.push((key, [ox, oz, ox + span, oz + span]));
     }
     for (key, rect) in work {
-        tiles.paint(key, &mut images, |tile| paint_rect(tile, rect, |x, z| grid.map_column(x, z)));
+        tiles.paint(key, &mut images, |tile| {
+            paint_rect(tile, rect, |x, z| grid.map_column(x, z))
+        });
     }
 }
 
 /// Set every sample of `tile` whose centre block lies in `rect` and has a loaded column; whether any did.
-fn paint_rect(tile: &mut MapTile, [x0, z0, x1, z1]: [i64; 4], column: impl Fn(i32, i32) -> Option<MapColumn>) -> bool {
+fn paint_rect(
+    tile: &mut MapTile,
+    [x0, z0, x1, z1]: [i64; 4],
+    column: impl Fn(i32, i32) -> Option<MapColumn>,
+) -> bool {
     let key = tile.key;
     let (ox, oz) = key.origin_block();
     let sm = key.sample_m();
@@ -74,9 +83,13 @@ fn paint_rect(tile: &mut MapTile, [x0, z0, x1, z1]: [i64; 4], column: impl Fn(i3
     for sz in range(oz, z0, z1) {
         for sx in range(ox, x0, x1) {
             let (bx, bz) = (ox + sx * sm + sm / 2, oz + sz * sm + sm / 2);
-            let Some(c) = column(bx as i32, bz as i32) else { continue };
+            let Some(c) = column(bx as i32, bz as i32) else {
+                continue;
+            };
             let s = &mut tile.samples[(sx + EDGE * sz) as usize];
-            let water = c.water_top.map_or(0, |w| (i32::from(w) + 1 - i32::from(c.height_m)).clamp(0, u8::MAX as i32) as u8);
+            let water = c.water_top.map_or(0, |w| {
+                (i32::from(w) + 1 - i32::from(c.height_m)).clamp(0, u8::MAX as i32) as u8
+            });
             let ice = s.flags & sample_flags::ICE;
             let painted = game::map_tile::MapSample {
                 height: c.height_m,

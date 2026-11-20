@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use bevy::{
@@ -17,7 +17,7 @@ use bevy::{
         view::ExtractedView,
     },
 };
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 
 use super::arena::GpuNearChunkMeta;
 use super::queue::chunk_in_view;
@@ -307,8 +307,15 @@ impl GpuNearCullView {
             camera: cull_camera(view, face_culling_enabled()),
             cut: cull_cut(fortress),
             detail: detail.map_or([0.0; 4], super::NearDetail::cull_uniform),
-            receivers: receivers.map_or([[0.0; 4]; super::RECEIVER_PLANES], |d| d.receivers.map(|p| p.to_array())),
-            receiver_count: [receivers.map_or(0, |d| d.receiver_count), u32::from(shadow), 0, 0],
+            receivers: receivers.map_or([[0.0; 4]; super::RECEIVER_PLANES], |d| {
+                d.receivers.map(|p| p.to_array())
+            }),
+            receiver_count: [
+                receivers.map_or(0, |d| d.receiver_count),
+                u32::from(shadow),
+                0,
+                0,
+            ],
         }
     }
 }
@@ -477,10 +484,9 @@ fn create_view_buffers(
     depth_pyramid: Option<&ViewDepthPyramid>,
     sizes: GpuNearBufferSizes,
 ) -> GpuNearViewBuffers {
-    let command_bytes =
-        u64::from(sizes.capacity.max(1))
-            * u64::from(FACES_PER_SLOT + CUTOUT_COMMANDS_PER_SLOT)
-            * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
+    let command_bytes = u64::from(sizes.capacity.max(1))
+        * u64::from(FACES_PER_SLOT + CUTOUT_COMMANDS_PER_SLOT)
+        * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
     let indirect = device.create_buffer(&BufferDescriptor {
         label: Some("voxel_pull_indirect_commands"),
         size: command_bytes,
@@ -637,11 +643,13 @@ pub fn prepare_gpu_near_view_buffers(
 /// final count before the main pass consumes it.
 pub fn add_near_gpu_systems(schedule: &mut Schedule, telemetry_enabled: bool) {
     use bevy::core_pipeline::{
+        Core3dSystems,
         mip_generation::experimental::depth::early_downsample_depth,
         prepass::node::{early_prepass, late_prepass},
-        Core3dSystems,
     };
-    use bevy::pbr::{per_view_shadow_pass, shared_shadow_pass, EARLY_SHADOW_PASS, LATE_SHADOW_PASS};
+    use bevy::pbr::{
+        EARLY_SHADOW_PASS, LATE_SHADOW_PASS, per_view_shadow_pass, shared_shadow_pass,
+    };
 
     schedule.add_systems((
         near_frustum_cull
@@ -719,8 +727,7 @@ pub fn near_frustum_cull(
     } else {
         pipeline.frustum_fixed_pipeline
     };
-    let Ok((buffers, light_views)) = views.get(view.entity())
-    else {
+    let Ok((buffers, light_views)) = views.get(view.entity()) else {
         return;
     };
     dispatch_cull(
@@ -775,12 +782,10 @@ pub fn near_clear_late_phases(
     light_view_buffers: Query<&GpuNearViewBuffers>,
     mut render_context: RenderContext,
 ) {
-    let ActiveNearMode::GpuDriven { indirect_count } = *world.resource::<ActiveNearMode>()
-    else {
+    let ActiveNearMode::GpuDriven { indirect_count } = *world.resource::<ActiveNearMode>() else {
         return;
     };
-    let Ok((buffers, light_views)) = views.get(view.entity())
-    else {
+    let Ok((buffers, light_views)) = views.get(view.entity()) else {
         return;
     };
     clear_cull_arguments(&mut render_context, buffers, indirect_count);
@@ -1112,8 +1117,7 @@ pub fn near_telemetry_copy(
     let Some(telemetry) = world.get_resource::<NearTelemetryReadback>() else {
         return;
     };
-    let ActiveNearMode::GpuDriven { indirect_count } = *world.resource::<ActiveNearMode>()
-    else {
+    let ActiveNearMode::GpuDriven { indirect_count } = *world.resource::<ActiveNearMode>() else {
         return;
     };
     let Ok(buffers) = views.get(view.entity()) else {
@@ -1259,4 +1263,3 @@ pub fn conservative_hzb_visible(input: HzbCpuInput<'_>) -> bool {
 pub fn conservative_frustum_visible(frustum: &Frustum, center: Vec3, half_extents: Vec3) -> bool {
     chunk_in_view(frustum, center, half_extents)
 }
-

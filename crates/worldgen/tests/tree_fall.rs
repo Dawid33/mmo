@@ -15,15 +15,15 @@ use std::collections::BTreeMap;
 
 use game::math::Quat;
 use game::rapier3d::math::Vector;
-use game::voxel_body::{collision_model, model_mass_properties, SETTLE_TIMEOUT_TICKS};
+use game::voxel_body::{SETTLE_TIMEOUT_TICKS, collision_model, model_mass_properties};
 use game::{
-    Block, BlockId, BlockRegistry, Chunk, ChunkCoords, Column, ColumnCoords, DesignationKind, EntityKey, GameEventKind,
-    OpId, Order, Region, RegionCoords, Rollback, TileBox, TilePos, BLOCK_VOXELS, CHUNK_BLOCKS, DEFAULT_PRIORITY,
-    REGION_BLOCKS, REGION_CHUNKS, TICK_RATE,
+    BLOCK_VOXELS, Block, BlockId, BlockRegistry, CHUNK_BLOCKS, Chunk, ChunkCoords, Column,
+    ColumnCoords, DEFAULT_PRIORITY, DesignationKind, EntityKey, GameEventKind, OpId, Order,
+    REGION_BLOCKS, REGION_CHUNKS, Region, RegionCoords, Rollback, TICK_RATE, TileBox, TilePos,
 };
 use worldgen::material::{Materials, TreeBlocks};
 use worldgen::pipeline::SEA_TOP_BLOCK;
-use worldgen::trees::{rasterize, skeleton, Species, TreeBlock, TreePart, MAX_AGE, SPECIES};
+use worldgen::trees::{MAX_AGE, SPECIES, Species, TreeBlock, TreePart, rasterize, skeleton};
 
 const MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
 const B: f32 = BLOCK_VOXELS as f32;
@@ -65,8 +65,14 @@ fn bare_forest() -> Ground {
     let reg = registry();
     let mats = Materials::from_names(|n| reg.id_of(n).unwrap());
     let rc = forest();
-    let cols: Vec<(ColumnCoords, Column)> =
-        worldgen::generate_region(rc, worldgen::WORLD_SEED, Materials { trees: TreeBlocks::NONE, ..mats });
+    let cols: Vec<(ColumnCoords, Column)> = worldgen::generate_region(
+        rc,
+        worldgen::WORLD_SEED,
+        Materials {
+            trees: TreeBlocks::NONE,
+            ..mats
+        },
+    );
     let mut chunks = BTreeMap::new();
     let mut surface = BTreeMap::new();
     for (cc, col) in &cols {
@@ -81,9 +87,22 @@ fn bare_forest() -> Ground {
             }
         }
     }
-    let recipes = cols.iter().map(|(c, col)| (*c, col.ground().unwrap().clone())).collect();
-    let mut g = Ground { rc, chunks, recipes, surface, top: BTreeMap::new() };
-    g.top = g.surface.iter().map(|(&c, &s)| (c, g.block_top([c[0], s, c[1]]))).collect();
+    let recipes = cols
+        .iter()
+        .map(|(c, col)| (*c, col.ground().unwrap().clone()))
+        .collect();
+    let mut g = Ground {
+        rc,
+        chunks,
+        recipes,
+        surface,
+        top: BTreeMap::new(),
+    };
+    g.top = g
+        .surface
+        .iter()
+        .map(|(&c, &s)| (c, g.block_top([c[0], s, c[1]])))
+        .collect();
     g
 }
 
@@ -93,7 +112,10 @@ pub(crate) fn flat_floor(depth: i32) -> Ground {
     let mut chunks = BTreeMap::new();
     for x in 0..REGION_CHUNKS {
         for z in 0..REGION_CHUNKS {
-            chunks.insert(ChunkCoords::new(x, 0, z), Chunk::flat_floor_with(depth as u32 * BLOCK_VOXELS as u32, BlockId(2)));
+            chunks.insert(
+                ChunkCoords::new(x, 0, z),
+                Chunk::flat_floor_with(depth as u32 * BLOCK_VOXELS as u32, BlockId(2)),
+            );
         }
     }
     let mut surface = BTreeMap::new();
@@ -104,7 +126,13 @@ pub(crate) fn flat_floor(depth: i32) -> Ground {
             top.insert([x, z], depth as f32 * B);
         }
     }
-    Ground { rc: RegionCoords::new(0, 0), chunks, recipes: Vec::new(), surface, top }
+    Ground {
+        rc: RegionCoords::new(0, 0),
+        chunks,
+        recipes: Vec::new(),
+        surface,
+        top,
+    }
 }
 
 impl Ground {
@@ -113,20 +141,27 @@ impl Ground {
     /// ground, not sunk), or the whole block.
     fn block_top(&self, p: TilePos) -> f32 {
         let (coords, (x, y, z)) = game::edit::locate(p).unwrap();
-        let chisel = self.chunks.get(&coords).and_then(|c| c.chisel.get(&game::BlockIndex::from_xyz(x, y, z)));
+        let chisel = self
+            .chunks
+            .get(&coords)
+            .and_then(|c| c.chisel.get(&game::BlockIndex::from_xyz(x, y, z)));
         match chisel {
             Some(c) => {
                 let cuboids: Vec<_> = c.cuboids().collect();
                 let column_top = |vx: usize, vz: usize| {
                     cuboids
                         .iter()
-                        .filter(|(min, max, _)| (min[0]..max[0]).contains(&vx) && (min[2]..max[2]).contains(&vz))
+                        .filter(|(min, max, _)| {
+                            (min[0]..max[0]).contains(&vx) && (min[2]..max[2]).contains(&vz)
+                        })
                         .map(|(_, max, _)| max[1])
                         .max()
                         .unwrap_or(0)
                 };
-                let lowest = (0..BLOCK_VOXELS).flat_map(|vx| (0..BLOCK_VOXELS).map(move |vz| (vx, vz)));
-                p[1] as f32 * B + lowest.map(|(vx, vz)| column_top(vx, vz)).min().unwrap_or(0) as f32
+                let lowest =
+                    (0..BLOCK_VOXELS).flat_map(|vx| (0..BLOCK_VOXELS).map(move |vz| (vx, vz)));
+                p[1] as f32 * B
+                    + lowest.map(|(vx, vz)| column_top(vx, vz)).min().unwrap_or(0) as f32
             }
             None => (p[1] + 1) as f32 * B,
         }
@@ -198,8 +233,14 @@ pub(crate) fn scene(mut ground: Ground, sp: &Species, seed: u64, age: u16) -> Sc
     let id = |part: &str| reg.id_of(&format!("{}_{part}", sp.name)).unwrap();
     let mut tree = BTreeMap::new();
     for b in rasterize(&skeleton(sp, seed, age)) {
-        let p = [base[0] + b.offset[0], base[1] + b.offset[1], base[2] + b.offset[2]];
-        let Some((coords, (bx, by, bz))) = game::edit::locate(p) else { continue };
+        let p = [
+            base[0] + b.offset[0],
+            base[1] + b.offset[1],
+            base[2] + b.offset[2],
+        ];
+        let Some((coords, (bx, by, bz))) = game::edit::locate(p) else {
+            continue;
+        };
         if p[1] <= ground.surface[&[p[0], p[2]]] {
             continue; // trees only fill air (as worldgen places them)
         }
@@ -215,7 +256,12 @@ pub(crate) fn scene(mut ground: Ground, sp: &Species, seed: u64, age: u16) -> Sc
     }
     let (send, recv) = crossbeam::channel::unbounded();
     std::mem::forget(recv);
-    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), ground.rc, None);
+    let mut region = Region::new(
+        Rollback::new(Some(send.clone())),
+        Some(send),
+        ground.rc,
+        None,
+    );
     let chunks: Vec<_> = ground.chunks.iter().map(|(c, k)| (*c, k.clone())).collect();
     let recipes = ground.recipes.clone();
     region.with_data(|r| {
@@ -224,19 +270,37 @@ pub(crate) fn scene(mut ground: Ground, sp: &Species, seed: u64, age: u16) -> Sc
             r.seed_ground_genesis(recipes);
         }
     });
-    Scene { region, ground, tree }
+    Scene {
+        region,
+        ground,
+        tree,
+    }
 }
 
 impl Scene {
     pub(crate) fn base_y(&self) -> i32 {
-        self.tree.iter().filter(|(_, b)| b.part != TreePart::Leaves).map(|(p, _)| p[1]).min().unwrap()
+        self.tree
+            .iter()
+            .filter(|(_, b)| b.part != TreePart::Leaves)
+            .map(|(p, _)| p[1])
+            .min()
+            .unwrap()
     }
     fn top_log(&self) -> i32 {
-        self.tree.iter().filter(|(_, b)| b.part == TreePart::Log).map(|(p, _)| p[1]).max().unwrap()
+        self.tree
+            .iter()
+            .filter(|(_, b)| b.part == TreePart::Log)
+            .map(|(p, _)| p[1])
+            .max()
+            .unwrap()
     }
     /// The trunk log (limb 0) at level `y` nearest the trunk's base.
     pub(crate) fn trunk_at(&self, y: i32) -> Option<TilePos> {
-        let axis = self.tree.iter().find(|(p, b)| p[1] == self.base_y() && b.part == TreePart::Log).map(|(p, _)| *p)?;
+        let axis = self
+            .tree
+            .iter()
+            .find(|(p, b)| p[1] == self.base_y() && b.part == TreePart::Log)
+            .map(|(p, _)| *p)?;
         self.tree
             .iter()
             .filter(|(p, b)| p[1] == y && b.part == TreePart::Log && b.limb == 0)
@@ -247,14 +311,23 @@ impl Scene {
     /// Chops `cut` through the real orders; the felled body, if any.
     fn chop(&mut self, cut: TilePos) -> Option<EntityKey> {
         let op = OpId { client: 0, seq: 1 };
-        let designate =
-            Order::Designate { op, kind: DesignationKind::Chop, priority: DEFAULT_PRIORITY, area: TileBox::new(cut, cut) };
+        let designate = Order::Designate {
+            op,
+            kind: DesignationKind::Chop,
+            priority: DEFAULT_PRIORITY,
+            area: TileBox::new(cut, cut),
+        };
         for order in [designate, Order::DevCompleteAll] {
-            self.region.handle_event(GameEventKind::Order(0, order)).unwrap();
+            self.region
+                .handle_event(GameEventKind::Order(0, order))
+                .unwrap();
             self.region.forget_last_event();
         }
         let r = self.region.data();
-        r.ecs.voxel_body.iter().find_map(|(k, v)| v.as_ref().map(|_| k))
+        r.ecs
+            .voxel_body
+            .iter()
+            .find_map(|(k, v)| v.as_ref().map(|_| k))
     }
 }
 
@@ -289,7 +362,12 @@ fn body_points(model: &game::VoxelModel, toppling: bool) -> Vec<Point> {
     let com = model_mass_properties(model).local_com;
     let colliding = collision_model(model, toppling);
     let trunk = |b: &Block| b.tree_id() != 0 && b.limb() == 0 && game::block_props().is_solid(b.id);
-    let butt_y = model.blocks.iter().filter(|(_, (b, _))| trunk(b)).map(|(o, _)| o[1]).min();
+    let butt_y = model
+        .blocks
+        .iter()
+        .filter(|(_, (b, _))| trunk(b))
+        .map(|(o, _)| o[1])
+        .min();
     let mut out = Vec::new();
     for (o, (block, chisel)) in &model.blocks {
         let base = Vector::new(o[0] as f32, o[1] as f32, o[2] as f32) * B;
@@ -311,7 +389,12 @@ fn body_points(model: &game::VoxelModel, toppling: bool) -> Vec<Point> {
         for (lo, hi) in boxes {
             for i in 0..8 {
                 let pick = |a: usize| if (i >> a) & 1 == 0 { lo[a] } else { hi[a] };
-                out.push(Point { at: base + Vector::new(pick(0), pick(1), pick(2)) - com, tol, collides, butt });
+                out.push(Point {
+                    at: base + Vector::new(pick(0), pick(1), pick(2)) - com,
+                    tol,
+                    collides,
+                    butt,
+                });
             }
         }
     }
@@ -341,28 +424,43 @@ struct Fall {
 
 impl Fall {
     fn deepest(&self) -> f32 {
-        self.ticks.iter().map(|t| t.depth).fold(f32::NEG_INFINITY, f32::max)
+        self.ticks
+            .iter()
+            .map(|t| t.depth)
+            .fold(f32::NEG_INFINITY, f32::max)
     }
     fn resting_depth(&self) -> f32 {
         self.ticks.last().unwrap().depth
     }
     fn clip(&self) -> f32 {
-        self.ticks.iter().map(|t| t.clip).fold(f32::NEG_INFINITY, f32::max)
+        self.ticks
+            .iter()
+            .map(|t| t.clip)
+            .fold(f32::NEG_INFINITY, f32::max)
     }
     /// Largest rotation from the starting orientation, degrees.
     fn max_turn_deg(&self) -> f32 {
         let q0 = self.ticks[0].rotation;
-        self.ticks.iter().map(|t| (q0.inverse() * t.rotation).to_axis_angle().1.to_degrees()).fold(0.0, f32::max)
+        self.ticks
+            .iter()
+            .map(|t| (q0.inverse() * t.rotation).to_axis_angle().1.to_degrees())
+            .fold(0.0, f32::max)
     }
     /// How far the butt rose above where it started, units.
     fn butt_rise(&self) -> f32 {
         let y0 = self.ticks[0].butt;
-        self.ticks.iter().map(|t| t.butt - y0).fold(f32::NEG_INFINITY, f32::max)
+        self.ticks
+            .iter()
+            .map(|t| t.butt - y0)
+            .fold(f32::NEG_INFINITY, f32::max)
     }
     /// Fastest the butt ever rose, units/s.
     fn butt_kick(&self) -> f32 {
         let dt = TICK_RATE as f32 / 1000.0;
-        self.ticks.windows(2).map(|w| (w[1].butt - w[0].butt) / dt).fold(0.0, f32::max)
+        self.ticks
+            .windows(2)
+            .map(|w| (w[1].butt - w[0].butt) / dt)
+            .fold(0.0, f32::max)
     }
     /// Tilt of the model's up axis from vertical at the end, degrees.
     fn final_tilt_deg(&self) -> f32 {
@@ -371,7 +469,10 @@ impl Fall {
     /// Seconds until it was down: tilted to within 10 % of where it ended.
     fn down_after(&self) -> Option<f32> {
         let end = self.final_tilt_deg();
-        self.ticks.iter().position(|t| tilt(t.rotation) >= 0.9 * end).map(|t| t as f32 * TICK_RATE as f32 / 1000.0)
+        self.ticks
+            .iter()
+            .position(|t| tilt(t.rotation) >= 0.9 * end)
+            .map(|t| t as f32 * TICK_RATE as f32 / 1000.0)
     }
 }
 
@@ -381,7 +482,11 @@ fn tilt(q: Quat) -> f32 {
 
 fn run_fall(scene: &mut Scene, e: EntityKey) -> Fall {
     let points = body_points(&scene.region.data().ecs.voxel_body.get(e).model, true);
-    let mut fall = Fall { ticks: Vec::new(), settled_after: u64::MAX, last_speed: (0.0, 0.0) };
+    let mut fall = Fall {
+        ticks: Vec::new(),
+        settled_after: u64::MAX,
+        last_speed: (0.0, 0.0),
+    };
     for t in 0..SETTLE_TIMEOUT_TICKS + 5 {
         let r = scene.region.data();
         if !r.ecs.entities.contains_key(e) {
@@ -412,7 +517,17 @@ fn run_fall(scene: &mut Scene, e: EntityKey) -> Fall {
             let (v, w) = (body.linvel(), body.angvel());
             println!(
                 "  t {t:3} tilt {:5.1} butt {:7.1} com {:7.1} depth {:5.1} clip {:5.1} v [{:6.1} {:6.1} {:6.1}] w [{:5.2} {:5.2} {:5.2}]",
-                tilt(pose.rotation), sample.butt, pose.translation.y, sample.depth, sample.clip, v.x, v.y, v.z, w.x, w.y, w.z
+                tilt(pose.rotation),
+                sample.butt,
+                pose.translation.y,
+                sample.depth,
+                sample.clip,
+                v.x,
+                v.y,
+                v.z,
+                w.x,
+                w.y,
+                w.z
             );
         }
         fall.ticks.push(sample);
@@ -429,10 +544,16 @@ fn run_fall(scene: &mut Scene, e: EntityKey) -> Fall {
 fn ground_failure(fall: &Fall) -> Option<String> {
     let mut bad = Vec::new();
     if fall.deepest() > IMPACT_SLACK {
-        bad.push(format!("{:.1} u past its tolerance on impact", fall.deepest()));
+        bad.push(format!(
+            "{:.1} u past its tolerance on impact",
+            fall.deepest()
+        ));
     }
     if fall.resting_depth() > 0.0 {
-        bad.push(format!("rests {:.1} u past its tolerance", fall.resting_depth()));
+        bad.push(format!(
+            "rests {:.1} u past its tolerance",
+            fall.resting_depth()
+        ));
     }
     (!bad.is_empty()).then(|| bad.join(", "))
 }
@@ -462,8 +583,14 @@ fn young_trees_land_on_the_ground() {
     // blocks for `scene` to plant.
     let species = SPECIES.iter().filter(|s| !s.single_block);
     for sp in species.filter(|s| std::env::var("TREE_FALL_SPECIES").map_or(true, |n| n == s.name)) {
-        for seed in std::env::var("TREE_FALL_SEED").ok().map_or(0..3u64, |s| { let s: u64 = s.parse().unwrap(); s..s + 1 }) {
-            for age in std::env::var("TREE_FALL_AGE").ok().map_or(vec![5u16, 15, 30], |a| vec![a.parse().unwrap()]) {
+        for seed in std::env::var("TREE_FALL_SEED").ok().map_or(0..3u64, |s| {
+            let s: u64 = s.parse().unwrap();
+            s..s + 1
+        }) {
+            for age in std::env::var("TREE_FALL_AGE")
+                .ok()
+                .map_or(vec![5u16, 15, 30], |a| vec![a.parse().unwrap()])
+            {
                 let probe = scene(clone_ground(&ground), sp, seed, age);
                 let (base, top) = (probe.base_y(), probe.top_log());
                 drop(probe);
@@ -497,15 +624,30 @@ fn young_trees_land_on_the_ground() {
         }
     }
     assert!(falls > 20, "only {falls} falls");
-    assert!(failures.is_empty(), "{} of {falls} falls went into the ground:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} of {falls} falls went into the ground:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     // A top cut off mid-trunk can land upright on its own stump and teeter
     // there until the settle timeout (it is above ground, checked above);
     // nearly every fall must come to rest.
-    assert!(unsettled.len() * 10 <= falls, "{} of {falls} falls never came to rest: {unsettled:?}", unsettled.len());
+    assert!(
+        unsettled.len() * 10 <= falls,
+        "{} of {falls} falls never came to rest: {unsettled:?}",
+        unsettled.len()
+    );
 }
 
 fn clone_ground(g: &Ground) -> Ground {
-    Ground { rc: g.rc, chunks: g.chunks.clone(), recipes: g.recipes.clone(), surface: g.surface.clone(), top: g.top.clone() }
+    Ground {
+        rc: g.rc,
+        chunks: g.chunks.clone(),
+        recipes: g.recipes.clone(),
+        surface: g.surface.clone(),
+        top: g.top.clone(),
+    }
 }
 
 /// Seconds a mature tree (14–19 blocks of trunk) takes from the chop until
@@ -533,10 +675,15 @@ const MAX_BUTT_RISE_BLOCKS: f32 = 3.5;
 #[ignore = "slow: >100ms — run via just test-full"]
 fn mature_trees_topple_about_their_base() {
     let mut failures = Vec::new();
-    for name in std::env::var("TREE_FALL_SPECIES").map_or(vec!["oak".to_string(), "pine".to_string()], |s| vec![s]) {
+    for name in std::env::var("TREE_FALL_SPECIES")
+        .map_or(vec!["oak".to_string(), "pine".to_string()], |s| vec![s])
+    {
         let name = name.as_str();
         let sp = SPECIES.iter().find(|s| s.name == name).unwrap();
-        for seed in std::env::var("TREE_FALL_SEED").ok().map_or(0..3u64, |s| { let s: u64 = s.parse().unwrap(); s..s + 1 }) {
+        for seed in std::env::var("TREE_FALL_SEED").ok().map_or(0..3u64, |s| {
+            let s: u64 = s.parse().unwrap();
+            s..s + 1
+        }) {
             let mut s = scene(flat_floor(4), sp, seed, MAX_AGE);
             let height = (s.top_log() - s.base_y() + 1) as f32;
             let cut = s.trunk_at(s.base_y()).unwrap();
@@ -545,12 +692,27 @@ fn mature_trees_topple_about_their_base() {
                 let model = &s.region.data().ecs.voxel_body.get(e).model;
                 let floor = model.blocks.keys().map(|o| o[1]).min().unwrap();
                 for dy in 0..4 {
-                    let layer: Vec<_> = model.blocks.iter().filter(|(o, _)| o[1] == floor + dy).collect();
-                    let leaves = layer.iter().filter(|(_, (b, _))| game::is_foliage(b.id)).count();
+                    let layer: Vec<_> = model
+                        .blocks
+                        .iter()
+                        .filter(|(o, _)| o[1] == floor + dy)
+                        .collect();
+                    let leaves = layer
+                        .iter()
+                        .filter(|(_, (b, _))| game::is_foliage(b.id))
+                        .count();
                     let xs: Vec<i16> = layer.iter().map(|(o, _)| o[0]).collect();
-                    println!("  layer +{dy}: {} blocks, {leaves} leaves, x {:?}..{:?}", layer.len(), xs.iter().min(), xs.iter().max());
+                    println!(
+                        "  layer +{dy}: {} blocks, {leaves} leaves, x {:?}..{:?}",
+                        layer.len(),
+                        xs.iter().min(),
+                        xs.iter().max()
+                    );
                 }
-                println!("  cut {cut:?}, origin {:?}", s.region.data().ecs.voxel_body.get(e).origin);
+                println!(
+                    "  cut {cut:?}, origin {:?}",
+                    s.region.data().ecs.voxel_body.get(e).origin
+                );
             }
             let fall = run_fall(&mut s, e);
             let land = fall.down_after().unwrap_or(f32::INFINITY);

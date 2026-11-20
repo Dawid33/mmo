@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use game::RegionId;
 
 use super::adventure::ClientPlayMode;
-use super::{clamp_focus, region_rect, CommanderCamera};
+use super::{CommanderCamera, clamp_focus, region_rect};
 use crate::renderer::hud::HudStatus;
 use crate::world_scale::WorldScale;
 
@@ -17,17 +17,16 @@ use crate::world_scale::WorldScale;
 pub fn window_rect(home: RegionId, near_radius: i32) -> Rect {
     let r = region_rect(home);
     let grow = Vec2::splat(near_radius.max(0) as f32 * game::REGION_SIZE);
-    Rect { min: r.min - grow, max: r.max + grow }
+    Rect {
+        min: r.min - grow,
+        max: r.max + grow,
+    }
 }
 
 /// The rect the pan is confined to: the near window in Adventure, none
 /// (free pan) in Overview.
 pub fn pan_bounds(adventure: bool, window: Option<Rect>) -> Option<Rect> {
-    if adventure {
-        window
-    } else {
-        None
-    }
+    if adventure { window } else { None }
 }
 
 /// After panning and following: clamp the focus to the near window.
@@ -40,11 +39,12 @@ pub fn clamp_to_window(
 ) {
     let scale = scale.map_or(WorldScale::FULL, |s| *s);
     let frame = frame.as_deref().copied().unwrap_or_default();
-    let window = status.home_region.map(|home| window_rect(frame.alias(home), scale.near_radius));
+    let window = status
+        .home_region
+        .map(|home| window_rect(frame.alias(home), scale.near_radius));
     let bounds = pan_bounds(mode.adventure(), window);
     let clamped = clamp_focus(cam.focus, bounds);
     if clamped != cam.focus {
         cam.focus = clamped;
     }
 }
-

@@ -92,6 +92,9 @@
 #  11. Records (asserts nothing): each pod's memory after the forge and five minutes
 #      after the world-start, any pod log line about a file it could not write, and each
 #      coordinator replica's `[coordinator] window=` lines (transitions, conflicts, assigned).
+#      With TWIN_CHECK_TELEMETRY=1 (the just recipe's `telemetry=1`), assert Tempo resource
+#      identities and one login -> coordinator -> host trace, Pyroscope role/pod labels,
+#      correlated trace_id log fields, and record exporter error counter deltas.
 #  12. To zero (Elastic 4 Task 8): VOXEL_FLEET_MIN=0 set on the coordinator Deployment (every
 #      replica restarts together, as in 7b). With nobody online the hosts go ONE AT A TIME
 #      (rule 6 drains one while two are wanted, rule 7 the last: each after the module's
@@ -108,7 +111,8 @@
 # Every wait has a timeout and says what it waited for. Exit 0 = pass, 1 = a check
 # failed (pods, events and logs are dumped and saved under target/twin/check-<time>/).
 # Env: TWIN_CONTEXT (k3d-mmo), TWIN_NAMESPACE (world-twin), TWIN_COORDINATORS (2),
-# TWIN_HOSTS (2), TWIN_WORLD_DB (world_twin).
+# TWIN_HOSTS (2), TWIN_WORLD_DB (world_twin), TWIN_CHECK_TELEMETRY (0), and optional
+# TWIN_TEMPO_URL / TWIN_PYROSCOPE_URL / TWIN_ALLOY_READY_URL endpoints.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -119,6 +123,10 @@ coordinators="${TWIN_COORDINATORS:-2}"
 fleet_hosts="${TWIN_HOSTS:-2}"
 world_id="${ns#world-}"
 world_db="${TWIN_WORLD_DB:-world_twin}"
+telemetry_check="${TWIN_CHECK_TELEMETRY:-0}"
+tempo_url="${TWIN_TEMPO_URL:-http://127.0.0.1:3200}"
+pyroscope_url="${TWIN_PYROSCOPE_URL:-http://127.0.0.1:4040}"
+alloy_ready_url="${TWIN_ALLOY_READY_URL:-http://127.0.0.1:12345/-/ready}"
 out="target/twin/check-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$out"
 started=$SECONDS
@@ -161,6 +169,12 @@ dump() {
         echo "---- $pod (last 25 log lines; whole log in $out/$pod.log)"
         tail -25 "$out/$pod.log"
     done
+    if telemetry_on; then
+        kc -n login logs deploy/login > "$out/login.log" 2>&1 || true
+        telemetry_search '{ resource.service.name != "" }' > "$out/telemetry-failure-traces.json" 2> "$out/telemetry-failure-traces.err" || true
+        telemetry_label_values mmo.role > "$out/telemetry-failure-profile-roles.json" 2> "$out/telemetry-failure-profiles.err" || true
+        echo "---- telemetry query files: $out/telemetry-* (login log: $out/login.log)"
+    fi
 }
 
 fail() {
@@ -424,6 +438,133 @@ log_has_since() {
     grep -qF -- "$3" <<< "$text"
 }
 
+# --- optional local telemetry evidence -----------------------------------------
+
+telemetry_on() { [ "$telemetry_check" = 1 ]; }
+telemetry_record_pod() {
+    telemetry_on || return 0
+    printf '%s\t%s\n' "$1" "$2" >> "$out/telemetry-pods.tsv"
+}
+telemetry_search() {
+    local query="$1"
+    curl -fsS --max-time 20 --get "$tempo_url/api/search" \
+        --data "limit=100" --data-urlencode "q=$query"
+}
+telemetry_trace_roles() {
+    local id="$1"
+    curl -fsS --max-time 20 "$tempo_url/api/traces/$id" |
+        jq -r '.. | objects | select(.key? == "mmo.role") | .value.stringValue // empty' |
+        sort -u
+}
+telemetry_wait_identity() {
+    local role="$1" pod="$2" query response waited=$SECONDS
+    if [ "$role" = login ]; then
+        query="{ resource.service.name = \"errantry-login\" && resource.\`k8s.pod.name\` = \"$pod\" && resource.\`mmo.role\` = \"login\" }"
+    else
+        query="{ resource.service.name = \"errantry-world\" && resource.\`mmo.world_id\` = \"$world_id\" && resource.\`k8s.pod.name\` = \"$pod\" && resource.\`mmo.role\` = \"$role\" }"
+    fi
+    until response=$(telemetry_search "$query" 2> "$out/telemetry-search.err") &&
+        [ "$(printf '%s' "$response" | jq -r '.traces // [] | length')" -gt 0 ]; do
+        [ $((SECONDS - waited)) -lt 60 ] ||
+            fail "Tempo has no trace/profile resource identity for role=$role pod=$pod (query: $query; error: $(head -1 "$out/telemetry-search.err"))"
+        sleep 2
+    done
+    printf '%s\n' "$response" > "$out/tempo-$role-$pod.json"
+}
+telemetry_wait_join_continuity() {
+    local search_file="$out/tempo-login-search.json" id roles
+    search_file=
+    for attempt in $(seq 1 30); do
+        search_file="$out/tempo-login-search.json"
+        if telemetry_search '{ resource.service.name = "errantry-login" && resource.`mmo.role` = "login" }' \
+            > "$search_file" 2> "$out/telemetry-join-search.err"; then
+            while read -r id; do
+                [ -n "$id" ] || continue
+                roles=$(telemetry_trace_roles "$id" 2> /dev/null | tr '\n' ' ')
+                if [[ " $roles " == *" login "* && " $roles " == *" coordinator "* && " $roles " == *" host "* ]]; then
+                    curl -fsS --max-time 20 "$tempo_url/api/traces/$id" > "$out/tempo-join-$id.json"
+                    printf 'trace %s roles: %s\n' "$id" "$roles" > "$out/tempo-join.txt"
+                    return 0
+                fi
+            done < <(jq -r '.traces[]?.traceID // empty' "$search_file")
+        fi
+        sleep 2
+    done
+    fail "Tempo has no sampled join trace continuing through login, coordinator and host (last search: $search_file)"
+}
+telemetry_label_values() {
+    local label="$1"
+    curl -fsS --max-time 20 "$pyroscope_url/pyroscope/api/label/$label/values"
+}
+telemetry_wait_profiles() {
+    local role pod response waited
+    while read -r role pod; do
+        waited=$SECONDS
+        until response=$(telemetry_label_values pod 2> "$out/telemetry-profile.err") &&
+            grep -qF "\"$pod\"" <<< "$response"; do
+            [ $((SECONDS - waited)) -lt 60 ] ||
+                fail "Pyroscope has no pod profile label for role=$role pod=$pod (error: $(head -1 "$out/telemetry-profile.err"))"
+            sleep 2
+        done
+    done < "$out/telemetry-pods.tsv"
+    response=$(telemetry_label_values role) || fail "Pyroscope role label query failed"
+    printf '%s\n' "$response" > "$out/pyroscope-roles.json"
+    for role in login coordinator fleet host; do
+        grep -qF "\"$role\"" <<< "$response" || fail "Pyroscope has no role=$role profile"
+    done
+    response=$(telemetry_label_values world_id) || fail "Pyroscope world_id label query failed"
+    printf '%s\n' "$response" > "$out/pyroscope-worlds.json"
+    grep -qF "\"$world_id\"" <<< "$response" || fail "Pyroscope has no mmo.world_id=$world_id profile"
+}
+telemetry_exporter_snapshot() {
+    local label="$1" pod text
+    telemetry_on || return 0
+    : > "$out/telemetry-exporters-$label.txt"
+    for pod in $(kc -n login get pods -l app.kubernetes.io/name=login -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null); do
+        text=$(kc -n login get --raw "/api/v1/namespaces/login/pods/$pod:8790/proxy/metrics" 2>/dev/null || true)
+        printf '%s\n' "$text" | awk -v p="$pod" '!/^#/ && $1 ~ /^mmo_/ && tolower($0) ~ /(telemetry|otel|pyroscope|profile)/ && tolower($0) ~ /(error|fail)/ { print p, $1, $NF }' \
+            >> "$out/telemetry-exporters-$label.txt"
+    done
+    for pod in $(k get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null); do
+        text=$(proxy "$pod" metrics 2>/dev/null || true)
+        printf '%s\n' "$text" | awk -v p="$pod" '!/^#/ && $1 ~ /^mmo_/ && tolower($0) ~ /(telemetry|otel|pyroscope|profile)/ && tolower($0) ~ /(error|fail)/ { print p, $1, $NF }' \
+            >> "$out/telemetry-exporters-$label.txt"
+    done
+}
+telemetry_evidence() {
+    local role pod text before after
+    telemetry_on || return 0
+    while read -r role pod; do
+        telemetry_wait_identity "$role" "$pod"
+    done < <(sort -u "$out/telemetry-pods.tsv")
+    telemetry_wait_join_continuity
+    telemetry_wait_profiles
+    kc -n login logs deploy/login > "$out/login-telemetry.log" 2>&1 || true
+    for role in login coordinator host; do
+        case "$role" in
+            login) text="$out/login-telemetry.log" ;;
+            coordinator) text="$out/$(coordinator_pods | sed -n 1p).log" ;;
+            host) text="$out/$(host_pod "$ha").log" ;;
+        esac
+        grep -m1 -E 'trace_id[=:][[:space:]]*[0-9a-f]{32}|trace_id.?[[:space:]]*[=:][[:space:]]*[0-9a-f]{32}' "$text" \
+            >> "$out/telemetry-logs.txt" ||
+            fail "no trace_id in a representative $role log ($text)"
+    done
+    telemetry_exporter_snapshot after
+    [ -s "$out/telemetry-exporters-before.txt" ] ||
+        fail "no telemetry/profile exporter failure counters in the after-forge metrics snapshot"
+    [ -s "$out/telemetry-exporters-after.txt" ] ||
+        fail "no telemetry/profile exporter failure counters in the final metrics snapshot"
+    before=$(awk '{ total += $3 } END { printf "%.0f", total + 0 }' "$out/telemetry-exporters-before.txt")
+    after=$(awk '{ total += $3 } END { printf "%.0f", total + 0 }' "$out/telemetry-exporters-after.txt")
+    {
+        printf 'before exporter failures: %s\n' "$before"
+        printf 'after exporter failures: %s\n' "$after"
+        awk -v before="$before" -v after="$after" 'BEGIN { printf "delta: %+.0f\n", after - before }'
+    } > "$out/telemetry-exporter-delta.txt"
+    say "telemetry: Tempo identities/traced join, Pyroscope role/profile identities and log trace_ids recorded"
+}
+
 # --- memory (record only) ----------------------------------------------------------
 
 # memory_snapshot <label>: kubectl top (metrics-server, when it answers) and each pod's
@@ -451,6 +592,16 @@ memory_snapshot() {
 }
 
 echo "twin-check: context $ctx, namespace $ns; transcript files in $out/"
+if telemetry_on; then
+    curl -fsS --max-time 10 "$alloy_ready_url" > /dev/null ||
+        fail "telemetry mode: Alloy is not Ready ($alloy_ready_url); run just profile-up"
+    curl -fsS --max-time 10 "$tempo_url/ready" > /dev/null ||
+        fail "telemetry mode: Tempo is not Ready ($tempo_url/ready)"
+    curl -fsS --max-time 10 "$pyroscope_url/ready" > /dev/null ||
+        curl -fsS --max-time 10 "$pyroscope_url/" > /dev/null ||
+        fail "telemetry mode: Pyroscope is not Ready ($pyroscope_url)"
+    : > "$out/telemetry-pods.tsv"
+fi
 kc get nodes > /dev/null || fail "the cluster ($ctx) does not answer: just twin-up && just twin-apply"
 k get deploy/fleet > /dev/null 2>&1 || fail "no Deployment fleet in $ns (the fleet reconciler, Elastic 4): just twin-apply with this tree"
 want=$(k get deploy/coordinator -o jsonpath='{.spec.replicas}')
@@ -491,6 +642,8 @@ wait_until 180 "$coordinators coordinator replicas and the fleet reconciler Runn
 coords=$(coordinator_pods | tr '\n' ' ')
 pf=$(fleet_pod)
 say "coordinator replicas: $coords; fleet reconciler: $pf"
+telemetry_record_pod login "$(kc -n login get pods -l app.kubernetes.io/name=login -o jsonpath='{.items[0].metadata.name}')"
+for pod in $coords; do telemetry_record_pod coordinator "$pod"; done
 # Record (not a check): restarts before the forge, with the end of the previous run's log.
 # shellcheck disable=SC2086 # one word per pod
 for pod in $coords "$pf"; do
@@ -536,6 +689,7 @@ say "the fleet pod stopped in ${stop_secs}s with exit code 0: $(grep -F 'stop si
 wait_until 120 "a new fleet pod Running and waiting for the forge" waiting_pods
 pf=$(fleet_pod)
 pod_ready "$pf" && fail "the new fleet pod is Ready before any forge"
+telemetry_record_pod fleet "$pf"
 
 # ---------------------------------------------------------------------------------
 step "2. forge from the toolbox; the coordinator and the reconciler become Ready"
@@ -554,6 +708,8 @@ names_are_first() { [ "$(host_names | tr '\n' ' ')" = "$want_names" ]; }
 wait_until 120 "the host Deployments $want_names(desired rows added by the coordinator, created by the reconciler)" names_are_first
 desired | sed 's/^/   desired: /'
 wait_until 300 "$fleet_hosts hosts Ready" hosts_ready "$fleet_hosts"
+for h in $(host_names); do telemetry_record_pod host "$(host_pod "$h")"; done
+telemetry_exporter_snapshot before
 memory_snapshot "after the forge (toolbox peak = the forge)"
 cimg=$(coordinator_image)
 ports_seen=''
@@ -670,6 +826,7 @@ k delete pod "$pb" --grace-period=0 --force > /dev/null 2>&1
 wait_until 60 "a new host $hb pod Ready" host_replaced_and_ready "$hb" "$uid1"
 pb=$(host_pod "$hb")
 say "new host $hb pod $pb Ready $((SECONDS - t0))s after the kill"
+telemetry_record_pod host "$pb"
 c1=$(committed) || fail "the coordinator does not answer after the crash"
 left=$((60 - (SECONDS - t0)))
 [ "$left" -gt 0 ] || left=1
@@ -728,6 +885,7 @@ say "$(grep -F '[server] left the world in cut' "$out/host-$ha-leave.log" | tail
     fail "the reconciler touched deploy/host-$ha at 0 replicas: $(k get "deploy/host-$ha" -o jsonpath='{.metadata.uid} {.spec.replicas}' || true) (was $dep_uid 0)"
 k scale "deploy/host-$ha" --replicas=1 > /dev/null
 wait_until 120 "a new host $ha pod Ready" host_replaced_and_ready "$ha" "$uid0"
+telemetry_record_pod host "$(host_pod "$ha")"
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed after a clean leave"
 [ "$(coord_sum mmo_successions_declared_total)" = "$d0" ] || fail "a clean leave declared a succession"
 say "generation $gen unchanged, no succession"
@@ -839,6 +997,7 @@ join_or_fail "$(left_of 90)" "a join answers 200 after the kill (within 90 s of 
 [ "$(pod_uid "$pb")" = "$ub" ] && [ "$(pod_restarts "$pb")" = "$rb" ] || fail "host $hb's pod changed or restarted when a coordinator replica died"
 wait_until 120 "the coordinator back at $coordinators replicas, every one Ready" coords_ready
 wait_until 60 "every replica counts $coordinators live replicas" every_replica_counts_all
+for pod in $(coordinator_pods); do telemetry_record_pod coordinator "$pod"; done
 say "replicas $(coordinator_pods | tr '\n' ' '), generation $gen, hosts untouched"
 
 # ---------------------------------------------------------------------------------
@@ -857,6 +1016,7 @@ wait_until 20 "the fleet reconciler's /readyz says stopped" fleet_stopped
 t0=$SECONDS
 k scale deploy/coordinator --replicas="$coordinators" > /dev/null
 wait_until 120 "$coordinators coordinator replicas back, every one Ready" coords_ready
+for pod in $(coordinator_pods); do telemetry_record_pod coordinator "$pod"; done
 wait_until "$(left_of 120)" "both hosts Ready (attached)" both_hosts_ready
 wait_until "$(left_of 120)" "a cut commits after the restart (the counters restarted with the pods: every host re-attached)" committed_above 0
 wait_until 30 "exactly one ticker" one_ticker
@@ -1147,6 +1307,7 @@ third_name() {
 wait_until 120 "a third desired host name, wanted (the coordinator's minimum, $fleet_hosts)" third_name
 [ "$(desired_slot "$hc")" = "$slot_b" ] || fail "the new host $hc got slot '$(desired_slot "$hc")', not the freed slot $slot_b: $(desired | tr '\n' ';')"
 wait_until 120 "host $hc's pod Ready (its Deployment created by the reconciler)" host_ready "$hc"
+telemetry_record_pod host "$(host_pod "$hc")"
 [ "$(host_image "$hc")" = "$(coordinator_image)" ] || fail "host $hc runs image '$(host_image "$hc")', not the coordinator's '$(coordinator_image)'"
 [ "$(node_ports "$hc")" = "$((port_base + 2 * slot_b)) $((port_base + 2 * slot_b + 1))" ] ||
     fail "host $hc has node ports '$(node_ports "$hc")', not slot $slot_b's $((port_base + 2 * slot_b)) $((port_base + 2 * slot_b + 1))"
@@ -1194,6 +1355,9 @@ world_started=$SECONDS
     fail "world-start did not bring the coordinator back at $coordinators replicas: $(k get deploy/coordinator -o jsonpath='{.spec.replicas}')"
 [ "$(k get deploy/fleet -o jsonpath='{.spec.replicas}')" = 1 ] || fail "world-start did not bring the fleet reconciler back to 1"
 wait_until 30 "$coordinators coordinator replicas, the fleet reconciler and $fleet_hosts hosts Ready" all_ready
+telemetry_record_pod fleet "$(fleet_pod)"
+for pod in $(coordinator_pods); do telemetry_record_pod coordinator "$pod"; done
+for h in $(host_names); do telemetry_record_pod host "$(host_pod "$h")"; done
 [ "$(host_names | tr '\n' ' ')" = "$ha $hc " ] || fail "the host Deployments after the start are '$(host_names | tr '\n' ' ')', not '$ha $hc '"
 wait_until 60 "the coordinator commits a cut after the start" committed_above 0
 [ "$(coord_gen)" = "$gen" ] || fail "the world generation changed across stop and start"
@@ -1276,6 +1440,7 @@ for f in "$out"/coordinator-*.log; do
           if (v["transitions"] + 0 > tmax) tmax = v["transitions"] + 0 }
         END { printf "   %s: %d windows, transitions %d (max %d per window), conflicts %d (max %d per window), write failures %d, assigned %d\n", f, n, t, tmax, c, cmax, w, a }' || true
 done | tee "$out/windows.txt"
+telemetry_evidence
 
 # ---------------------------------------------------------------------------------
 step "12. to zero: VOXEL_FLEET_MIN=0, nobody online: the hosts drain one at a time and are removed"
@@ -1387,6 +1552,7 @@ cold=$((SECONDS - first_503))
 printf 'cold start (first 503 world_starting -> first 200): %s s; host %s; answers before it: %s (s = world_starting, u = another 503)\n' \
     "$cold" "$hd" "${answers:-none}" | tee "$out/cold-start.txt" | sed 's/^/   /'
 host_ready "$hd" || say "record: host $hd's pod is not Ready yet at the first 200"
+telemetry_record_pod host "$(host_pod "$hd")"
 [ "$(desired | grep -c . || true)" = 1 ] || fail "not exactly one desired row after the join: $(desired | tr '\n' ';')"
 [ "$(host_names | tr '\n' ' ')" = "$hd " ] || fail "the host Deployments are '$(host_names | tr '\n' ' ')', not '$hd '"
 added=$(coord_sum mmo_fleet_added_total) || fail "no coordinator replica answers mmo_fleet_added_total"
@@ -1398,6 +1564,7 @@ say "one host ($hd), fleet added $added0 -> $added, generation $gen, successions
 # The twin's own dial back (the root's fleet.min); its replicas restart together again.
 k set env deploy/coordinator VOXEL_FLEET_MIN="$fmin" > /dev/null || fail "kubectl set env VOXEL_FLEET_MIN=$fmin on the coordinator failed"
 wait_until 150 "$coordinators coordinator replicas back on VOXEL_FLEET_MIN=$fmin, every one Ready" coord_pods_with_min "$fmin"
+for pod in $(coordinator_pods); do telemetry_record_pod coordinator "$pod"; done
 
 echo
 [ -z "$skipped_7d" ] || echo "twin-check: phase 7d SKIPPED: $skipped_7d"

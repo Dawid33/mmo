@@ -66,7 +66,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// link is swapped; the session's connection is reset
     /// ([`PeerSession::reset_connection`]), so its next pump reports `Down` (that host's
     /// regions are no longer known to run) and resumes over the new link after a hello.
-    pub fn set_peer(&mut self, ordinal: HostId, mut session: PeerSession, link: Box<dyn PeerLink + Send>) {
+    pub fn set_peer(
+        &mut self,
+        ordinal: HostId,
+        mut session: PeerSession,
+        link: Box<dyn PeerLink + Send>,
+    ) {
         debug_assert_eq!(session.peer(), ordinal, "a session for another host");
         if self.forgotten_hosts.contains(&ordinal) {
             // A zombie of a forgotten host dialing in: never linked again (its id is never
@@ -76,11 +81,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let prefilled = session.unreceived().count();
         if prefilled > 0 {
-            log::error!("[server] a session for host {ordinal} came with {prefilled} message(s) already queued");
-            debug_assert!(false, "set_peer: a session with messages queued for host {ordinal}");
+            log::error!(
+                "[server] a session for host {ordinal} came with {prefilled} message(s) already queued"
+            );
+            debug_assert!(
+                false,
+                "set_peer: a session with messages queued for host {ordinal}"
+            );
         }
         if let Some(peer) = self.peers.get_mut(&ordinal) {
-            log::info!("[server] the link to host {ordinal} was replaced: its session continues on the new one");
+            log::info!(
+                "[server] the link to host {ordinal} was replaced: its session continues on the new one"
+            );
             peer.link = link;
             peer.session.reset_connection();
             return;
@@ -104,7 +116,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             // nothing goes either way until the cut is decided (`world_cut.rs`).
             session.freeze();
         }
-        self.peers.insert(ordinal, Peer { session, link, stale: false });
+        self.peers.insert(
+            ordinal,
+            Peer {
+                session,
+                link,
+                stale: false,
+            },
+        );
     }
 
     /// Drive every peer session: read what the other hosts sent and act on it, then send
@@ -113,7 +132,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.clock_ms = self.clock_ms.max(now_ms);
         let ordinals: Vec<HostId> = self.peers.keys().copied().collect();
         for ordinal in ordinals {
-            let Some(peer) = self.peers.get_mut(&ordinal) else { continue };
+            let Some(peer) = self.peers.get_mut(&ordinal) else {
+                continue;
+            };
             if peer.stale {
                 continue;
             }
@@ -121,7 +142,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             // A connection the session broke on this pump (it reported `Down` and waits for
             // the next one) is ended here, so the link makes a fresh one with a new hello.
             if peer.session.is_broken() && peer.link.is_up() && events.contains(&PeerEvent::Down) {
-                log::warn!("[server] the connection to host {ordinal} broke: closing it for a fresh one");
+                log::warn!(
+                    "[server] the connection to host {ordinal} broke: closing it for a fresh one"
+                );
                 peer.link.close();
             }
             for ev in events {
@@ -147,7 +170,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub(super) fn owner_of_sr(&self, sr: crate::SuperRegion) -> crate::Owner {
         // Land being inherited, and land this host's pending part releases (`land.rs`): no
         // region of it starts until the cut is decided.
-        if self.inheriting.contains_key(&sr) || self.releasing.contains_key(&sr) || self.move_masked(sr) {
+        if self.inheriting.contains_key(&sr)
+            || self.releasing.contains_key(&sr)
+            || self.move_masked(sr)
+        {
             return crate::Owner::Unknown;
         }
         self.ownership.0.owner_of(sr)
@@ -190,31 +216,63 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Whether host `ordinal`'s session is reachable now (and it is not of a newer
     /// generation, nor joined to this host by a leave: `world_cut.rs`).
     pub(super) fn peer_reachable(&self, ordinal: HostId) -> bool {
-        self.peers.get(&ordinal).is_some_and(|p| !p.stale && p.session.is_reachable()) && !self.leave_blocks(ordinal)
+        self.peers
+            .get(&ordinal)
+            .is_some_and(|p| !p.stale && p.session.is_reachable())
+            && !self.leave_blocks(ordinal)
     }
 
     /// Reliable messages to other hosts not acknowledged yet, those waiting for a session
     /// included (the `[server]` counters line; 0 once everything arrived).
     pub fn peer_unreceived(&self) -> usize {
-        self.peers.values().map(|p| p.session.unreceived().count()).sum::<usize>()
+        self.peers
+            .values()
+            .map(|p| p.session.unreceived().count())
+            .sum::<usize>()
             + self.peer_waiting.values().map(Vec::len).sum::<usize>()
-            + self.leave_pairs.values().map(|p| p.held.len()).sum::<usize>()
-            + self.count_pairs.values().map(|p| p.held.len()).sum::<usize>()
+            + self
+                .leave_pairs
+                .values()
+                .map(|p| p.held.len())
+                .sum::<usize>()
+            + self
+                .count_pairs
+                .values()
+                .map(|p| p.held.len())
+                .sum::<usize>()
     }
 
     /// What a leave, or a world cut counted across a down link, holds back for each host
     /// (`world_cut.rs`), never sent yet.
     fn leave_held(&self) -> impl Iterator<Item = (HostId, &Reliable)> {
-        let counted = self.count_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r)));
-        self.leave_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r))).chain(counted)
+        let counted = self
+            .count_pairs
+            .iter()
+            .flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r)));
+        self.leave_pairs
+            .iter()
+            .flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r)))
+            .chain(counted)
     }
 
     /// Per host, what waits for it outside a session, never sent: waiting for a session
     /// (`peer_waiting`), or held back by a leave or a counted cut.
     fn never_sent(&self) -> impl Iterator<Item = (HostId, Vec<&Reliable>)> {
-        let waiting = self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>()));
-        let counted = self.count_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>()));
-        waiting.chain(self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>()))).chain(counted)
+        let waiting = self
+            .peer_waiting
+            .iter()
+            .map(|(o, l)| (*o, l.iter().collect::<Vec<_>>()));
+        let counted = self
+            .count_pairs
+            .iter()
+            .map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>()));
+        waiting
+            .chain(
+                self.leave_pairs
+                    .iter()
+                    .map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>())),
+            )
+            .chain(counted)
     }
 
     /// Test support: the entity of every [`Reliable::Transfer`] not acknowledged yet —
@@ -223,15 +281,23 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn peer_unreceived_ids(&self) -> Vec<(HostId, crate::EntityId, bool)> {
         let mut out = Vec::new();
         for (&ordinal, peer) in &self.peers {
-            let unsent: BTreeSet<crate::EntityId> = peer.session.unsent().filter_map(transfer_id).collect();
+            let unsent: BTreeSet<crate::EntityId> =
+                peer.session.unsent().filter_map(transfer_id).collect();
             for id in peer.session.unreceived().filter_map(transfer_id) {
                 out.push((ordinal, id, !unsent.contains(&id)));
             }
         }
         for (&ordinal, list) in &self.peer_waiting {
-            out.extend(list.iter().filter_map(transfer_id).map(|id| (ordinal, id, false)));
+            out.extend(
+                list.iter()
+                    .filter_map(transfer_id)
+                    .map(|id| (ordinal, id, false)),
+            );
         }
-        out.extend(self.leave_held().filter_map(|(o, r)| transfer_id(r).map(|id| (o, id, false))));
+        out.extend(
+            self.leave_held()
+                .filter_map(|(o, r)| transfer_id(r).map(|id| (o, id, false))),
+        );
         out
     }
 
@@ -252,7 +318,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         for (ordinal, list) in self.never_sent() {
             out.extend(list.into_iter().filter_map(|r| match r.inner() {
-                Reliable::PlayerMove { handoff, .. } => Some((ordinal, handoff.client, handoff.player, false)),
+                Reliable::PlayerMove { handoff, .. } => {
+                    Some((ordinal, handoff.client, handoff.player, false))
+                }
                 _ => None,
             }));
         }
@@ -268,11 +336,19 @@ impl<S: RegionSpawner> WorldManager<S> {
             let all: Vec<&Reliable> = peer.session.unreceived().collect();
             let sent = all.len() - unsent;
             for (i, r) in all.into_iter().enumerate() {
-                out.extend(intents_in(r).into_iter().map(|msg| (ordinal, msg, i < sent)));
+                out.extend(
+                    intents_in(r)
+                        .into_iter()
+                        .map(|msg| (ordinal, msg, i < sent)),
+                );
             }
         }
         for (ordinal, list) in self.never_sent() {
-            out.extend(list.into_iter().flat_map(|r| intents_in(r).into_iter().map(move |msg| (ordinal, msg, false))));
+            out.extend(list.into_iter().flat_map(|r| {
+                intents_in(r)
+                    .into_iter()
+                    .map(move |msg| (ordinal, msg, false))
+            }));
         }
         out
     }
@@ -340,22 +416,45 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// subscriptions only. A body handed here before the session came makes it the home.
     pub(super) fn observer_connected(&mut self, client: ClientId, player: PlayerId, now_ms: u64) {
         if self.sessions.contains_key(&client) {
-            log::warn!("client {client}: a second session on this host; the observer connection is ignored");
+            log::warn!(
+                "client {client}: a second session on this host; the observer connection is ignored"
+            );
             return;
         }
-        let _ = self.out.send((Some(client), ServerPacket::Host(self.endpoint.clone())));
+        let _ = self
+            .out
+            .send((Some(client), ServerPacket::Host(self.endpoint.clone())));
         let home = self.awaiting_session.remove(&client).is_some();
         if home && self.player_of.get(&client) != Some(&player) {
-            log::error!("client {client}: an observer session for player {} holds another player's body", player.0);
+            log::error!(
+                "client {client}: an observer session for player {} holds another player's body",
+                player.0
+            );
         }
-        let kind = if home { SessionKind::Home } else { SessionKind::Observer };
-        self.sessions.insert(client, Session { kind, player: Some(player), idle_since_ms: now_ms, ..Session::default() });
+        let kind = if home {
+            SessionKind::Home
+        } else {
+            SessionKind::Observer
+        };
+        self.sessions.insert(
+            client,
+            Session {
+                kind,
+                player: Some(player),
+                idle_since_ms: now_ms,
+                ..Session::default()
+            },
+        );
         if home {
-            log::info!("client {client}: connected after its body was handed here; the session is its home");
+            log::info!(
+                "client {client}: connected after its body was handed here; the session is its home"
+            );
             self.observer_revocations.push(client);
             let region = self.homes.get(&client).copied();
             self.send_home_hop(client, player);
-            let _ = self.out.send((Some(client), ServerPacket::PlayerRegion(region, client)));
+            let _ = self
+                .out
+                .send((Some(client), ServerPacket::PlayerRegion(region, client)));
             self.send_home_state(client, now_ms);
             if let Some(rc) = region {
                 self.refresh_keepalive(rc, now_ms);
@@ -366,17 +465,32 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The host `client`'s player was handed to, if this host handed it away.
     pub(super) fn departed_host(&self, client: ClientId) -> Option<HostId> {
-        let player = self.player_of.get(&client).copied().or_else(|| self.sessions.get(&client)?.player)?;
+        let player = self
+            .player_of
+            .get(&client)
+            .copied()
+            .or_else(|| self.sessions.get(&client)?.player)?;
         self.departed.get(&player).copied()
     }
 
     /// An input of `client`, whose body is on another host now (`departed`), to that host
     /// (volatile: lost with a link that is down, as an input to a dead region is).
-    pub(super) fn forward_input(&mut self, client: ClientId, kind: GameEventKind, stamp: crate::Tick) {
-        let Some(host) = self.departed_host(client) else { return };
+    pub(super) fn forward_input(
+        &mut self,
+        client: ClientId,
+        kind: GameEventKind,
+        stamp: crate::Tick,
+    ) {
+        let Some(host) = self.departed_host(client) else {
+            return;
+        };
         log::debug!("[server] {kind:?} of client {client}: its body is on host {host}, forwarded");
         if let Some(peer) = self.peers.get_mut(&host).filter(|p| !p.stale) {
-            peer.session.send_volatile(Volatile::Input { client, kind, stamp });
+            peer.session.send_volatile(Volatile::Input {
+                client,
+                kind,
+                stamp,
+            });
         }
     }
 
@@ -384,7 +498,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// it is reachable, the player is known (online, or parking) and no move or restore
     /// here waits on the body. Otherwise it is handed back to where it left.
     pub(super) fn can_hand_off(&self, client: ClientId, target: RegionCoords) -> bool {
-        let player = self.player_of.get(&client).copied().or_else(|| self.parking.get(&client).map(|p| p.player));
+        let player = self
+            .player_of
+            .get(&client)
+            .copied()
+            .or_else(|| self.parking.get(&client).map(|p| p.player));
         let Some(player) = player else { return false };
         self.reaches(target)
             && !self.moving.contains_key(&client)
@@ -411,13 +529,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         view: bool,
         now_ms: u64,
     ) {
-        let client = bundle.client.as_ref().map(|(c, _)| *c).expect("a player's body");
-        let owner = self.foreign_host(target).expect("can_hand_off: another host owns the target");
+        let client = bundle
+            .client
+            .as_ref()
+            .map(|(c, _)| *c)
+            .expect("a player's body");
+        let owner = self
+            .foreign_host(target)
+            .expect("can_hand_off: another host owns the target");
         let (player, claim, park) = match self.parking.remove(&client) {
             // Disconnected, its park on the way to `rc`: parked where it lands.
             Some(p) => (p.player, claim_of(p.adventure), true),
             None => {
-                let player = self.player_of.remove(&client).expect("can_hand_off: online or parking");
+                let player = self
+                    .player_of
+                    .remove(&client)
+                    .expect("can_hand_off: online or parking");
                 let claim = claim_of(self.adventurer_of.remove(&client));
                 // Not offline: in transit, its claim kept in use until `owner` reports it.
                 self.world_handed(player, owner);
@@ -428,7 +555,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         let hop = self.hop_here(player) + 1;
         // Its login session goes with it (it is still in the world).
         let login = self.logins.remove(&client);
-        log::info!("[server] player {} (client {client}) from {rc:?} into {target:?}: handed to host {owner}", player.0);
+        log::info!(
+            "[server] player {} (client {client}) from {rc:?} into {target:?}: handed to host {owner}",
+            player.0
+        );
         self.homes.remove(&client);
         // Handed here without a session and on again before it came: not awaited here.
         self.awaiting_session.remove(&client);
@@ -440,8 +570,24 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.forget_home_answers(client);
         self.departed.insert(player, owner);
         self.locations.remove(&bundle.id);
-        let handoff = crate::PlayerHandoff { client, player, claim, login, park, hop };
-        self.send_reliable(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: Some(handoff) }, view);
+        let handoff = crate::PlayerHandoff {
+            client,
+            player,
+            claim,
+            login,
+            park,
+            hop,
+        };
+        self.send_reliable(
+            owner,
+            Reliable::Transfer {
+                target,
+                stamp,
+                bundle: Box::new(bundle),
+                player: Some(handoff),
+            },
+            view,
+        );
         // Its home may have just lost its keep-alive reason.
         self.refresh_keepalive(rc, now_ms);
     }
@@ -460,12 +606,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     ) {
         let now_ms = self.clock_ms;
         if bundle.client.as_ref().map(|(c, _)| *c) != Some(h.client) {
-            log::error!("[server] host {from} handed player {} over with another client's body: dropped", h.player.0);
+            log::error!(
+                "[server] host {from} handed player {} over with another client's body: dropped",
+                h.player.0
+            );
             debug_assert!(false, "a hand-off whose body is not its client's");
             return;
         }
         let c = h.client;
-        log::info!("[server] player {} (client {c}) handed over by host {from} into {target:?}", h.player.0);
+        log::info!(
+            "[server] player {} (client {c}) handed over by host {from} into {target:?}",
+            h.player.0
+        );
         self.departed.remove(&h.player);
         if self.holds_player(h.player) {
             return self.drop_arriving_copy(from, h.player, h.hop);
@@ -483,9 +635,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // A survivor that applied the succession hands it here before this heir
                 // adopted the land, or a peer not told yet of a release here: expected,
                 // nothing is lost (the player logs in again).
-                log::info!("[server] player {} handed into {target:?}, inherited or released here: parked", h.player.0);
+                log::info!(
+                    "[server] player {} handed into {target:?}, inherited or released here: parked",
+                    h.player.0
+                );
             } else {
-                log::error!("[server] player {} handed into {target:?}, which cannot take it now: parked", h.player.0);
+                log::error!(
+                    "[server] player {} handed into {target:?}, which cannot take it now: parked",
+                    h.player.0
+                );
             }
             self.park_handed(from, c, h.player, record, now_ms);
             self.login_parked_on_arrival(login);
@@ -493,7 +651,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         if h.park {
             // `accept_arrival` parks it where it lands (`ParkPlayer` behind the arrival).
-            self.parking.insert(c, Parking { player: h.player, region: target, adventure });
+            self.parking.insert(
+                c,
+                Parking {
+                    player: h.player,
+                    region: target,
+                    adventure,
+                },
+            );
             self.accept_arrival(None, target, stamp, bundle, now_ms);
             self.login_parked_on_arrival(login);
             return;
@@ -523,11 +688,22 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// host is reachable, so it waits there, conserved. This host keeps only where it went
     /// (`departed`); the client's session here becomes an observer and is sent on to that
     /// host ([`crate::ServerPacket::RegionElsewhere`]).
-    pub(super) fn move_to_peer(&mut self, client: ClientId, m: Moving, record: Option<Box<PlayerRecord>>, now_ms: u64) {
-        let owner = self.foreign_host(m.target).expect("finish_move: another host owns the target");
+    pub(super) fn move_to_peer(
+        &mut self,
+        client: ClientId,
+        m: Moving,
+        record: Option<Box<PlayerRecord>>,
+        now_ms: u64,
+    ) {
+        let owner = self
+            .foreign_host(m.target)
+            .expect("finish_move: another host owns the target");
         // A move belongs to an online player (a disconnect turns it into a park).
         let Some(player) = self.player_of.remove(&client) else {
-            log::error!("move of client {client} into {:?}: no player; nothing to hand over", m.target);
+            log::error!(
+                "move of client {client} into {:?}: no player; nothing to hand over",
+                m.target
+            );
             debug_assert!(false, "a move with no player");
             return;
         };
@@ -540,7 +716,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         let (mut carried, y) = match record {
             Some(record) => (record.client, record.pose.translation.y),
             None => {
-                log::error!("move of client {client} out of {:?}: no body came back; its items are lost", m.from);
+                log::error!(
+                    "move of client {client} out of {:?}: no body came back; its items are lost",
+                    m.from
+                );
                 (crate::Client::default(), 0.0)
             }
         };
@@ -552,7 +731,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         let adventure = split_claim(claim);
         let (x, z) = crate::block_column_xz(m.landing);
         let pose = crate::Pose::from_translation(rapier3d::math::Vector::new(x, y, z));
-        let record = PlayerRecord { client: carried, pose, region: m.target, adventure };
+        let record = PlayerRecord {
+            client: carried,
+            pose,
+            region: m.target,
+            adventure,
+        };
         log::info!(
             "[server] player {} (client {client}) moves from {:?} into {:?}: handed to host {owner}",
             player.0,
@@ -568,10 +752,26 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.forget_home_answers(client);
         self.departed.insert(player, owner);
-        let handoff = crate::PlayerHandoff { client, player, claim, login, park: false, hop };
+        let handoff = crate::PlayerHandoff {
+            client,
+            player,
+            claim,
+            login,
+            park: false,
+            hop,
+        };
         // Parked after `m.from` answered the pending cut: its snapshot holds the body.
         let view = self.in_cut_view(m.from);
-        self.send_reliable(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target, place: crate::MovePlace::Landing }, view);
+        self.send_reliable(
+            owner,
+            Reliable::PlayerMove {
+                handoff,
+                record: Box::new(record),
+                target: m.target,
+                place: crate::MovePlace::Landing,
+            },
+            view,
+        );
         self.refresh_keepalive(m.from, now_ms);
         let _ = self.redirect(client, m.target);
     }
@@ -581,14 +781,24 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ([`HANDOFF_SESSION_GRACE_MS`]) — its body created at `target`'s landing with what it
     /// carries, as a move within one host creates it. A `target` that cannot be loaded
     /// parks the record here ([`Self::park_handed`]).
-    pub(super) fn accept_move(&mut self, from: HostId, h: crate::PlayerHandoff, record: PlayerRecord, target: RegionCoords, place: crate::MovePlace) {
+    pub(super) fn accept_move(
+        &mut self,
+        from: HostId,
+        h: crate::PlayerHandoff,
+        record: PlayerRecord,
+        target: RegionCoords,
+        place: crate::MovePlace,
+    ) {
         // Elastic 5: land a move brings here and not claimed yet: held until it is.
         if self.hold_for_move(from, &h, &record, target, place) {
             return;
         }
         let now_ms = self.clock_ms;
         let c = h.client;
-        log::info!("[server] player {} (client {c}) moved here by host {from} into {target:?}", h.player.0);
+        log::info!(
+            "[server] player {} (client {c}) moved here by host {from} into {target:?}",
+            h.player.0
+        );
         self.departed.remove(&h.player);
         if self.holds_player(h.player) {
             return self.drop_arriving_copy(from, h.player, h.hop);
@@ -596,9 +806,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.placed_by_handoff(h.player, h.hop);
         if self.is_unavailable(target) || !self.owns(target) || self.leave_parked {
             if self.masked_or_released(target) {
-                log::info!("[server] player {} moved into {target:?}, inherited or released here: parked", h.player.0);
+                log::info!(
+                    "[server] player {} moved into {target:?}, inherited or released here: parked",
+                    h.player.0
+                );
             } else {
-                log::error!("[server] player {} moved into {target:?}, unavailable, not this host's or leaving: parked", h.player.0);
+                log::error!(
+                    "[server] player {} moved into {target:?}, unavailable, not this host's or leaving: parked",
+                    h.player.0
+                );
             }
             self.park_handed(from, c, h.player, record, now_ms);
             self.login_parked_on_arrival(h.login);
@@ -616,15 +832,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         match place {
             crate::MovePlace::Landing => {
                 let landing = self.landing_in(target);
-                self.send_play_event(target, GameEventKind::CreateClientAt(c, landing, Some(Box::new(record.client))));
+                self.send_play_event(
+                    target,
+                    GameEventKind::CreateClientAt(c, landing, Some(Box::new(record.client))),
+                );
             }
             // Its land moved here under it: it stands where it stood.
-            crate::MovePlace::Pose => self.send_play_event(target, GameEventKind::RestorePlayer(c, Box::new(record))),
+            crate::MovePlace::Pose => {
+                self.send_play_event(target, GameEventKind::RestorePlayer(c, Box::new(record)))
+            }
         }
         if promoted {
             self.send_home_hop(c, h.player);
         }
-        let _ = self.out.send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
+        let _ = self
+            .out
+            .send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
         if promoted {
             self.send_home_state(c, now_ms);
         }
@@ -639,7 +862,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ([`ServerPacket::HomeHop`]), so a client with connections to several hosts can tell
     /// this newer home from an older one whose `PlayerRegion` arrives after it.
     fn send_home_hop(&self, client: ClientId, player: PlayerId) {
-        let _ = self.out.send((Some(client), ServerPacket::HomeHop(self.hop_here(player))));
+        let _ = self
+            .out
+            .send((Some(client), ServerPacket::HomeHop(self.hop_here(player))));
     }
 
     /// `c`'s body was handed here by host `from`: its session here (an observer, if any)
@@ -695,13 +920,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// reported again at it (online, or offline when it is not online here) — its older
     /// reports would be stale against that transit and could never end it.
     fn drop_arriving_copy(&mut self, from: HostId, player: PlayerId, hop: u64) {
-        log::warn!("[server] player {} from host {from} is already here; the arriving copy is dropped", player.0);
+        log::warn!(
+            "[server] player {} from host {from} is already here; the arriving copy is dropped",
+            player.0
+        );
         if hop <= self.hop_here(player) {
             return;
         }
         self.player_hop.insert(player, hop);
         self.handed.remove(&player);
-        let clients: Vec<ClientId> = self.player_of.iter().filter(|(_, p)| **p == player).map(|(c, _)| *c).collect();
+        let clients: Vec<ClientId> = self
+            .player_of
+            .iter()
+            .filter(|(_, p)| **p == player)
+            .map(|(c, _)| *c)
+            .collect();
         if clients.is_empty() {
             self.world_send(HostMsg::PlayerOffline { player, hop });
         }
@@ -723,16 +956,29 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the SENDER's part writes this record (here the player is `not_ours`), so it is noted
     /// under that cut (`parked_written`) and dropped at its commit if it parks on land that is
     /// not this host's (`drop_stored_parked`: the store is then its only holder).
-    fn park_handed(&mut self, from: HostId, client: ClientId, player: PlayerId, record: PlayerRecord, now_ms: u64) {
+    fn park_handed(
+        &mut self,
+        from: HostId,
+        client: ClientId,
+        player: PlayerId,
+        record: PlayerRecord,
+        now_ms: u64,
+    ) {
         let hop = self.hop_here(player);
         self.world_send(HostMsg::PlayerOffline { player, hop });
         self.cut_transit(player, &record);
         if let Some(cut) = self.inbound_accounted.filter(|c| self.world_cut_is(*c)) {
-            self.parked_written.entry(cut).or_default().insert(player, record.clone());
+            self.parked_written
+                .entry(cut)
+                .or_default()
+                .insert(player, record.clone());
         }
         self.parked_players.insert(player, record);
         if self.sessions.contains_key(&client) {
-            let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+            let _ = self.out.send((
+                Some(client),
+                ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string()),
+            ));
             self.client_disconnected(client, now_ms);
         } else {
             self.tell_parked(from, client, player);
@@ -744,17 +990,27 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn tell_parked(&mut self, from: HostId, client: ClientId, player: PlayerId) {
         if from == self.ordinal() {
             // Handed here by a host declared dead since (a succession): nobody to tell.
-            log::info!("[server] player {} (client {client}) parked here with no session", player.0);
+            log::info!(
+                "[server] player {} (client {client}) parked here with no session",
+                player.0
+            );
             return;
         }
-        log::info!("[server] player {} (client {client}) parked here with no session: host {from} told", player.0);
+        log::info!(
+            "[server] player {} (client {client}) parked here with no session: host {from} told",
+            player.0
+        );
         self.queue_to_peer(from, Reliable::PlayerParked { client, player });
     }
 
     /// [`Self::tell_parked`] for an awaited client (`awaiting_session`) about to be parked.
     pub(super) fn tell_awaited_parked(&mut self, client: ClientId) {
-        let Some(&(_, from)) = self.awaiting_session.get(&client) else { return };
-        let Some(&player) = self.player_of.get(&client) else { return };
+        let Some(&(_, from)) = self.awaiting_session.get(&client) else {
+            return;
+        };
+        let Some(&player) = self.player_of.get(&client) else {
+            return;
+        };
         self.tell_parked(from, client, player);
     }
 
@@ -762,14 +1018,25 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// there: this host's observer session of the client (if any) ends, the client told
     /// why. `departed` stays (the record is on `from`).
     fn player_parked_elsewhere(&mut self, from: HostId, client: ClientId, player: PlayerId) {
-        let observing =
-            self.sessions.get(&client).is_some_and(|s| s.kind == SessionKind::Observer && s.player == Some(player));
+        let observing = self
+            .sessions
+            .get(&client)
+            .is_some_and(|s| s.kind == SessionKind::Observer && s.player == Some(player));
         if !observing {
-            log::debug!("[server] host {from} parked player {} (client {client}); no observer session here", player.0);
+            log::debug!(
+                "[server] host {from} parked player {} (client {client}); no observer session here",
+                player.0
+            );
             return;
         }
-        log::info!("[server] host {from} parked player {} (client {client}): its session here ends", player.0);
-        let _ = self.out.send((Some(client), ServerPacket::Refused(PLAYER_PARKED_ELSEWHERE.to_string())));
+        log::info!(
+            "[server] host {from} parked player {} (client {client}): its session here ends",
+            player.0
+        );
+        let _ = self.out.send((
+            Some(client),
+            ServerPacket::Refused(PLAYER_PARKED_ELSEWHERE.to_string()),
+        ));
         self.client_disconnected(client, self.clock_ms);
     }
 
@@ -785,19 +1052,27 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// go: a client re-asks its home for a region an observer connection has not served
     /// within `OBSERVER_RETRY_MAX_MS`, releasing it there.
     pub(super) fn subscribe_elsewhere(&mut self, client: ClientId, rc: RegionCoords) {
-        let Some(kind) = self.sessions.get(&client).map(|s| s.kind) else { return };
+        let Some(kind) = self.sessions.get(&client).map(|s| s.kind) else {
+            return;
+        };
         if kind == SessionKind::Observer {
             if !self.reaches(rc) {
                 self.note_unowned(rc);
             }
-            log::debug!("client {client}: {rc:?} ({:?}) is not served here; its observer subscribe waits", self.owner_of(rc));
+            log::debug!(
+                "client {client}: {rc:?} ({:?}) is not served here; its observer subscribe waits",
+                self.owner_of(rc)
+            );
             self.remember_asked(client, rc);
             return;
         }
         if !self.reaches(rc) {
             // With no owner known it is wanted for a claim.
             self.note_unowned(rc);
-            log::debug!("client {client}: {rc:?}'s owner ({:?}) is not reachable; the subscribe waits", self.owner_of(rc));
+            log::debug!(
+                "client {client}: {rc:?}'s owner ({:?}) is not reachable; the subscribe waits",
+                self.owner_of(rc)
+            );
             self.remember_asked(client, rc);
             return;
         }
@@ -882,7 +1157,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let endpoint = self.endpoint.clone();
                     // Never presented: a client opens no connection to its home host.
                     let ticket = crate::ObserverTicket { client, nonce: 0 };
-                    let _ = self.out.send((Some(client), ServerPacket::RegionElsewhere { region: rc, endpoint, ticket }));
+                    let _ = self.out.send((
+                        Some(client),
+                        ServerPacket::RegionElsewhere {
+                            region: rc,
+                            endpoint,
+                            ticket,
+                        },
+                    ));
                     named_here += 1;
                 } else {
                     self.subscribe(client, rc);
@@ -893,7 +1175,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             if kind != SessionKind::Home || !self.reaches(rc) {
                 continue;
             }
-            if self.foreign_host(rc).is_some_and(|owner| !self.peer_endpoints.contains_key(&owner)) {
+            if self
+                .foreign_host(rc)
+                .is_some_and(|owner| !self.peer_endpoints.contains_key(&owner))
+            {
                 // Its endpoint comes with its hello (`redirect` would warn every pass).
                 continue;
             }
@@ -922,12 +1207,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// here was sent to it for is answered again (`redirected`, the entry kept as where the
     /// client takes the region from until then) — now, or when it can be.
     pub(super) fn reanswer_redirected_to(&mut self, pred: HostId) {
-        let to_pred: Vec<(ClientId, RegionCoords)> =
-            self.redirected.iter().filter(|(_, o)| **o == pred).map(|(k, _)| *k).collect();
+        let to_pred: Vec<(ClientId, RegionCoords)> = self
+            .redirected
+            .iter()
+            .filter(|(_, o)| **o == pred)
+            .map(|(k, _)| *k)
+            .collect();
         if to_pred.is_empty() {
             return;
         }
-        log::info!("[server] {} region(s) clients were sent to host {pred} for are answered again", to_pred.len());
+        log::info!(
+            "[server] {} region(s) clients were sent to host {pred} for are answered again",
+            to_pred.len()
+        );
         for (client, rc) in to_pred {
             match self.sessions.get_mut(&client) {
                 Some(session) if session.kind == SessionKind::Home => {
@@ -945,12 +1237,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ticket that host is told to expect — queued like everything to it).
     pub(super) fn redirect(&mut self, client: ClientId, rc: RegionCoords) -> Redirect {
         let Some(owner) = self.foreign_host(rc) else {
-            log::warn!("client {client}: {rc:?} is not another host's ({:?}); subscribe dropped", self.owner_of(rc));
+            log::warn!(
+                "client {client}: {rc:?} is not another host's ({:?}); subscribe dropped",
+                self.owner_of(rc)
+            );
             return Redirect::Never;
         };
         let Some(endpoint) = self.peer_endpoints.get(&owner).cloned() else {
             // Per subscribe (a client re-asks): debug only; it waits (`asked_elsewhere`).
-            log::debug!("client {client}: {rc:?} is host {owner}'s, whose endpoint is not known yet; the subscribe waits");
+            log::debug!(
+                "client {client}: {rc:?} is host {owner}'s, whose endpoint is not known yet; the subscribe waits"
+            );
             return Redirect::Later;
         };
         if self.sessions.get(&client).and_then(|s| s.player).is_none() {
@@ -961,21 +1258,42 @@ impl<S: RegionSpawner> WorldManager<S> {
             // No source (`set_endpoints` not called): no ticket.
             if !self.unseeded_warned {
                 self.unseeded_warned = true;
-                log::error!("[server] no nonce source (set_endpoints): subscribes to other hosts' regions are dropped");
+                log::error!(
+                    "[server] no nonce source (set_endpoints): subscribes to other hosts' regions are dropped"
+                );
             }
             return Redirect::Never;
         }
         let ticket = self.observer_ticket(client, owner, self.clock_ms);
-        let _ = self.out.send((Some(client), ServerPacket::RegionElsewhere { region: rc, endpoint, ticket }));
+        let _ = self.out.send((
+            Some(client),
+            ServerPacket::RegionElsewhere {
+                region: rc,
+                endpoint,
+                ticket,
+            },
+        ));
         Redirect::Sent(owner)
     }
 
     /// Test support: the regions `client`'s session here waits to answer
     /// (`Session::asked_elsewhere`), and those it sent the client elsewhere for, with the host.
     #[doc(hidden)]
-    pub fn client_answers(&self, client: ClientId) -> (Vec<RegionCoords>, Vec<(RegionCoords, HostId)>) {
-        let asked = self.sessions.get(&client).map(|s| s.asked_elsewhere.iter().copied().collect()).unwrap_or_default();
-        let redirected = self.redirected.iter().filter(|((c, _), _)| *c == client).map(|((_, rc), o)| (*rc, *o)).collect();
+    pub fn client_answers(
+        &self,
+        client: ClientId,
+    ) -> (Vec<RegionCoords>, Vec<(RegionCoords, HostId)>) {
+        let asked = self
+            .sessions
+            .get(&client)
+            .map(|s| s.asked_elsewhere.iter().copied().collect())
+            .unwrap_or_default();
+        let redirected = self
+            .redirected
+            .iter()
+            .filter(|((c, _), _)| *c == client)
+            .map(|((_, rc), o)| (*rc, *o))
+            .collect();
         (asked, redirected)
     }
 
@@ -983,7 +1301,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the owner told to expect it — [`Reliable::ObserverOrder`], valid for
     /// [`OBSERVER_ORDER_TTL_SECS`] from its receipt there), handed out again while at
     /// least half its life is left (by this host's `now_ms`), then minted anew.
-    pub(super) fn observer_ticket(&mut self, client: ClientId, owner: HostId, now_ms: u64) -> crate::ObserverTicket {
+    pub(super) fn observer_ticket(
+        &mut self,
+        client: ClientId,
+        owner: HostId,
+        now_ms: u64,
+    ) -> crate::ObserverTicket {
         let reuse_ms = OBSERVER_ORDER_TTL_SECS * 1000 / 2;
         if let Some(&(nonce, minted)) = self.observer_tickets.get(&(client, owner)) {
             if now_ms.saturating_sub(minted) < reuse_ms {
@@ -991,13 +1314,24 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         }
         let nonce = self.next_nonce();
-        self.observer_tickets.insert((client, owner), (nonce, now_ms));
+        self.observer_tickets
+            .insert((client, owner), (nonce, now_ms));
         match self.sessions.get(&client).and_then(|s| s.player) {
             Some(player) => {
                 let ttl_secs = OBSERVER_ORDER_TTL_SECS;
-                self.queue_to_peer(owner, Reliable::ObserverOrder { client, player, nonce: crate::Nonce(nonce), ttl_secs });
+                self.queue_to_peer(
+                    owner,
+                    Reliable::ObserverOrder {
+                        client,
+                        player,
+                        nonce: crate::Nonce(nonce),
+                        ttl_secs,
+                    },
+                );
             }
-            None => log::error!("client {client}: an observer ticket with no player; host {owner} is not told"),
+            None => log::error!(
+                "client {client}: an observer ticket with no player; host {owner} is not told"
+            ),
         }
         crate::ObserverTicket { client, nonce }
     }
@@ -1023,11 +1357,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.to_forgotten(ordinal, msg, view);
         }
         let msg = match self.world_cut_wrap(ordinal, msg, view) {
-            (msg, Some(cut)) => Reliable::InCut { cut, body: Box::new(msg) },
+            (msg, Some(cut)) => Reliable::InCut {
+                cut,
+                body: Box::new(msg),
+            },
             (msg, None) => msg,
         };
         // Joined by a leave of the pending world cut: held back until it is decided.
-        let Some(msg) = self.hold_for_leave(ordinal, msg) else { return };
+        let Some(msg) = self.hold_for_leave(ordinal, msg) else {
+            return;
+        };
         if let Some(id) = self.queue_now(ordinal, msg) {
             if view {
                 self.peer_in_source_view.insert((ordinal, id));
@@ -1052,9 +1391,27 @@ impl<S: RegionSpawner> WorldManager<S> {
             other => (other, self.inbound_accounted),
         };
         match body {
-            Reliable::Transfer { target, stamp, bundle, player: None } => {
-                log::warn!("[server] a transfer of {:?} into {target:?} for host {ordinal}, which is forgotten: it waits for the owner", bundle.id);
-                self.wait_for_owner(target, Reliable::Transfer { target, stamp, bundle, player: None }, view, accounted);
+            Reliable::Transfer {
+                target,
+                stamp,
+                bundle,
+                player: None,
+            } => {
+                log::warn!(
+                    "[server] a transfer of {:?} into {target:?} for host {ordinal}, which is forgotten: it waits for the owner",
+                    bundle.id
+                );
+                self.wait_for_owner(
+                    target,
+                    Reliable::Transfer {
+                        target,
+                        stamp,
+                        bundle,
+                        player: None,
+                    },
+                    view,
+                    accounted,
+                );
                 // The directory that routed it here still names the forgotten host: read it
                 // again (the heir holds that land now), or nothing would deliver the transfer
                 // until the polling backstop.
@@ -1067,10 +1424,17 @@ impl<S: RegionSpawner> WorldManager<S> {
                     reliable_name(&msg)
                 );
                 self.peer_state_to_forgotten += 1;
-                debug_assert!(false, "a {} for forgotten host {ordinal}", reliable_name(&msg));
+                debug_assert!(
+                    false,
+                    "a {} for forgotten host {ordinal}",
+                    reliable_name(&msg)
+                );
             }
             msg => {
-                log::debug!("[server] a {} for host {ordinal}, which is forgotten: dropped", reliable_name(&msg));
+                log::debug!(
+                    "[server] a {} for host {ordinal}, which is forgotten: dropped",
+                    reliable_name(&msg)
+                );
                 self.peer_dropped_for_dead += 1;
             }
         }
@@ -1123,10 +1487,20 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|o| self.land_of(*o).is_some_and(|l| l.is_empty()))
             .collect();
         for o in hosts {
-            let entries: Vec<(u64, Reliable)> = self.peer_entries_of(o).into_iter().map(|(id, r)| (id, r.clone())).collect();
-            if let Some((_, r)) =
-                entries.iter().find(|(_, r)| matches!(r.inner(), Reliable::Transfer { player: Some(_), .. } | Reliable::PlayerMove { .. }))
-            {
+            let entries: Vec<(u64, Reliable)> = self
+                .peer_entries_of(o)
+                .into_iter()
+                .map(|(id, r)| (id, r.clone()))
+                .collect();
+            if let Some((_, r)) = entries.iter().find(|(_, r)| {
+                matches!(
+                    r.inner(),
+                    Reliable::Transfer {
+                        player: Some(_),
+                        ..
+                    } | Reliable::PlayerMove { .. }
+                )
+            }) {
                 log::error!(
                     "[server] host {o} left and owns no land, but a {} is held for it: nothing held for it moves (a \
                      conservation bug: nothing is handed to a leaving host)",
@@ -1139,7 +1513,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.departed.retain(|_, h| *h != o);
             let dropped = before - self.departed.len();
             if dropped > 0 {
-                log::info!("[server] host {o} left and owns no land: {dropped} player(s) handed to it are placed from the store from now on");
+                log::info!(
+                    "[server] host {o} left and owns no land: {dropped} player(s) handed to it are placed from the store from now on"
+                );
             }
             self.reanswer_redirected_to(o);
             if entries.is_empty() {
@@ -1160,7 +1536,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             self.peer_waiting.remove(&o);
             self.journal.take(o);
-            log::info!("[server] host {o} left and owns no land: {} message(s) held for it go on by their land's owner", entries.len());
+            log::info!(
+                "[server] host {o} left and owns no land: {} message(s) held for it go on by their land's owner",
+                entries.len()
+            );
             for (id, msg) in entries {
                 let view = self.peer_in_source_view.remove(&(o, id));
                 let (body, accounted) = match msg {
@@ -1168,24 +1547,54 @@ impl<S: RegionSpawner> WorldManager<S> {
                     other => (other, self.inbound_accounted),
                 };
                 match body {
-                    Reliable::Transfer { target, stamp, bundle, player: None } => {
-                        self.wait_for_owner(target, Reliable::Transfer { target, stamp, bundle, player: None }, view, accounted);
+                    Reliable::Transfer {
+                        target,
+                        stamp,
+                        bundle,
+                        player: None,
+                    } => {
+                        self.wait_for_owner(
+                            target,
+                            Reliable::Transfer {
+                                target,
+                                stamp,
+                                bundle,
+                                player: None,
+                            },
+                            view,
+                            accounted,
+                        );
                     }
                     Reliable::Intent(crate::IntentMsg::Intent(s)) => {
                         let target = s.target.region().unwrap_or(s.from);
-                        let reply = crate::IntentReply::Refused(s.intent, crate::IntentRefusal::OwnerNotRunning);
-                        let back = crate::SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 };
+                        let reply = crate::IntentReply::Refused(
+                            s.intent,
+                            crate::IntentRefusal::OwnerNotRunning,
+                        );
+                        let back = crate::SentReply {
+                            reply,
+                            hint: s.from,
+                            due: s.due + 1,
+                            hops: 0,
+                        };
                         let lineage = std::mem::replace(&mut self.inbound_accounted, accounted);
                         self.route_intent(crate::IntentMsg::Reply(back), target, view);
                         self.inbound_accounted = lineage;
                     }
                     Reliable::Intent(reply @ crate::IntentMsg::Reply(_)) => {
                         let target = peer_intent_target(&reply);
-                        self.intent_mailbox.entry(target).or_default().push(Mail { msg: reply, in_source_view: view, accounted_in: accounted });
+                        self.intent_mailbox.entry(target).or_default().push(Mail {
+                            msg: reply,
+                            in_source_view: view,
+                            accounted_in: accounted,
+                        });
                         self.note_unowned(target);
                     }
                     msg => {
-                        log::debug!("[server] a {} held for host {o}, which left owning no land: dropped", reliable_name(&msg));
+                        log::debug!(
+                            "[server] a {} held for host {o}, which left owning no land: dropped",
+                            reliable_name(&msg)
+                        );
                         self.peer_dropped_for_dead += 1;
                     }
                 }
@@ -1213,7 +1622,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         match &msg {
             Reliable::CutMark { cut } => self.journal.mark_out(ordinal, *cut),
-            msg if self.journals() => self.journal.sent(ordinal, id, msg, None, self.spawner.world_tick()),
+            msg if self.journals() => {
+                self.journal
+                    .sent(ordinal, id, msg, None, self.spawner.world_tick())
+            }
             _ => {}
         }
         match self.peers.get_mut(&ordinal) {
@@ -1222,7 +1634,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let waiting = self.peer_waiting.entry(ordinal).or_default();
                 // Once per wait, not per message.
                 if waiting.is_empty() {
-                    log::warn!("[server] no session with host {ordinal} yet: messages to it are kept until it has one");
+                    log::warn!(
+                        "[server] no session with host {ordinal} yet: messages to it are kept until it has one"
+                    );
                 }
                 waiting.push(msg);
             }
@@ -1255,15 +1669,30 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// At boot, before any peer traffic: the journal counts from `base`, the store's last
     /// committed world cut (`CutId(0)`, the default, before any).
     pub fn start_peer_journal(&mut self, base: crate::CutId) {
-        debug_assert!(self.journal.is_empty(), "the peer journal restarted with entries in it");
+        debug_assert!(
+            self.journal.is_empty(),
+            "the peer journal restarted with entries in it"
+        );
         self.journal = crate::PeerJournal::new(base);
     }
 
     /// Every reliable message to another host not acknowledged yet (a session's, or
     /// waiting for one), with its host and id ([`Self::peer_entries_of`]).
     fn peer_entries(&self) -> Vec<(HostId, u64, &Reliable)> {
-        let ordinals: BTreeSet<HostId> = self.peers.keys().chain(self.peer_waiting.keys()).copied().collect();
-        ordinals.into_iter().flat_map(|o| self.peer_entries_of(o).into_iter().map(move |(id, r)| (o, id, r))).collect()
+        let ordinals: BTreeSet<HostId> = self
+            .peers
+            .keys()
+            .chain(self.peer_waiting.keys())
+            .copied()
+            .collect();
+        ordinals
+            .into_iter()
+            .flat_map(|o| {
+                self.peer_entries_of(o)
+                    .into_iter()
+                    .map(move |(id, r)| (o, id, r))
+            })
+            .collect()
     }
 
     /// What this host owes host `ordinal` and it has not acknowledged (its session's, then
@@ -1272,12 +1701,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// acknowledged, or forgotten through a cut mark or count — and a session is never
     /// replaced, so they are always the LAST ones queued to that host.
     fn peer_entries_of(&self, ordinal: HostId) -> Vec<(u64, &Reliable)> {
-        let mut list: Vec<&Reliable> = self.peers.get(&ordinal).map(|p| p.session.unreceived().collect()).unwrap_or_default();
+        let mut list: Vec<&Reliable> = self
+            .peers
+            .get(&ordinal)
+            .map(|p| p.session.unreceived().collect())
+            .unwrap_or_default();
         list.extend(self.peer_waiting.get(&ordinal).into_iter().flatten());
         let queued = self.peer_queued.get(&ordinal).copied().unwrap_or(0);
         // (Never short; saturating all the same, so a miscount cannot wrap.)
         let first = queued.saturating_sub(list.len() as u64);
-        list.into_iter().enumerate().map(|(i, r)| (first + i as u64, r)).collect()
+        list.into_iter()
+            .enumerate()
+            .map(|(i, r)| (first + i as u64, r))
+            .collect()
     }
 
     /// `bundle` (in `target`'s frame), a body that is not a player, departed from `rc` at
@@ -1295,13 +1731,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     ) {
         // Never a player: the `Departures` arm hands a player off (`hand_off_to_peer`) or
         // back to its source, and a person without a history back to its source.
-        debug_assert!(bundle.client.is_none(), "a player crosses hosts by hand_off_to_peer");
+        debug_assert!(
+            bundle.client.is_none(),
+            "a player crosses hosts by hand_off_to_peer"
+        );
         // A person with a history: the receiving host reports the crossing
         // (`PersonCrossed`), never this one (`peer_schedule::person_crosses_host_seam_*`).
         // It is on another host now (or waits for one): nothing here routes to it.
         self.locations.remove(&bundle.id);
         let id = bundle.id;
-        let msg = Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None };
+        let msg = Reliable::Transfer {
+            target,
+            stamp,
+            bundle: Box::new(bundle),
+            player: None,
+        };
         match self.foreign_host(target) {
             Some(owner) => {
                 log::debug!("[server] {id:?} from {rc:?} into {target:?}: sent to host {owner}");
@@ -1328,8 +1772,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         );
         let sr = crate::super_region_of(target, self.ownership.1);
         let owner = self.owner_of(target);
-        log::debug!("[server] {} for {target:?}: super-region {sr:?} is {owner:?} here; it waits", reliable_name(&msg));
-        self.unowned_waiting.entry(sr).or_default().push(UnownedWait { msg, in_source_view: view, accounted_in });
+        log::debug!(
+            "[server] {} for {target:?}: super-region {sr:?} is {owner:?} here; it waits",
+            reliable_name(&msg)
+        );
+        self.unowned_waiting
+            .entry(sr)
+            .or_default()
+            .push(UnownedWait {
+                msg,
+                in_source_view: view,
+                accounted_in,
+            });
         self.note_unowned(target);
     }
 
@@ -1370,7 +1824,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// it right before [`Self::directory_read`]): the coordinator assigns none of them land; a
     /// draining host still asks for land something here needs (`land.rs`).
     pub fn set_draining(&mut self, draining: BTreeSet<HostId>) {
-        let Some(directory) = self.ownership.0.directory_mut() else { return };
+        let Some(directory) = self.ownership.0.directory_mut() else {
+            return;
+        };
         directory.set_draining(draining);
     }
 
@@ -1380,7 +1836,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn claimed(&mut self, rows: Vec<(crate::SuperRegion, u64)>) {
         let me = self.ordinal();
         let Some(directory) = self.ownership.0.directory_mut() else {
-            log::error!("[server] {} super-region(s) assigned, but this host's ownership keeps no directory", rows.len());
+            log::error!(
+                "[server] {} super-region(s) assigned, but this host's ownership keeps no directory",
+                rows.len()
+            );
             return;
         };
         for &(sr, epoch) in &rows {
@@ -1391,10 +1850,19 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.forget_land_need(sr);
         }
         // Elastic 5: land a move brought here: its held players are placed (below, after `Owns`).
-        let moved: Vec<crate::SuperRegion> = rows.iter().map(|(sr, _)| *sr).filter(|sr| self.expects_land(*sr)).collect();
+        let moved: Vec<crate::SuperRegion> = rows
+            .iter()
+            .map(|(sr, _)| *sr)
+            .filter(|sr| self.expects_land(*sr))
+            .collect();
         // Not to a host that left (its session is held; each message queued for it would
         // re-arm the re-route of what is held for it, `reroute_held_for_landless_leavers`).
-        let peers: Vec<HostId> = self.peers.keys().copied().filter(|p| !self.left_peers.contains_key(p)).collect();
+        let peers: Vec<HostId> = self
+            .peers
+            .keys()
+            .copied()
+            .filter(|p| !self.left_peers.contains_key(p))
+            .collect();
         for p in peers {
             self.queue_to_peer(p, Reliable::Owns { rows: rows.clone() });
         }
@@ -1415,10 +1883,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `directory_wanted` is NOT cleared here: the server takes it at every pass
     /// ([`Self::take_directory_wanted`]), so a want still set was raised while this read was
     /// in flight — its rows may predate what was wanted — and asks for the next one.
-    pub fn directory_read(&mut self, rows: Vec<(crate::SuperRegion, i64, u64)>, mut live: BTreeSet<HostId>) {
+    pub fn directory_read(
+        &mut self,
+        rows: Vec<(crate::SuperRegion, i64, u64)>,
+        mut live: BTreeSet<HostId>,
+    ) {
         live.insert(self.ordinal());
-        let Some(directory) = self.ownership.0.directory_mut() else { return };
-        directory.replace(rows.into_iter().map(|(sr, owner, epoch)| (sr, u64::try_from(owner).ok().map(HostId), epoch)));
+        let Some(directory) = self.ownership.0.directory_mut() else {
+            return;
+        };
+        directory.replace(
+            rows.into_iter()
+                .map(|(sr, owner, epoch)| (sr, u64::try_from(owner).ok().map(HostId), epoch)),
+        );
         directory.set_live(live);
         self.left_land_read();
         self.flush_unowned();
@@ -1434,7 +1911,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// directory says so unless it knows a newer epoch; what waited for them goes on.
     fn peer_owns(&mut self, from: HostId, rows: Vec<(crate::SuperRegion, u64)>) {
         let Some(directory) = self.ownership.0.directory_mut() else {
-            log::warn!("[server] host {from} claims {} super-region(s), but this host keeps no directory: ignored", rows.len());
+            log::warn!(
+                "[server] host {from} claims {} super-region(s), but this host keeps no directory: ignored",
+                rows.len()
+            );
             return;
         };
         // A host back from a leave holds land it left with again (R4 drain).
@@ -1455,7 +1935,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// nothing is flushed.
     fn peer_released(&mut self, from: HostId, rows: Vec<(crate::SuperRegion, u64)>) {
         let Some(directory) = self.ownership.0.directory_mut() else {
-            log::warn!("[server] host {from} released {} super-region(s), but this host keeps no directory: ignored", rows.len());
+            log::warn!(
+                "[server] host {from} released {} super-region(s), but this host keeps no directory: ignored",
+                rows.len()
+            );
             return;
         };
         log::info!("[server] host {from} released super-region(s) {rows:?}: free");
@@ -1472,24 +1955,54 @@ impl<S: RegionSpawner> WorldManager<S> {
             .unowned_waiting
             .keys()
             .copied()
-            .filter(|sr| matches!(self.owner_of_sr(*sr), crate::Owner::Me | crate::Owner::Host(_)))
+            .filter(|sr| {
+                matches!(
+                    self.owner_of_sr(*sr),
+                    crate::Owner::Me | crate::Owner::Host(_)
+                )
+            })
             .collect();
         for sr in ready {
             let owner = self.owner_of_sr(sr);
             let list = self.unowned_waiting.remove(&sr).unwrap_or_default();
-            log::debug!("[server] super-region {sr:?} is {owner:?}: {} message(s) that waited for it go on", list.len());
+            log::debug!(
+                "[server] super-region {sr:?} is {owner:?}: {} message(s) that waited for it go on",
+                list.len()
+            );
             for w in list {
                 let lineage = std::mem::replace(&mut self.inbound_accounted, w.accounted_in);
                 match (owner, w.msg) {
-                    (crate::Owner::Me, Reliable::Transfer { target, stamp, bundle, player: None }) => {
+                    (
+                        crate::Owner::Me,
+                        Reliable::Transfer {
+                            target,
+                            stamp,
+                            bundle,
+                            player: None,
+                        },
+                    ) => {
                         let now_ms = self.clock_ms;
-                        self.accept_arrival_in_view(None, target, stamp, *bundle, now_ms, w.in_source_view);
+                        self.accept_arrival_in_view(
+                            None,
+                            target,
+                            stamp,
+                            *bundle,
+                            now_ms,
+                            w.in_source_view,
+                        );
                     }
                     (crate::Owner::Host(h), msg) => self.send_reliable(h, msg, w.in_source_view),
                     (owner, msg) => {
                         // `wait_for_owner` keeps only transfers without a player.
-                        log::error!("[server] a waiting {} for super-region {sr:?} ({owner:?}): kept", reliable_name(&msg));
-                        let keep = UnownedWait { msg, in_source_view: w.in_source_view, accounted_in: w.accounted_in };
+                        log::error!(
+                            "[server] a waiting {} for super-region {sr:?} ({owner:?}): kept",
+                            reliable_name(&msg)
+                        );
+                        let keep = UnownedWait {
+                            msg,
+                            in_source_view: w.in_source_view,
+                            accounted_in: w.accounted_in,
+                        };
                         self.unowned_waiting.entry(sr).or_default().push(keep);
                     }
                 }
@@ -1511,14 +2024,23 @@ impl<S: RegionSpawner> WorldManager<S> {
             .intent_mailbox
             .keys()
             .copied()
-            .filter(|rc| self.foreign_host(*rc).is_some_and(|h| self.peer_reachable(h)))
+            .filter(|rc| {
+                self.foreign_host(*rc)
+                    .is_some_and(|h| self.peer_reachable(h))
+            })
             .collect();
         for rc in ready {
             let list = self.intent_mailbox.remove(&rc).unwrap_or_default();
-            log::debug!("[server] {rc:?} is another host's now: {} intent(s) or reply(ies) held for it go there", list.len());
+            log::debug!(
+                "[server] {rc:?} is another host's now: {} intent(s) or reply(ies) held for it go there",
+                list.len()
+            );
             for m in list {
                 let to = peer_intent_target(&m.msg);
-                if !self.foreign_host(to).is_some_and(|h| self.peer_reachable(h)) {
+                if !self
+                    .foreign_host(to)
+                    .is_some_and(|h| self.peer_reachable(h))
+                {
                     // Held under another key than its own target (a reply routed by where
                     // its entity was): kept until that target's owner is reached.
                     self.intent_mailbox.entry(rc).or_default().push(m);
@@ -1536,7 +2058,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn unowned_waiting_ids(&self) -> Vec<(crate::SuperRegion, crate::EntityId)> {
         let mut out = Vec::new();
         for (sr, list) in &self.unowned_waiting {
-            out.extend(list.iter().filter_map(|w| transfer_id(&w.msg)).map(|id| (*sr, id)));
+            out.extend(
+                list.iter()
+                    .filter_map(|w| transfer_id(&w.msg))
+                    .map(|id| (*sr, id)),
+            );
         }
         out
     }
@@ -1564,7 +2090,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
             .map(|(_, _, r)| r);
         // Waiting for an owner: no other part can write it (as toward an absent peer).
-        let unowned = self.unowned_waiting.values().flatten().filter(|w| !w.in_source_view).map(|w| &w.msg);
+        let unowned = self
+            .unowned_waiting
+            .values()
+            .flatten()
+            .filter(|w| !w.in_source_view)
+            .map(|w| &w.msg);
         to_peers
             .chain(unowned)
             .filter_map(|r| match in_transit(r, None) {
@@ -1583,10 +2114,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// intent's due raised to at least `tick` (no receiver region applies it before its
     /// snapshot); and the ids of everything owed above the count (the journal's
     /// `kept_sent`). What waits for a session counts as above any count.
-    pub(super) fn cut_counted(&self, ordinal: HostId, count: u64, cut: CutId, tick: crate::Tick) -> CountedPart {
+    pub(super) fn cut_counted(
+        &self,
+        ordinal: HostId,
+        count: u64,
+        cut: CutId,
+        tick: crate::Tick,
+    ) -> CountedPart {
         let mut out = CountedPart::default();
         let mut entries = self.peer_entries_of(ordinal);
-        let above = self.peers.get(&ordinal).map_or(0, |p| p.session.owed_above(count).count())
+        let above = self
+            .peers
+            .get(&ordinal)
+            .map_or(0, |p| p.session.owed_above(count).count())
             + self.peer_waiting.get(&ordinal).map_or(0, Vec::len);
         // Owed entries leave only from the front: those above the count are the last ones.
         let above = entries.split_off(entries.len().saturating_sub(above));
@@ -1615,7 +2155,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A player handed to a participant follows the same rule as every state message
     /// (`world_cut.rs`): bare, its record is the receiver's; wrapped, this host's snapshot
     /// holds the body or this part wrote its record when it was sent.
-    pub(super) fn cut_peer_players(&self, participants: &BTreeSet<HostId>) -> Vec<(PlayerId, PlayerRecord)> {
+    pub(super) fn cut_peer_players(
+        &self,
+        participants: &BTreeSet<HostId>,
+    ) -> Vec<(PlayerId, PlayerRecord)> {
         self.peer_entries()
             .into_iter()
             .filter(|(ordinal, _, _)| !participants.contains(ordinal))
@@ -1630,15 +2173,23 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `msg` (an intent or a reply) to the region `to` another host owns, reliably.
     /// `view`: sent after its source answered the pending cut (not a row of that cut).
     pub(super) fn intent_to_peer(&mut self, to: RegionCoords, msg: crate::IntentMsg, view: bool) {
-        debug_assert_eq!(peer_intent_target(&msg), to, "an intent to a peer goes where its message says");
-        let owner = self.foreign_host(to).expect("intent_to_peer: another host owns the target");
+        debug_assert_eq!(
+            peer_intent_target(&msg),
+            to,
+            "an intent to a peer goes where its message says"
+        );
+        let owner = self
+            .foreign_host(to)
+            .expect("intent_to_peer: another host owns the target");
         log::debug!("[server] {msg:?} for {to:?}: sent to host {owner}");
         self.send_reliable(owner, Reliable::Intent(msg), view);
     }
 
     /// `v` to the host that owns `rc`, if its session is up (else dropped: volatile).
     fn volatile_to_owner(&mut self, rc: RegionCoords, v: Volatile) {
-        let Some(owner) = self.foreign_host(rc) else { return };
+        let Some(owner) = self.foreign_host(rc) else {
+            return;
+        };
         if let Some(peer) = self.peers.get_mut(&owner).filter(|p| !p.stale) {
             peer.session.send_volatile(v);
         }
@@ -1671,9 +2222,16 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// This host's region `rc` started (`Volatile::RegionUp`), parked (`RegionParked`) or
     /// was lost (`RegionDown`): `what(rc)` told to every host owning one of its neighbours.
     pub(super) fn announce_region(&mut self, rc: RegionCoords, what: fn(RegionCoords) -> Volatile) {
-        let ordinals: Vec<HostId> = self.peers.keys().copied().filter(|&p| self.borders(rc, p)).collect();
+        let ordinals: Vec<HostId> = self
+            .peers
+            .keys()
+            .copied()
+            .filter(|&p| self.borders(rc, p))
+            .collect();
         for ordinal in ordinals {
-            let Some(peer) = self.peers.get_mut(&ordinal).filter(|p| !p.stale) else { continue };
+            let Some(peer) = self.peers.get_mut(&ordinal).filter(|p| !p.stale) else {
+                continue;
+            };
             peer.session.send_volatile(what(rc));
         }
     }
@@ -1702,8 +2260,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The link to host `from` is gone (or it runs a newer generation): every region of
     /// it is gone for this host's halos.
     pub(super) fn peer_lost(&mut self, from: HostId) {
-        let gone: Vec<RegionCoords> =
-            self.foreign_running.iter().filter(|(_, &h)| h == from).map(|(rc, _)| *rc).collect();
+        let gone: Vec<RegionCoords> = self
+            .foreign_running
+            .iter()
+            .filter(|(_, &h)| h == from)
+            .map(|(rc, _)| *rc)
+            .collect();
         for n in gone {
             self.foreign_region_gone(n);
         }
@@ -1750,14 +2312,18 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             Volatile::HaloRequest { from: to, of } => {
                 if !self.owns(of) {
-                    log::warn!("[server] host {from} asked this host for the halo of {of:?}, which it does not own");
+                    log::warn!(
+                        "[server] host {from} asked this host for the halo of {of:?}, which it does not own"
+                    );
                 } else if self.runs(of) {
                     self.send_to_region(of, RegionInput::HaloRequest(to));
                 } else if !self.regions.contains_key(&of) {
                     // Parked (or never run here): from its last terrain, as a starting
                     // region of this host would be seeded; none cached: dropped (the
                     // requester seeds from the store or worldgen).
-                    let seed = self.terrain_cache.get(&of).and_then(|snap| crate::halo::halo_seed_from_snapshot(self.map_extent(), of, to, &snap));
+                    let seed = self.terrain_cache.get(&of).and_then(|snap| {
+                        crate::halo::halo_seed_from_snapshot(self.map_extent(), of, to, &snap)
+                    });
                     if let Some(update) = seed {
                         let stamp = self.spawner.world_tick();
                         self.halo_to_peer(to, Volatile::HaloUpdate { to, update, stamp });
@@ -1767,7 +2333,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             Volatile::HaloUpdate { to, update, stamp } => {
                 if self.owns(to) && self.runs(to) {
-                    self.send_to_region(to, RegionInput::Transfer(GameEventKind::HaloUpdate(update), stamp));
+                    self.send_to_region(
+                        to,
+                        RegionInput::Transfer(GameEventKind::HaloUpdate(update), stamp),
+                    );
                 }
             }
             Volatile::HaloEntity { to, msg, stamp } => {
@@ -1778,19 +2347,34 @@ impl<S: RegionSpawner> WorldManager<S> {
             // An older host's ask to claim free land (before Elastic 3): no host claims land
             // any more — the coordinator assigns it. Never sent by this build; ignored.
             Volatile::ClaimWanted(sr) => {
-                log::debug!("[server] host {from} asked this host to claim {sr:?}: ignored (the coordinator assigns land)");
+                log::debug!(
+                    "[server] host {from} asked this host to claim {sr:?}: ignored (the coordinator assigns land)"
+                );
             }
             // An input the client sent to that host after its body left for this one.
-            Volatile::Input { client, kind, stamp } => {
+            Volatile::Input {
+                client,
+                kind,
+                stamp,
+            } => {
                 if kind.input_client() != Some(client) {
-                    log::warn!("[server] peer host {from}: an input of another client as client {client}'s; dropped");
+                    log::warn!(
+                        "[server] peer host {from}: an input of another client as client {client}'s; dropped"
+                    );
                     return;
                 }
-                match self.homes.get(&client).copied().filter(|h| self.regions.contains_key(h)) {
+                match self
+                    .homes
+                    .get(&client)
+                    .copied()
+                    .filter(|h| self.regions.contains_key(h))
+                {
                     Some(home) => {
                         self.send_to_region(home, RegionInput::EventAfterTick(kind, stamp));
                     }
-                    None => log::debug!("[server] peer host {from}: input of client {client}, whose body is not here; dropped"),
+                    None => log::debug!(
+                        "[server] peer host {from}: input of client {client}, whose body is not here; dropped"
+                    ),
                 }
             }
         }
@@ -1821,16 +2405,23 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                     // And every row this host released that no read showed owned since: a
                     // peer that linked after the release (or missed it) learns it is free.
-                    let released: Vec<(crate::SuperRegion, u64)> =
-                        self.recently_released.iter().map(|(sr, epoch)| (*sr, *epoch)).collect();
+                    let released: Vec<(crate::SuperRegion, u64)> = self
+                        .recently_released
+                        .iter()
+                        .map(|(sr, epoch)| (*sr, *epoch))
+                        .collect();
                     if !released.is_empty() {
                         self.queue_to_peer(from, Reliable::Released { rows: released });
                     }
                 }
                 // Every region (stopping ones too: their `RegionDown` follows) bordering
                 // that host; it asks each for the seeds of its own neighbours of them.
-                let running: Vec<RegionCoords> =
-                    self.regions.keys().copied().filter(|rc| self.borders(*rc, from)).collect();
+                let running: Vec<RegionCoords> = self
+                    .regions
+                    .keys()
+                    .copied()
+                    .filter(|rc| self.borders(*rc, from))
+                    .collect();
                 if let Some(peer) = self.peers.get_mut(&from) {
                     peer.session.send_volatile(Volatile::Running(running));
                 }
@@ -1844,8 +2435,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.world_cut_count_mode(from, "went down");
             }
             PeerEvent::HigherGeneration(generation) => {
-                log::error!("[server] peer host {from} runs world generation {generation}, newer than ours: this host is stale");
-                self.higher_generation = Some(self.higher_generation.map_or(generation, |g| g.max(generation)));
+                log::error!(
+                    "[server] peer host {from} runs world generation {generation}, newer than ours: this host is stale"
+                );
+                self.higher_generation = Some(
+                    self.higher_generation
+                        .map_or(generation, |g| g.max(generation)),
+                );
                 if let Some(peer) = self.peers.get_mut(&from) {
                     peer.stale = true;
                 }
@@ -1858,7 +2454,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             // A boot declared dead (a succession): its connection is closed for a fresh one.
             PeerEvent::Refused(boot) => {
                 // The session warned once per boot.
-                log::debug!("[server] host {from}'s boot {boot:#x} was declared dead: its connection is closed");
+                log::debug!(
+                    "[server] host {from}'s boot {boot:#x} was declared dead: its connection is closed"
+                );
                 if let Some(peer) = self.peers.get_mut(&from) {
                     peer.link.close();
                 }
@@ -1870,8 +2468,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// its part fails. (A link that merely went down is counted across instead,
     /// `world_cut.rs`.)
     fn world_cut_peer_stale(&mut self, from: HostId) {
-        if self.world_cut.as_ref().is_some_and(|r| r.state == super::world_cut::PartState::Pending && r.peers.contains(&from)) {
-            log::warn!("[server] world cut: host {from} runs a newer generation while the cut was pending");
+        if self.world_cut.as_ref().is_some_and(|r| {
+            r.state == super::world_cut::PartState::Pending && r.peers.contains(&from)
+        }) {
+            log::warn!(
+                "[server] world cut: host {from} runs a newer generation while the cut was pending"
+            );
             self.world_cut_fail(crate::CutFailure::Aborted);
         }
     }
@@ -1889,10 +2491,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             Reliable::CutMark { cut } => self.peer_cut_mark(from, cut),
             Reliable::InCut { cut, body } => {
                 if matches!(*body, Reliable::InCut { .. }) || !body.is_state() {
-                    log::error!("[server] host {from}: a wrapped {} for cut {}; applied as is", reliable_name(&body), cut.0);
+                    log::error!(
+                        "[server] host {from}: a wrapped {} for cut {}; applied as is",
+                        reliable_name(&body),
+                        cut.0
+                    );
                 }
                 if self.journals() {
-                    self.journal.received(from, &body, Some(cut), self.spawner.world_tick());
+                    self.journal
+                        .received(from, &body, Some(cut), self.spawner.world_tick());
                 }
                 self.note_wrapper(cut);
                 self.note_player_accounted(&body, cut);
@@ -1917,7 +2524,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.world_cut_fail(crate::CutFailure::Aborted);
                 }
                 if self.journals() {
-                    self.journal.received(from, &msg, None, self.spawner.world_tick());
+                    self.journal
+                        .received(from, &msg, None, self.spawner.world_tick());
                 }
                 // A player that left bare (the receiver's) and comes back bare is this
                 // host's again in the pending cut.
@@ -1931,13 +2539,26 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// pending cut (what it creates here is in no part of this host's).
     pub(super) fn peer_reliable_in(&mut self, from: HostId, msg: Reliable, after: bool) {
         match msg {
-            Reliable::Transfer { target, stamp, bundle, player: None } => {
+            Reliable::Transfer {
+                target,
+                stamp,
+                bundle,
+                player: None,
+            } => {
                 if !self.owns(target) && !self.is_foreign(target) {
                     // Sent here, but this host knows no owner of it: it waits here for one
                     // (a cut row), never sent back.
                     // Debug, not warn: one per transfer (counted as `unowned_waiting=`).
-                    log::debug!("[server] host {from} sent {:?} into {target:?}, whose owner this host does not know", bundle.id);
-                    let msg = Reliable::Transfer { target, stamp, bundle, player: None };
+                    log::debug!(
+                        "[server] host {from} sent {:?} into {target:?}, whose owner this host does not know",
+                        bundle.id
+                    );
+                    let msg = Reliable::Transfer {
+                        target,
+                        stamp,
+                        bundle,
+                        player: None,
+                    };
                     self.wait_for_owner(target, msg, after, self.inbound_accounted);
                     return;
                 }
@@ -1948,7 +2569,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                     );
                     if owner != from {
                         // Bounced on to its owner (as any crossing into a foreign region).
-                        self.send_reliable(owner, Reliable::Transfer { target, stamp, bundle, player: None }, after);
+                        self.send_reliable(
+                            owner,
+                            Reliable::Transfer {
+                                target,
+                                stamp,
+                                bundle,
+                                player: None,
+                            },
+                            after,
+                        );
                         return;
                     }
                     // The sender thinks this host owns it and this host thinks the sender
@@ -1958,22 +2588,41 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let now_ms = self.clock_ms;
                 self.accept_arrival(None, target, stamp, *bundle, now_ms);
             }
-            Reliable::Transfer { target, stamp, bundle, player: Some(handoff) } => {
+            Reliable::Transfer {
+                target,
+                stamp,
+                bundle,
+                player: Some(handoff),
+            } => {
                 if !self.owns(target) && !self.masked_or_released(target) {
                     // Parked here from the hand-off (`accept_handoff`): a region this host does
                     // not own is never started here. Never lost.
-                    log::error!("[server] host {from} handed a player into {target:?}, which this host does not own");
+                    log::error!(
+                        "[server] host {from} handed a player into {target:?}, which this host does not own"
+                    );
                 }
                 self.accept_handoff(from, target, stamp, *bundle, handoff);
             }
             // For the server edge, which admits the ticket (`take_observer_orders`).
             // Never for a client whose session here is its home: its ticket must not open a
             // second connection of it (`take_observer_revocations`).
-            Reliable::ObserverOrder { client, player, nonce, ttl_secs } => {
-                if self.sessions.get(&client).is_some_and(|s| s.kind == SessionKind::Home) {
-                    log::info!("[server] host {from}'s observer order for client {client}, at home here: not recorded");
+            Reliable::ObserverOrder {
+                client,
+                player,
+                nonce,
+                ttl_secs,
+            } => {
+                if self
+                    .sessions
+                    .get(&client)
+                    .is_some_and(|s| s.kind == SessionKind::Home)
+                {
+                    log::info!(
+                        "[server] host {from}'s observer order for client {client}, at home here: not recorded"
+                    );
                 } else {
-                    self.observer_orders.push((client, player, nonce.0, ttl_secs));
+                    self.observer_orders
+                        .push((client, player, nonce.0, ttl_secs));
                 }
             }
             // As if one of this host's regions had sent it: no cut has seen it here, unless
@@ -1988,48 +2637,79 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // intent is refused back (its items return), a reply held here — sent on by
                 // `forward_mailbox` once the directory names another owner this host reaches.
                 if self.masked_or_released(target) {
-                    log::debug!("[server] host {from} sent {msg:?} for {target:?}, inherited or released here");
+                    log::debug!(
+                        "[server] host {from} sent {msg:?} for {target:?}, inherited or released here"
+                    );
                 } else {
-                    log::error!("[server] host {from} sent {msg:?} for {target:?}, which this host does not own");
+                    log::error!(
+                        "[server] host {from} sent {msg:?} for {target:?}, which this host does not own"
+                    );
                     // One of the two directories is stale: read this one again.
                     self.directory_wanted = true;
                 }
                 match msg {
                     // Refused back to where it came from: its items return.
                     crate::IntentMsg::Intent(s) => {
-                        let reply = crate::IntentReply::Refused(s.intent, crate::IntentRefusal::OwnerNotRunning);
-                        let back = crate::SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 };
+                        let reply = crate::IntentReply::Refused(
+                            s.intent,
+                            crate::IntentRefusal::OwnerNotRunning,
+                        );
+                        let back = crate::SentReply {
+                            reply,
+                            hint: s.from,
+                            due: s.due + 1,
+                            hops: 0,
+                        };
                         self.route_intent(crate::IntentMsg::Reply(back), target, after);
                     }
                     // A reply is held here, in the mailbox of its region (a cut carries it,
                     // a restore queues it to the owner, `forward_mailbox` sends it to an owner
                     // found since): never lost.
                     reply @ crate::IntentMsg::Reply(_) => {
-                        self.intent_mailbox.entry(target).or_default().push(Mail { msg: reply, in_source_view: after, accounted_in: self.inbound_accounted });
+                        self.intent_mailbox.entry(target).or_default().push(Mail {
+                            msg: reply,
+                            in_source_view: after,
+                            accounted_in: self.inbound_accounted,
+                        });
                     }
                 }
             }
-            Reliable::PlayerMove { handoff, record, target, place } => {
+            Reliable::PlayerMove {
+                handoff,
+                record,
+                target,
+                place,
+            } => {
                 if !self.owns(target) && !self.masked_or_released(target) {
                     // Parked here (`accept_move`): a region this host does not own is never
                     // started here, so its body could not be created. Never lost.
-                    log::error!("[server] host {from} moved a player into {target:?}, which this host does not own");
+                    log::error!(
+                        "[server] host {from} moved a player into {target:?}, which this host does not own"
+                    );
                 }
                 self.accept_move(from, handoff, *record, target, place);
             }
-            Reliable::PlayerParked { client, player } => self.player_parked_elsewhere(from, client, player),
+            Reliable::PlayerParked { client, player } => {
+                self.player_parked_elsewhere(from, client, player)
+            }
             Reliable::Owns { rows } => self.peer_owns(from, rows),
             Reliable::Released { rows } => self.peer_released(from, rows),
-            Reliable::SuccessionReport { id, base_cut, entries, owed } => {
-                self.peer_succession_report(from, id, base_cut, entries, owed)
-            }
+            Reliable::SuccessionReport {
+                id,
+                base_cut,
+                entries,
+                owed,
+            } => self.peer_succession_report(from, id, base_cut, entries, owed),
             msg @ (Reliable::SpawnOrder { .. }
             | Reliable::SpawnAck { .. }
             | Reliable::Kick { .. }
             | Reliable::KickAck { .. }
             | Reliable::SessionEnded { .. }) => self.peer_login_msg(from, msg),
             other => {
-                log::error!("[server] peer host {from}: {} is not handled by this host yet: dropped", reliable_name(&other))
+                log::error!(
+                    "[server] peer host {from}: {} is not handled by this host yet: dropped",
+                    reliable_name(&other)
+                )
             }
         }
     }
@@ -2047,10 +2727,19 @@ fn split_claim(claim: Option<Claim>) -> Option<SiteId> {
 
 /// The record of a player handed over in `bundle` (its body, in `target`'s frame), as the
 /// receiving host parks it: `None` if the bundle carries no player.
-pub(super) fn handoff_record(target: RegionCoords, bundle: &crate::EntityBundle, h: &crate::PlayerHandoff) -> Option<PlayerRecord> {
+pub(super) fn handoff_record(
+    target: RegionCoords,
+    bundle: &crate::EntityBundle,
+    h: &crate::PlayerHandoff,
+) -> Option<PlayerRecord> {
     let (_, carried) = bundle.client.as_ref()?;
     let adventure = split_claim(h.claim);
-    Some(PlayerRecord { client: crate::parked_client(carried), pose: bundle.body.pose, region: target, adventure })
+    Some(PlayerRecord {
+        client: crate::parked_client(carried),
+        pose: bundle.body.pose,
+        region: target,
+        adventure,
+    })
 }
 
 /// A server-authored event that was to follow a moved player's creation, applied to the
@@ -2075,7 +2764,9 @@ fn carry_event(carried: &mut crate::Client, kind: GameEventKind) {
                 }
             }
         }
-        other => log::error!("[server] {other:?} was to follow a player's creation; it moved to another host: dropped"),
+        other => log::error!(
+            "[server] {other:?} was to follow a player's creation; it moved to another host: dropped"
+        ),
     }
 }
 
@@ -2174,23 +2865,42 @@ enum InTransit {
 fn in_transit(r: &Reliable, floor: Option<crate::Tick>) -> InTransit {
     let floor = floor.unwrap_or(0);
     match r.inner() {
-        Reliable::Transfer { bundle, .. } if matches!(bundle.kind, EntityKind::Person { .. }) => InTransit::Nothing,
-        Reliable::Transfer { target, stamp, bundle, player: None } => {
-            InTransit::Row(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: (*stamp).max(floor) })
+        Reliable::Transfer { bundle, .. } if matches!(bundle.kind, EntityKind::Person { .. }) => {
+            InTransit::Nothing
         }
+        Reliable::Transfer {
+            target,
+            stamp,
+            bundle,
+            player: None,
+        } => InTransit::Row(InFlightRow::Transfer {
+            target: *target,
+            bundle: (**bundle).clone(),
+            stamp: (*stamp).max(floor),
+        }),
         Reliable::Intent(msg) => {
             let mut msg = *msg;
             match &mut msg {
                 crate::IntentMsg::Intent(s) => s.due = s.due.max(floor),
                 crate::IntentMsg::Reply(s) => s.due = s.due.max(floor),
             }
-            InTransit::Row(InFlightRow::Intent { target: peer_intent_target(&msg), msg })
+            InTransit::Row(InFlightRow::Intent {
+                target: peer_intent_target(&msg),
+                msg,
+            })
         }
-        Reliable::Transfer { target, bundle, player: Some(h), .. } => match handoff_record(*target, bundle, h) {
+        Reliable::Transfer {
+            target,
+            bundle,
+            player: Some(h),
+            ..
+        } => match handoff_record(*target, bundle, h) {
             Some(record) => InTransit::Player(h.player, record),
             None => InTransit::Nothing,
         },
-        Reliable::PlayerMove { handoff, record, .. } => InTransit::Player(handoff.player, (**record).clone()),
+        Reliable::PlayerMove {
+            handoff, record, ..
+        } => InTransit::Player(handoff.player, (**record).clone()),
         _ => InTransit::Nothing,
     }
 }

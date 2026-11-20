@@ -5,12 +5,12 @@
 //! 5-second 32 m world predicts the 16 m or 8 m one forged from the same seed.
 //! The criteria live in the lib (`forge::quality::world_score`).
 
-use worldgen::forge::hydrology::Stats;
-use worldgen::forge::quality::{quality, summarise, world_score};
-use worldgen::forge::{forge, Forged, ForgeParams};
-use worldgen::forged::WorldArtifact;
 use crate::Params;
 use crate::render;
+use worldgen::forge::hydrology::Stats;
+use worldgen::forge::quality::{quality, summarise, world_score};
+use worldgen::forge::{ForgeParams, Forged, forge};
+use worldgen::forged::WorldArtifact;
 
 /// Cell size used for candidates.
 const SEARCH_CELL_M: f64 = 32.0;
@@ -30,11 +30,20 @@ pub fn run(base: &Params) {
     let threads = ((cores as f64 * CORE_SHARE) as usize).clamp(1, base.search);
     println!(
         "searching {} seeds from {:#X} at {SEARCH_CELL_M} m cells, {} iterations, {threads} threads",
-        base.search, base.seed,
-        worldgen::forge::schedule(&ForgeParams { cell_m: SEARCH_CELL_M, ..base.forge.clone() }).iter().map(|&(_, i)| i).sum::<usize>()
+        base.search,
+        base.seed,
+        worldgen::forge::schedule(&ForgeParams {
+            cell_m: SEARCH_CELL_M,
+            ..base.forge.clone()
+        })
+        .iter()
+        .map(|&(_, i)| i)
+        .sum::<usize>()
     );
     let started = std::time::Instant::now();
-    let seeds: Vec<u64> = (0..base.search as u64).map(|k| base.seed.wrapping_add(k)).collect();
+    let seeds: Vec<u64> = (0..base.search as u64)
+        .map(|k| base.seed.wrapping_add(k))
+        .collect();
     let mut results: Vec<(f64, u64, Stats, Vec<(&'static str, f64)>)> = Vec::new();
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
@@ -43,7 +52,12 @@ pub fn run(base: &Params) {
                 scope.spawn(move || {
                     let mut out = Vec::new();
                     for &seed in seeds.iter().skip(t).step_by(threads) {
-                        let p = ForgeParams { seed, cell_m: SEARCH_CELL_M, quiet: true, ..base.forge.clone() };
+                        let p = ForgeParams {
+                            seed,
+                            cell_m: SEARCH_CELL_M,
+                            quiet: true,
+                            ..base.forge.clone()
+                        };
                         let forged = forge(&p);
                         let artifact = forged.artifact(&p);
                         let (sc, terms) = score(&forged, &artifact);
@@ -83,10 +97,19 @@ pub fn run(base: &Params) {
     }
     let stem = base.out.to_string_lossy().to_string();
     for (rank, (_, seed, ..)) in results.iter().take(THUMBNAILS).enumerate() {
-        let p = ForgeParams { seed: *seed, cell_m: SEARCH_CELL_M, quiet: true, ..base.forge.clone() };
+        let p = ForgeParams {
+            seed: *seed,
+            cell_m: SEARCH_CELL_M,
+            quiet: true,
+            ..base.forge.clone()
+        };
         let forged = forge(&p);
         let path = format!("{stem}-search-{}-{seed:X}.png", rank + 1);
-        render::layer(&forged, worldgen::forge::render::PreviewLayer::Rivers, &path);
+        render::layer(
+            &forged,
+            worldgen::forge::render::PreviewLayer::Rivers,
+            &path,
+        );
     }
     if let Some((_, seed, ..)) = results.first() {
         println!("forge the winner at full resolution: just forge-proto --seed {seed:X}");

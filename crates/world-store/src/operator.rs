@@ -33,13 +33,13 @@
 //!   abandon) and an abort left the rows as they were. The coordinator's [`crate::succession::rollback_world`]
 //!   takes the same path after its fence.
 
-use game::HostId;
 use game::HOST_LIVE;
+use game::HostId;
 use sqlx::{PgPool, Row};
 
+use crate::StoreError;
 use crate::rows::i;
 use crate::succession::{PG_NOW_MS, declare_error, lock_world, rollback_in};
-use crate::StoreError;
 
 /// What an operator's rollback's lock timeout names.
 const OPERATOR_ROLLING_BACK: &str = "worldctl rollback";
@@ -47,16 +47,24 @@ const OPERATOR_ROLLING_BACK: &str = "worldctl rollback";
 /// [`crate::StoreHandle::rollback_world_operator`] (Postgres, `worldctl rollback`): the world
 /// row `FOR NO KEY UPDATE` (no coordinator fence: the operator holds none), then
 /// [`crate::succession::rollback_in`]. Returns `(generation, successions abandoned)`.
-pub(crate) async fn rollback_world_operator(pool: &PgPool, lock_timeout_ms: u64) -> Result<(u64, u64), StoreError> {
+pub(crate) async fn rollback_world_operator(
+    pool: &PgPool,
+    lock_timeout_ms: u64,
+) -> Result<(u64, u64), StoreError> {
     let mut tx = pool.begin().await?;
-    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'"))
+        .execute(&mut *tx)
+        .await?;
     let rolled = async {
         let stored = lock_world(&mut tx).await?;
         rollback_in(&mut tx, stored).await
     }
     .await;
-    let (generation, abandoned) = rolled.map_err(|e| e.into_store(OPERATOR_ROLLING_BACK, lock_timeout_ms))?;
-    tx.commit().await.map_err(|e| declare_error(OPERATOR_ROLLING_BACK, e, lock_timeout_ms))?;
+    let (generation, abandoned) =
+        rolled.map_err(|e| e.into_store(OPERATOR_ROLLING_BACK, lock_timeout_ms))?;
+    tx.commit()
+        .await
+        .map_err(|e| declare_error(OPERATOR_ROLLING_BACK, e, lock_timeout_ms))?;
     log::warn!(
         "[world-store] the operator rolled the world back to generation {generation}; {abandoned} open successions abandoned"
     );
@@ -78,7 +86,9 @@ pub enum Vouched {
 pub(crate) fn not_retirable(retired: HostId, row: Option<(bool, i64)>) -> Option<String> {
     let retired = retired.0;
     match row {
-        None => Some(format!("host {retired} has no hosts row: nothing to retire")),
+        None => Some(format!(
+            "host {retired} has no hosts row: nothing to retire"
+        )),
         Some((_, state)) if state != HOST_LIVE => Some(format!(
             "host {retired} was declared dead already: its land is inherited by its succession (worldctl rollback abandons \
              an open one)"
@@ -94,9 +104,16 @@ pub(crate) fn not_retirable(retired: HostId, row: Option<(bool, i64)>) -> Option
 /// [`crate::StoreHandle::vouch_host`] (Postgres): ONE statement over host `retired`'s row
 /// (its row lock; a heartbeat either commits first — then the row is fresh and nothing is
 /// written — or overwrites the vouch after, which the declaration's lapse re-check sees).
-pub(crate) async fn vouch_host(pool: &PgPool, retired: HostId, lease_ms: u64, lock_timeout_ms: u64) -> Result<Vouched, StoreError> {
+pub(crate) async fn vouch_host(
+    pool: &PgPool,
+    retired: HostId,
+    lease_ms: u64,
+    lock_timeout_ms: u64,
+) -> Result<Vouched, StoreError> {
     let mut tx = pool.begin().await?;
-    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")).execute(&mut *tx).await?;
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{lock_timeout_ms}ms'"))
+        .execute(&mut *tx)
+        .await?;
     let done = sqlx::query(&format!(
         "UPDATE hosts SET seen_ms = 0 WHERE id = $1 AND clean = 0 AND state = {HOST_LIVE} \
          AND (seen_ms = 0 OR {PG_NOW_MS} - seen_ms > $2)"
@@ -125,4 +142,3 @@ pub(crate) async fn vouch_host(pool: &PgPool, retired: HostId, lease_ms: u64, lo
         None => Vouched::Running,
     })
 }
-

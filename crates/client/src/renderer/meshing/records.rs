@@ -19,10 +19,20 @@
 
 use super::super::block_textures::BlockTextureLayers;
 use super::ao::ao_flips_quad;
-use super::binary::{cross_axes, Face, Quad};
+use super::binary::{Face, Quad, cross_axes};
 use super::pack;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[repr(transparent)]
 pub struct QuadRecord(pub [u32; 2]);
 
@@ -46,12 +56,7 @@ pub const QUAD_INDEX_PATTERN: [u32; 6] = [0, 1, 2, 2, 1, 3];
 /// (and winding) of the matching `CORNER_SLOTS` row. Indexed drawing shades 4
 /// vertices per quad instead of 6. Mirrored in voxel_pull.wgsl and
 /// voxel_pull_depth.wgsl; `indexed_corners_rebuild_the_slot_triangles` pins it.
-pub const CORNER_PERM: [[u32; 4]; 4] = [
-    [1, 3, 0, 2],
-    [0, 1, 2, 3],
-    [1, 0, 3, 2],
-    [0, 2, 1, 3],
-];
+pub const CORNER_PERM: [[u32; 4]; 4] = [[1, 3, 0, 2], [0, 1, 2, 3], [1, 0, 3, 2], [0, 2, 1, 3]];
 
 pub fn pack_record(q: &Quad, layer: u32) -> QuadRecord {
     // The face plane sits at min[axis] for negative faces, +1 for positive —
@@ -101,7 +106,9 @@ pub fn record_brick(rec: QuadRecord) -> [u32; 3] {
 /// `quads_to_records` order (opaque then cutout, each by face), as
 /// `face_ends` needs — the shader draws the opaque and cutout ranges with
 /// different pipelines, so an unsorted merge would draw leaves opaque.
-pub fn merge_records<'a>(parts: impl IntoIterator<Item = ([u8; 3], &'a [QuadRecord])>) -> Vec<QuadRecord> {
+pub fn merge_records<'a>(
+    parts: impl IntoIterator<Item = ([u8; 3], &'a [QuadRecord])>,
+) -> Vec<QuadRecord> {
     let mut out: Vec<QuadRecord> = Vec::new();
     for (local, records) in parts {
         out.extend(records.iter().map(|&r| with_brick(r, local)));
@@ -159,7 +166,9 @@ pub fn record_face(rec: QuadRecord) -> u32 {
 /// end; `len` when there is none) — equal to `ends[5]` when ordered.
 pub fn face_ends(records: &[QuadRecord]) -> [u32; 8] {
     let len = records.len() as u32;
-    let ordered = records.windows(2).all(|w| record_order(w[0]) <= record_order(w[1]));
+    let ordered = records
+        .windows(2)
+        .all(|w| record_order(w[0]) <= record_order(w[1]));
     if !ordered {
         return [len, len, len, len, len, len, 1, len];
     }
@@ -213,4 +222,3 @@ pub fn decode_corner(rec: QuadRecord, slot: u32) -> DecodedCorner {
         layer: (w1 >> 12) & LAYER_MAX,
     }
 }
-

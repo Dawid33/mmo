@@ -9,10 +9,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::edit::{raycast_blocks, BlockHit, BlockPos};
+use crate::edit::{BlockHit, BlockPos, raycast_blocks};
 use crate::{
-    Block, BlockId, ClientId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback,
-    BLOCK_VOXELS, REGION_BLOCKS, UNDERGROUND_DEPTH,
+    BLOCK_VOXELS, Block, BlockId, ClientId, GameDataTransactionKind, GameDataUpdate,
+    GameDataUpdateKind, REGION_BLOCKS, Rollback, UNDERGROUND_DEPTH,
 };
 use rapier3d::math::Vector;
 use state_hash::StateHash;
@@ -35,7 +35,18 @@ pub const MAX_ORDER_LEVEL: i32 = i16::MAX as i32;
 
 /// Identifies one order: the issuing client and its running sequence number.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize, StateHash,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    StateHash,
 )]
 pub struct OpId {
     pub client: ClientId,
@@ -43,7 +54,9 @@ pub struct OpId {
 }
 
 // `Default` only because the rollback map wrapper requires it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub enum DesignationKind {
     #[default]
     Dig,
@@ -67,7 +80,9 @@ impl DesignationKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub struct Designation {
     pub kind: DesignationKind,
     pub op: OpId,
@@ -118,8 +133,14 @@ impl TileBox {
     /// The part inside the region's columns (`x`, `z` in `0..REGION_BLOCKS`);
     /// `y` is left alone. `None` when nothing is left.
     pub fn clip_to_region(&self) -> Option<TileBox> {
-        let (min_x, max_x) = (self.min[0].max(0), self.max[0].min(REGION_BLOCKS as i32 - 1));
-        let (min_z, max_z) = (self.min[2].max(0), self.max[2].min(REGION_BLOCKS as i32 - 1));
+        let (min_x, max_x) = (
+            self.min[0].max(0),
+            self.max[0].min(REGION_BLOCKS as i32 - 1),
+        );
+        let (min_z, max_z) = (
+            self.min[2].max(0),
+            self.max[2].min(REGION_BLOCKS as i32 - 1),
+        );
         (min_x <= max_x && min_z <= max_z).then_some(TileBox {
             min: [min_x, self.min[1], min_z],
             max: [max_x, self.max[1], max_z],
@@ -129,14 +150,25 @@ impl TileBox {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
 pub enum Order {
-    Designate { op: OpId, kind: DesignationKind, priority: u8, area: TileBox },
+    Designate {
+        op: OpId,
+        kind: DesignationKind,
+        priority: u8,
+        area: TileBox,
+    },
     /// Remove designations in `area`; `None` = every kind.
-    Erase { area: TileBox, only: Option<DesignationKind> },
+    Erase {
+        area: TileBox,
+        only: Option<DesignationKind>,
+    },
     CancelOp(OpId),
     DevCompleteAll,
     /// Switch the issuing client's play mode; `at` is read only when
     /// entering Adventure (the tile to put the body on).
-    SetMode { mode: crate::PlayMode, at: Option<TilePos> },
+    SetMode {
+        mode: crate::PlayMode,
+        at: Option<TilePos>,
+    },
     /// Walk the issuing client's adventurer to a world goal, any number of
     /// regions away (`path_plan.rs`).
     MoveTo(crate::Goal),
@@ -146,7 +178,9 @@ pub enum Order {
     DevBreakBlock(crate::WorldBlockPos),
     /// Dev panel: drop a 1 m dynamic body (`EntityKind::Body`) above this
     /// region-local tile (`Rollback::dev_drop_body_safe`).
-    DevDropBody { at: TilePos },
+    DevDropBody {
+        at: TilePos,
+    },
 }
 
 /// Why a tile refuses a designation.
@@ -207,7 +241,9 @@ pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Res
                 Ok(())
             }
         }
-        DesignationKind::Deconstruct => src.is_constructed(p).then_some(()).ok_or(Invalid::NotBuilt),
+        DesignationKind::Deconstruct => {
+            src.is_constructed(p).then_some(()).ok_or(Invalid::NotBuilt)
+        }
         DesignationKind::Build(_) => {
             if !crate::block_props().blocks_ray(src.block(p)) {
                 Ok(())
@@ -248,7 +284,8 @@ fn order_area(area: TileBox) -> Option<TileBox> {
     if area.is_inverted() || area.min[1] < MIN_ORDER_LEVEL || area.max[1] > MAX_ORDER_LEVEL {
         return None;
     }
-    area.clip_to_region().filter(|a| a.tile_count() <= MAX_ORDER_TILES)
+    area.clip_to_region()
+        .filter(|a| a.tile_count() <= MAX_ORDER_TILES)
 }
 
 /// The shared `column_band` probe (sim and client mirror): walks the chunk
@@ -266,7 +303,8 @@ pub fn probe_column_band(
     let cb = crate::CHUNK_BLOCKS as i32;
     let (probe_lo, probe_hi, base) = match ground {
         Some(g) => {
-            let i = column[0].rem_euclid(cb) as usize * crate::CHUNK_BLOCKS + column[1].rem_euclid(cb) as usize;
+            let i = column[0].rem_euclid(cb) as usize * crate::CHUNK_BLOCKS
+                + column[1].rem_euclid(cb) as usize;
             let surface = i32::from(g.surface[i]);
             let bedrock_sub = (surface - UNDERGROUND_DEPTH).div_euclid(cb);
             (
@@ -275,7 +313,11 @@ pub fn probe_column_band(
                 Some((g.band_base_sub_y * cb, surface)),
             )
         }
-        None => (crate::COLUMN_SCAN_Y_MIN.div_euclid(cb), crate::COLUMN_SCAN_Y_MAX.div_euclid(cb), None),
+        None => (
+            crate::COLUMN_SCAN_Y_MIN.div_euclid(cb),
+            crate::COLUMN_SCAN_Y_MAX.div_euclid(cb),
+            None,
+        ),
     };
     let mut band = base;
     for cy in probe_lo..=probe_hi {
@@ -306,12 +348,17 @@ impl TileSource for Rollback {
                 return None;
             }
             return probe_column_band(column, None, |cy| {
-                self.halo_chunk_at([cx, cy, cz]).is_some_and(|h| h.chunk.is_some())
+                self.halo_chunk_at([cx, cy, cz])
+                    .is_some_and(|h| h.chunk.is_some())
             });
         }
-        let ground = self.data.ground.get(&crate::ColumnCoords::new(cx as usize, cz as usize));
+        let ground = self
+            .data
+            .ground
+            .get(&crate::ColumnCoords::new(cx as usize, cz as usize));
         probe_column_band(column, ground, |cy| {
-            self.chunk_key_at(crate::ChunkCoords::new(cx as usize, cy, cz as usize)).is_some()
+            self.chunk_key_at(crate::ChunkCoords::new(cx as usize, cy, cz as usize))
+                .is_some()
         })
     }
 
@@ -321,13 +368,23 @@ impl TileSource for Rollback {
 
     /// Own ∪ halo, through [`Rollback::water_units_at`].
     fn water_units(&self, p: TilePos) -> u16 {
-        self.water_units_at(crate::WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(p[0], p[1], p[2])))
+        self.water_units_at(crate::WorldBlockPos::from_local(
+            *self.data.region,
+            crate::BlockPos::new(p[0], p[1], p[2]),
+        ))
     }
 
     fn is_bedrock(&self, p: TilePos) -> bool {
-        let Some((coords, local)) = crate::edit::locate(p) else { return false };
+        let Some((coords, local)) = crate::edit::locate(p) else {
+            return false;
+        };
         self.current_block(coords, local).is_some_and(|b| {
-            crate::edit::is_bedrock_at(self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), b)
+            crate::edit::is_bedrock_at(
+                self.data
+                    .ground
+                    .get(&crate::ColumnCoords::new(coords.x, coords.z)),
+                b,
+            )
         })
     }
 
@@ -350,7 +407,10 @@ impl TileSource for Rollback {
         };
         let e = self.chunk_key_at(coords)?;
         let chunk = self.data.ecs.chunk.try_get(e).as_ref()?;
-        chunk.chisel.get(&crate::BlockIndex::from_xyz(bx, by, bz)).and_then(crate::slope::classify)
+        chunk
+            .chisel
+            .get(&crate::BlockIndex::from_xyz(bx, by, bz))
+            .and_then(crate::slope::classify)
     }
 }
 
@@ -364,14 +424,21 @@ impl Rollback {
     /// tiles that [`validate`], replacing what was there.
     pub fn apply_order_safe(&mut self, client: ClientId, order: Order) -> bool {
         match order {
-            Order::Designate { op, kind, priority, area } => {
+            Order::Designate {
+                op,
+                kind,
+                priority,
+                area,
+            } => {
                 if op.client != client || !(1..=MAX_PRIORITY).contains(&priority) {
                     return false;
                 }
                 if matches!(kind, DesignationKind::Build(id) if id != crate::edit::PLACE_BLOCK) {
                     return false;
                 }
-                let Some(area) = order_area(area) else { return false };
+                let Some(area) = order_area(area) else {
+                    return false;
+                };
                 let d = Designation { kind, op, priority };
                 let changes: Vec<_> = area
                     .tiles()
@@ -382,7 +449,9 @@ impl Rollback {
                 self.set_designations_safe(changes);
             }
             Order::Erase { area, only } => {
-                let Some(area) = order_area(area) else { return false };
+                let Some(area) = order_area(area) else {
+                    return false;
+                };
                 let changes: Vec<_> = self
                     .data
                     .designations
@@ -423,8 +492,12 @@ impl Rollback {
     /// and detaches each falling part of the tree into a voxel body that
     /// despawns at rest.
     fn dev_complete_all_safe(&mut self) {
-        let all: Vec<(TilePos, Designation)> =
-            self.data.designations.iter().map(|(p, d)| (*p, *d)).collect();
+        let all: Vec<(TilePos, Designation)> = self
+            .data
+            .designations
+            .iter()
+            .map(|(p, d)| (*p, *d))
+            .collect();
         let is_build = |d: &Designation| matches!(d.kind, DesignationKind::Build(_));
         let mut builds: Vec<_> = all.iter().copied().filter(|(_, d)| is_build(d)).collect();
         builds.sort_by_key(|(p, _)| p[1]);
@@ -449,7 +522,11 @@ impl Rollback {
             }
         }
         for (id, tiles) in placing {
-            constructed.extend(self.fill_blocks_safe(&tiles, Block::new(id)).into_iter().map(|p| (p, true)));
+            constructed.extend(
+                self.fill_blocks_safe(&tiles, Block::new(id))
+                    .into_iter()
+                    .map(|p| (p, true)),
+            );
         }
         let mut clearing = Vec::new();
         for (p, d) in removals {
@@ -473,19 +550,71 @@ impl Rollback {
     /// Clears the pending dig / deconstruct tiles in one batch and drops
     /// their constructed flags. A refused write (e.g. the tile became
     /// bedrock) leaves the construction standing, flag included.
-    fn clear_tiles_safe(&mut self, tiles: &mut Vec<TilePos>, constructed: &mut Vec<(TilePos, bool)>) {
+    fn clear_tiles_safe(
+        &mut self,
+        tiles: &mut Vec<TilePos>,
+        constructed: &mut Vec<(TilePos, bool)>,
+    ) {
         if tiles.is_empty() {
             return;
         }
         let cleared = self.fill_blocks_safe(tiles, Block::new(BlockId::AIR));
-        constructed.extend(cleared.into_iter().filter(|p| self.data.constructed.contains_key(p)).map(|p| (p, false)));
+        constructed.extend(
+            cleared
+                .into_iter()
+                .filter(|p| self.data.constructed.contains_key(p))
+                .map(|p| (p, false)),
+        );
         tiles.clear();
     }
 
-    /// Carries out a chop order at `p`: [`Self::fell_safe`] with felled parts
-    /// that despawn at rest, leaving nothing (no items).
+    /// Carries out a chop order at `p`, leaving nothing (no items): under
+    /// [`crate::TreeFelling::Physics`] [`Self::fell_safe`] with felled parts
+    /// that despawn at rest; under `Instant` [`Self::fell_instant_safe`].
     fn chop_safe(&mut self, p: TilePos) {
-        let _ = self.fell_safe(p, crate::SettlePolicy::Despawn);
+        match crate::TREE_FELLING {
+            crate::TreeFelling::Physics => {
+                let _ = self.fell_safe(p, crate::SettlePolicy::Despawn);
+            }
+            crate::TreeFelling::Instant => {
+                let _ = self.fell_instant_safe(p);
+            }
+        }
+    }
+
+    /// Fells the tree at `p` at once ([`crate::TreeFelling::Instant`]): every
+    /// block `trees::fell` names — the cut and the falling part — is cleared
+    /// in one batch, nothing detaches (the renderer is told:
+    /// `GameDataUpdateKind::TreeFelled`). Returns the cleared blocks as they
+    /// were, sorted by position. `None`, with nothing changed, for a tree
+    /// `fell` refuses (not wood, or over `MAX_TREE_BLOCKS`) — left whole.
+    pub fn fell_instant_safe(&mut self, p: TilePos) -> Option<Vec<(TilePos, crate::Block)>> {
+        let felling = crate::trees::fell(self, p)?;
+        let mut all: Vec<TilePos> = felling
+            .cut
+            .into_iter()
+            .chain(felling.falling.into_iter().flatten())
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        let mut gone: Vec<(TilePos, crate::Block)> = all
+            .iter()
+            .filter_map(|&c| self.block_at(c).map(|b| (c, b)))
+            .collect();
+        if self.clear_blocks_safe(&all) == 0 {
+            return None;
+        }
+        // Only what was actually cleared (a refused write keeps its block).
+        gone.retain(|&(c, _)| self.block_at(c).is_some_and(|b| b.id == BlockId::AIR));
+        // Render-only: the client takes them away top to bottom.
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::TreeFelled(crate::TreeFelledView {
+                blocks: gone.clone(),
+                tick: *self.data.tick,
+            }),
+        ));
+        Some(gone)
     }
 
     /// Fells the tree at `p` (`trees::fell`, computed first): clears the cut
@@ -503,8 +632,11 @@ impl Rollback {
     ) -> Option<(Vec<(TilePos, crate::Block)>, Option<crate::EntityKey>)> {
         let tree = TileSource::tree_id(self, p);
         let felling = crate::trees::fell(self, p)?;
-        let mut cut: Vec<(TilePos, crate::Block)> =
-            felling.cut.iter().filter_map(|&c| self.block_at(c).map(|b| (c, b))).collect();
+        let mut cut: Vec<(TilePos, crate::Block)> = felling
+            .cut
+            .iter()
+            .filter_map(|&c| self.block_at(c).map(|b| (c, b)))
+            .collect();
         if self.clear_blocks_safe(&felling.cut) == 0 {
             return None;
         }
@@ -515,7 +647,9 @@ impl Rollback {
         for set in felling.falling {
             let spin = crate::trees::tip_angvel(tree, p, &set, tick);
             let pivot = crate::trees::tip_pivot(p);
-            body = self.detach_blocks_pivoting_safe(&set, policy, spin, Some(pivot)).or(body);
+            body = self
+                .detach_blocks_pivoting_safe(&set, policy, spin, Some(pivot))
+                .or(body);
         }
         Some((cut, body))
     }
@@ -525,7 +659,10 @@ impl Rollback {
         if changes.is_empty() {
             return;
         }
-        let prior = changes.iter().map(|(p, _)| (*p, self.data.designations.get(p).copied())).collect();
+        let prior = changes
+            .iter()
+            .map(|(p, _)| (*p, self.data.designations.get(p).copied()))
+            .collect();
         // LIFO: registered first, so the prior values are re-sent after the
         // map is restored.
         self.data.emit_on_undo(GameDataUpdate::new(
@@ -549,7 +686,10 @@ impl Rollback {
         if changes.is_empty() {
             return;
         }
-        let prior = changes.iter().map(|(p, _)| (*p, self.data.constructed.contains_key(p))).collect();
+        let prior = changes
+            .iter()
+            .map(|(p, _)| (*p, self.data.constructed.contains_key(p)))
+            .collect();
         self.data.emit_on_undo(GameDataUpdate::new(
             GameDataTransactionKind::Undo,
             GameDataUpdateKind::SetConstructed(prior),

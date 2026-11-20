@@ -87,7 +87,11 @@ pub fn contact_manifolds_voxels_composite_shape<ManifoldData, ContactData>(
     // compound resting a hair above the voxels' top face enumerated no voxel at all: no
     // contact, so the CCD clamp (which keeps velocities) froze the body while gravity piled
     // up its speed, until a step the sweep let through sank it deep into the ground.
-    let aabb2_1 = shape2.bvh().root_aabb().transform_by(pos12).loosened(prediction);
+    let aabb2_1 = shape2
+        .bvh()
+        .root_aabb()
+        .transform_by(pos12)
+        .loosened(prediction);
     let domain2_1 = Aabb {
         mins: aabb2_1.mins - radius1 * 10.0,
         maxs: aabb2_1.maxs + radius1 * 10.0,

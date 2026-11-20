@@ -35,7 +35,8 @@ impl InteriorGround {
         let mut surfaces = [None; SPAN * SPAN];
         for i in 0..SPAN {
             for k in 0..SPAN {
-                surfaces[i * SPAN + k] = surface(origin[0] - 1 + i as i32, origin[2] - 1 + k as i32);
+                surfaces[i * SPAN + k] =
+                    surface(origin[0] - 1 + i as i32, origin[2] - 1 + k as i32);
             }
         }
         // Dug air lies below a surface: a brick whose faces look into nothing
@@ -58,4 +59,3 @@ impl InteriorGround {
             .is_some_and(|s| game::is_dug_air(self.origin[1] + block[1], i32::from(s)))
     }
 }
-

@@ -29,15 +29,27 @@ impl StoredTerrain for NoStoredTerrain {
 /// `stored.load_terrain(rc)`, with a missing region or a read error logged as
 /// a warning and turned into `None` (the caller builds pristine). `what`
 /// names the reader in the log line.
-pub fn load_stored_or_warn(stored: &dyn StoredTerrain, rc: RegionCoords, what: &str) -> Option<TerrainSnapshot> {
+pub fn load_stored_or_warn(
+    stored: &dyn StoredTerrain,
+    rc: RegionCoords,
+    what: &str,
+) -> Option<TerrainSnapshot> {
     match stored.load_terrain(rc) {
         Ok(Some(snap)) => Some(snap),
         Ok(None) => {
-            log::warn!("{what}: region {},{} is listed as stored but the store has no terrain; pristine", rc.x, rc.z);
+            log::warn!(
+                "{what}: region {},{} is listed as stored but the store has no terrain; pristine",
+                rc.x,
+                rc.z
+            );
             None
         }
         Err(e) => {
-            log::warn!("{what}: cannot read region {},{} from the world store ({e}); pristine", rc.x, rc.z);
+            log::warn!(
+                "{what}: cannot read region {},{} from the world store ({e}); pristine",
+                rc.x,
+                rc.z
+            );
             None
         }
     }

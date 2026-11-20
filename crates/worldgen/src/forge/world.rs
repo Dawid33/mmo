@@ -1,7 +1,7 @@
 //! The simulated world grid, run parameters, and the initial condition.
 
-use crate::forge::knobs::Knobs;
 use crate::forge::fields;
+use crate::forge::knobs::Knobs;
 use crate::forge::par;
 use crate::forge::periodic::PeriodicX;
 use crate::forge::plates;
@@ -55,7 +55,8 @@ pub const EDGE_NAMES: [&str; 4] = ["north", "east", "south", "west"];
 
 /// The edges of every forged world (the Planet): polar seas north and
 /// south, east and west wrap round to each other.
-pub const PLANET_EDGES: [EdgeKind; 4] = [EdgeKind::Sea, EdgeKind::Wrap, EdgeKind::Sea, EdgeKind::Wrap];
+pub const PLANET_EDGES: [EdgeKind; 4] =
+    [EdgeKind::Sea, EdgeKind::Wrap, EdgeKind::Sea, EdgeKind::Wrap];
 
 /// Proximity of a point (half-width units, -1..1 both ways) to each edge in
 /// `edges` order: 1 on the edge, -1 on the opposite one.
@@ -94,19 +95,29 @@ impl ContinentalMass {
             let x = 2.0 * hash01(seed, 0xC0A6, attempt) - 1.0;
             let z = (2.0 * hash01(seed, 0xC0A7, attempt) - 1.0) * CONTINENT_CENTRE_BOX;
             let gap = |cx: f64, cz: f64| wrap.dx(cx, x).hypot(cz - z);
-            let clear = attempt > 400 || centres.iter().all(|&(cx, cz)| gap(cx, cz) >= CONTINENT_CENTRE_GAP);
+            let clear = attempt > 400
+                || centres
+                    .iter()
+                    .all(|&(cx, cz)| gap(cx, cz) >= CONTINENT_CENTRE_GAP);
             if clear {
                 centres.push((x, z));
             }
         }
         let centres = wrap.with_images(&centres, |c| c.0, |c, d| (c.0 + d, c.1));
-        ContinentalMass { coast, sea, centres, channel: k.continent_sea_width }
+        ContinentalMass {
+            coast,
+            sea,
+            centres,
+            channel: k.continent_sea_width,
+        }
     }
 
     fn at(&self, rx: f64, rz: f64) -> f64 {
         let prox = edge_proximity(rx, rz);
-        let coastal =
-            (0..4).filter(|&e| self.sea[e]).map(|e| 1.0 - prox[e] - self.coast[e]).fold(CONTINENT_INTERIOR_MASS, f64::min);
+        let coastal = (0..4)
+            .filter(|&e| self.sea[e])
+            .map(|e| 1.0 - prox[e] - self.coast[e])
+            .fold(CONTINENT_INTERIOR_MASS, f64::min);
         let (mut a, mut b) = ((f64::INFINITY, 0usize), (f64::INFINITY, 0usize));
         for (j, &(cx, cz)) in self.centres.iter().enumerate() {
             let d = (rx - cx).powi(2) + (rz - cz).powi(2);
@@ -157,12 +168,15 @@ impl ContinentalShape {
             wrap_hi: wrap.for_noise(1_024.0 * scale),
             wrap,
             shape_lo: OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]), // 8 km at the reference size
-            shape_hi: OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]), // 1 km
+            shape_hi: OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]),      // 1 km
             half_x: p.width_m * 0.5,
             half_z: p.height_m * 0.5,
             scale: p.span_m() / REFERENCE_SIZE_M,
             coast_noise: (k.coast_noise_lo, k.coast_noise_hi),
-            margin: (k.ocean_margin_start, (k.ocean_margin_start + OCEAN_MARGIN_RAMP).min(0.99)),
+            margin: (
+                k.ocean_margin_start,
+                (k.ocean_margin_start + OCEAN_MARGIN_RAMP).min(0.99),
+            ),
         }
     }
 
@@ -170,14 +184,27 @@ impl ContinentalShape {
     /// the sea's own (not the margin's) — shelf and abyss.
     fn at(&self, mx: f64, mz: f64) -> (f64, f64) {
         let mx = self.wrap.fold(mx);
-        let (rx, rz) = ((mx - self.half_x) / self.half_x, (mz - self.half_z) / self.half_z);
+        let (rx, rz) = (
+            (mx - self.half_x) / self.half_x,
+            (mz - self.half_z) / self.half_z,
+        );
         let scale = self.scale;
-        let lo = self.wrap_lo.sample(mx, mz, |x, z| self.shape_lo.sample2(x / scale, z / scale));
-        let hi = self.wrap_hi.sample(mx, mz, |x, z| self.shape_hi.sample2(x / scale, z / scale));
+        let lo = self
+            .wrap_lo
+            .sample(mx, mz, |x, z| self.shape_lo.sample2(x / scale, z / scale));
+        let hi = self
+            .wrap_hi
+            .sample(mx, mz, |x, z| self.shape_hi.sample2(x / scale, z / scale));
         let shape = self.mass.at(rx, rz) + self.coast_noise.0 * lo + self.coast_noise.1 * hi;
         let prox = edge_proximity(rx, rz);
-        let sea_prox = (0..4).filter(|&e| self.edges[e] == EdgeKind::Sea).map(|e| prox[e]).fold(-1.0, f64::max);
-        (shape, shape - 2.0 * smoothstep(self.margin.0, self.margin.1, sea_prox))
+        let sea_prox = (0..4)
+            .filter(|&e| self.edges[e] == EdgeKind::Sea)
+            .map(|e| prox[e])
+            .fold(-1.0, f64::max);
+        (
+            shape,
+            shape - 2.0 * smoothstep(self.margin.0, self.margin.1, sea_prox),
+        )
     }
 }
 
@@ -187,7 +214,9 @@ impl ContinentalShape {
 /// same cones, and the world file stores the same list.
 pub fn volcano_sites(p: &ForgeParams) -> Vec<[f32; 2]> {
     let shape = ContinentalShape::new(p);
-    fields::volcano_sites_on(p, &|mx, mz| shape.at(mx, mz).1 > fields::VOLCANO_MIN_LANDNESS)
+    fields::volcano_sites_on(p, &|mx, mz| {
+        shape.at(mx, mz).1 > fields::VOLCANO_MIN_LANDNESS
+    })
 }
 
 /// The ocean margin ramps from fully open to fully drowned over this share of
@@ -198,8 +227,16 @@ const OCEAN_MARGIN_RAMP: f64 = 0.13;
 /// Lowest land height (m): erosion and diffusion clamp land to it too.
 pub const LAND_FLOOR_M: f64 = 0.05;
 
-const NEIGHBORS: [(i32, i32); 8] =
-    [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
+const NEIGHBORS: [(i32, i32); 8] = [
+    (1, 0),
+    (-1, 0),
+    (0, 1),
+    (0, -1),
+    (1, 1),
+    (1, -1),
+    (-1, 1),
+    (-1, -1),
+];
 
 /// What a forge run needs: world size (x across `width_m`, z down
 /// `height_m`), grid, seed and every knob.
@@ -255,7 +292,8 @@ pub fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
 
 /// Uniform hash in [0, 1) of (seed, a, b).
 pub fn hash01(seed: u64, a: u64, b: u64) -> f64 {
-    let mut z = seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    let mut z =
+        seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
@@ -312,8 +350,11 @@ impl World {
         let field = plates::plate_field(p.seed, p.width_m, p.height_m, nx, nz, k);
         // Each range with its images east and west.
         let ranges = plates::interior_ranges(p.seed, p.width_m, p.height_m, k);
-        let volcanoes =
-            wrap.with_images(&volcano_sites(p), |s| s[0] as f64, |s, d| [(s[0] as f64 + d) as f32, s[1]]);
+        let volcanoes = wrap.with_images(
+            &volcano_sites(p),
+            |s| s[0] as f64,
+            |s, d| [(s[0] as f64 + d) as f32, s[1]],
+        );
 
         let mut w = World {
             nx,
@@ -344,7 +385,8 @@ impl World {
                     };
                     continue;
                 }
-                let rough_at = wrap_rough.sample(mx, mz, |x, z| rough.sample2(x / scale, z / scale));
+                let rough_at =
+                    wrap_rough.sample(mx, mz, |x, z| rough.sample2(x / scale, z / scale));
                 w.h[i] = (1.0 + 45.0 * smoothstep(0.0, 0.5, land) + 3.0 * rough_at).max(0.5);
                 let interior = plates::interior_strength(&ranges, mx, mz, p.width_m, p.height_m, k);
                 let belt = (field.convergence[i] as f64).max(interior);
@@ -391,7 +433,9 @@ impl World {
     pub fn border_cells(&self) -> impl Iterator<Item = usize> + use<> {
         let (nx, nz) = (self.nx, self.nz);
         let columns = if self.wrap_x { 0 } else { nz };
-        (0..nx).flat_map(move |x| [x, (nz - 1) * nx + x]).chain((0..columns).flat_map(move |z| [z * nx, z * nx + nx - 1]))
+        (0..nx)
+            .flat_map(move |x| [x, (nz - 1) * nx + x])
+            .chain((0..columns).flat_map(move |z| [z * nx, z * nx + nx - 1]))
     }
 
     /// The cell `dx` columns east and `dz` rows south of cell `i`: x wraps
@@ -400,7 +444,10 @@ impl World {
     /// wrap-aware offset every neighbour walk uses.
     #[inline]
     pub fn step(&self, i: usize, dx: i32, dz: i32) -> Option<usize> {
-        let (x, z) = ((i % self.nx) as i64 + dx as i64, (i / self.nx) as i64 + dz as i64);
+        let (x, z) = (
+            (i % self.nx) as i64 + dx as i64,
+            (i / self.nx) as i64 + dz as i64,
+        );
         let (w, h) = (self.nx as i64, self.nz as i64);
         let x = if self.wrap_x { x.rem_euclid(w) } else { x };
         (x >= 0 && z >= 0 && x < w && z < h).then(|| (z * w + x) as usize)
@@ -424,8 +471,12 @@ impl World {
         let (ncx, ncz, nfx) = (self.nx, self.nz, fine.nx);
         // Coarse sea cells read as sea level for land, as diffusion's shore
         // does: a coast cell must not inherit the shelf's depth.
-        let coarse_h: Vec<f64> =
-            self.h.iter().zip(&self.ocean).map(|(&h, &sea)| if sea { 0.0 } else { h }).collect();
+        let coarse_h: Vec<f64> = self
+            .h
+            .iter()
+            .zip(&self.ocean)
+            .map(|(&h, &sea)| if sea { 0.0 } else { h })
+            .collect();
         // Cell centers matched by real position (metres), not share of the
         // grid: a level whose `size / cell` rounds (16 km at 256 m: 62.5 ->
         // 63 cells) covers a little more or less than the fine grid, and a
@@ -446,7 +497,11 @@ impl World {
         };
         let wrap_x = self.wrap_x && fine.wrap_x;
         let sample = |grid: &[f64], i: usize| {
-            let x_axis = if wrap_x { circular(i % nfx, ncx) } else { axis(i % nfx, ncx) };
+            let x_axis = if wrap_x {
+                circular(i % nfx, ncx)
+            } else {
+                axis(i % nfx, ncx)
+            };
             let ((x0, x1, tx), (z0, z1, tz)) = (x_axis, axis(i / nfx, ncz));
             let row = |z: usize| grid[z * ncx + x0] * (1.0 - tx) + grid[z * ncx + x1] * tx;
             row(z0) * (1.0 - tz) + row(z1) * tz
@@ -454,8 +509,20 @@ impl World {
         // Outlets (the sea) keep the fine initial condition.
         let outlet = &fine.outlet;
         let cells = fine.cells();
-        let h = par::map_range(cells, |i| if outlet[i] { fine.h[i] } else { sample(&coarse_h, i).max(LAND_FLOOR_M) });
-        let uplifted = par::map_range(cells, |i| if outlet[i] { 0.0 } else { sample(&self.uplifted, i) });
+        let h = par::map_range(cells, |i| {
+            if outlet[i] {
+                fine.h[i]
+            } else {
+                sample(&coarse_h, i).max(LAND_FLOOR_M)
+            }
+        });
+        let uplifted = par::map_range(cells, |i| {
+            if outlet[i] {
+                0.0
+            } else {
+                sample(&self.uplifted, i)
+            }
+        });
         fine.h = h;
         fine.uplifted = uplifted;
         fine
@@ -471,7 +538,11 @@ impl World {
             let (jx, jz) = (x + ox, z + oz);
             let jx = if wrap { jx.rem_euclid(w) } else { jx };
             (jx >= 0 && jz >= 0 && jx < w && jz < h).then(|| {
-                let dist = if ox != 0 && oz != 0 { std::f64::consts::SQRT_2 } else { 1.0 };
+                let dist = if ox != 0 && oz != 0 {
+                    std::f64::consts::SQRT_2
+                } else {
+                    1.0
+                };
                 ((jz * w + jx) as usize, dist * self.dx)
             })
         })
@@ -479,6 +550,9 @@ impl World {
 
     /// Cell center in world meters.
     pub fn center(&self, i: usize) -> (f64, f64) {
-        (((i % self.nx) as f64 + 0.5) * self.dx, ((i / self.nx) as f64 + 0.5) * self.dx)
+        (
+            ((i % self.nx) as f64 + 0.5) * self.dx,
+            ((i / self.nx) as f64 + 0.5) * self.dx,
+        )
     }
 }

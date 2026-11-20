@@ -87,8 +87,8 @@ impl Forged {
     /// The world file the engine serves (`VOXEL_WORLD_FILE`, worldgen::forged).
     pub fn artifact(&self, p: &ForgeParams) -> crate::forged::WorldArtifact {
         use crate::forged::{
-            RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, PRECIP_STEP_MM,
-            TEMPERATURE_STEP_C,
+            ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, PRECIP_STEP_MM, RiverPoint, RiverReach,
+            TEMPERATURE_STEP_C, WorldArtifact,
         };
         let (w, a) = (&self.world, &self.analysis);
         // Lake water surface per cell, from the lake bodies' own levels.
@@ -107,9 +107,17 @@ impl Forged {
             height: quantise(&w.h, HEIGHT_STEP_M),
             uplifted: quantise(&w.uplifted, GEO_STEP_M),
             bedding: quantise(&self.geology.bedding, GEO_STEP_M),
-            temperature_c: crate::forged::QRaster::fit(&self.climate.temperature_c, TEMPERATURE_STEP_C),
+            temperature_c: crate::forged::QRaster::fit(
+                &self.climate.temperature_c,
+                TEMPERATURE_STEP_C,
+            ),
             precip_mm: crate::forged::QRaster::fit(&self.climate.precip_mm, PRECIP_STEP_MM),
-            column: self.geology.column().iter().map(|&(top, rock)| (top as f32, rock)).collect(),
+            column: self
+                .geology
+                .column()
+                .iter()
+                .map(|&(top, rock)| (top as f32, rock))
+                .collect(),
             rock_names: geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
             rivers: a
                 .rivers
@@ -287,7 +295,10 @@ pub fn schedule(p: &ForgeParams) -> Vec<(f64, usize)> {
     let mut levels = vec![p.cell_m];
     for _ in 0..k.coarse_level_count() {
         let cell = levels[0] * 2.0;
-        let (nx, nz) = ((p.width_m / cell).round() as usize, (p.height_m / cell).round() as usize);
+        let (nx, nz) = (
+            (p.width_m / cell).round() as usize,
+            (p.height_m / cell).round() as usize,
+        );
         if nx.min(nz) < MIN_LEVEL_CELLS {
             break;
         }
@@ -378,8 +389,15 @@ pub fn forge_with(
     let mut done = 0;
     for (level, &(cell_m, level_iters)) in levels.iter().enumerate() {
         let last = level + 1 == levels.len();
-        let lp = ForgeParams { cell_m, ..p.clone() };
-        let base = if last { fine.take().expect("final grid built once") } else { World::new(&lp) };
+        let lp = ForgeParams {
+            cell_m,
+            ..p.clone()
+        };
+        let base = if last {
+            fine.take().expect("final grid built once")
+        } else {
+            World::new(&lp)
+        };
         let mut lw = match w.take() {
             Some(coarse) => coarse.upsample_onto(base),
             None => base,
@@ -400,7 +418,8 @@ pub fn forge_with(
                     Some(filled) => climate::lakes_from_filled(&lw, filled),
                     None => vec![false; lw.cells()],
                 };
-                rain = climate::discharge_weight(&climate::compute_with_lakes(&lw, &lp, &lakes), &lw);
+                rain =
+                    climate::discharge_weight(&climate::compute_with_lakes(&lw, &lp, &lakes), &lw);
             }
             let drowned = erosion::step(&mut lw, &lp, &level_geo, &rain, &mut scratch);
             done += 1;
@@ -418,7 +437,10 @@ pub fn forge_with(
         w = Some(lw);
         geo = Some(level_geo);
     }
-    let (mut w, geo) = (w.expect("the schedule has a final level"), geo.expect("final geology"));
+    let (mut w, geo) = (
+        w.expect("the schedule has a final level"),
+        geo.expect("final geology"),
+    );
     let k = &p.knobs;
     if report(ForgeStage::Shaping, 0) {
         return None;
@@ -442,6 +464,15 @@ pub fn forge_with(
     let rain = climate::discharge_weight(&climate, &w);
     let analysis = hydrology::analyze(&w, &geo, &rain, k);
     let fields = fields::compute(p, &w, &analysis, &geo);
-    Some(Forged { world: w, initial, geology: geo, climate, rain, analysis, fields, simulated_peak_m, height_fit })
+    Some(Forged {
+        world: w,
+        initial,
+        geology: geo,
+        climate,
+        rain,
+        analysis,
+        fields,
+        simulated_peak_m,
+        height_fit,
+    })
 }
-

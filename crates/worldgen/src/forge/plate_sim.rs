@@ -23,8 +23,8 @@
 
 use crate::forge::periodic::PeriodicX;
 use crate::forge::planet::{
-    planet_deg, planet_lat_deg, planet_step, CrustKind, OrogenyKind, PlanetKey, PlanetNoise, PLANET_CELLS,
-    PLANET_DEG_PER_CELL, PLANET_NX, PLANET_NZ,
+    CrustKind, OrogenyKind, PLANET_CELLS, PLANET_DEG_PER_CELL, PLANET_NX, PLANET_NZ, PlanetKey,
+    PlanetNoise, planet_deg, planet_lat_deg, planet_step,
 };
 use crate::forge::world::{hash01, smoothstep};
 
@@ -38,7 +38,7 @@ pub const PLATES_MAX: usize = 24;
 pub const NO_PLATE: u8 = 255;
 
 /// The supercontinent's share of the planet's cells (untested design).
-const SUPERCONTINENT_SHARE: f64 = 0.26;
+const SUPERCONTINENT_SHARE: f64 = 0.29;
 /// The supercontinent outline's scale bracket and its bisection's halvings.
 const SUPERCONTINENT_SIGMA: [f64; 2] = [0.2, 3.0];
 const SUPERCONTINENT_HALVINGS: usize = 24;
@@ -67,13 +67,13 @@ const CONT_BASE_NOISE_M: f64 = 350.0;
 /// Initial continental crust is born `CONT_BORN_MY[0] − CONT_BORN_MY[1] · t` My (−600 … −2,500).
 const CONT_BORN_MY: [f64; 2] = [-600.0, 1_900.0];
 /// Initial ocean floor is born up to this long before the start, My.
-const OCEAN_BORN_SPREAD_MY: f64 = 150.0;
+const OCEAN_BORN_SPREAD_MY: f64 = 80.0;
 /// Old belts across the supercontinent at the start: count, half-width (degrees),
 /// strength at the axis, the outline warp (degrees), and the segment's offset
 /// from the centroid, angle and length draws.
-const ANCIENT_SUTURES: usize = 2;
-const SUTURE_HALF_WIDTH_DEG: f64 = 6.0;
-const SUTURE_STRENGTH: f64 = 0.9;
+const ANCIENT_SUTURES: usize = 3;
+const SUTURE_HALF_WIDTH_DEG: f64 = 7.0;
+const SUTURE_STRENGTH: f64 = 1.0;
 const SUTURE_WARP_DEG: f64 = 3.0;
 const SUTURE_OFFSET_DEG: [f64; 2] = [-25.0, 50.0];
 const SUTURE_LENGTH_DEG: [f64; 2] = [60.0, 50.0];
@@ -84,10 +84,10 @@ const PLATE_SITE_ATTEMPTS: u64 = 4_000;
 /// Warp of the plate boundaries, degrees.
 const PLATE_SITE_WARP_DEG: f64 = 8.0;
 /// A plate more than this share continental moves slowly.
-const SLOW_PLATE_CONT_SHARE: f64 = 0.30;
+const SLOW_PLATE_CONT_SHARE: f64 = 0.40;
 /// Speeds, cells per step: `[base, spread]` for continental and oceanic plates.
-const SLOW_SPEED: [f64; 2] = [0.15, 0.30];
-const FAST_SPEED: [f64; 2] = [0.40, 0.60];
+const SLOW_SPEED: [f64; 2] = [0.18, 0.24];
+const FAST_SPEED: [f64; 2] = [0.70, 0.30];
 
 /// Oceanic elevation, m: `OCEAN_ABYSS_M + (OCEAN_RIDGE_M − OCEAN_ABYSS_M) ·
 /// exp(−crust_age / OCEAN_SUBSIDE_MY)` — Cortial's ridge `zr` and abyss `za`;
@@ -104,7 +104,7 @@ pub const HOTSPOT_SUBSIDE_MY: f64 = 25.0;
 /// `root_keep(age) = ROOT_RESIDUAL + (1 − ROOT_RESIDUAL) · exp(−age / ROOT_DECAY_MY)`:
 /// how much of an orogen's crustal root is left. 333 My = `zc / εc` = 10 km ÷
 /// 0.03 mm/yr, Cortial's continental-erosion e-folding; the residual is untested design.
-pub const ROOT_RESIDUAL: f64 = 0.15;
+pub const ROOT_RESIDUAL: f64 = 0.20;
 pub const ROOT_DECAY_MY: f64 = 333.0;
 
 /// A subduction belt's reach from its front, degrees: Cortial's `rs` 1,800 km.
@@ -112,9 +112,9 @@ pub const SUBDUCTION_REACH_DEG: f64 = 16.2;
 /// Where the belt's profile peaks, as a share of the reach (untested: the
 /// paper gives no control distance).
 pub const SUBDUCTION_PEAK_SHARE: f64 = 0.25;
-/// Cortial's subduction uplift `u0`, m per My (0.6 mm/yr); a gain is this
-/// over the Andean `OROGEN_HEIGHT_M` (6,000) per My.
-pub const SUBDUCTION_U0_M_PER_MY: f64 = 600.0;
+/// Cortial's subduction uplift `u0`, m per My (0.6 mm/yr in Cortial; tuned to 300.0 for `m.relief ≈ 0.1`);
+/// a gain is this over the Andean `OROGEN_HEIGHT_M` (6,000) per My.
+pub const SUBDUCTION_U0_M_PER_MY: f64 = 300.0;
 /// The ends of Cortial's elevation scale `z̃`, m.
 pub const TRENCH_M: f64 = -10_000.0;
 pub const CONT_MAX_M: f64 = 10_000.0;
@@ -141,13 +141,11 @@ pub const SUTURE_CONSUMED_CELLS: u32 = 24;
 /// least `COLLISION_RADIUS_MIN_DEG` (untested), `r ∝ sqrt(speed · A)`.
 pub const COLLISION_RADIUS_MAX_DEG: f64 = 37.8;
 pub const COLLISION_RADIUS_MIN_DEG: f64 = 3.0;
-/// A collision's peak gain per square degree of terrane: Cortial's `Δc`
-/// 1.3·10⁻⁵ km⁻¹ × 12,321 km² per square degree ÷ `OROGEN_HEIGHT_M` 6,000.
-/// `COLLISION_GAIN_PER_DEG2 · A` reaches 1 at 37.5 square degrees (about 76
-/// cells), so with `SUTURE_CONSUMED_CELLS = 24` nearly every suture has a
-/// full-strength core — in this model a terrane's AREA sets the belt's
-/// radius (`r ∝ sqrt(A)`), not its peak.
-pub const COLLISION_GAIN_PER_DEG2: f64 = 0.0267;
+/// A collision's peak gain per square degree of terrane: Cortial's Δc was
+/// `0.0267` (reaching 1 at 37.5 deg²); tuned to `0.00012` so microcontinents
+/// and `t = 1.5 My` Voronoi slices do not turn whole continents into `1.0`
+/// plateaus while large continent collisions still build bounded ranges.
+pub const COLLISION_GAIN_PER_DEG2: f64 = 0.00012;
 /// A terrane at least this large, square degrees, raises a `Plateau` (untested design).
 pub const PLATEAU_MIN_DEG2: f64 = 300.0;
 /// The merged plate's velocity is multiplied by this after a suture (untested design).
@@ -155,11 +153,11 @@ pub const COLLISION_BRAKE: f64 = 0.5;
 
 /// Rifting rate per My for a fully continental plate of the initial mean area at `rift_rate = 1`
 /// (Cortial gives the form, no rate; untested design).
-pub const RIFT_RATE_PER_MY: f64 = 1.0 / 150.0;
+pub const RIFT_RATE_PER_MY: f64 = 1.0 / 120.0;
 /// Minimum continental area of a plate that may rift, square degrees (untested design).
-pub const RIFT_MIN_CONT_DEG2: f64 = 400.0;
+pub const RIFT_MIN_CONT_DEG2: f64 = 1_200.0;
 /// Half-separation speed added along the rift normal, cells per step (untested design).
-pub const RIFT_SPEED: f64 = 0.35;
+pub const RIFT_SPEED: f64 = 0.45;
 /// Distance from the rift cut within which continental `base_m` drops as a passive margin, degrees (untested design).
 pub const RIFT_MARGIN_DEG: f64 = 4.0;
 /// Maximum `base_m` drop at a rifted passive margin, m (untested design).
@@ -173,7 +171,7 @@ pub const REDIRECT_MY: (f64, f64) = (60.0, 120.0);
 /// Maximum turn angle at a plate redirect, degrees (untested design).
 pub const REDIRECT_TURN_DEG: f64 = 60.0;
 /// Slab-pull acceleration per My applied to subducting plates (untested design).
-pub const SLAB_PULL_PER_MY: f64 = 0.01;
+pub const SLAB_PULL_PER_MY: f64 = 0.035;
 /// Number of fixed mantle hotspots (notes: 10–20 active on Earth, a hobbyist synthesis).
 pub const HOTSPOTS: usize = 12;
 /// Strength stamped by a mantle hotspot (untested design; Ruling 13).
@@ -181,7 +179,7 @@ pub const HOTSPOT_STRENGTH: f32 = 1.0;
 /// Width of the polar orogeny fade margin, degrees from each pole (Ruling 10; untested design).
 pub const POLAR_FADE_DEG: f64 = 12.0;
 /// Continental-centroid latitude past which the polar soft wall reverses poleward motion, degrees (Ruling 10; untested design).
-pub const POLAR_WALL_DEG: f64 = 45.0;
+pub const POLAR_WALL_DEG: f64 = 36.0;
 /// Warp of the rift cut line, degrees (untested design).
 const RIFT_WARP_DEG: f64 = 4.0;
 /// Hotspot latitudes stay within this of the equator, degrees (untested design).
@@ -339,7 +337,9 @@ impl PlateState {
         let deg: Vec<(f64, f64)> = (0..PLANET_CELLS).map(planet_deg).collect();
         let field = |salt: u64, wavelength: f64| {
             let n = PlanetNoise::new(seed, salt, wavelength);
-            deg.iter().map(|&(lon, lat_s)| n.at(lon, lat_s)).collect::<Vec<f64>>()
+            deg.iter()
+                .map(|&(lon, lat_s)| n.at(lon, lat_s))
+                .collect::<Vec<f64>>()
         };
         let shape = field(N_SHAPE, N_SHAPE_DEG);
         let shape2 = field(N_SHAPE2, N_SHAPE_DEG);
@@ -362,7 +362,8 @@ impl PlateState {
         let [mut lo, mut hi] = SUPERCONTINENT_SIGMA;
         for _ in 0..SUPERCONTINENT_HALVINGS {
             let mid = 0.5 * (lo + hi);
-            let share = supercontinent(mid).iter().filter(|&&m| m).count() as f64 / PLANET_CELLS as f64;
+            let share =
+                supercontinent(mid).iter().filter(|&&m| m).count() as f64 / PLANET_CELLS as f64;
             if share > SUPERCONTINENT_SHARE {
                 hi = mid;
             } else {
@@ -410,7 +411,9 @@ impl PlateState {
             if continental[c] {
                 crust[c] = CrustKind::Continental as u8;
                 base_m[c] = (CONT_BASE_M + CONT_BASE_NOISE_M * base[c]) as f32;
-                born_my[c] = (CONT_BORN_MY[0] - CONT_BORN_MY[1] * (0.5 + 0.5 * age[c]).clamp(0.0, 1.0)) as f32;
+                born_my[c] = (CONT_BORN_MY[0]
+                    - CONT_BORN_MY[1] * (0.5 + 0.5 * age[c]).clamp(0.0, 1.0))
+                    as f32;
             } else {
                 born_my[c] = (-OCEAN_BORN_SPREAD_MY * h(H_OCEAN_AGE, c as u64)) as f32;
             }
@@ -466,7 +469,9 @@ impl PlateState {
         while sites.len() < PLATES_INITIAL {
             let lon = 360.0 * h(H_SITE, 2 * t);
             let lat_s = 180.0 - 180.0 * h(H_SITE, 2 * t + 1); // lat = −90 + 180 · h1
-            let far = sites.iter().all(|&(sx, sz)| wrap.dx(sx, lon).hypot(lat_s - sz) >= PLATE_SITE_GAP_DEG);
+            let far = sites
+                .iter()
+                .all(|&(sx, sz)| wrap.dx(sx, lon).hypot(lat_s - sz) >= PLATE_SITE_GAP_DEG);
             if far || t > PLATE_SITE_ATTEMPTS {
                 sites.push((lon, lat_s));
             }
@@ -475,7 +480,10 @@ impl PlateState {
         let mut plate = vec![0u8; PLANET_CELLS];
         for c in 0..PLANET_CELLS {
             let (lon, lat_s) = deg[c];
-            let (px, pz) = (lon + PLATE_SITE_WARP_DEG * shape[c], lat_s + PLATE_SITE_WARP_DEG * shape2[c]);
+            let (px, pz) = (
+                lon + PLATE_SITE_WARP_DEG * shape[c],
+                lat_s + PLATE_SITE_WARP_DEG * shape2[c],
+            );
             let mut best = (f64::INFINITY, 0usize);
             for (i, &(sx, sz)) in sites.iter().enumerate() {
                 let dx = wrap.dx(sx, px);
@@ -498,11 +506,16 @@ impl PlateState {
         for i in 0..PLATES_INITIAL {
             let dir = 2.0 * std::f64::consts::PI * h(H_VEL, 2 * i as u64);
             let share = cont[i] as f64 / cells[i].max(1) as f64;
-            let [s0, s1] = if share > SLOW_PLATE_CONT_SHARE { SLOW_SPEED } else { FAST_SPEED };
+            let [s0, s1] = if share > SLOW_PLATE_CONT_SHARE {
+                SLOW_SPEED
+            } else {
+                FAST_SPEED
+            };
             let speed = s0 + s1 * h(H_VEL, 2 * i as u64 + 1);
             vel[i] = [speed * dir.cos(), speed * dir.sin()];
             alive[i] = true;
-            next_redirect_my[i] = REDIRECT_MY.0 + (REDIRECT_MY.1 - REDIRECT_MY.0) * h(H_REDIRECT_T, i as u64);
+            next_redirect_my[i] =
+                REDIRECT_MY.0 + (REDIRECT_MY.1 - REDIRECT_MY.0) * h(H_REDIRECT_T, i as u64);
         }
         let hotspots: Vec<usize> = (0..HOTSPOTS as u64)
             .map(|k| {
@@ -535,7 +548,10 @@ impl PlateState {
             redirect_count: vec![0; PLATES_MAX],
             hotspots,
             step: 0,
-            counters: Counters { continental_cells_start, ..Counters::default() },
+            counters: Counters {
+                continental_cells_start,
+                ..Counters::default()
+            },
             shape: std::sync::Arc::from(shape),
             next: Next::default(),
             scratch: Scratch::default(),
@@ -565,7 +581,12 @@ impl PlateState {
     fn advance_in(
         &mut self,
         order: impl Iterator<Item = usize>,
-    ) -> ([u32; PLATES_MAX], [u64; PLATES_MAX], [u32; PLATES_MAX], [u32; PLATES_MAX]) {
+    ) -> (
+        [u32; PLATES_MAX],
+        [u64; PLATES_MAX],
+        [u32; PLATES_MAX],
+        [u32; PLATES_MAX],
+    ) {
         // 1. Whole-cell moves.
         let mut moves = [(0i32, 0i32); PLATES_MAX];
         for p in 0..PLATES_MAX {
@@ -593,7 +614,12 @@ impl PlateState {
         for v in [&mut next.crust, &mut next.kind] {
             v.resize(PLANET_CELLS, 0);
         }
-        for v in [&mut next.born_my, &mut next.base_m, &mut next.strength, &mut next.orogeny_my] {
+        for v in [
+            &mut next.born_my,
+            &mut next.base_m,
+            &mut next.strength,
+            &mut next.orogeny_my,
+        ] {
             v.resize(PLANET_CELLS, 0.0);
         }
         next.fold.resize(PLANET_CELLS, [0.0; 2]);
@@ -619,10 +645,16 @@ impl PlateState {
             consumed,
         } = &mut self.next;
         consumed.clear();
-        let (plate, crust, born_my) =
-            (&self.plate[..PLANET_CELLS], &self.crust[..PLANET_CELLS], &self.born_my[..PLANET_CELLS]);
-        let (n_plate, winner, dest) =
-            (&mut n_plate[..PLANET_CELLS], &mut winner[..PLANET_CELLS], &mut dest[..PLANET_CELLS]);
+        let (plate, crust, born_my) = (
+            &self.plate[..PLANET_CELLS],
+            &self.crust[..PLANET_CELLS],
+            &self.born_my[..PLANET_CELLS],
+        );
+        let (n_plate, winner, dest) = (
+            &mut n_plate[..PLANET_CELLS],
+            &mut winner[..PLANET_CELLS],
+            &mut dest[..PLANET_CELLS],
+        );
         let mut cont = [0u32; PLATES_MAX];
         let mut cont_cz_sum = [0u64; PLATES_MAX];
         // Per plate: `born_my` summed over its oceanic cells, and their count.
@@ -673,7 +705,8 @@ impl PlateState {
                 }
             }
         }
-        let ocean: [f64; PLATES_MAX] = std::array::from_fn(|p| ocean_mean_born(ocean_sum[p], ocean_cells[p]));
+        let ocean: [f64; PLATES_MAX] =
+            std::array::from_fn(|p| ocean_mean_born(ocean_sum[p], ocean_cells[p]));
         // Pass A, the contest: the winner of each destination under one
         // total order (the result does not depend on `order`).
         for c in order {
@@ -756,8 +789,19 @@ impl PlateState {
         for &(d, c) in consumed.iter() {
             let (d, c) = (d as usize, c as usize);
             let (o, u) = (n_plate[d] as usize, plate[c] as usize);
-            let dv = [self.vel[u][0] - self.vel[o][0], self.vel[u][1] - self.vel[o][1]];
-            let elevation = cell_elevation_m(crust[c], born_my[c], base_m[c], strength[c], orogeny_my[c], kind[c], now);
+            let dv = [
+                self.vel[u][0] - self.vel[o][0],
+                self.vel[u][1] - self.vel[o][1],
+            ];
+            let elevation = cell_elevation_m(
+                crust[c],
+                born_my[c],
+                base_m[c],
+                strength[c],
+                orogeny_my[c],
+                kind[c],
+                now,
+            );
             let z = (elevation - TRENCH_M) / (CONT_MAX_M - TRENCH_M);
             let is_contact = crust[c] == CrustKind::Continental as u8;
             if is_contact {
@@ -847,12 +891,24 @@ impl PlateState {
         let belt_gain = BELT_MIN_REL * (1.0 - root_keep(period));
         let Scratch { dist, src, .. } = &mut self.scratch;
         let (ttl, mark) = (&self.mark_ttl, &self.mark);
-        let active = chamfer_into(|c| ttl[c] > 0 && !mark[c].contact, PLANET_DEG_PER_CELL, reach, dist, src);
+        let active = chamfer_into(
+            |c| ttl[c] > 0 && !mark[c].contact,
+            PLANET_DEG_PER_CELL,
+            reach,
+            dist,
+            src,
+        );
         // Only the chamfer's active tiles can hold a distance below the reach.
-        let cells = (0..CHAMFER_TX * CHAMFER_TZ).filter(|&t| active[t]).flat_map(|t| {
-            let (x0, z0) = ((t % CHAMFER_TX) * CHAMFER_TILE, (t / CHAMFER_TX) * CHAMFER_TILE);
-            (z0..z0 + CHAMFER_TILE).flat_map(move |z| (z * PLANET_NX + x0)..(z * PLANET_NX + x0 + CHAMFER_TILE))
-        });
+        let cells = (0..CHAMFER_TX * CHAMFER_TZ)
+            .filter(|&t| active[t])
+            .flat_map(|t| {
+                let (x0, z0) = (
+                    (t % CHAMFER_TX) * CHAMFER_TILE,
+                    (t / CHAMFER_TX) * CHAMFER_TILE,
+                );
+                (z0..z0 + CHAMFER_TILE)
+                    .flat_map(move |z| (z * PLANET_NX + x0)..(z * PLANET_NX + x0 + CHAMFER_TILE))
+            });
         for c in cells {
             let d = dist[c];
             if d >= reach {
@@ -865,13 +921,13 @@ impl PlateState {
             if self.crust[c] == CrustKind::Oceanic as u8 && d >= ARC_REACH_DEG {
                 continue;
             }
-            let f = if d < peak { smoothstep(0.0, peak, d) } else { 1.0 - smoothstep(peak, reach, d) };
+            let f = if d < peak {
+                smoothstep(0.0, peak, d)
+            } else {
+                1.0 - smoothstep(peak, reach, d)
+            };
             let lat = planet_lat_deg(c / PLANET_NX);
-            let gain = rate
-                * f
-                * f64::from(m.speed)
-                * f64::from(m.relief)
-                * polar_fade(lat);
+            let gain = rate * f * f64::from(m.speed) * f64::from(m.relief) * polar_fade(lat);
             if gain <= GAIN_MIN {
                 continue;
             }
@@ -900,7 +956,10 @@ impl PlateState {
     fn sutures(&mut self, cells_after: &mut [u32; PLATES_MAX], cont_after: &mut [u32; PLATES_MAX]) {
         for o in 0..PLATES_MAX {
             for u in 0..PLATES_MAX {
-                if self.alive[o] && self.alive[u] && self.pending[o * PLATES_MAX + u] >= SUTURE_CONSUMED_CELLS {
+                if self.alive[o]
+                    && self.alive[u]
+                    && self.pending[o * PLATES_MAX + u] >= SUTURE_CONSUMED_CELLS
+                {
                     self.suture(o, u, cells_after, cont_after);
                 }
             }
@@ -912,11 +971,23 @@ impl PlateState {
     /// continental cell of `U` that is an 8-neighbour of a live contact mark
     /// of the pair. An empty `R` (the colliding crust is all consumed) makes
     /// no suture and clears the pair's count.
-    fn suture(&mut self, o: usize, u: usize, cells_after: &mut [u32; PLATES_MAX], cont_after: &mut [u32; PLATES_MAX]) {
+    fn suture(
+        &mut self,
+        o: usize,
+        u: usize,
+        cells_after: &mut [u32; PLATES_MAX],
+        cont_after: &mut [u32; PLATES_MAX],
+    ) {
         let time = self.time_my();
         self.pending[o * PLATES_MAX + u] = 0;
         let continental = CrustKind::Continental as u8;
-        let Scratch { dist, src, terrane, terrane_cells, stack } = &mut self.scratch;
+        let Scratch {
+            dist,
+            src,
+            terrane,
+            terrane_cells,
+            stack,
+        } = &mut self.scratch;
         if terrane.len() != PLANET_CELLS {
             terrane.resize(PLANET_CELLS, false);
         }
@@ -966,27 +1037,42 @@ impl PlateState {
             lat_s_sum += lat_s;
         }
         let wrap = PeriodicX::for_width(360.0);
-        let q = (wrap.fold(sin_sum.atan2(cos_sum).to_degrees()), lat_s_sum / n_r as f64);
+        let q = (
+            wrap.fold(sin_sum.atan2(cos_sum).to_degrees()),
+            lat_s_sum / n_r as f64,
+        );
         let q_cell = {
             let qx = ((q.0 / PLANET_DEG_PER_CELL) as usize).min(PLANET_NX - 1);
             let qz = ((q.1 / PLANET_DEG_PER_CELL) as usize).min(PLANET_NZ - 1);
             qz * PLANET_NX + qx
         };
         let area = n_r as f64 * PLANET_DEG_PER_CELL * PLANET_DEG_PER_CELL;
-        let dv = [self.vel[u][0] - self.vel[o][0], self.vel[u][1] - self.vel[o][1]];
+        let dv = [
+            self.vel[u][0] - self.vel[o][0],
+            self.vel[u][1] - self.vel[o][1],
+        ];
         let speed = (0.5 * dv[0].hypot(dv[1])).min(1.0);
         let a0 = PLANET_DEG2 / PLATES_INITIAL as f64;
         let r = (COLLISION_RADIUS_MAX_DEG * (speed * area / a0).sqrt())
             .clamp(COLLISION_RADIUS_MIN_DEG, COLLISION_RADIUS_MAX_DEG);
         let peak = (COLLISION_GAIN_PER_DEG2 * area).min(1.0);
-        let kind =
-            if area >= PLATEAU_MIN_DEG2 { OrogenyKind::Plateau as u8 } else { OrogenyKind::Collision as u8 };
+        let kind = if area >= PLATEAU_MIN_DEG2 {
+            OrogenyKind::Plateau as u8
+        } else {
+            OrogenyKind::Collision as u8
+        };
         let active = chamfer_into(|c| terrane[c], PLANET_DEG_PER_CELL, r, dist, src);
         let n_o = cont_after[o] as usize;
-        let cells = (0..CHAMFER_TX * CHAMFER_TZ).filter(|&t| active[t]).flat_map(|t| {
-            let (x0, z0) = ((t % CHAMFER_TX) * CHAMFER_TILE, (t / CHAMFER_TX) * CHAMFER_TILE);
-            (z0..z0 + CHAMFER_TILE).flat_map(move |z| (z * PLANET_NX + x0)..(z * PLANET_NX + x0 + CHAMFER_TILE))
-        });
+        let cells = (0..CHAMFER_TX * CHAMFER_TZ)
+            .filter(|&t| active[t])
+            .flat_map(|t| {
+                let (x0, z0) = (
+                    (t % CHAMFER_TX) * CHAMFER_TILE,
+                    (t / CHAMFER_TX) * CHAMFER_TILE,
+                );
+                (z0..z0 + CHAMFER_TILE)
+                    .flat_map(move |z| (z * PLANET_NX + x0)..(z * PLANET_NX + x0 + CHAMFER_TILE))
+            });
         for c in cells {
             if self.crust[c] != continental {
                 continue;
@@ -1035,7 +1121,8 @@ impl PlateState {
         }
         let (wo, wr) = (n_o as f64, n_r as f64);
         for j in 0..2 {
-            self.vel[o][j] = (self.vel[o][j] * wo + self.vel[u][j] * wr) / (wo + wr) * COLLISION_BRAKE;
+            self.vel[o][j] =
+                (self.vel[o][j] * wo + self.vel[u][j] * wr) / (wo + wr) * COLLISION_BRAKE;
         }
         self.counters.sutures += 1;
     }
@@ -1103,8 +1190,11 @@ impl PlateState {
             if a_cont < RIFT_MIN_CONT_DEG2 {
                 continue;
             }
-            let prob =
-                RIFT_RATE_PER_MY * key.rift_rate * PLATE_DT_MY * (a_cont / a0) * (f64::from(cont[p]) / f64::from(total[p]));
+            let prob = RIFT_RATE_PER_MY
+                * key.rift_rate
+                * PLATE_DT_MY
+                * (a_cont / a0)
+                * (f64::from(cont[p]) / f64::from(total[p]));
             let draw = u64::from(self.step) * 64 + p as u64;
             if hash01(key.seed, H_RIFT, draw) >= prob {
                 continue;
@@ -1119,14 +1209,21 @@ impl PlateState {
                     lat_s_sum += lat_s;
                 }
             }
-            let q = (wrap.fold(sin_sum.atan2(cos_sum).to_degrees()), lat_s_sum / f64::from(cont[p]));
+            let q = (
+                wrap.fold(sin_sum.atan2(cos_sum).to_degrees()),
+                lat_s_sum / f64::from(cont[p]),
+            );
             let angle = std::f64::consts::PI * hash01(key.seed, H_RIFT_ANGLE, draw);
             let n = [-angle.sin(), angle.cos()];
             let mut far: Vec<usize> = Vec::new();
             for c in 0..PLANET_CELLS {
                 if self.plate[c] as usize == p {
                     let (lon, lat_s) = planet_deg(c);
-                    if wrap.dx(q.0, lon) * n[0] + (lat_s - q.1) * n[1] + RIFT_WARP_DEG * self.shape[c] > 0.0 {
+                    if wrap.dx(q.0, lon) * n[0]
+                        + (lat_s - q.1) * n[1]
+                        + RIFT_WARP_DEG * self.shape[c]
+                        > 0.0
+                    {
                         far.push(c);
                     }
                 }
@@ -1150,8 +1247,9 @@ impl PlateState {
                 self.vel[p][j] = (old_v[j] - RIFT_SPEED * n[j]).clamp(-1.0, 1.0);
             }
             self.redirect_count[new_p] = 0;
-            self.next_redirect_my[new_p] =
-                time + REDIRECT_MY.0 + (REDIRECT_MY.1 - REDIRECT_MY.0) * hash01(key.seed, H_REDIRECT_T, new_p as u64);
+            self.next_redirect_my[new_p] = time
+                + REDIRECT_MY.0
+                + (REDIRECT_MY.1 - REDIRECT_MY.0) * hash01(key.seed, H_REDIRECT_T, new_p as u64);
 
             // Margin thinning and rift shoulders around the new boundary.
             let plate = &self.plate;
@@ -1163,19 +1261,26 @@ impl PlateState {
                         return false;
                     }
                     let other = if me == p { new_p } else { p };
-                    [(-1, 0), (1, 0), (0, -1), (0, 1)]
-                        .iter()
-                        .any(|&(dx, dz)| planet_step(c, dx, dz).is_some_and(|nb| plate[nb] as usize == other))
+                    [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dz)| {
+                        planet_step(c, dx, dz).is_some_and(|nb| plate[nb] as usize == other)
+                    })
                 },
                 PLANET_DEG_PER_CELL,
                 RIFT_SHOULDER_DEG.1,
                 dist,
                 src,
             );
-            let cells = (0..CHAMFER_TX * CHAMFER_TZ).filter(|&t| active[t]).flat_map(|t| {
-                let (x0, z0) = ((t % CHAMFER_TX) * CHAMFER_TILE, (t / CHAMFER_TX) * CHAMFER_TILE);
-                (z0..z0 + CHAMFER_TILE).flat_map(move |z| (z * PLANET_NX + x0)..(z * PLANET_NX + x0 + CHAMFER_TILE))
-            });
+            let cells = (0..CHAMFER_TX * CHAMFER_TZ)
+                .filter(|&t| active[t])
+                .flat_map(|t| {
+                    let (x0, z0) = (
+                        (t % CHAMFER_TX) * CHAMFER_TILE,
+                        (t / CHAMFER_TX) * CHAMFER_TILE,
+                    );
+                    (z0..z0 + CHAMFER_TILE).flat_map(move |z| {
+                        (z * PLANET_NX + x0)..(z * PLANET_NX + x0 + CHAMFER_TILE)
+                    })
+                });
             for c in cells {
                 let me = self.plate[c] as usize;
                 if self.crust[c] != continental || (me != p && me != new_p) {
@@ -1186,9 +1291,13 @@ impl PlateState {
                     let u = 1.0 - d / RIFT_MARGIN_DEG;
                     self.base_m[c] -= (RIFT_MARGIN_DROP_M * u * u) as f32;
                 }
-                if d > RIFT_SHOULDER_DEG.0 && d < RIFT_SHOULDER_DEG.1 && self.kind[c] == OrogenyKind::None as u8 {
+                if d > RIFT_SHOULDER_DEG.0
+                    && d < RIFT_SHOULDER_DEG.1
+                    && self.kind[c] == OrogenyKind::None as u8
+                {
                     let s = RIFT_SHOULDER_STRENGTH
-                        * (std::f64::consts::PI * (d - RIFT_SHOULDER_DEG.0) / (RIFT_SHOULDER_DEG.1 - RIFT_SHOULDER_DEG.0))
+                        * (std::f64::consts::PI * (d - RIFT_SHOULDER_DEG.0)
+                            / (RIFT_SHOULDER_DEG.1 - RIFT_SHOULDER_DEG.0))
                             .sin();
                     self.kind[c] = OrogenyKind::RiftShoulder as u8;
                     self.strength[c] = s as f32;
@@ -1209,16 +1318,21 @@ impl PlateState {
                 continue;
             }
             let n = u64::from(self.redirect_count[p]);
-            let turn =
-                (-REDIRECT_TURN_DEG + 2.0 * REDIRECT_TURN_DEG * hash01(key.seed, H_REDIRECT_A, 64 * n + p as u64))
-                    .to_radians();
+            let turn = (-REDIRECT_TURN_DEG
+                + 2.0 * REDIRECT_TURN_DEG * hash01(key.seed, H_REDIRECT_A, 64 * n + p as u64))
+            .to_radians();
             let (cs, sn) = (turn.cos(), turn.sin());
             let [vx, vz] = self.vel[p];
-            self.vel[p] = [(vx * cs - vz * sn).clamp(-1.0, 1.0), (vx * sn + vz * cs).clamp(-1.0, 1.0)];
+            self.vel[p] = [
+                (vx * cs - vz * sn).clamp(-1.0, 1.0),
+                (vx * sn + vz * cs).clamp(-1.0, 1.0),
+            ];
             self.redirect_count[p] += 1;
             let n_next = u64::from(self.redirect_count[p]);
-            self.next_redirect_my[p] =
-                time + REDIRECT_MY.0 + (REDIRECT_MY.1 - REDIRECT_MY.0) * hash01(key.seed, H_REDIRECT_T, 64 * n_next + p as u64);
+            self.next_redirect_my[p] = time
+                + REDIRECT_MY.0
+                + (REDIRECT_MY.1 - REDIRECT_MY.0)
+                    * hash01(key.seed, H_REDIRECT_T, 64 * n_next + p as u64);
         }
     }
 
@@ -1232,7 +1346,9 @@ impl PlateState {
             }
             let mean_cz = cont_cz_sum[p] as f64 / f64::from(cont[p]);
             let lat_c = 90.0 - (mean_cz + 0.5) * PLANET_DEG_PER_CELL;
-            if (lat_c > POLAR_WALL_DEG && self.vel[p][1] < 0.0) || (lat_c < -POLAR_WALL_DEG && self.vel[p][1] > 0.0) {
+            if (lat_c > POLAR_WALL_DEG && self.vel[p][1] < 0.0)
+                || (lat_c < -POLAR_WALL_DEG && self.vel[p][1] > 0.0)
+            {
                 self.vel[p][1] = -self.vel[p][1];
             }
         }
@@ -1246,14 +1362,23 @@ impl PlateState {
 /// root_keep(period))`; a weaker one writes nothing (controller's ruling
 /// after Task 2's review: weak tails no longer relabel or rejuvenate older
 /// belts).
-pub const BELT_MIN_REL: f64 = 0.12;
+pub const BELT_MIN_REL: f64 = 0.22;
 
 /// A gain at or below this writes nothing (the brief's field threshold;
 /// sutures use it too).
 const GAIN_MIN: f64 = 1e-5;
 
 /// The 8 neighbours as `(dx, dz)`, row-major.
-const NEIGHBOURS_8: [(i32, i32); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+const NEIGHBOURS_8: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
 
 /// How much of an orogen's crustal root is left after `age_my` (the
 /// vocabulary's `root_keep`; 1 at age 0, `ROOT_RESIDUAL` for ever).
@@ -1285,7 +1410,15 @@ pub fn elevation_m(state: &PlateState, c: usize) -> f64 {
 }
 
 /// `elevation_m` of one cell's record at `time`.
-fn cell_elevation_m(crust: u8, born_my: f32, base_m: f32, strength: f32, orogeny_my: f32, kind: u8, time: f64) -> f64 {
+fn cell_elevation_m(
+    crust: u8,
+    born_my: f32,
+    base_m: f32,
+    strength: f32,
+    orogeny_my: f32,
+    kind: u8,
+    time: f64,
+) -> f64 {
     let ground = if crust == CrustKind::Continental as u8 {
         f64::from(base_m)
     } else {
@@ -1313,7 +1446,11 @@ fn orogeny_strength(strength: f32, orogeny_my: f32, time: f64, gain: f64) -> f32
 /// `v` over its length, `[0, 0]` for a zero vector (never NaN).
 fn unit(v: [f64; 2]) -> [f32; 2] {
     let len = v[0].hypot(v[1]);
-    if len > 0.0 { [(v[0] / len) as f32, (v[1] / len) as f32] } else { [0.0; 2] }
+    if len > 0.0 {
+        [(v[0] / len) as f32, (v[1] / len) as f32]
+    } else {
+        [0.0; 2]
+    }
 }
 
 /// A plate's mean `born_my` over its oceanic cells (`sum` over `count`);
@@ -1321,7 +1458,11 @@ fn unit(v: [f64; 2]) -> [f32; 2] {
 /// exact (rounding depends on the order of the additions); it is the same on
 /// every run because pass A adds the cells in a pinned order, row-major.
 fn ocean_mean_born(sum: f64, count: u32) -> f64 {
-    if count == 0 { f64::NEG_INFINITY } else { sum / f64::from(count) }
+    if count == 0 {
+        f64::NEG_INFINITY
+    } else {
+        sum / f64::from(count)
+    }
 }
 
 /// Source `a` beats source `b` for one destination: continental beats
@@ -1331,7 +1472,14 @@ fn ocean_mean_born(sum: f64, count: u32) -> f64 {
 /// pair of plates per step, so a boundary is consumed as a line); ties the
 /// lower plate id. Two sources of one destination are always of different
 /// plates, so this is a total order on them.
-fn beats(plate: &[u8], crust: &[u8], cont: &[u32; PLATES_MAX], ocean: &[f64; PLATES_MAX], a: usize, b: usize) -> bool {
+fn beats(
+    plate: &[u8],
+    crust: &[u8],
+    cont: &[u32; PLATES_MAX],
+    ocean: &[f64; PLATES_MAX],
+    a: usize,
+    b: usize,
+) -> bool {
     let continental = CrustKind::Continental as u8;
     let (ca, cb) = (crust[a] == continental, crust[b] == continental);
     if ca != cb {
@@ -1410,7 +1558,11 @@ fn chamfer_into(
         }
     }
     let cells = cap / unit;
-    let out = if cells.is_finite() { ((cells - 1.0) / T as f64).ceil().max(0.0) as usize } else { TX };
+    let out = if cells.is_finite() {
+        ((cells - 1.0) / T as f64).ceil().max(0.0) as usize
+    } else {
+        TX
+    };
     let mut active = [false; TX * TZ];
     for tz in 0..TZ {
         for tx in 0..TX {
@@ -1457,7 +1609,10 @@ fn chamfer_into(
             let cur: &mut [f64; NX] = (&mut d_tail[..NX]).try_into().unwrap();
             let s_cur: &mut [u32; NX] = (&mut s_tail[..NX]).try_into().unwrap();
             let (up, s_up): (&[f64; NX], &[u32; NX]) = if z > 0 {
-                ((&d_head[row - NX..]).try_into().unwrap(), (&s_head[row - NX..]).try_into().unwrap())
+                (
+                    (&d_head[row - NX..]).try_into().unwrap(),
+                    (&s_head[row - NX..]).try_into().unwrap(),
+                )
             } else {
                 (&none_d, &none_s)
             };
@@ -1471,7 +1626,9 @@ fn chamfer_into(
                 let mut fresh = stamp[k] > last || stamp[z * TX + txw] > last;
                 if z > 0 {
                     let u = k - TX;
-                    fresh |= stamp[u] > last || stamp[z * TX - TX + txw] > last || stamp[z * TX - TX + txe] > last;
+                    fresh |= stamp[u] > last
+                        || stamp[z * TX - TX + txw] > last
+                        || stamp[z * TX - TX + txe] > last;
                 }
                 if !fresh {
                     continue;
@@ -1509,7 +1666,10 @@ fn chamfer_into(
             let cur: &mut [f64; NX] = (&mut d_head[row..]).try_into().unwrap();
             let s_cur: &mut [u32; NX] = (&mut s_head[row..]).try_into().unwrap();
             let (down, s_down): (&[f64; NX], &[u32; NX]) = if z + 1 < PLANET_NZ {
-                ((&d_tail[..NX]).try_into().unwrap(), (&s_tail[..NX]).try_into().unwrap())
+                (
+                    (&d_tail[..NX]).try_into().unwrap(),
+                    (&s_tail[..NX]).try_into().unwrap(),
+                )
             } else {
                 (&none_d, &none_s)
             };
@@ -1523,7 +1683,9 @@ fn chamfer_into(
                 let mut fresh = stamp[k] > last || stamp[z * TX + txe] > last;
                 if z + 1 < PLANET_NZ {
                     let b = k + TX;
-                    fresh |= stamp[b] > last || stamp[z * TX + TX + txw] > last || stamp[z * TX + TX + txe] > last;
+                    fresh |= stamp[b] > last
+                        || stamp[z * TX + TX + txw] > last
+                        || stamp[z * TX + TX + txe] > last;
                 }
                 if !fresh {
                     continue;
@@ -1581,7 +1743,8 @@ pub fn simulate(key: &PlanetKey, every: u32, on_frame: &mut dyn FnMut(&PlateStat
     let mut pass_ms = [0.0f64; 8];
     while state.step < steps {
         let mut s = std::time::Instant::now();
-        let (cont, cont_cz_sum, mut cells_after, mut cont_after) = state.advance_in(0..PLANET_CELLS);
+        let (cont, cont_cz_sum, mut cells_after, mut cont_after) =
+            state.advance_in(0..PLANET_CELLS);
         pass_ms[0] += s.elapsed().as_secs_f64() * 1000.0;
         s = std::time::Instant::now();
         state.stamp_hotspots();
@@ -1612,7 +1775,14 @@ pub fn simulate(key: &PlanetKey, every: u32, on_frame: &mut dyn FnMut(&PlateStat
     }
     eprintln!(
         "plate_sim passes (ms): initial {init_ms:.1}, move {:.1}, hotspots {:.1}, field {:.1}, pull {:.1}, sutures {:.1}, rift {:.1}, redirects {:.1}, wall {:.1}",
-        pass_ms[0], pass_ms[1], pass_ms[2], pass_ms[3], pass_ms[4], pass_ms[5], pass_ms[6], pass_ms[7],
+        pass_ms[0],
+        pass_ms[1],
+        pass_ms[2],
+        pass_ms[3],
+        pass_ms[4],
+        pass_ms[5],
+        pass_ms[6],
+        pass_ms[7],
     );
     state
 }

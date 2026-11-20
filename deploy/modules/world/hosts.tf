@@ -90,6 +90,7 @@ locals {
     VOXEL_PEER_CERT_HASH_FILE = "${local.peer_dir}/peer.cert-sha256"
     VOXEL_AUTH                = "jwt"
     VOXEL_LOGIN_URL           = var.auth.login_url
+    OTEL_TRACES_SAMPLER_ARG   = tostring(var.telemetry.host_sampler_ratio)
     }, var.client_certificate == null ? {} : {
     VOXEL_CLIENT_CERT = "${local.client_cert_dir}/tls.crt"
     VOXEL_CLIENT_KEY  = "${local.client_cert_dir}/tls.key"
@@ -168,6 +169,9 @@ locals {
             # ORDER MATTERS: $(POD_IP) below expands only because POD_IP is declared first.
             env = concat([
               { name = "POD_IP", valueFrom = { fieldRef = { fieldPath = "status.podIP" } } },
+              { name = "K8S_POD_NAME", valueFrom = { fieldRef = { fieldPath = "metadata.name" } } },
+              { name = "K8S_NAMESPACE_NAME", valueFrom = { fieldRef = { fieldPath = "metadata.namespace" } } },
+              { name = "K8S_NODE_NAME", valueFrom = { fieldRef = { fieldPath = "spec.nodeName" } } },
               { name = "VOXEL_ADVERTISE_PEER", value = "$(POD_IP):6500" },
               ], [
               for k in sort(keys(local.host_env)) : { name = k, value = local.host_env[k] }

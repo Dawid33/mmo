@@ -68,11 +68,13 @@ impl LoginConfig {
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let oidc = Some(get("VOXEL_OIDC_ISSUER", "")).filter(|i| !i.is_empty()).map(|issuer| OidcConfig {
-            issuer,
-            audience: get("VOXEL_OIDC_AUDIENCE", DEFAULT_OIDC_AUDIENCE),
-            client_id: get("VOXEL_OIDC_CLIENT_ID", DEFAULT_OIDC_CLIENT_ID),
-        });
+        let oidc = Some(get("VOXEL_OIDC_ISSUER", ""))
+            .filter(|i| !i.is_empty())
+            .map(|issuer| OidcConfig {
+                issuer,
+                audience: get("VOXEL_OIDC_AUDIENCE", DEFAULT_OIDC_AUDIENCE),
+                client_id: get("VOXEL_OIDC_CLIENT_ID", DEFAULT_OIDC_CLIENT_ID),
+            });
         Ok(LoginConfig {
             bind,
             db_url: get("VOXEL_LOGIN_DB", DEFAULT_DB),
@@ -114,4 +116,3 @@ impl std::fmt::Debug for LoginConfig {
             .finish()
     }
 }
-

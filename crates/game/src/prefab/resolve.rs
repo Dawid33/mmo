@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::file::{FileShape, GroundFit, Marker, PrefabFile, PrefabMeta, PREFAB_FORMAT};
 use super::Shape;
+use super::file::{FileShape, GroundFit, Marker, PREFAB_FORMAT, PrefabFile, PrefabMeta};
 use crate::block::BLOCK_VOXELS;
 use crate::registry::BlockId;
 
@@ -54,8 +54,12 @@ impl fmt::Display for Problem {
             Problem::EmptyName => write!(f, "the prefab has no name"),
             Problem::EmptySize => write!(f, "the prefab has an empty size"),
             Problem::UnknownBlock(n) => write!(f, "unknown block `{n}`"),
-            Problem::BadPaletteIndex { list, index } => write!(f, "{list}[{index}] uses a palette index out of range"),
-            Problem::OutsideSize { list, index } => write!(f, "{list}[{index}] lies outside the prefab"),
+            Problem::BadPaletteIndex { list, index } => {
+                write!(f, "{list}[{index}] uses a palette index out of range")
+            }
+            Problem::OutsideSize { list, index } => {
+                write!(f, "{list}[{index}] lies outside the prefab")
+            }
             Problem::BadShape { index } => write!(f, "shaped[{index}] is not a valid shape"),
             Problem::DuplicateShaped { at } => write!(f, "two shaped cells at {at:?}"),
             Problem::BadTurn { index } => write!(f, "markers[{index}] has a turn above 3"),
@@ -76,8 +80,14 @@ pub enum Cell<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedShape {
-    Named { shape: Shape, mat: BlockId },
-    Cuboids { cuboids: Vec<([u8; 3], [u8; 3], u8)>, mats: Vec<BlockId> },
+    Named {
+        shape: Shape,
+        mat: BlockId,
+    },
+    Cuboids {
+        cuboids: Vec<([u8; 3], [u8; 3], u8)>,
+        mats: Vec<BlockId>,
+    },
 }
 
 /// The block written for a `Cuboids` shape is `mats[0]` (layout writes `mats.first()`); the material the
@@ -174,7 +184,10 @@ fn inside(at: [i32; 3], dims: [u32; 3]) -> bool {
 
 /// Within `MARKER_MARGIN` cells of `0..size` on every axis.
 fn near_box(at: [i32; 3], dims: [u32; 3]) -> bool {
-    (0..3).all(|a| at[a] as i64 >= -(MARKER_MARGIN as i64) && (at[a] as i64) < dims[a] as i64 + MARKER_MARGIN as i64)
+    (0..3).all(|a| {
+        at[a] as i64 >= -(MARKER_MARGIN as i64)
+            && (at[a] as i64) < dims[a] as i64 + MARKER_MARGIN as i64
+    })
 }
 
 fn is_empty_box(b: &ResBox) -> bool {
@@ -202,15 +215,24 @@ pub fn resolve(
         Trust::Builtin => MAX_AXIS,
     };
     if dims.iter().any(|&d| d > extent_limit) {
-        problems.push(Problem::TooLarge { what: "extent", limit: extent_limit as usize });
+        problems.push(Problem::TooLarge {
+            what: "extent",
+            limit: extent_limit as usize,
+        });
     }
     let items = file.boxes.len() + file.shaped.len() + file.carve.len() + file.markers.len();
     if trust == Trust::Untrusted && items > UNTRUSTED_MAX_ITEMS {
-        problems.push(Problem::TooLarge { what: "items", limit: UNTRUSTED_MAX_ITEMS });
+        problems.push(Problem::TooLarge {
+            what: "items",
+            limit: UNTRUSTED_MAX_ITEMS,
+        });
     }
     let columns = dims[0] as u64 * dims[2] as u64;
     if columns > MAX_PROFILE_COLUMNS && !dims.iter().any(|&d| d > extent_limit) {
-        problems.push(Problem::TooLarge { what: "columns", limit: MAX_PROFILE_COLUMNS as usize });
+        problems.push(Problem::TooLarge {
+            what: "columns",
+            limit: MAX_PROFILE_COLUMNS as usize,
+        });
     }
     // An untrusted file over a cap is refused before any of its content is looked at.
     if trust == Trust::Untrusted && !problems.is_empty() {
@@ -228,7 +250,11 @@ pub fn resolve(
         }
     }
     // `None`: the index is out of range (reported here) or names an unknown block (reported once above).
-    let pal = |index: u16, list: &'static str, at: usize, problems: &mut Vec<Problem>| -> Option<BlockId> {
+    let pal = |index: u16,
+               list: &'static str,
+               at: usize,
+               problems: &mut Vec<Problem>|
+     -> Option<BlockId> {
         match palette.get(index as usize) {
             Some(id) => *id,
             None => {
@@ -247,14 +273,24 @@ pub fn resolve(
                     boxes.push(ResBox { min, max, mat });
                 }
             }
-            None => problems.push(Problem::OutsideSize { list: "boxes", index: i }),
+            None => problems.push(Problem::OutsideSize {
+                list: "boxes",
+                index: i,
+            }),
         }
     }
     let mut carve = Vec::with_capacity(file.carve.len());
     for (i, c) in file.carve.iter().enumerate() {
         match bounds(c.min, c.size, dims) {
-            Some((min, max)) => carve.push(ResBox { min, max, mat: BlockId(0) }),
-            None => problems.push(Problem::OutsideSize { list: "carve", index: i }),
+            Some((min, max)) => carve.push(ResBox {
+                min,
+                max,
+                mat: BlockId(0),
+            }),
+            None => problems.push(Problem::OutsideSize {
+                list: "carve",
+                index: i,
+            }),
         }
     }
 
@@ -265,17 +301,26 @@ pub fn resolve(
                 continue;
             }
             refs += (0..3)
-                .map(|a| ((b.max[a] - 1) / PREFAB_BUCKET_BLOCKS - b.min[a] / PREFAB_BUCKET_BLOCKS + 1) as u64)
+                .map(|a| {
+                    ((b.max[a] - 1) / PREFAB_BUCKET_BLOCKS - b.min[a] / PREFAB_BUCKET_BLOCKS + 1)
+                        as u64
+                })
                 .product::<u64>();
             if i < boxes.len() {
                 cols += (b.max[0] - b.min[0]) as u64 * (b.max[2] - b.min[2]) as u64;
             }
             if refs > UNTRUSTED_MAX_BUCKET_REFS {
-                problems.push(Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_BUCKET_REFS as usize });
+                problems.push(Problem::TooLarge {
+                    what: "box overlap",
+                    limit: UNTRUSTED_MAX_BUCKET_REFS as usize,
+                });
                 return Err(problems);
             }
             if cols > UNTRUSTED_MAX_COLUMN_WORK {
-                problems.push(Problem::TooLarge { what: "box overlap", limit: UNTRUSTED_MAX_COLUMN_WORK as usize });
+                problems.push(Problem::TooLarge {
+                    what: "box overlap",
+                    limit: UNTRUSTED_MAX_COLUMN_WORK as usize,
+                });
                 return Err(problems);
             }
         }
@@ -284,14 +329,18 @@ pub fn resolve(
     let mut shaped: Vec<ResShaped> = Vec::with_capacity(file.shaped.len());
     for (i, s) in file.shaped.iter().enumerate() {
         if !inside(s.at, dims) {
-            problems.push(Problem::OutsideSize { list: "shaped", index: i });
+            problems.push(Problem::OutsideSize {
+                list: "shaped",
+                index: i,
+            });
         }
         let resolved = match &s.shape {
             FileShape::Named { shape, mat } => {
                 if !shape.is_valid() || shape.is_empty() {
                     problems.push(Problem::BadShape { index: i });
                 }
-                pal(*mat, "shaped", i, &mut problems).map(|mat| ResolvedShape::Named { shape: *shape, mat })
+                pal(*mat, "shaped", i, &mut problems)
+                    .map(|mat| ResolvedShape::Named { shape: *shape, mat })
             }
             FileShape::Cuboids { cuboids, mats } => {
                 let ok = !cuboids.is_empty()
@@ -303,8 +352,11 @@ pub fn resolve(
                 if !ok {
                     problems.push(Problem::BadShape { index: i });
                 }
-                let ids: Vec<Option<BlockId>> =
-                    mats.iter().take(MAX_CUBOID_MATS).map(|m| pal(*m, "shaped", i, &mut problems)).collect();
+                let ids: Vec<Option<BlockId>> = mats
+                    .iter()
+                    .take(MAX_CUBOID_MATS)
+                    .map(|m| pal(*m, "shaped", i, &mut problems))
+                    .collect();
                 if ok && ids.iter().all(Option::is_some) {
                     Some(ResolvedShape::Cuboids {
                         cuboids: cuboids.clone(),
@@ -334,7 +386,10 @@ pub fn resolve(
             problems.push(Problem::BadTurn { index: i });
         }
         if !near_box(m.at, dims) {
-            problems.push(Problem::OutsideSize { list: "markers", index: i });
+            problems.push(Problem::OutsideSize {
+                list: "markers",
+                index: i,
+            });
         }
     }
 
@@ -366,7 +421,11 @@ pub fn resolve(
     }
     for (i, s) in shaped.iter().enumerate() {
         let k = s.at.map(|v| v / PREFAB_BUCKET_BLOCKS);
-        buckets.entry([k[2], k[1], k[0]]).or_default().shaped.push(i as u32);
+        buckets
+            .entry([k[2], k[1], k[0]])
+            .or_default()
+            .shaped
+            .push(i as u32);
     }
 
     let mut solid = 0u64;
@@ -415,10 +474,18 @@ fn bucket_range(key: [i32; 3], dims: [u32; 3]) -> ([i32; 3], [i32; 3]) {
 }
 
 /// Cells of one bucket held by a box or a shaped cell (the bucket is not covered by one box).
-fn occupied_cells(bucket: &Bucket, boxes: &[ResBox], shaped: &[ResShaped], lo: [i32; 3], hi: [i32; 3]) -> u64 {
+fn occupied_cells(
+    bucket: &Bucket,
+    boxes: &[ResBox],
+    shaped: &[ResShaped],
+    lo: [i32; 3],
+    hi: [i32; 3],
+) -> u64 {
     const N: usize = PREFAB_BUCKET_BLOCKS as usize;
     let mut grid = vec![false; N * N * N];
-    let idx = |x: i32, y: i32, z: i32| ((z - lo[2]) as usize * N + (y - lo[1]) as usize) * N + (x - lo[0]) as usize;
+    let idx = |x: i32, y: i32, z: i32| {
+        ((z - lo[2]) as usize * N + (y - lo[1]) as usize) * N + (x - lo[0]) as usize
+    };
     for &i in &bucket.boxes {
         let b = &boxes[i as usize];
         let from = [0, 1, 2].map(|a| b.min[a].max(lo[a]));
@@ -469,7 +536,9 @@ fn column_profile(
         }
     }
     for s in shaped {
-        let Some(mat) = s.shape.top_material() else { continue };
+        let Some(mat) = s.shape.top_material() else {
+            continue;
+        };
         let i = s.at[2] as usize * w + s.at[0] as usize;
         if profile[i].is_none_or(|(y, _)| s.at[1] >= y) {
             profile[i] = Some((s.at[1], mat));
@@ -488,7 +557,10 @@ impl ResolvedPrefab {
 
     fn in_bucket(&self, bucket: &Bucket, at: [i32; 3]) -> Cell<'_> {
         if !bucket.shaped.is_empty() {
-            if let Ok(p) = bucket.shaped.binary_search_by(|&i| self.shaped[i as usize].at.cmp(&at)) {
+            if let Ok(p) = bucket
+                .shaped
+                .binary_search_by(|&i| self.shaped[i as usize].at.cmp(&at))
+            {
                 return Cell::Shaped(&self.shaped[bucket.shaped[p] as usize].shape);
             }
         }
@@ -498,7 +570,11 @@ impl ResolvedPrefab {
                 return Cell::Block(b.mat);
             }
         }
-        if bucket.carve.iter().any(|&i| self.carve[i as usize].contains(at)) {
+        if bucket
+            .carve
+            .iter()
+            .any(|&i| self.carve[i as usize].contains(at))
+        {
             return Cell::Carve;
         }
         Cell::Keep
@@ -518,7 +594,12 @@ impl ResolvedPrefab {
 
     /// Every non-Keep cell with `min <= cell < max` (clamped to the prefab), in ascending (z, y, x)
     /// order. Cost is bounded by the buckets the range overlaps, not by the prefab.
-    pub fn for_each_cell(&self, min: [i32; 3], max: [i32; 3], f: &mut dyn FnMut([i32; 3], Cell<'_>)) {
+    pub fn for_each_cell(
+        &self,
+        min: [i32; 3],
+        max: [i32; 3],
+        f: &mut dyn FnMut([i32; 3], Cell<'_>),
+    ) {
         let lo = [0, 1, 2].map(|a| min[a].max(0));
         let hi = [0, 1, 2].map(|a| max[a].min(self.size[a] as i32));
         if (0..3).any(|a| lo[a] >= hi[a]) {
@@ -526,7 +607,12 @@ impl ResolvedPrefab {
         }
         let bl = lo.map(|v| v / PREFAB_BUCKET_BLOCKS);
         let bh = hi.map(|v| (v - 1) / PREFAB_BUCKET_BLOCKS);
-        let span = |b: i32, a: usize| (lo[a].max(b * PREFAB_BUCKET_BLOCKS), hi[a].min((b + 1) * PREFAB_BUCKET_BLOCKS));
+        let span = |b: i32, a: usize| {
+            (
+                lo[a].max(b * PREFAB_BUCKET_BLOCKS),
+                hi[a].min((b + 1) * PREFAB_BUCKET_BLOCKS),
+            )
+        };
         for bz in bl[2]..=bh[2] {
             let (z0, z1) = span(bz, 2);
             // The bucket rows of this z layer, one per by: (y range, [(bx, bucket)]).

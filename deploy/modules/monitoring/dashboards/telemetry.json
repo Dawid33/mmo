@@ -1,0 +1,827 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Cross-signal Errantry telemetry: traces, correlated logs and CPU profiles. Select low-cardinality resource labels before investigating.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "traces",
+      "title": "Recent traces",
+      "description": "Latest traces matching the selected deployment. Select a trace ID to open the same time window in Explore.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "limit": 50,
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.service.name =~ \"$service\" && resource.mmo.role =~ \"$role\" && resource.k8s.pod.name =~ \"$pod\" && (resource.mmo.world_id = nil || resource.mmo.world_id =~ \"$world\") }",
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "Open trace in Explore",
+              "url": "/explore?orgId=1&left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22${__value.raw}%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22%7D%7D"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "type": "traces",
+      "title": "Error traces",
+      "description": "Traces containing a span in error status. Scope is bounded by environment, service, role, world and pod.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "limit": 50,
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.service.name =~ \"$service\" && resource.mmo.role =~ \"$role\" && resource.k8s.pod.name =~ \"$pod\" && (resource.mmo.world_id = nil || resource.mmo.world_id =~ \"$world\") && (status = error || (span.outcome != nil && span.outcome =~ \"(?i)(error|failed|transport|status|body|pin|refused|retry|retryable|fenced|conflict)\")) }",
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "Open trace in Explore",
+              "url": "/explore?orgId=1&left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22${__value.raw}%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22%7D%7D"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Operation duration p50",
+      "description": "TraceQL metrics query, grouped by fixed span name and role. Tempo metrics must be enabled for this panel to return data.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "expr": "",
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.service.name =~ \"$service\" && resource.mmo.role =~ \"$role\" && resource.k8s.pod.name =~ \"$pod\" && (resource.mmo.world_id = nil || resource.mmo.world_id =~ \"$world\") } | quantile_over_time(duration, 0.5) by (name, resource.mmo.role)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ns"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Operation duration p95",
+      "description": "TraceQL metrics query, grouped by fixed span name and role. Tempo metrics must be enabled for this panel to return data.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 17,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "expr": "",
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.service.name =~ \"$service\" && resource.mmo.role =~ \"$role\" && resource.k8s.pod.name =~ \"$pod\" && (resource.mmo.world_id = nil || resource.mmo.world_id =~ \"$world\") } | quantile_over_time(duration, 0.95) by (name, resource.mmo.role)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ns"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Operation duration p99",
+      "description": "TraceQL metrics query, grouped by fixed span name and role. Tempo metrics must be enabled for this panel to return data.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 17,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "expr": "",
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.service.name =~ \"$service\" && resource.mmo.role =~ \"$role\" && resource.k8s.pod.name =~ \"$pod\" && (resource.mmo.world_id = nil || resource.mmo.world_id =~ \"$world\") } | quantile_over_time(duration, 0.99) by (name, resource.mmo.role)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ns"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "traces",
+      "title": "Login join traces",
+      "description": "Login, join and spawn operations. Open a row in Explore, then follow its trace-to-log or trace-to-profile links.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "limit": 30,
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.mmo.role = \"login\" && resource.service.name = \"errantry-login\" && resource.k8s.pod.name =~ \"$pod\" && name =~ \"(?i).*(login|join|spawn|ticket).*\" }",
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "targetBlank": false,
+              "title": "Open login trace in Explore",
+              "url": "/explore?orgId=1&left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22${__value.raw}%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22${__from}%22%2C%22to%22%3A%22${__to}%22%7D%7D"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "type": "traces",
+      "title": "Coordinator transition / conflict / error traces",
+      "description": "Coordinator store, transition and conflict operations, plus any coordinator error span.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 25,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "limit": 30,
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.service.name = \"errantry-world\" && resource.mmo.role = \"coordinator\" && (resource.mmo.world_id = nil || resource.mmo.world_id =~ \"$world\") && resource.k8s.pod.name =~ \"$pod\" && (name =~ \"(?i).*(coordinator|transition|conflict|store).*\" || status = error || (span.outcome != nil && span.outcome =~ \"(?i)(error|failed|transport|status|body|retry|retryable|fenced|conflict)\")) }",
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 8,
+      "type": "traces",
+      "title": "Fleet pass / action errors",
+      "description": "Fleet reconciliation passes and Kubernetes actions, scoped to error status.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "limit": 30,
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.service.name = \"errantry-world\" && resource.mmo.role = \"fleet\" && (resource.mmo.world_id = nil || resource.mmo.world_id =~ \"$world\") && resource.k8s.pod.name =~ \"$pod\" && (status = error || (span.outcome != nil && span.outcome =~ \"(?i)(error|failed|transport|status|body|retry)\")) }",
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 9,
+      "type": "traces",
+      "title": "Host attach / cut / placement errors",
+      "description": "Host attachment, mailbox, world-cut and player-placement error traces.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${DS_TEMPO}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 33,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${DS_TEMPO}"
+          },
+          "editorMode": "code",
+          "limit": 30,
+          "query": "{ resource.deployment.environment.name =~ \"$environment\" && resource.k8s.cluster.name =~ \"$cluster\" && resource.service.name = \"errantry-world\" && resource.mmo.role = \"host\" && (resource.mmo.world_id = nil || resource.mmo.world_id =~ \"$world\") && resource.k8s.pod.name =~ \"$pod\" && (name =~ \"(?i).*(attach|mailbox|cut|placement|spawn).*\" || status = error || (span.outcome != nil && span.outcome =~ \"(?i)(error|failed|transport|status|body|pin|refused|retry|fenced|stale_generation)\")) }",
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 10,
+      "type": "logs",
+      "title": "Correlated logs by trace_id",
+      "description": "Enter the 32-digit trace ID from Tempo in the trace_id variable. Loki's derived field uses the same exact trace_id=<hex> text.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "{cluster=~\"$cluster\",pod=~\"$pod\",container=~\"$role\"} |= \"trace_id=$trace_id\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    },
+    {
+      "id": 11,
+      "type": "logs",
+      "title": "Recent warnings and errors",
+      "description": "Recent WARN/ERROR lines for the selected cluster, pod and process role.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 51,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "{cluster=~\"$cluster\",pod=~\"$pod\",container=~\"$role\"} |~ \"(?i)\\\\b(warn|error)\\\\b\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    },
+    {
+      "id": 12,
+      "type": "flamegraph",
+      "title": "Selected pod CPU profile",
+      "description": "CPU profile for the selected service and role. Keep the dashboard time range aligned with a trace while inspecting its pod.",
+      "datasource": {
+        "type": "grafana-pyroscope-datasource",
+        "uid": "${DS_PYROSCOPE}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 61,
+        "w": 12,
+        "h": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-pyroscope-datasource",
+            "uid": "${DS_PYROSCOPE}"
+          },
+          "groupBy": [],
+          "labelSelector": "{service_name=~\"$service\",role=~\"$role\",environment=~\"$environment\",cluster=~\"$cluster\",pod=~\"$pod\"}",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "queryType": "profile",
+          "refId": "A"
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 13,
+      "type": "flamegraph",
+      "title": "World CPU profile role comparison",
+      "description": "The selected world, split by role. This second view keeps a world peer beside the trace's selected pod.",
+      "datasource": {
+        "type": "grafana-pyroscope-datasource",
+        "uid": "${DS_PYROSCOPE}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 61,
+        "w": 12,
+        "h": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-pyroscope-datasource",
+            "uid": "${DS_PYROSCOPE}"
+          },
+          "groupBy": [
+            "role"
+          ],
+          "labelSelector": "{service_name=\"errantry-world\",role=~\"$role|$compare_role\",environment=~\"$environment\",cluster=~\"$cluster\",world_id=~\"$world\"}",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "queryType": "profile",
+          "refId": "A"
+        }
+      ],
+      "options": {}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "errantry",
+    "telemetry"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Tempo",
+          "value": "tempo"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "traces",
+        "multi": false,
+        "name": "DS_TEMPO",
+        "options": [],
+        "query": "tempo",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "Loki",
+          "value": "loki"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "logs",
+        "multi": false,
+        "name": "DS_LOKI",
+        "options": [],
+        "query": "loki",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "Pyroscope",
+          "value": "pyroscope"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "profiles",
+        "multi": false,
+        "name": "DS_PYROSCOPE",
+        "options": [],
+        "query": "grafana-pyroscope-datasource",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "tempo",
+          "uid": "${DS_TEMPO}"
+        },
+        "definition": "label_values(resource.deployment.environment.name)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "environment",
+        "multi": false,
+        "name": "environment",
+        "options": [],
+        "query": {
+          "query": "label_values(resource.deployment.environment.name)",
+          "refId": "TempoDatasourceVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "tempo",
+          "uid": "${DS_TEMPO}"
+        },
+        "definition": "label_values(resource.k8s.cluster.name)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "cluster",
+        "multi": false,
+        "name": "cluster",
+        "options": [],
+        "query": {
+          "query": "label_values(resource.k8s.cluster.name)",
+          "refId": "TempoDatasourceVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "service",
+        "multi": false,
+        "name": "service",
+        "options": [
+          {
+            "selected": false,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": false,
+            "text": "errantry-login",
+            "value": "errantry-login"
+          },
+          {
+            "selected": false,
+            "text": "errantry-world",
+            "value": "errantry-world"
+          }
+        ],
+        "query": "errantry-login,errantry-world",
+        "refresh": 0,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "role",
+        "multi": false,
+        "name": "role",
+        "options": [
+          {
+            "selected": false,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": false,
+            "text": "login",
+            "value": "login"
+          },
+          {
+            "selected": false,
+            "text": "coordinator",
+            "value": "coordinator"
+          },
+          {
+            "selected": false,
+            "text": "fleet",
+            "value": "fleet"
+          },
+          {
+            "selected": false,
+            "text": "host",
+            "value": "host"
+          }
+        ],
+        "query": "login,coordinator,fleet,host",
+        "refresh": 0,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "tempo",
+          "uid": "${DS_TEMPO}"
+        },
+        "definition": "label_values(resource.mmo.world_id)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "world",
+        "multi": false,
+        "name": "world",
+        "options": [],
+        "query": {
+          "query": "label_values(resource.mmo.world_id)",
+          "refId": "TempoDatasourceVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "tempo",
+          "uid": "${DS_TEMPO}"
+        },
+        "definition": "label_values(resource.k8s.pod.name)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "pod / instance",
+        "multi": false,
+        "name": "pod",
+        "options": [],
+        "query": {
+          "query": "label_values(resource.k8s.pod.name)",
+          "refId": "TempoDatasourceVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "none",
+          "value": "none"
+        },
+        "hide": 0,
+        "label": "trace_id",
+        "name": "trace_id",
+        "options": [
+          {
+            "selected": true,
+            "text": "none",
+            "value": "none"
+          }
+        ],
+        "query": "none",
+        "refresh": 0,
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "coordinator",
+          "value": "coordinator"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "compare role",
+        "multi": false,
+        "name": "compare_role",
+        "options": [
+          {
+            "selected": true,
+            "text": "coordinator",
+            "value": "coordinator"
+          },
+          {
+            "selected": false,
+            "text": "fleet",
+            "value": "fleet"
+          },
+          {
+            "selected": false,
+            "text": "host",
+            "value": "host"
+          }
+        ],
+        "query": "coordinator,fleet,host",
+        "refresh": 0,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Errantry telemetry",
+  "uid": "telemetry",
+  "version": 1
+}

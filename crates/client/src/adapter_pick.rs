@@ -28,17 +28,24 @@ pub fn rank(info: &AdapterInfo) -> u8 {
 pub fn choose(wanted: Option<&str>, adapters: &[AdapterInfo]) -> Option<String> {
     if let Some(wanted) = wanted.filter(|w| !w.is_empty()) {
         let wanted = wanted.to_lowercase();
-        if adapters.iter().any(|a| a.name.to_lowercase().contains(&wanted)) {
+        if adapters
+            .iter()
+            .any(|a| a.name.to_lowercase().contains(&wanted))
+        {
             return None;
         }
     }
-    adapters.iter().max_by_key(|a| rank(a)).map(|a| a.name.clone())
+    adapters
+        .iter()
+        .max_by_key(|a| rank(a))
+        .map(|a| a.name.clone())
 }
 
 /// Set `WGPU_ADAPTER_NAME` to the adapter [`choose`] picks. Call first thing in
 /// `main`, before any thread exists (it writes the process environment).
 pub fn pin_adapter() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
     let adapters: Vec<AdapterInfo> = bevy::tasks::block_on(instance.enumerate_adapters(backends))
         .iter()
@@ -52,4 +59,3 @@ pub fn pin_adapter() {
         std::env::set_var("WGPU_ADAPTER_NAME", name);
     }
 }
-

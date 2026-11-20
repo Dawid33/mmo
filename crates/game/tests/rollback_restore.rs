@@ -75,4 +75,3 @@ fn sim_survives_dropped_render_receiver() {
         "rollback did not restore state after receiver drop"
     );
 }
-

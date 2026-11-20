@@ -65,7 +65,10 @@ fn primitive(spec: &ColliderSpec, density: f32) -> (f32, Vector) {
             let mass = volume * density;
             (mass, Vector::splat(i) * mass)
         }
-        ColliderSpec::CapsuleY { half_height, radius: r } => {
+        ColliderSpec::CapsuleY {
+            half_height,
+            radius: r,
+        } => {
             let cyl_vol = half_height * r * r * PI * 2.0;
             let sq_radius = r * r;
             let sq_height = half_height * half_height * 4.0;
@@ -98,7 +101,9 @@ fn compound(parts: &[(rapier3d::math::Pose, ColliderSpec)], density: f32) -> Mas
             let mut t = [[0.0f64; 3]; 3];
             for (i, row) in t.iter_mut().enumerate() {
                 for (j, v) in row.iter_mut().enumerate() {
-                    *v = r[i][0] * d[0] * r[j][0] + r[i][1] * d[1] * r[j][1] + r[i][2] * d[2] * r[j][2];
+                    *v = r[i][0] * d[0] * r[j][0]
+                        + r[i][1] * d[1] * r[j][1]
+                        + r[i][2] * d[2] * r[j][2];
                 }
             }
             let c = pose.translation;
@@ -138,11 +143,28 @@ fn compound(parts: &[(rapier3d::math::Pose, ColliderSpec)], density: f32) -> Mas
 
 /// Row-major rotation matrix of a unit quaternion (arithmetic only).
 fn rotation_matrix(q: Rotation) -> [[f64; 3]; 3] {
-    let (x, y, z, w) = (f64::from(q.x), f64::from(q.y), f64::from(q.z), f64::from(q.w));
+    let (x, y, z, w) = (
+        f64::from(q.x),
+        f64::from(q.y),
+        f64::from(q.z),
+        f64::from(q.w),
+    );
     [
-        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
-        [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
-        [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - w * z),
+            2.0 * (x * z + w * y),
+        ],
+        [
+            2.0 * (x * y + w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - w * x),
+        ],
+        [
+            2.0 * (x * z - w * y),
+            2.0 * (y * z + w * x),
+            1.0 - 2.0 * (x * x + y * y),
+        ],
     ]
 }
 
@@ -156,7 +178,11 @@ pub fn jacobi_eigen_sym3(m: [[f32; 3]; 3]) -> (Vector, Rotation) {
 }
 
 fn jacobi_f64(m: [[f64; 3]; 3]) -> (Vector, Rotation) {
-    let mut a = [[m[0][0], m[0][1], m[0][2]], [m[0][1], m[1][1], m[1][2]], [m[0][2], m[1][2], m[2][2]]];
+    let mut a = [
+        [m[0][0], m[0][1], m[0][2]],
+        [m[0][1], m[1][1], m[1][2]],
+        [m[0][2], m[1][2], m[2][2]],
+    ];
     let mut v = [[1.0f64, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     for _ in 0..JACOBI_SWEEPS {
         for (p, q) in [(0usize, 1usize), (0, 2), (1, 2)] {
@@ -192,14 +218,19 @@ fn jacobi_f64(m: [[f64; 3]; 3]) -> (Vector, Rotation) {
             }
         }
     }
-    let det = v[0][0] * (v[1][1] * v[2][2] - v[1][2] * v[2][1]) - v[0][1] * (v[1][0] * v[2][2] - v[1][2] * v[2][0])
+    let det = v[0][0] * (v[1][1] * v[2][2] - v[1][2] * v[2][1])
+        - v[0][1] * (v[1][0] * v[2][2] - v[1][2] * v[2][0])
         + v[0][2] * (v[1][0] * v[2][1] - v[1][1] * v[2][0]);
     if det < 0.0 {
         for row in &mut v {
             row[2] = -row[2];
         }
     }
-    let col = |j: usize| rapier3d::math::Vector::new(v[0][j] as f32, v[1][j] as f32, v[2][j] as f32);
+    let col =
+        |j: usize| rapier3d::math::Vector::new(v[0][j] as f32, v[1][j] as f32, v[2][j] as f32);
     let frame = Rotation::from_mat3(&glamx::Mat3::from_cols(col(0), col(1), col(2)));
-    (Vector::new(a[0][0] as f32, a[1][1] as f32, a[2][2] as f32), frame)
+    (
+        Vector::new(a[0][0] as f32, a[1][1] as f32, a[2][2] as f32),
+        frame,
+    )
 }

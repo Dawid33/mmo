@@ -5,20 +5,20 @@ pub mod classify;
 pub mod convert;
 pub mod nbt;
 pub mod report;
-pub mod sponge;
 pub mod split;
+pub mod sponge;
 pub mod table;
 pub mod volume;
 
 use std::fmt;
 
-pub use classify::{classify, Class, Classified};
-pub use convert::{convert, AirMode, ConvertOptions};
-pub use nbt::{parse_gzip_nbt, parse_nbt, Tag, NBT_MAX_DEPTH, NBT_MAX_TAGS};
+pub use classify::{Class, Classified, classify};
+pub use convert::{AirMode, ConvertOptions, convert};
+pub use nbt::{NBT_MAX_DEPTH, NBT_MAX_TAGS, Tag, parse_gzip_nbt, parse_nbt};
 pub use report::Report;
-pub use sponge::{read_schem, SCHEM_MAX_BYTES, SCHEM_MAX_CELLS};
-pub use split::{slug, split, Build, GroundMode, Split, SplitOptions};
-pub use table::{Table, MAPPING_VERSION};
+pub use split::{Build, GroundMode, Split, SplitOptions, slug, split};
+pub use sponge::{SCHEM_MAX_BYTES, SCHEM_MAX_CELLS, read_schem};
+pub use table::{MAPPING_VERSION, Table};
 pub use volume::{BlockEntity, BlockState, BlockVolume};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

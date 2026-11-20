@@ -5,8 +5,8 @@
 //! a row another host holds is never touched — and never locked, so it never waits for a
 //! staged cut part. Postgres only. The lock walk: `succession.rs`'s module notes.
 
-use game::coordinator::{AssignLand, Assigned};
 use game::HOST_LIVE;
+use game::coordinator::{AssignLand, Assigned};
 use sqlx::Row;
 
 use crate::StoreError;
@@ -24,7 +24,10 @@ use crate::rows::i;
 /// 3. a row absent from that read inserted at epoch 1 (`ON CONFLICT DO NOTHING`);
 /// 4. else a FREE row taken at `epoch + 1` (`WHERE owner = NO_OWNER`: a held row does not
 ///    match and is not locked); no row → [`Assigned::Owned`].
-pub(crate) async fn assign_land_in(tx: &mut sqlx::PgConnection, a: &AssignLand) -> Result<Assigned, StoreError> {
+pub(crate) async fn assign_land_in(
+    tx: &mut sqlx::PgConnection,
+    a: &AssignLand,
+) -> Result<Assigned, StoreError> {
     let host = sqlx::query(&format!(
         "SELECT drain_at_ms FROM hosts WHERE id = $1 AND boot = $2 AND state = {HOST_LIVE} AND clean = 0 FOR SHARE"
     ))
@@ -32,16 +35,19 @@ pub(crate) async fn assign_land_in(tx: &mut sqlx::PgConnection, a: &AssignLand) 
     .bind(i(a.boot))
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(host) = host else { return Ok(Assigned::HostNotLive) };
+    let Some(host) = host else {
+        return Ok(Assigned::HostNotLive);
+    };
     if host.try_get::<Option<i64>, _>(0)?.is_some() {
         return Ok(Assigned::HostDraining);
     }
     let (sx, sz) = (i64::from(a.sr.0), i64::from(a.sr.1));
-    let owner: Option<i64> = sqlx::query_scalar("SELECT owner FROM super_regions WHERE sx = $1 AND sz = $2")
-        .bind(sx)
-        .bind(sz)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let owner: Option<i64> =
+        sqlx::query_scalar("SELECT owner FROM super_regions WHERE sx = $1 AND sz = $2")
+            .bind(sx)
+            .bind(sz)
+            .fetch_optional(&mut *tx)
+            .await?;
     match owner {
         Some(o) if o != crate::NO_OWNER => return Ok(Assigned::Owned),
         Some(_) => {}
@@ -55,7 +61,9 @@ pub(crate) async fn assign_land_in(tx: &mut sqlx::PgConnection, a: &AssignLand) 
             .fetch_optional(&mut *tx)
             .await?;
             if let Some(epoch) = inserted {
-                return Ok(Assigned::Done { epoch: epoch as u64 });
+                return Ok(Assigned::Done {
+                    epoch: epoch as u64,
+                });
             }
         }
     }
@@ -69,7 +77,9 @@ pub(crate) async fn assign_land_in(tx: &mut sqlx::PgConnection, a: &AssignLand) 
     .fetch_optional(&mut *tx)
     .await?;
     Ok(match taken {
-        Some(epoch) => Assigned::Done { epoch: epoch as u64 },
+        Some(epoch) => Assigned::Done {
+            epoch: epoch as u64,
+        },
         None => Assigned::Owned,
     })
 }

@@ -13,11 +13,15 @@ fn takes_file(name: &str) -> bool {
 
 fn walk(dir: &Path, files: &mut Vec<(String, PathBuf)>) {
     println!("cargo:rerun-if-changed={}", dir.display());
-    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = read.filter_map(Result::ok).collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
-        let Ok(name) = e.file_name().into_string() else { continue };
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
         let Ok(kind) = e.file_type() else { continue };
         let path = e.path();
         if kind.is_dir() {
@@ -41,7 +45,12 @@ fn main() {
     let mut out = String::from("&[\n");
     for (name, path) in &files {
         let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let _ = writeln!(out, "    ({:?}, include_bytes!({:?}) as &[u8]),", name, abs.to_string_lossy());
+        let _ = writeln!(
+            out,
+            "    ({:?}, include_bytes!({:?}) as &[u8]),",
+            name,
+            abs.to_string_lossy()
+        );
     }
     out.push_str("]\n");
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets it"));

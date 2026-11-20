@@ -6,9 +6,9 @@ use alloc::vec::Vec;
 use core::hint::unreachable_unchecked;
 use core::iter::{Enumerate, Extend, FromIterator, FusedIterator};
 use core::marker::PhantomData;
-use core::mem::replace;
 #[allow(unused_imports)] // MaybeUninit is only used on nightly at the moment.
 use core::mem::MaybeUninit;
+use core::mem::replace;
 use core::num::NonZeroU32;
 use core::ops::{Index, IndexMut};
 

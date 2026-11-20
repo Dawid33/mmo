@@ -6,3 +6,7 @@
 mod wasm_images;
 
 slint::include_modules!();
+
+// The dependency is for the build script (`DEP_WIDGETS_UI_DIR`); naming it keeps
+// cargo's `unused_dependencies` lint quiet.
+use widgets as _;

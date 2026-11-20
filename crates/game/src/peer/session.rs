@@ -4,8 +4,8 @@
 use std::collections::VecDeque;
 
 use super::{PeerHello, PeerLink, PeerMsg, Reliable, Volatile};
-use crate::HostId;
 use crate::CutId;
+use crate::HostId;
 
 /// What the session hands its owner from a [`PeerSession::pump`].
 #[derive(Debug, Clone, PartialEq)]
@@ -204,7 +204,10 @@ impl PeerSession {
     /// or sent and not acknowledged, numbered above `count`. With a frozen peer (its count
     /// cannot grow) none of it reaches the peer before this session is thawed.
     pub fn owed_above(&self, count: u64) -> impl Iterator<Item = &Reliable> {
-        self.out.iter().filter(move |(seq, _)| *seq > count).map(|(_, r)| r)
+        self.out
+            .iter()
+            .filter(move |(seq, _)| *seq > count)
+            .map(|(_, r)| r)
     }
 
     /// Freeze the session for a world cut counted across a down link (`world_cut.rs`, count
@@ -245,7 +248,10 @@ impl PeerSession {
     /// numbering (the rest was sent and is not acknowledged yet: the peer may hold it).
     pub fn unsent(&self) -> impl Iterator<Item = &Reliable> {
         let sent = self.max_sent;
-        self.out.iter().filter(move |(seq, _)| *seq > sent).map(|(_, r)| r)
+        self.out
+            .iter()
+            .filter(move |(seq, _)| *seq > sent)
+            .map(|(_, r)| r)
     }
 
     /// Stop sending reliable messages (they keep queuing) and volatile ones (dropped): a
@@ -300,7 +306,11 @@ impl PeerSession {
     /// boot it would leave a hole in the numbering (the peer sees a gap).
     pub fn drop_through_mark(&mut self, cut: CutId) {
         debug_assert!(self.held, "drop_through_mark on a session that is not held");
-        let Some(at) = self.out.iter().position(|(_, r)| matches!(r, Reliable::CutMark { cut: c } if *c == cut)) else {
+        let Some(at) = self
+            .out
+            .iter()
+            .position(|(_, r)| matches!(r, Reliable::CutMark { cut: c } if *c == cut))
+        else {
             return;
         };
         self.out.drain(..=at);
@@ -339,7 +349,9 @@ impl PeerSession {
         while let Some(msg) = link.recv() {
             match (self.state, msg) {
                 (Conn::Broken, _) => {}
-                (Conn::AwaitHello | Conn::OtherGeneration, PeerMsg::Hello(h)) => self.hello(h, &mut events),
+                (Conn::AwaitHello | Conn::OtherGeneration, PeerMsg::Hello(h)) => {
+                    self.hello(h, &mut events)
+                }
                 (Conn::Up, PeerMsg::Reliable { seq, body }) => {
                     ack_due = true;
                     if seq <= self.received_through {
@@ -374,19 +386,28 @@ impl PeerSession {
                     }
                 }
                 (Conn::Up, PeerMsg::Volatile(v)) => events.push(PeerEvent::Volatile(v)),
-                (state, msg) => log::debug!("peer {}: {:?} dropped while {state:?}", self.peer, msg.redacted()),
+                (state, msg) => log::debug!(
+                    "peer {}: {:?} dropped while {state:?}",
+                    self.peer,
+                    msg.redacted()
+                ),
             }
         }
         if self.state != Conn::Up {
             return events;
         }
         if ack_due {
-            link.send(PeerMsg::Ack { through: self.received_through });
+            link.send(PeerMsg::Ack {
+                through: self.received_through,
+            });
         }
         if !self.held {
             let from = self.sent_through;
             for (seq, body) in self.out.iter().filter(|(seq, _)| *seq > from) {
-                link.send(PeerMsg::Reliable { seq: *seq, body: body.clone() });
+                link.send(PeerMsg::Reliable {
+                    seq: *seq,
+                    body: body.clone(),
+                });
                 self.sent_through = *seq;
                 self.max_sent = self.max_sent.max(*seq);
             }
@@ -422,9 +443,17 @@ impl PeerSession {
         if self.refused.contains(&h.boot) {
             // Once per boot: a zombie redials every few seconds.
             if self.refused_logged.insert(h.boot) {
-                log::warn!("peer {}: hello of boot {}, declared dead: refused (and every later one)", self.peer, h.boot);
+                log::warn!(
+                    "peer {}: hello of boot {}, declared dead: refused (and every later one)",
+                    self.peer,
+                    h.boot
+                );
             } else {
-                log::debug!("peer {}: hello of boot {}, declared dead: refused", self.peer, h.boot);
+                log::debug!(
+                    "peer {}: hello of boot {}, declared dead: refused",
+                    self.peer,
+                    h.boot
+                );
             }
             self.state = Conn::Broken;
             self.volatile_out.clear();
@@ -433,10 +462,19 @@ impl PeerSession {
         }
         if h.generation != self.me.generation {
             if h.generation > self.me.generation {
-                log::warn!("peer {}: generation {} is newer than ours ({})", self.peer, h.generation, self.me.generation);
+                log::warn!(
+                    "peer {}: generation {} is newer than ours ({})",
+                    self.peer,
+                    h.generation,
+                    self.me.generation
+                );
                 events.push(PeerEvent::HigherGeneration(h.generation));
             } else {
-                log::info!("peer {}: generation {} is older than ours, ignored", self.peer, h.generation);
+                log::info!(
+                    "peer {}: generation {} is older than ours, ignored",
+                    self.peer,
+                    h.generation
+                );
             }
             self.state = Conn::OtherGeneration;
             return;
@@ -455,21 +493,33 @@ impl PeerSession {
         // Incoming: a count of another peer boot is void.
         if self.recv_boot != Some(h.boot) {
             if self.recv_boot.is_some() {
-                log::info!("peer {}: new boot {}, its numbering starts again", self.peer, h.boot);
+                log::info!(
+                    "peer {}: new boot {}, its numbering starts again",
+                    self.peer,
+                    h.boot
+                );
             }
             self.recv_boot = Some(h.boot);
             self.received_through = 0;
         }
         if resume {
             // Same boot pair, counted against us: resume after what the peer has.
-            while self.out.front().is_some_and(|(seq, _)| *seq <= h.received_through) {
+            while self
+                .out
+                .front()
+                .is_some_and(|(seq, _)| *seq <= h.received_through)
+            {
                 self.out.pop_front();
             }
             self.sent_through = h.received_through;
         } else {
             // The peer has none of our numbers (a new peer boot, or a peer that never
             // counted this boot): restart the numbering of everything still owed.
-            log::debug!("peer {}: renumbering {} unacknowledged from 1", self.peer, self.out.len());
+            log::debug!(
+                "peer {}: renumbering {} unacknowledged from 1",
+                self.peer,
+                self.out.len()
+            );
             if self.hold_new_boot && self.send_boot.is_some_and(|b| b != h.boot) {
                 // A leaving peer's next boot (R4 drain): nothing of the leaving boot's time
                 // goes to it before the leave is decided here.

@@ -11,6 +11,8 @@ login-api = { workspace = true }
 sqlx = { workspace = true }
 thiserror = "2"
 log = { workspace = true }
+observability = { workspace = true }
+tracing = { workspace = true }
 auth = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
@@ -24,8 +26,10 @@ serde = { workspace = true, features = ["std"] }
 rand_core = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
-simplelog = { workspace = true }
 jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["http2"] }
 prometheus = { workspace = true }
+
+[features]
+pyroscope = ["observability/pyroscope"]

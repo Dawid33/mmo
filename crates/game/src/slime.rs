@@ -21,10 +21,10 @@ use slotmapd::Key as _;
 use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
 use crate::movement::{self, MoveKeys, MoveParams, UNITS_PER_METER};
-use crate::protocol::{ColliderSpec, RegionCoords, REGION_SIZE};
+use crate::protocol::{ColliderSpec, REGION_SIZE, RegionCoords};
 use crate::{
-    EntityKey, EntityKind, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind,
-    Pose, Rollback, BLOCK_VOXELS,
+    BLOCK_VOXELS, EntityKey, EntityKind, GameDataTransactionKind, GameDataUpdate,
+    GameDataUpdateKind, Pose, Rollback,
 };
 
 // --- Spawning -----------------------------------------------------------
@@ -49,8 +49,9 @@ pub const SLIME_EDGE_M: f32 = 0.52;
 /// (Minecraft: 10 + rand(20), 0.5–1.5 s).
 pub const SLIME_HOP_DELAY_MIN_TICKS: u64 = 10;
 pub const SLIME_HOP_DELAY_RANGE_TICKS: u64 = 20;
-/// Launch speed of a hop, m/s. Peak = v² / (2 GRAVITY) ≈ 1.1 m, over a block.
-pub const SLIME_JUMP_SPEED: f32 = 10.0;
+/// Launch speed of a hop, m/s: the player's jump (Minecraft 0.42 blocks/tick),
+/// peaking at 1.25 m under `GRAVITY` and `AIR_DRAG`, over a block.
+pub const SLIME_JUMP_SPEED: f32 = 8.4;
 /// Airborne horizontal speed, m/s: BASE + PER_SIZE × size, so bigger slimes
 /// cover more ground per hop (Minecraft: 0.2 + 0.1 × size).
 pub const SLIME_HOP_SPEED_BASE: f32 = 2.0;
@@ -65,7 +66,16 @@ pub const SLIME_MAX_TURN_PER_TICK: f32 = FRAC_PI_4;
 /// Per-slime behaviour state. Lives in the rollback ECS (`Ecs::slime`) and
 /// rides `EntityBundle`. u64 ticks, not usize: serialized across the
 /// 64-bit↔wasm32 seam.
-#[derive(Debug, Default, Clone, Copy, PartialEq, state_hash::StateHash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    state_hash::StateHash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct Slime {
     /// Facing (radians about +Y), eased toward `target_yaw`.
     pub yaw: f32,
@@ -88,7 +98,10 @@ pub fn slime_edge_units(size: u8) -> f32 {
 /// fixes were pinned on capsules) and already crosses the transfer seam.
 pub fn slime_collider(size: u8) -> ColliderSpec {
     let edge = slime_edge_units(size);
-    ColliderSpec::CapsuleY { half_height: 0.1 * edge, radius: 0.4 * edge }
+    ColliderSpec::CapsuleY {
+        half_height: 0.1 * edge,
+        radius: 0.4 * edge,
+    }
 }
 
 /// Walking tunables for a slime of `size`.
@@ -96,6 +109,7 @@ pub fn slime_move_params(size: u8) -> MoveParams {
     MoveParams {
         walk_speed: SLIME_HOP_SPEED_BASE + SLIME_HOP_SPEED_PER_SIZE * size as f32,
         jump_speed: SLIME_JUMP_SPEED,
+        momentum: false,
         allow_flight: false,
     }
 }
@@ -200,15 +214,29 @@ impl Rollback {
     }
 
     fn maybe_spawn_slime_safe(&mut self, region: RegionCoords, tick: u64) {
-        let Some(plan) = slime_spawn_plan(region, tick) else { return };
-        let count = self.data.ecs.slime.iter().filter(|(_, s)| s.is_some()).count();
+        let Some(plan) = slime_spawn_plan(region, tick) else {
+            return;
+        };
+        let count = self
+            .data
+            .ecs
+            .slime
+            .iter()
+            .filter(|(_, s)| s.is_some())
+            .count();
         if count >= SLIME_CAP_PER_REGION {
             return;
         }
-        let Some((surface, _)) = self.surface_voxel(plan.vx, plan.vz) else { return };
+        let Some((surface, _)) = self.surface_voxel(plan.vx, plan.vz) else {
+            return;
+        };
         // Never on a seabed: the cell over the top voxel holds no water.
         let bv = crate::BLOCK_VOXELS as i32;
-        let above = crate::BlockPos::new(plan.vx.div_euclid(bv), (surface + 1).div_euclid(bv), plan.vz.div_euclid(bv));
+        let above = crate::BlockPos::new(
+            plan.vx.div_euclid(bv),
+            (surface + 1).div_euclid(bv),
+            plan.vz.div_euclid(bv),
+        );
         if self.water_units_at(crate::WorldBlockPos::from_local(region, above)) > 0 {
             return;
         }
@@ -234,7 +262,10 @@ impl Rollback {
             GameDataUpdateKind::SetEntityKind(e, None),
         ));
         self.data.ecs.kind.set_safe(e, Some(kind));
-        self.data.ecs.motion.set_safe(e, Some(crate::Motion::default()));
+        self.data
+            .ecs
+            .motion
+            .set_safe(e, Some(crate::Motion::default()));
         let turn = roll(tick, e.data().as_ffi(), SALT_TURN);
         self.data.ecs.slime.set_safe(
             e,
@@ -254,10 +285,18 @@ impl Rollback {
     }
 
     fn step_slime_safe(&mut self, e: EntityKey, tick: u64) {
-        let Some(slime0) = *self.data.ecs.slime.try_get(e) else { return };
-        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return };
-        let Some(EntityKind::Slime { size }) = *self.data.ecs.kind.try_get(e) else { return };
-        let Some(body) = self.data.physics.bodies.get(handle) else { return };
+        let Some(slime0) = *self.data.ecs.slime.try_get(e) else {
+            return;
+        };
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else {
+            return;
+        };
+        let Some(EntityKind::Slime { size }) = *self.data.ecs.kind.try_get(e) else {
+            return;
+        };
+        let Some(body) = self.data.physics.bodies.get(handle) else {
+            return;
+        };
         let t = body.translation();
         let motion0 = (*self.data.ecs.motion.try_get(e)).unwrap_or_default();
         let subject = e.data().as_ffi();
@@ -291,7 +330,13 @@ impl Rollback {
         let mut moved = Vector::ZERO;
         if !(grounded && keys == MoveKeys::default()) {
             let mut motion = motion0;
-            let desired = movement::plan_with(&mut motion, &keys, slime.yaw, tick, &slime_move_params(size));
+            let desired = movement::plan_with(
+                &mut motion,
+                &keys,
+                slime.yaw,
+                tick,
+                &slime_move_params(size),
+            );
             let (corrected, now_grounded) = movement::sweep_character(
                 &self.data.physics.broad_phase,
                 &self.data.physics.narrow_phase,
@@ -333,4 +378,3 @@ impl Rollback {
         }
     }
 }
-

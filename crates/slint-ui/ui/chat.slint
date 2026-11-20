@@ -64,13 +64,13 @@ export component ChatBox {
         y: ChatConfig.pad;
         width: root.width - 2 * ChatConfig.pad;
         height: root.height - 3 * ChatConfig.pad - ChatConfig.field-height;
-        viewport-width: self.width;
-        viewport-height: max(self.height, log.preferred-height);
-        viewport-y: self.height - self.viewport-height;
+        content-width: self.width;
+        content-height: max(self.height, log.preferred-height);
+        content-y: self.height - self.content-height;
 
         log := ChatLines {
             width: scroll.width;
-            height: scroll.viewport-height;
+            height: scroll.content-height;
             lines: root.lines;
         }
     }

@@ -8,17 +8,19 @@
 use macros::rollback;
 use rapier3d::math::{IVector, Pose, Vector};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
-use state_hash::StateHash;
 use slotmapd::Key as _;
-use slotmapd::{new_key_type, SlotMap, SparseSecondaryMap};
+use slotmapd::{SlotMap, SparseSecondaryMap, new_key_type};
+use state_hash::StateHash;
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use crate::camera::{Camera, Perspective3};
-use crate::input::InputState;
-use crate::protocol::{BodyState, ColliderSpec, EntityBundle, HaloEntityDelta, HaloEntityGone, HaloEntityMsg};
-use crate::registry::BlockId;
 use crate::block::CHUNK_UNITS;
 use crate::block::{Block, BlockIndex, ChiselData};
+use crate::camera::{Camera, Perspective3};
+use crate::input::InputState;
+use crate::protocol::{
+    BodyState, ColliderSpec, EntityBundle, HaloEntityDelta, HaloEntityGone, HaloEntityMsg,
+};
+use crate::registry::BlockId;
 use crate::voxel::{Chunk, ChunkCoords, Voxel};
 
 pub type ClientId = u64;
@@ -73,7 +75,10 @@ pub enum GameDataUpdateKind {
     /// Marks an entity as an entity-halo mirror of (source region, entity
     /// id), or clears the mark on upgrade / removal. The bridge draws one
     /// copy per id: the owned one when its source region is loaded here.
-    SetHaloSource(EntityKey, Option<(crate::protocol::RegionCoords, crate::EntityId)>),
+    SetHaloSource(
+        EntityKey,
+        Option<(crate::protocol::RegionCoords, crate::EntityId)>,
+    ),
     /// The entity's animation state (`anim.rs`), set (`Some`) or gone. The
     /// renderer poses the entity's model from it with `anim::sample`.
     SetAnimator(EntityKey, Option<crate::anim::Animator>),
@@ -114,6 +119,10 @@ pub enum GameDataUpdateKind {
     /// where they started (a pile falling or pushed up, a throw) — piles have
     /// no physics, so the client animates the jump. Dedupe replays on `tick`.
     ItemsLanded(Vec<crate::PileFlight>),
+    /// Render-only, Do only: a tree felled at once (`TreeFelling::Instant`,
+    /// `Rollback::fell_instant_safe`) — every block it cleared, so the client
+    /// can take them away top to bottom. Dedupe replays on `tick`.
+    TreeFelled(crate::TreeFelledView),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -138,14 +147,34 @@ pub enum GameDataTransactionKind {
 }
 
 #[derive(
-    Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, StateHash, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    serde::Serialize,
+    serde::Deserialize,
+    StateHash,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
 )]
 pub struct ItemStack {
     pub item: crate::ItemId,
     pub count: u32,
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, StateHash, PartialEq)]
+#[derive(
+    Default,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    ::borrow::Partial,
+    StateHash,
+    PartialEq,
+)]
 #[module(crate)]
 pub struct Client {
     pub input: InputState,
@@ -161,8 +190,14 @@ pub struct Client {
     pub cursor: Option<ItemStack>,
     /// The block being mined (Adventure, left held; `mining.rs`).
     pub mining: Option<crate::Mining>,
+    /// Blocks this client mined a part of and left, oldest first
+    /// (`mining.rs`: at most `DAMAGED_MAX`, each for `DAMAGE_LINGER_TICKS`).
+    pub damaged: Vec<crate::Damaged>,
     /// No mining progress before this tick (set after each break).
     pub break_cooldown_until: u64,
+    /// A held place button places again from this tick (`edit.rs`,
+    /// `PLACE_REPEAT_TICKS`).
+    pub place_repeat_at: u64,
     /// The chest (its world cell — this region's, or a neighbour's seen
     /// through the halo) whose screen is open (`containers.rs`).
     pub open_container: Option<crate::WorldBlockPos>,
@@ -185,13 +220,16 @@ impl Client {
         self.inventory_open = false;
         self.open_container = None;
         self.mining = None;
+        self.damaged.clear();
         self.stow_cursor()
     }
 }
 
 /// What an entity *is*, for rendering and future gameplay. The player is the
 /// first kind; NPC kinds extend this enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub enum EntityKind {
     #[default]
     Player,
@@ -231,7 +269,10 @@ impl Default for HaloEntity {
             entity: EntityKey::default(),
             source_region: crate::RegionCoords::default(),
             kind: EntityKind::default(),
-            collider: ColliderSpec::CapsuleY { half_height: 0.0, radius: 0.0 },
+            collider: ColliderSpec::CapsuleY {
+                half_height: 0.0,
+                radius: 0.0,
+            },
         }
     }
 }
@@ -245,9 +286,8 @@ mod game_data {
     };
 
     use super::{
-        Camera, Chunk, ChunkIndexKey, Client, ClientId, Component, EntityKey,
-        PhysicsParams,
-        EntityKind, HaloEntity, Pose, RigidBodyHandle, RollbackInfo, SlotMap,
+        Camera, Chunk, ChunkIndexKey, Client, ClientId, Component, EntityKey, EntityKind,
+        HaloEntity, PhysicsParams, Pose, RigidBodyHandle, RollbackInfo, SlotMap,
     };
     use std::collections::BTreeMap;
 
@@ -458,7 +498,11 @@ pub type ChunkIndexKey = (usize, usize, i32);
 /// multiples of `CHUNK_UNITS`). The only place coords are derived from a body.
 pub fn chunk_coords_from_translation(t: Vector) -> ChunkCoords {
     let u = CHUNK_UNITS as f32;
-    ChunkCoords::new((t.x / u) as usize, (t.y / u).floor() as i32, (t.z / u) as usize)
+    ChunkCoords::new(
+        (t.x / u) as usize,
+        (t.y / u).floor() as i32,
+        (t.z / u) as usize,
+    )
 }
 
 pub fn chunk_index_key(c: ChunkCoords) -> ChunkIndexKey {
@@ -491,12 +535,16 @@ impl GameData {
     }
 
     /// Block inventories (chests) by cell.
-    pub fn containers(&self) -> &std::collections::BTreeMap<crate::WorldBlockPos, crate::Container> {
+    pub fn containers(
+        &self,
+    ) -> &std::collections::BTreeMap<crate::WorldBlockPos, crate::Container> {
         &self.containers
     }
 
     /// The halo's mirrors of the neighbours' chests, by world cell.
-    pub fn halo_containers(&self) -> &std::collections::BTreeMap<crate::WorldBlockPos, crate::Container> {
+    pub fn halo_containers(
+        &self,
+    ) -> &std::collections::BTreeMap<crate::WorldBlockPos, crate::Container> {
         &self.halo_containers
     }
 
@@ -507,22 +555,30 @@ impl GameData {
 
     /// The terrain halo's mirrored chunks, by world chunk (for the client's
     /// tile mirror).
-    pub fn halo_terrain(&self) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::HaloChunk> {
+    pub fn halo_terrain(
+        &self,
+    ) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::HaloChunk> {
         &self.halo
     }
 
     /// The terrain halo's ground recipes, by world chunk column.
-    pub fn halo_grounds(&self) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::ColumnGround> {
+    pub fn halo_grounds(
+        &self,
+    ) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::ColumnGround> {
         &self.halo_ground
     }
 
     /// The region's static water bodies, labelled at genesis.
-    pub fn water_bodies(&self) -> &std::collections::BTreeMap<crate::WaterBodyId, crate::WaterBody> {
+    pub fn water_bodies(
+        &self,
+    ) -> &std::collections::BTreeMap<crate::WaterBodyId, crate::WaterBody> {
         &self.water_bodies
     }
 
     /// The per-column ground recipes (for the client's tile mirror).
-    pub fn ground_recipes(&self) -> &std::collections::BTreeMap<crate::ColumnCoords, crate::ColumnGround> {
+    pub fn ground_recipes(
+        &self,
+    ) -> &std::collections::BTreeMap<crate::ColumnCoords, crate::ColumnGround> {
         &self.ground
     }
 }
@@ -586,10 +642,7 @@ fn component_slot_digest<T: StateHash>(key: EntityKey, slot: Option<&Option<T>>)
 
 /// crc32 of one rigid-body slot + the set's allocator state — the exact
 /// footprint of a journaled body insert (reverted via revert_insert).
-fn body_slot_digest(
-    alloc: (Option<u32>, u32),
-    body: Option<&rapier3d::prelude::RigidBody>,
-) -> u32 {
+fn body_slot_digest(alloc: (Option<u32>, u32), body: Option<&rapier3d::prelude::RigidBody>) -> u32 {
     let mut h = crate::StateHasher::new();
     alloc.state_hash(&mut h);
     body.state_hash(&mut h);
@@ -655,7 +708,9 @@ impl Undo<rapier3d::prelude::RigidBodySet> {
         } else {
             0
         };
-        f(scope.get_mut(handle).expect("mutate_body_safe: body missing"));
+        f(scope
+            .get_mut(handle)
+            .expect("mutate_body_safe: body missing"));
         scope.register(pre, move |bodies, _| {
             bodies.restore_raw(handle, pre_body);
             if !was_modified {
@@ -669,7 +724,10 @@ impl Undo<rapier3d::prelude::RigidBodySet> {
 /// crc32 of the exact footprint of one in-place collider mutation through
 /// `ColliderSet::get_mut`: the collider's value and whether it was already on
 /// the modified list. The collider twin of [`body_write_digest`].
-fn collider_write_digest(collider: Option<&rapier3d::prelude::Collider>, was_modified: bool) -> u32 {
+fn collider_write_digest(
+    collider: Option<&rapier3d::prelude::Collider>,
+    was_modified: bool,
+) -> u32 {
     let mut h = crate::StateHasher::new();
     collider.state_hash(&mut h);
     was_modified.state_hash(&mut h);
@@ -700,7 +758,9 @@ impl Undo<rapier3d::prelude::ColliderSet> {
         } else {
             0
         };
-        f(scope.get_mut(handle).expect("mutate_collider_safe: collider missing"));
+        f(scope
+            .get_mut(handle)
+            .expect("mutate_collider_safe: collider missing"));
         scope.register(pre, move |colliders, _| {
             colliders.restore_raw(handle, pre_collider);
             if !was_modified {
@@ -769,7 +829,12 @@ where
 
 /// Writes one block's full state (block + chisel entry) into a chunk. Going
 /// through `ChunkBlocks::set` keeps the grid canonical in both directions.
-fn write_chunk_block(chunk: &mut Chunk, index: BlockIndex, block: Block, chisel: Option<ChiselData>) {
+fn write_chunk_block(
+    chunk: &mut Chunk,
+    index: BlockIndex,
+    block: Block,
+    chisel: Option<ChiselData>,
+) {
     chunk.blocks.set(index, block);
     match chisel {
         Some(c) => {
@@ -811,12 +876,24 @@ impl Undo<Component<Chunk>> {
         let old_block = chunk.blocks.get(index);
         let old_chisel = chunk.chisel.get(&index).cloned();
         let delta = crate::hash_mode() == crate::HashMode::Delta;
-        let pre = if delta { component_slot_digest(key, self.list.get(key)) } else { 0 };
+        let pre = if delta {
+            component_slot_digest(key, self.list.get(key))
+        } else {
+            0
+        };
         self.undo_digest(pre, move |d, _| {
-            let chunk = d.list.get_mut(key).and_then(Option::as_mut).expect("set_chunk_block_safe undo: chunk gone");
+            let chunk = d
+                .list
+                .get_mut(key)
+                .and_then(Option::as_mut)
+                .expect("set_chunk_block_safe undo: chunk gone");
             write_chunk_block(chunk, index, old_block, old_chisel);
             // Full/Off never read the returned digest.
-            if delta { component_slot_digest(key, d.list.get(key)) } else { 0 }
+            if delta {
+                component_slot_digest(key, d.list.get(key))
+            } else {
+                0
+            }
         });
         let chunk = self
             .raw_mut()
@@ -831,7 +908,11 @@ impl Undo<Component<Chunk>> {
     /// undo entry: the inverse writes back each old block and chisel entry
     /// (exact for the same reason — canonical grid, entry-for-entry chisel).
     /// `writes` must not repeat an index.
-    pub fn set_chunk_blocks_safe(&mut self, key: EntityKey, writes: Vec<(BlockIndex, Block, Option<ChiselData>)>) {
+    pub fn set_chunk_blocks_safe(
+        &mut self,
+        key: EntityKey,
+        writes: Vec<(BlockIndex, Block, Option<ChiselData>)>,
+    ) {
         crate::halo::touch_chunk(key);
         let chunk = self
             .list
@@ -840,16 +921,34 @@ impl Undo<Component<Chunk>> {
             .expect("set_chunk_blocks_safe: no chunk at key");
         let olds: Vec<(BlockIndex, Block, Option<ChiselData>)> = writes
             .iter()
-            .map(|&(index, _, _)| (index, chunk.blocks.get(index), chunk.chisel.get(&index).cloned()))
+            .map(|&(index, _, _)| {
+                (
+                    index,
+                    chunk.blocks.get(index),
+                    chunk.chisel.get(&index).cloned(),
+                )
+            })
             .collect();
         let delta = crate::hash_mode() == crate::HashMode::Delta;
-        let pre = if delta { component_slot_digest(key, self.list.get(key)) } else { 0 };
+        let pre = if delta {
+            component_slot_digest(key, self.list.get(key))
+        } else {
+            0
+        };
         self.undo_digest(pre, move |d, _| {
-            let chunk = d.list.get_mut(key).and_then(Option::as_mut).expect("set_chunk_blocks_safe undo: chunk gone");
+            let chunk = d
+                .list
+                .get_mut(key)
+                .and_then(Option::as_mut)
+                .expect("set_chunk_blocks_safe undo: chunk gone");
             for (index, block, chisel) in olds.iter().rev() {
                 write_chunk_block(chunk, *index, *block, chisel.clone());
             }
-            if delta { component_slot_digest(key, d.list.get(key)) } else { 0 }
+            if delta {
+                component_slot_digest(key, d.list.get(key))
+            } else {
+                0
+            }
         });
         let chunk = self
             .raw_mut()
@@ -954,7 +1053,11 @@ impl Rollback {
         self.ecs.chunk.set_safe(e, Some(chunk));
         self.chunk_index.insert(chunk_index_key(coords), e);
         crate::halo::touch_chunk(e);
-        let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));
+        let position = Pose::from_translation(Vector::new(
+            (coords.x * CHUNK_UNITS) as f32,
+            (coords.y * CHUNK_UNITS as i32) as f32,
+            (coords.z * CHUNK_UNITS) as f32,
+        ));
         let body = RigidBodyBuilder::fixed()
             .pose(position)
             .user_data(e.data().as_ffi() as u128)
@@ -998,7 +1101,11 @@ impl Rollback {
             let cells = crate::collider_cells(&chunk);
             self.ecs.chunk.raw_mut().insert(e, Some(chunk));
             self.chunk_index.insert_raw(chunk_index_key(coords), e);
-            let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));
+            let position = Pose::from_translation(Vector::new(
+                (coords.x * CHUNK_UNITS) as f32,
+                (coords.y * CHUNK_UNITS as i32) as f32,
+                (coords.z * CHUNK_UNITS) as f32,
+            ));
             let body = RigidBodyBuilder::fixed()
                 .pose(position)
                 .user_data(e.data().as_ffi() as u128)
@@ -1035,9 +1142,11 @@ impl Rollback {
             }
             let phys = self.data.physics.raw_mut();
             for collider in colliders {
-                phys.colliders
-                    .raw_mut()
-                    .insert_with_parent(collider, handle, phys.bodies.raw_mut());
+                phys.colliders.raw_mut().insert_with_parent(
+                    collider,
+                    handle,
+                    phys.bodies.raw_mut(),
+                );
             }
         }
     }
@@ -1051,7 +1160,10 @@ impl Rollback {
 
     /// Genesis-only: raw, unlogged insert of the water bodies labelled from
     /// the ground recipes (`label_water_bodies`).
-    pub fn seed_water_genesis(&mut self, bodies: std::collections::BTreeMap<crate::WaterBodyId, crate::WaterBody>) {
+    pub fn seed_water_genesis(
+        &mut self,
+        bodies: std::collections::BTreeMap<crate::WaterBodyId, crate::WaterBody>,
+    ) {
         for (id, body) in bodies {
             self.water_bodies.insert_raw(id, body);
         }
@@ -1060,11 +1172,20 @@ impl Rollback {
     /// The block the ground recipe implies at `local` of chunk `coords`,
     /// when that chunk is not materialised. `None` for a chunk entity, a
     /// column without ground, or a sub-chunk inside the band.
-    pub fn implied_block(&self, coords: ChunkCoords, local: (usize, usize, usize)) -> Option<crate::Block> {
+    pub fn implied_block(
+        &self,
+        coords: ChunkCoords,
+        local: (usize, usize, usize),
+    ) -> Option<crate::Block> {
         if self.chunk_index.contains_key(&chunk_index_key(coords)) {
             return None;
         }
-        crate::ground::implied_block(self.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), coords, local)
+        crate::ground::implied_block(
+            self.ground
+                .get(&crate::ColumnCoords::new(coords.x, coords.z)),
+            coords,
+            local,
+        )
     }
 
     /// Attach a voxel-grid collider to an entity's body. One cell per key;
@@ -1156,7 +1277,8 @@ impl Rollback {
                 p.bodies.get(body),
                 p.bodies.is_marked_modified(body),
             )
-        });        handle
+        });
+        handle
     }
 
     /// Highest solid voxel Y at region-local voxel column `(vx, vz)`, scanning
@@ -1172,16 +1294,29 @@ impl Rollback {
 
     /// [`Self::surface_voxel_y`] plus the material of that topmost voxel.
     pub fn surface_voxel(&self, vx: i32, vz: i32) -> Option<(i32, BlockId)> {
-        let (cx, cz) = (vx.div_euclid(CHUNK_UNITS as i32), vz.div_euclid(CHUNK_UNITS as i32));
-        let (lx, lz) = (vx.rem_euclid(CHUNK_UNITS as i32) as u32, vz.rem_euclid(CHUNK_UNITS as i32) as u32);
+        let (cx, cz) = (
+            vx.div_euclid(CHUNK_UNITS as i32),
+            vz.div_euclid(CHUNK_UNITS as i32),
+        );
+        let (lx, lz) = (
+            vx.rem_euclid(CHUNK_UNITS as i32) as u32,
+            vz.rem_euclid(CHUNK_UNITS as i32) as u32,
+        );
         if cx < 0 || cz < 0 {
             return None;
         }
         let (cx, cz) = (cx as usize, cz as usize);
         // Chunks of this column, highest first: the first with any solid voxel
         // in the column holds the surface. Chunk Y comes from the index key.
-        for (&(_, _, cy), &e) in self.data.chunk_index.range((cx, cz, i32::MIN)..=(cx, cz, i32::MAX)).rev() {
-            let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else { continue };
+        for (&(_, _, cy), &e) in self
+            .data
+            .chunk_index
+            .range((cx, cz, i32::MIN)..=(cx, cz, i32::MAX))
+            .rev()
+        {
+            let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else {
+                continue;
+            };
             if let Some((ly, block)) = chunk.column_top(lx, lz) {
                 return Some((cy * CHUNK_UNITS as i32 + ly as i32, block));
             }
@@ -1205,7 +1340,9 @@ impl Rollback {
         let (vx, vz) = (x as i32, z as i32);
         let ground = self.surface_voxel_y(vx, vz);
         let bv = crate::BLOCK_VOXELS as i32;
-        let water = self.recipe_water_top_at(vx.div_euclid(bv), vz.div_euclid(bv)).map(|top| (top + 1) * bv - 1);
+        let water = self
+            .recipe_water_top_at(vx.div_euclid(bv), vz.div_euclid(bv))
+            .map(|top| (top + 1) * bv - 1);
         match ground.max(water) {
             Some(surface) => {
                 (surface + 1) as f32
@@ -1224,8 +1361,12 @@ impl Rollback {
         if !(0..n).contains(&bx) || !(0..n).contains(&bz) {
             return None;
         }
-        let g = self.data.ground.get(&crate::ColumnCoords::new((bx / cb) as usize, (bz / cb) as usize))?;
-        g.recipe_water((bx % cb) as usize, (bz % cb) as usize).map(|(_, top)| top)
+        let g = self.data.ground.get(&crate::ColumnCoords::new(
+            (bx / cb) as usize,
+            (bz / cb) as usize,
+        ))?;
+        g.recipe_water((bx % cb) as usize, (bz % cb) as usize)
+            .map(|(_, top)| top)
     }
 
     /// [`Self::create_player_safe`] over region-local `xz` (voxel units).
@@ -1241,7 +1382,10 @@ impl Rollback {
     pub(crate) fn alloc_entity_id_safe(&mut self) -> crate::EntityId {
         let serial = *self.next_entity_serial;
         self.next_entity_serial.update(|n| *n += 1);
-        crate::EntityId { birth_region: *self.region, serial }
+        crate::EntityId {
+            birth_region: *self.region,
+            serial,
+        }
     }
 
     /// Give `e` its `EntityId`, indexed.
@@ -1286,7 +1430,12 @@ impl Rollback {
         );
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
         // movement::PLAYER_HEIGHT tall (1.8 m = 28.8 units): two blocks.
-        self.attach_capsule_collider_safe(e, handle, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS);
+        self.attach_capsule_collider_safe(
+            e,
+            handle,
+            PLAYER_CAPSULE_HALF_HEIGHT,
+            PLAYER_CAPSULE_RADIUS,
+        );
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
@@ -1308,7 +1457,10 @@ impl Rollback {
             GameDataUpdateKind::SetEntityKind(e, None),
         ));
         self.data.ecs.kind.set_safe(e, Some(EntityKind::Player));
-        self.data.ecs.motion.set_safe(e, Some(crate::Motion::default()));
+        self.data
+            .ecs
+            .motion
+            .set_safe(e, Some(crate::Motion::default()));
         // Drawn as a dwarf whose bones collide (`anim.rs`); feet at the
         // bottom of the capsule.
         self.attach_rig_safe(
@@ -1449,7 +1601,9 @@ impl Rollback {
     /// wakes the body / marks it modified, but all of that lives inside the
     /// body slot + modified-mark that `mutate_body_safe` restores.
     pub fn set_body_pose_safe(&mut self, key: EntityKey, pose: Pose) {
-        let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { return };
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else {
+            return;
+        };
         self.data
             .physics
             .bodies
@@ -1464,7 +1618,10 @@ impl Rollback {
     /// (`revert_insert` restores the arena allocator exactly) with a delta
     /// digest of just this slot + the allocator state — the insert every
     /// body builder here uses.
-    pub(crate) fn insert_body_safe(&mut self, body: rapier3d::prelude::RigidBody) -> RigidBodyHandle {
+    pub(crate) fn insert_body_safe(
+        &mut self,
+        body: rapier3d::prelude::RigidBody,
+    ) -> RigidBodyHandle {
         let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
         let mut scope = self.data.physics.bodies.undo_scope_digest();
         let handle = scope.insert(body);
@@ -1524,7 +1681,9 @@ impl Rollback {
         // targets).
         let mut builder = rapier3d::prelude::ColliderBuilder::new(collider.shared_shape())
             .user_data(e.data().as_ffi() as u128);
-        if state.kind == crate::BodyKind::Dynamic || !matches!(collider, ColliderSpec::CapsuleY { .. }) {
+        if state.kind == crate::BodyKind::Dynamic
+            || !matches!(collider, ColliderSpec::CapsuleY { .. })
+        {
             builder = builder.density(0.0);
         }
         self.attach_collider_safe(handle, builder.build());
@@ -1548,8 +1707,12 @@ impl Rollback {
         // (born here, kept in a restored save, then sent again as in flight):
         // halo mirrors are never in `id_index`, so a live hit is the same
         // entity.
-        let known =
-            self.data.arrivals.get(&identity).copied().or_else(|| self.data.id_index.get(&identity).copied());
+        let known = self
+            .data
+            .arrivals
+            .get(&identity)
+            .copied()
+            .or_else(|| self.data.id_index.get(&identity).copied());
         if let Some(e) = known {
             if self.data.ecs.entities.contains_key(e) {
                 // A replay re-applies the whole bundle, not only the pose.
@@ -1588,7 +1751,10 @@ impl Rollback {
             // emit_on_undo), fires LIFO after state is restored.
             self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
                 GameDataTransactionKind::Undo,
-                GameDataUpdateKind::SetHaloSource(entry.entity, Some((entry.source_region, identity))),
+                GameDataUpdateKind::SetHaloSource(
+                    entry.entity,
+                    Some((entry.source_region, identity)),
+                ),
             ));
             entry.entity
         } else {
@@ -1642,7 +1808,10 @@ impl Rollback {
     pub fn apply_halo_entity_safe(&mut self, data: HaloEntityDelta) {
         let identity = data.id;
         if self.data.id_index.contains_key(&identity) {
-            log::debug!("halo entity {identity:?} from {:?} is owned here; ignored", data.source_region);
+            log::debug!(
+                "halo entity {identity:?} from {:?} is owned here; ignored",
+                data.source_region
+            );
             return;
         }
         if let Some(entry) = self.data.halo_entities.get(&identity).cloned() {
@@ -1653,14 +1822,23 @@ impl Rollback {
                 self.data.halo_entities.insert(identity, moved);
                 self.data.send(GameDataUpdate::new(
                     GameDataTransactionKind::Do,
-                    GameDataUpdateKind::SetHaloSource(entry.entity, Some((data.source_region, identity))),
+                    GameDataUpdateKind::SetHaloSource(
+                        entry.entity,
+                        Some((data.source_region, identity)),
+                    ),
                 ));
                 self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
                     GameDataTransactionKind::Undo,
-                    GameDataUpdateKind::SetHaloSource(entry.entity, Some((entry.source_region, identity))),
+                    GameDataUpdateKind::SetHaloSource(
+                        entry.entity,
+                        Some((entry.source_region, identity)),
+                    ),
                 ));
             }
-            self.data.ecs.isometry.set_safe(entry.entity, Some(data.isometry));
+            self.data
+                .ecs
+                .isometry
+                .set_safe(entry.entity, Some(data.isometry));
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetEntityPosition(entry.entity, data.isometry),
@@ -1676,9 +1854,15 @@ impl Rollback {
                     (data.isometry.translation - b.translation()).length_squared() > snap * snap
                 });
                 if jump {
-                    self.data.physics.bodies.mutate_body_safe(handle, |b| b.set_position(data.isometry, true));
+                    self.data
+                        .physics
+                        .bodies
+                        .mutate_body_safe(handle, |b| b.set_position(data.isometry, true));
                 } else {
-                    self.data.physics.bodies.mutate_body_safe(handle, |b| b.set_next_kinematic_position(data.isometry));
+                    self.data
+                        .physics
+                        .bodies
+                        .mutate_body_safe(handle, |b| b.set_next_kinematic_position(data.isometry));
                 }
             }
         } else {
@@ -1704,7 +1888,12 @@ impl Rollback {
             self.build_kinematic_body_safe(e, data.isometry, &data.collider);
             self.data.halo_entities.insert(
                 identity,
-                HaloEntity { entity: e, source_region: data.source_region, kind: data.kind, collider: data.collider },
+                HaloEntity {
+                    entity: e,
+                    source_region: data.source_region,
+                    kind: data.kind,
+                    collider: data.collider,
+                },
             );
         }
     }
@@ -1712,7 +1901,12 @@ impl Rollback {
     /// An owner ends its mirror here: removed if it is `gone.from`'s (a
     /// mirror of another owner, or none, is left alone).
     pub fn apply_halo_entity_gone_safe(&mut self, gone: HaloEntityGone) {
-        if self.data.halo_entities.get(&gone.id).is_some_and(|h| h.source_region == gone.from) {
+        if self
+            .data
+            .halo_entities
+            .get(&gone.id)
+            .is_some_and(|h| h.source_region == gone.from)
+        {
             self.remove_halo_entity_safe(gone.id);
         }
     }
@@ -1734,7 +1928,12 @@ impl Rollback {
 
     /// Removes the mirror of `id` and its entity, undo-safely.
     pub(crate) fn remove_halo_entity_safe(&mut self, id: crate::EntityId) {
-        let Some(HaloEntity { entity: e, source_region, .. }) = self.data.halo_entities.get(&id).cloned() else {
+        let Some(HaloEntity {
+            entity: e,
+            source_region,
+            ..
+        }) = self.data.halo_entities.get(&id).cloned()
+        else {
             return;
         };
         self.data.halo_entities.remove(&id);
@@ -1767,7 +1966,9 @@ impl Rollback {
             .halo_sent
             .iter()
             .flat_map(|(id, targets)| {
-                targets.iter().map(move |t| (HaloEntityMsg::Gone(HaloEntityGone { id: *id, from }), *t))
+                targets
+                    .iter()
+                    .map(move |t| (HaloEntityMsg::Gone(HaloEntityGone { id: *id, from }), *t))
             })
             .collect()
     }
@@ -1789,9 +1990,17 @@ impl Rollback {
         if let Some(spec) = spec {
             return spec;
         }
-        log::error!("body {handle:?} has no ColliderSpec (missing collider or a shape that cannot cross); crossing as a player capsule");
-        debug_assert!(false, "body {handle:?} has no ColliderSpec: its collider shape cannot cross a seam");
-        crate::ColliderSpec::CapsuleY { half_height: PLAYER_CAPSULE_HALF_HEIGHT, radius: PLAYER_CAPSULE_RADIUS }
+        log::error!(
+            "body {handle:?} has no ColliderSpec (missing collider or a shape that cannot cross); crossing as a player capsule"
+        );
+        debug_assert!(
+            false,
+            "body {handle:?} has no ColliderSpec: its collider shape cannot cross a seam"
+        );
+        crate::ColliderSpec::CapsuleY {
+            half_height: PLAYER_CAPSULE_HALF_HEIGHT,
+            radius: PLAYER_CAPSULE_RADIUS,
+        }
     }
 
     /// The bundle `key` would leave with, read-only: kind, id, body state,
@@ -1800,8 +2009,8 @@ impl Rollback {
     /// region format stores (`portable.rs`).
     pub fn bundle_of(&self, key: EntityKey) -> crate::EntityBundle {
         let kind = (*self.data.ecs.kind.try_get(key)).unwrap_or_default();
-        let handle = (*self.data.ecs.rigidbody.try_get(key))
-            .expect("transferable entities have bodies");
+        let handle =
+            (*self.data.ecs.rigidbody.try_get(key)).expect("transferable entities have bodies");
         let body = BodyState::of(self.data.physics.bodies.get(handle).unwrap());
         let collider = self.collider_spec_of(handle);
         let client = self
@@ -1823,10 +2032,7 @@ impl Rollback {
 
     /// Assemble the bundle ([`Self::bundle_of`]), then remove the entity —
     /// all undo-tracked.
-    pub fn extract_entity_safe(
-        &mut self,
-        key: EntityKey,
-    ) -> crate::EntityBundle {
+    pub fn extract_entity_safe(&mut self, key: EntityKey) -> crate::EntityBundle {
         let bundle = self.bundle_of(key);
         let kind = bundle.kind;
         let client_id = bundle.client.as_ref().map(|(c, _)| *c);
@@ -1873,16 +2079,22 @@ impl Rollback {
         Vec<(crate::EntityBundle, crate::RegionCoords)>,
         Vec<(HaloEntityMsg, crate::RegionCoords)>,
     ) {
-        let mirror_keys: std::collections::BTreeSet<EntityKey> =
-            self.data.halo_entities.iter().map(|(_, h)| h.entity).collect();
+        let mirror_keys: std::collections::BTreeSet<EntityKey> = self
+            .data
+            .halo_entities
+            .iter()
+            .map(|(_, h)| h.entity)
+            .collect();
         // Read-only pass: gather leavers/mirrors before any mutation, so the
         // immutable borrows of physics/ecs don't collide with extraction.
         let mut leavers: Vec<(EntityKey, crate::RegionCoords)> = Vec::new();
         let mut updates: Vec<(HaloEntityMsg, crate::RegionCoords)> = Vec::new();
         // Where each owned entity is mirrored after this scan (sorted), and
         // where a leaver goes.
-        let mut mirrored: std::collections::BTreeMap<crate::EntityId, Vec<crate::RegionCoords>> = Default::default();
-        let mut crossing: std::collections::BTreeMap<crate::EntityId, crate::RegionCoords> = Default::default();
+        let mut mirrored: std::collections::BTreeMap<crate::EntityId, Vec<crate::RegionCoords>> =
+            Default::default();
+        let mut crossing: std::collections::BTreeMap<crate::EntityId, crate::RegionCoords> =
+            Default::default();
         let mut held: Vec<(EntityKey, Pose)> = Vec::new();
         // Whether the neighbour at offset (dx, dz) is off the map: a body
         // past that side is held on it (a wrapped map's east and west
@@ -1893,9 +2105,14 @@ impl Rollback {
             if mirror_keys.contains(&key) {
                 continue;
             }
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
-            let id = (*self.data.ecs.id.try_get(key)).expect("transferable entities have an EntityId");
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else {
+                continue;
+            };
+            let Some(body) = self.data.physics.bodies.get(handle) else {
+                continue;
+            };
+            let id =
+                (*self.data.ecs.id.try_get(key)).expect("transferable entities have an EntityId");
             let mut t = body.translation();
             let size = crate::REGION_SIZE;
             let hold = |v: f32, lo_closed: bool, hi_closed: bool| {
@@ -1907,7 +2124,10 @@ impl Rollback {
                     v
                 }
             };
-            let (hx, hz) = (hold(t.x, closed(-1, 0), closed(1, 0)), hold(t.z, closed(0, -1), closed(0, 1)));
+            let (hx, hz) = (
+                hold(t.x, closed(-1, 0), closed(1, 0)),
+                hold(t.z, closed(0, -1), closed(0, 1)),
+            );
             if (hx, hz) != (t.x, t.z) {
                 t.x = hx;
                 t.z = hz;
@@ -1916,13 +2136,17 @@ impl Rollback {
             if let Some((dx, dz)) = crate::departure_offset(t.x, t.z) {
                 // Canonical (across a wrapped seam, the map's other end); the
                 // hold above keeps a body off a side with no neighbour.
-                let Some(target) = crate::region_neighbour(map, region, dx, dz) else { continue };
+                let Some(target) = crate::region_neighbour(map, region, dx, dz) else {
+                    continue;
+                };
                 leavers.push((key, target));
                 crossing.insert(id, target);
             } else {
                 let mut targets = Vec::new();
                 for (dx, dz) in crate::halo_offsets(t.x, t.z) {
-                    let Some(target) = crate::region_neighbour(map, region, dx, dz) else { continue };
+                    let Some(target) = crate::region_neighbour(map, region, dx, dz) else {
+                        continue;
+                    };
                     updates.push((
                         HaloEntityMsg::Update(HaloEntityDelta {
                             id,
@@ -1945,15 +2169,25 @@ impl Rollback {
         // Explicit ends: each mirror the last scan made that this one does
         // not, except in the region a leaver crosses into.
         let mut halo = Vec::new();
-        let sent: Vec<(crate::EntityId, Vec<crate::RegionCoords>)> =
-            self.data.halo_sent.iter().map(|(id, t)| (*id, t.clone())).collect();
+        let sent: Vec<(crate::EntityId, Vec<crate::RegionCoords>)> = self
+            .data
+            .halo_sent
+            .iter()
+            .map(|(id, t)| (*id, t.clone()))
+            .collect();
         for (id, was) in &sent {
             let now = mirrored.get(id);
             for t in was {
                 if now.is_some_and(|n| n.contains(t)) || crossing.get(id) == Some(t) {
                     continue;
                 }
-                halo.push((HaloEntityMsg::Gone(HaloEntityGone { id: *id, from: region }), *t));
+                halo.push((
+                    HaloEntityMsg::Gone(HaloEntityGone {
+                        id: *id,
+                        from: region,
+                    }),
+                    *t,
+                ));
             }
             if now != Some(was) {
                 match now {
@@ -2028,8 +2262,12 @@ impl Rollback {
         let mut chunks = Vec::new();
         for (key, maybe_chunk) in self.data.ecs.chunk.iter() {
             let Some(chunk) = maybe_chunk else { continue };
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else {
+                continue;
+            };
+            let Some(body) = self.data.physics.bodies.get(handle) else {
+                continue;
+            };
             let t = body.translation();
             let coords = chunk_coords_from_translation(t);
             chunks.push((coords, chunk.clone()));
@@ -2039,8 +2277,12 @@ impl Rollback {
         // order-insensitive and stable across sources (ECS insertion order
         // here vs. column-iteration order in `TerrainSnapshot::from_columns`).
         chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
-        let ground = self.data.ground.iter().map(|(c, g)| (*c, g.clone())).collect();
+        let ground = self
+            .data
+            .ground
+            .iter()
+            .map(|(c, g)| (*c, g.clone()))
+            .collect();
         crate::TerrainSnapshot { chunks, ground }
     }
 }
-

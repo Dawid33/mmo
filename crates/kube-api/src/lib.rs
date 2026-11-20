@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use reqwest::{Method, RequestBuilder, Response};
 use serde_json::Value;
+use tracing::Instrument;
 
 const SA_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 /// Every call gives up after this.
@@ -76,14 +77,19 @@ impl Kube {
         let host = std::env::var("KUBERNETES_SERVICE_HOST")
             .map_err(|_| format!("neither {api_env} nor KUBERNETES_SERVICE_HOST is set"))?;
         let port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".into());
-        let ca = std::fs::read(format!("{SA_DIR}/ca.crt")).map_err(|e| format!("{SA_DIR}/ca.crt: {e}"))?;
+        let ca = std::fs::read(format!("{SA_DIR}/ca.crt"))
+            .map_err(|e| format!("{SA_DIR}/ca.crt: {e}"))?;
         let ca = reqwest::Certificate::from_pem(&ca).map_err(|e| format!("ca.crt: {e}"))?;
         let http = reqwest::Client::builder()
             .add_root_certificate(ca)
             .build()
             .map_err(|e| format!("http client: {e}"))?;
         // An IPv6 service host needs brackets in a URL.
-        let host = if host.contains(':') { format!("[{host}]") } else { host };
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host
+        };
         Ok(Kube {
             http,
             base: format!("https://{host}:{port}"),
@@ -92,22 +98,31 @@ impl Kube {
     }
 
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, KubeError> {
-        let mut req = self.http.request(method, format!("{}{path}", self.base)).timeout(REQUEST_TIMEOUT);
+        let mut req = self
+            .http
+            .request(method, format!("{}{path}", self.base))
+            .timeout(REQUEST_TIMEOUT);
         if let Some(file) = &self.token_file {
-            let token = std::fs::read_to_string(file).map_err(|e| KubeError::Transport(format!("token: {e}")))?;
+            let token = std::fs::read_to_string(file)
+                .map_err(|e| KubeError::Transport(format!("token: {e}")))?;
             req = req.bearer_auth(token.trim());
         }
         Ok(req)
     }
 
     async fn send(&self, req: RequestBuilder) -> Result<Response, KubeError> {
-        req.send().await.map_err(|e| KubeError::Transport(format!("API server: {e}")))
+        req.send()
+            .await
+            .map_err(|e| KubeError::Transport(format!("API server: {e}")))
     }
 
     /// The status and body of an answer: a success's body as JSON, anything else as its error.
     async fn answer(resp: Response) -> Result<(u16, String), KubeError> {
         let status = resp.status().as_u16();
-        let body = resp.text().await.map_err(|e| KubeError::Transport(e.to_string()))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| KubeError::Transport(e.to_string()))?;
         match status {
             200..=299 => Ok((status, body)),
             404 => Err(KubeError::NotFound),
@@ -123,54 +138,139 @@ impl Kube {
     }
 
     pub async fn get(&self, path: &str) -> Result<Value, KubeError> {
-        let req = self.request(Method::GET, path)?;
-        Kube::json(self.send(req).await?).await
+        self.traced(Method::GET, "get", path, || async {
+            let req = self.request(Method::GET, path)?;
+            Kube::json(self.send(req).await?).await
+        })
+        .await
     }
 
     /// The `items` of the collection at `path` whose labels match `label_selector` (e.g.
     /// `errantry/fleet=errantry`; encoded here). One page: no `limit`, no `continue`.
     pub async fn list(&self, path: &str, label_selector: &str) -> Result<Vec<Value>, KubeError> {
-        let sep = if path.contains('?') { '&' } else { '?' };
-        let path = format!("{path}{sep}labelSelector={}", encode_query(label_selector));
-        let list = self.get(&path).await?;
-        match list.get("items") {
-            Some(Value::Array(items)) => Ok(items.clone()),
-            // An empty list may come without `items`.
-            None | Some(Value::Null) => Ok(Vec::new()),
-            Some(_) => Err(KubeError::Transport(format!("{path}: `items` is not a list"))),
-        }
+        self.traced(Method::GET, "list", path, || async {
+            let sep = if path.contains('?') { '&' } else { '?' };
+            let path = format!("{path}{sep}labelSelector={}", encode_query(label_selector));
+            let list = self.get(&path).await?;
+            match list.get("items") {
+                Some(Value::Array(items)) => Ok(items.clone()),
+                None | Some(Value::Null) => Ok(Vec::new()),
+                Some(_) => Err(KubeError::Transport(
+                    "the collection's items is not a list".into(),
+                )),
+            }
+        })
+        .await
     }
 
     /// Creates `body` in the collection at `path`. 409 (it exists) is [`KubeError::Conflict`].
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value, KubeError> {
-        let req = self.request(Method::POST, path)?.json(body);
-        Kube::json(self.send(req).await?).await
+        self.traced(Method::POST, "create", path, || async {
+            let req = self.request(Method::POST, path)?.json(body);
+            Kube::json(self.send(req).await?).await
+        })
+        .await
     }
 
     /// Replaces the object at `path` with `body`. With `metadata.resourceVersion` in `body`, a
     /// change since that version is [`KubeError::Conflict`] and nothing is written.
     pub async fn put(&self, path: &str, body: &Value) -> Result<Value, KubeError> {
-        let req = self.request(Method::PUT, path)?.json(body);
-        Kube::json(self.send(req).await?).await
+        self.traced(Method::PUT, "replace", path, || async {
+            let req = self.request(Method::PUT, path)?.json(body);
+            Kube::json(self.send(req).await?).await
+        })
+        .await
     }
 
     /// A JSON merge patch.
     pub async fn patch(&self, path: &str, body: &Value) -> Result<Value, KubeError> {
-        let req = self
-            .request(Method::PATCH, path)?
-            .header("content-type", "application/merge-patch+json")
-            .body(body.to_string());
-        Kube::json(self.send(req).await?).await
+        self.traced(Method::PATCH, "patch", path, || async {
+            let req = self
+                .request(Method::PATCH, path)?
+                .header("content-type", "application/merge-patch+json")
+                .body(body.to_string());
+            Kube::json(self.send(req).await?).await
+        })
+        .await
     }
 
     /// Deletes the object at `path` (a query such as `?propagationPolicy=Background` may follow).
     /// An object already gone (404) is `Ok`.
     pub async fn delete(&self, path: &str) -> Result<(), KubeError> {
-        let req = self.request(Method::DELETE, path)?;
-        match Kube::answer(self.send(req).await?).await {
-            Ok(_) | Err(KubeError::NotFound) => Ok(()),
-            Err(e) => Err(e),
+        self.traced(Method::DELETE, "delete", path, || async {
+            let req = self.request(Method::DELETE, path)?;
+            match Kube::answer(self.send(req).await?).await {
+                Ok(_) | Err(KubeError::NotFound) => Ok(()),
+                Err(e) => Err(e),
+            }
+        })
+        .await
+    }
+
+    async fn traced<T, F, Fut>(
+        &self,
+        method: Method,
+        action: &'static str,
+        path: &str,
+        call: F,
+    ) -> Result<T, KubeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, KubeError>>,
+    {
+        let span = tracing::info_span!(
+            "kube.api.request",
+            "http.request.method" = %method,
+            action,
+            manifest = resource_kind(path),
+            namespaced = path.contains("/namespaces/"),
+            outcome = tracing::field::Empty,
+            "http.response.status_class" = tracing::field::Empty
+        );
+        let result = call().instrument(span.clone()).await;
+        span.record("outcome", kube_outcome(&result));
+        if let Err(error) = &result {
+            let status = match error {
+                KubeError::NotFound => Some(404),
+                KubeError::Conflict => Some(409),
+                KubeError::Forbidden(_) => Some(403),
+                KubeError::Status(status, _) => Some(*status),
+                KubeError::Transport(_) => None,
+            };
+            if let Some(status) = status {
+                span.record("http.response.status_class", status / 100);
+            }
         }
+        result
+    }
+}
+
+fn resource_kind(path: &str) -> &'static str {
+    let segments: Vec<_> = path.split('/').filter(|part| !part.is_empty()).collect();
+    for segment in segments.iter().rev() {
+        match *segment {
+            "deployments" => return "deployment",
+            "services" => return "service",
+            "poddisruptionbudgets" => return "pod_disruption_budget",
+            "configmaps" => return "config_map",
+            "secrets" => return "secret",
+            "pods" => return "pod",
+            "namespaces" => return "namespace",
+            "persistentvolumeclaims" => return "persistent_volume_claim",
+            _ => {}
+        }
+    }
+    "other"
+}
+
+fn kube_outcome<T>(result: &Result<T, KubeError>) -> &'static str {
+    match result {
+        Ok(_) => "ok",
+        Err(KubeError::NotFound) => "not_found",
+        Err(KubeError::Conflict) => "conflict",
+        Err(KubeError::Forbidden(_)) => "forbidden",
+        Err(KubeError::Status(_, _)) => "status",
+        Err(KubeError::Transport(_)) => "transport",
     }
 }
 
@@ -179,7 +279,9 @@ pub fn encode_query(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for b in value.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

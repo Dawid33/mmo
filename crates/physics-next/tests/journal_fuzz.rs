@@ -23,7 +23,7 @@
 //! body and collider removal ticks, and ticks with live joints. The staged
 //! solver's writeback debug-asserts (debug builds) that every body it writes
 //! was captured first.
-use physics_next::{hash_disagreements, PhysicsWorld, differing_parts};
+use physics_next::{PhysicsWorld, differing_parts, hash_disagreements};
 use rapier3d::prelude::*;
 
 /// Seeds of the full run (`journal_fuzz_all_seeds`).
@@ -38,7 +38,10 @@ const DT: f32 = 0.05;
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     fn f(&mut self, lo: f32, hi: f32) -> f32 {
@@ -78,13 +81,26 @@ const CENTER: f32 = 32.0;
 
 impl Scene {
     fn new(seed: u64) -> Self {
-        let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
+        let mut w = PhysicsWorld {
+            gravity: Vector::new(0.0, -9.81, 0.0),
+            ..Default::default()
+        };
         w.params.dt = DT;
         let rng = Lcg(0x10u64.wrapping_add(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
         for x in 0..3 {
             for z in 0..3 {
-                let b = w.bodies.insert(RigidBodyBuilder::fixed().translation(Vector::new((x * 32) as f32, -1.0, (z * 32) as f32)));
-                w.colliders.insert_with_parent(ColliderBuilder::cuboid(16.0, 1.0, 16.0), b, &mut w.bodies);
+                let b = w
+                    .bodies
+                    .insert(RigidBodyBuilder::fixed().translation(Vector::new(
+                        (x * 32) as f32,
+                        -1.0,
+                        (z * 32) as f32,
+                    )));
+                w.colliders.insert_with_parent(
+                    ColliderBuilder::cuboid(16.0, 1.0, 16.0),
+                    b,
+                    &mut w.bodies,
+                );
             }
         }
         let mut s = Self {
@@ -98,22 +114,42 @@ impl Scene {
         // Two clusters, far enough apart to start as separate islands.
         for cx in [CENTER - 5.0, CENTER + 5.0] {
             for _ in 0..3 {
-                let at = Vector::new(cx + s.rng.f(-0.8, 0.8), s.rng.f(0.5, 3.0), CENTER + s.rng.f(-0.8, 0.8));
+                let at = Vector::new(
+                    cx + s.rng.f(-0.8, 0.8),
+                    s.rng.f(0.5, 3.0),
+                    CENTER + s.rng.f(-0.8, 0.8),
+                );
                 s.add_ball(at);
             }
         }
         s.add_joint_pair();
         for (i, z) in [CENTER - 3.0, CENTER + 3.0].into_iter().enumerate() {
-            let k = s.w.bodies.insert(RigidBodyBuilder::kinematic_position_based().translation(Vector::new(CENTER - 12.0, 0.9, z)));
-            s.w.colliders.insert_with_parent(ColliderBuilder::capsule_y(0.5, 0.4), k, &mut s.w.bodies);
+            let k = s.w.bodies.insert(
+                RigidBodyBuilder::kinematic_position_based().translation(Vector::new(
+                    CENTER - 12.0,
+                    0.9,
+                    z,
+                )),
+            );
+            s.w.colliders.insert_with_parent(
+                ColliderBuilder::capsule_y(0.5, 0.4),
+                k,
+                &mut s.w.bodies,
+            );
             s.kinematic[i] = k;
         }
         s
     }
 
     fn add_ball(&mut self, at: Vector) -> RigidBodyHandle {
-        let b = self.w.bodies.insert(RigidBodyBuilder::dynamic().translation(at).angular_damping(2.0));
-        self.w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut self.w.bodies);
+        let b = self.w.bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(at)
+                .angular_damping(2.0),
+        );
+        self.w
+            .colliders
+            .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut self.w.bodies);
         self.balls.push(b);
         b
     }
@@ -122,15 +158,28 @@ impl Scene {
         let z = CENTER + self.rng.f(-6.0, -4.0);
         let a = self.add_ball(Vector::new(CENTER - 0.6, 0.5, z));
         let b = self.add_ball(Vector::new(CENTER + 0.6, 0.5, z));
-        let joint = SphericalJointBuilder::new().local_anchor1(Vector::new(0.6, 0.0, 0.0)).local_anchor2(Vector::new(-0.6, 0.0, 0.0));
+        let joint = SphericalJointBuilder::new()
+            .local_anchor1(Vector::new(0.6, 0.0, 0.0))
+            .local_anchor2(Vector::new(-0.6, 0.0, 0.0));
         self.joint = Some(self.w.impulse_joints.insert(a, b, joint, true));
     }
 
     fn remove_body(&mut self, h: RigidBodyHandle) {
         let w = &mut self.w;
-        w.bodies.remove(h, &mut w.islands, &mut w.colliders, &mut w.impulse_joints, &mut w.multibody_joints, &mut w.soft_bodies, true);
+        w.bodies.remove(
+            h,
+            &mut w.islands,
+            &mut w.colliders,
+            &mut w.impulse_joints,
+            &mut w.multibody_joints,
+            &mut w.soft_bodies,
+            true,
+        );
         self.balls.retain(|b| *b != h);
-        if self.joint.is_some_and(|j| w.impulse_joints.get(j).is_none()) {
+        if self
+            .joint
+            .is_some_and(|j| w.impulse_joints.get(j).is_none())
+        {
             self.joint = None;
         }
     }
@@ -145,15 +194,27 @@ impl Scene {
         let x = CENTER - 12.0 + 24.0 * (1.0 - (2.0 * phase - 1.0).abs());
         for (i, k) in self.kinematic.into_iter().enumerate() {
             let z = if i == 0 { CENTER - 3.0 } else { CENTER + 3.0 };
-            self.w.bodies.get_mut(k).unwrap().set_next_kinematic_translation(Vector::new(x, 0.9, z));
+            self.w
+                .bodies
+                .get_mut(k)
+                .unwrap()
+                .set_next_kinematic_translation(Vector::new(x, 0.9, z));
         }
         if self.rng.chance(6) {
             if let Some(b) = self.rng.pick(&self.balls) {
                 if self.w.bodies[b].is_sleeping() {
                     woke.push(b);
                 }
-                let impulse = Vector::new(self.rng.f(-3.0, 3.0), self.rng.f(0.5, 3.0), self.rng.f(-3.0, 3.0));
-                self.w.bodies.get_mut(b).unwrap().apply_impulse(impulse, true);
+                let impulse = Vector::new(
+                    self.rng.f(-3.0, 3.0),
+                    self.rng.f(0.5, 3.0),
+                    self.rng.f(-3.0, 3.0),
+                );
+                self.w
+                    .bodies
+                    .get_mut(b)
+                    .unwrap()
+                    .apply_impulse(impulse, true);
             }
         }
         if self.rng.chance(3) {
@@ -166,13 +227,18 @@ impl Scene {
             if let Some(b) = self.rng.pick(&self.balls) {
                 if let Some(&c) = self.w.bodies[b].colliders().first() {
                     let w = &mut self.w;
-                    w.colliders.remove(c, &mut w.islands, &mut w.bodies, &mut w.soft_bodies, true);
+                    w.colliders
+                        .remove(c, &mut w.islands, &mut w.bodies, &mut w.soft_bodies, true);
                     collider_removed = true;
                 }
             }
         }
         if self.rng.chance(4) {
-            let at = Vector::new(CENTER + self.rng.f(-6.0, 6.0), self.rng.f(2.0, 4.0), CENTER + self.rng.f(-6.0, 6.0));
+            let at = Vector::new(
+                CENTER + self.rng.f(-6.0, 6.0),
+                self.rng.f(2.0, 4.0),
+                CENTER + self.rng.f(-6.0, 6.0),
+            );
             self.add_ball(at);
         }
         // Fallen or collider-less balls are cleaned up (more removal ticks).
@@ -180,7 +246,10 @@ impl Scene {
             .balls
             .iter()
             .copied()
-            .filter(|b| self.w.bodies[*b].translation().y < -10.0 || self.w.bodies[*b].colliders().is_empty())
+            .filter(|b| {
+                self.w.bodies[*b].translation().y < -10.0
+                    || self.w.bodies[*b].colliders().is_empty()
+            })
             .collect();
         for b in doomed {
             self.remove_body(b);
@@ -200,11 +269,20 @@ impl Scene {
 }
 
 fn dynamic_bodies(w: &PhysicsWorld) -> Vec<RigidBodyHandle> {
-    w.bodies.iter().filter(|(_, b)| b.is_dynamic()).map(|(h, _)| h).collect()
+    w.bodies
+        .iter()
+        .filter(|(_, b)| b.is_dynamic())
+        .map(|(h, _)| h)
+        .collect()
 }
 
 /// Records the transitions of one journaled step.
-fn observe(pre: &PhysicsWorld, post: &PhysicsWorld, user_woke: &[RigidBodyHandle], cov: &mut Coverage) {
+fn observe(
+    pre: &PhysicsWorld,
+    post: &PhysicsWorld,
+    user_woke: &[RigidBodyHandle],
+    cov: &mut Coverage,
+) {
     let bodies = dynamic_bodies(pre);
     for &h in &bodies {
         let (a, b) = (&pre.bodies[h], &post.bodies[h]);
@@ -217,9 +295,20 @@ fn observe(pre: &PhysicsWorld, post: &PhysicsWorld, user_woke: &[RigidBodyHandle
     }
     for (i, &h1) in bodies.iter().enumerate() {
         for &h2 in &bodies[i + 1..] {
-            let before = (pre.islands.persistent_island_of(&pre.bodies, h1), pre.islands.persistent_island_of(&pre.bodies, h2));
-            let after = (post.islands.persistent_island_of(&post.bodies, h1), post.islands.persistent_island_of(&post.bodies, h2));
-            if before.0.is_some() && before.1.is_some() && before.0 != before.1 && after.0.is_some() && after.0 == after.1 {
+            let before = (
+                pre.islands.persistent_island_of(&pre.bodies, h1),
+                pre.islands.persistent_island_of(&pre.bodies, h2),
+            );
+            let after = (
+                post.islands.persistent_island_of(&post.bodies, h1),
+                post.islands.persistent_island_of(&post.bodies, h2),
+            );
+            if before.0.is_some()
+                && before.1.is_some()
+                && before.0 != before.1
+                && after.0.is_some()
+                && after.0 == after.1
+            {
                 cov.merges += 1;
             }
         }
@@ -232,7 +321,8 @@ fn run_seed(seed: u64, cov: &mut Coverage) {
     while scene.tick < FUZZ_TICKS {
         let (body_removed, collider_removed, woke) = scene.user_events();
         cov.user_wakes += woke.len();
-        let len = (1 + scene.rng.next() % MAX_WINDOW).min((FUZZ_TICKS - scene.tick) as u64) as usize;
+        let len =
+            (1 + scene.rng.next() % MAX_WINDOW).min((FUZZ_TICKS - scene.tick) as u64) as usize;
         let reference = scene.w.clone();
 
         // Forward, journaled.
@@ -244,8 +334,13 @@ fn run_seed(seed: u64, cov: &mut Coverage) {
             let pre = scene.w.clone();
             let j = scene.w.step_journaled(&mut pipeline);
             // Task 4.4: the StateHash of each part moves iff its bytes do.
-            let bad = hash_disagreements(&pre_state, &(scene.w.state_bytes(), scene.w.state_hashes()));
-            assert!(bad.is_empty(), "seed {seed} tick {}: bytes and StateHash disagree on whether {bad:?} changed", scene.tick + k);
+            let bad =
+                hash_disagreements(&pre_state, &(scene.w.state_bytes(), scene.w.state_hashes()));
+            assert!(
+                bad.is_empty(),
+                "seed {seed} tick {}: bytes and StateHash disagree on whether {bad:?} changed",
+                scene.tick + k
+            );
             if j.joints_captured() {
                 cov.joint_steps += 1;
             }
@@ -262,7 +357,12 @@ fn run_seed(seed: u64, cov: &mut Coverage) {
         for (k, (pre_digest, j)) in journals.into_iter().enumerate().rev() {
             // Task 4.4: the Delta digest agrees with the byte-exact revert.
             let live = j.revert_digest(scene.w.parts());
-            assert_eq!(pre_digest, live, "seed {seed} tick {}: journal digest differs after revert", scene.tick + k);
+            assert_eq!(
+                pre_digest,
+                live,
+                "seed {seed} tick {}: journal digest differs after revert",
+                scene.tick + k
+            );
             let got = scene.w.state_bytes();
             assert!(
                 got == snaps[k],
@@ -301,11 +401,20 @@ fn journal_fuzz_all_seeds() {
         run_seed(seed, &mut cov);
     }
     eprintln!("journal fuzz coverage over {FUZZ_SEEDS} seeds x {FUZZ_TICKS} ticks: {cov:?}");
-    assert!(cov.user_wakes > 0, "no user wake of a sleeping body: {cov:?}");
-    assert!(cov.contact_wakes > 0, "no contact wake of a sleeping body: {cov:?}");
+    assert!(
+        cov.user_wakes > 0,
+        "no user wake of a sleeping body: {cov:?}"
+    );
+    assert!(
+        cov.contact_wakes > 0,
+        "no contact wake of a sleeping body: {cov:?}"
+    );
     assert!(cov.sleeps > 0, "no body fell asleep: {cov:?}");
     assert!(cov.merges > 0, "no island merge: {cov:?}");
     assert!(cov.body_removal_steps > 0, "no body-removal step: {cov:?}");
-    assert!(cov.collider_removal_steps > 0, "no collider-removal step: {cov:?}");
+    assert!(
+        cov.collider_removal_steps > 0,
+        "no collider-removal step: {cov:?}"
+    );
     assert!(cov.joint_steps > 0, "no step with joints: {cov:?}");
 }

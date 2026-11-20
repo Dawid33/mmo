@@ -28,16 +28,54 @@ struct Palette {
 
 fn palette(species: &str) -> Palette {
     match species {
-        "pine" => Palette { log: [105, 62, 40], branch: [120, 78, 52], leaves: [38, 82, 52], marks: None },
-        "birch" => {
-            Palette { log: [228, 225, 214], branch: [200, 196, 185], leaves: [124, 170, 66], marks: Some([40, 38, 36]) }
-        }
-        "spruce" => Palette { log: [88, 58, 40], branch: [104, 70, 48], leaves: [30, 66, 48], marks: None },
-        "acacia" => Palette { log: [120, 96, 72], branch: [134, 108, 80], leaves: [112, 132, 52], marks: None },
-        "palm" => Palette { log: [150, 124, 88], branch: [120, 140, 60], leaves: [70, 140, 50], marks: None },
-        "jungle" => Palette { log: [96, 84, 62], branch: [110, 96, 70], leaves: [34, 104, 38], marks: None },
-        "cactus" => Palette { log: [70, 120, 60], branch: [80, 132, 66], leaves: [70, 120, 60], marks: None },
-        _ => Palette { log: [92, 68, 44], branch: [112, 84, 56], leaves: [62, 112, 44], marks: None },
+        "pine" => Palette {
+            log: [105, 62, 40],
+            branch: [120, 78, 52],
+            leaves: [38, 82, 52],
+            marks: None,
+        },
+        "birch" => Palette {
+            log: [228, 225, 214],
+            branch: [200, 196, 185],
+            leaves: [124, 170, 66],
+            marks: Some([40, 38, 36]),
+        },
+        "spruce" => Palette {
+            log: [88, 58, 40],
+            branch: [104, 70, 48],
+            leaves: [30, 66, 48],
+            marks: None,
+        },
+        "acacia" => Palette {
+            log: [120, 96, 72],
+            branch: [134, 108, 80],
+            leaves: [112, 132, 52],
+            marks: None,
+        },
+        "palm" => Palette {
+            log: [150, 124, 88],
+            branch: [120, 140, 60],
+            leaves: [70, 140, 50],
+            marks: None,
+        },
+        "jungle" => Palette {
+            log: [96, 84, 62],
+            branch: [110, 96, 70],
+            leaves: [34, 104, 38],
+            marks: None,
+        },
+        "cactus" => Palette {
+            log: [70, 120, 60],
+            branch: [80, 132, 66],
+            leaves: [70, 120, 60],
+            marks: None,
+        },
+        _ => Palette {
+            log: [92, 68, 44],
+            branch: [112, 84, 56],
+            leaves: [62, 112, 44],
+            marks: None,
+        },
     }
 }
 
@@ -77,7 +115,10 @@ fn render(blocks: &[TreeBlock], view: View, pal: &Palette, scale: u32) -> RgbIma
     let vox = voxels(blocks);
     let lo = |i: usize| blocks.iter().map(|b| b.offset[i]).min().unwrap_or(0).min(0) - MARGIN;
     let hi = |i: usize| blocks.iter().map(|b| b.offset[i]).max().unwrap_or(0).max(0) + 1 + MARGIN;
-    let (min, max) = ([lo(0) * BV, lo(1) * BV, lo(2) * BV], [hi(0) * BV, hi(1) * BV, hi(2) * BV]);
+    let (min, max) = (
+        [lo(0) * BV, lo(1) * BV, lo(2) * BV],
+        [hi(0) * BV, hi(1) * BV, hi(2) * BV],
+    );
     // (u axis, v axis, depth axis, depth sign): screen u right, v down.
     let (u, v, w) = match view {
         View::Front => (0, 1, 2),
@@ -128,10 +169,20 @@ fn render(blocks: &[TreeBlock], view: View, pal: &Palette, scale: u32) -> RgbIma
             TreePart::Leaves => pal.leaves,
         };
         // Nearer is lighter; leaves vary per block.
-        let near = 1.0 - ((d + if matches!(view, View::Front) { -min[w] } else { max[w] }) as f32 / depth_span);
+        let near = 1.0
+            - ((d + if matches!(view, View::Front) {
+                -min[w]
+            } else {
+                max[w]
+            }) as f32
+                / depth_span);
         let mut k = 0.55 + 0.45 * near;
         if part == TreePart::Leaves {
-            let b = [p[0].div_euclid(BV), p[1].div_euclid(BV), p[2].div_euclid(BV)];
+            let b = [
+                p[0].div_euclid(BV),
+                p[1].div_euclid(BV),
+                p[2].div_euclid(BV),
+            ];
             k *= 0.88 + 0.24 * (hash(b[0], b[1], b[2]) % 100) as f32 / 100.0;
         }
         let c = Rgb([
@@ -140,7 +191,11 @@ fn render(blocks: &[TreeBlock], view: View, pal: &Palette, scale: u32) -> RgbIma
             (base[2] as f32 * k).min(255.0) as u8,
         ]);
         for s in 0..scale * scale {
-            img.put_pixel(x as u32 * scale + s % scale, y as u32 * scale + s / scale, c);
+            img.put_pixel(
+                x as u32 * scale + s % scale,
+                y as u32 * scale + s / scale,
+                c,
+            );
         }
     }
     img
@@ -166,9 +221,13 @@ fn main() {
             ),
         }
     }
-    let sp = SPECIES.iter().find(|s| s.name == species).unwrap_or_else(|| panic!("no species {species}"));
+    let sp = SPECIES
+        .iter()
+        .find(|s| s.name == species)
+        .unwrap_or_else(|| panic!("no species {species}"));
     let pal = palette(sp.name);
-    let stem = out.unwrap_or_else(|| PathBuf::from(format!("target/tree-view/{}-s{seed}-a{age}", sp.name)));
+    let stem = out
+        .unwrap_or_else(|| PathBuf::from(format!("target/tree-view/{}-s{seed}-a{age}", sp.name)));
     if let Some(dir) = stem.parent() {
         std::fs::create_dir_all(dir).expect("create output dir");
     }
@@ -178,7 +237,9 @@ fn main() {
         PathBuf::from(p)
     };
     if grid {
-        let trees: Vec<Vec<TreeBlock>> = (0..9).map(|i| rasterize(&skeleton(sp, seed + i, age))).collect();
+        let trees: Vec<Vec<TreeBlock>> = (0..9)
+            .map(|i| rasterize(&skeleton(sp, seed + i, age)))
+            .collect();
         for (view, name) in [(View::Front, "grid"), (View::Top, "grid-top")] {
             let views: Vec<RgbImage> = trees.iter().map(|t| render(t, view, &pal, scale)).collect();
             let cw = views.iter().map(|v| v.width()).max().unwrap();
@@ -186,12 +247,20 @@ fn main() {
             let mut sheet = RgbImage::from_pixel(cw * 3, ch * 3, Rgb([255, 255, 255]));
             for (i, v) in views.iter().enumerate() {
                 // Bottom-centre each tree in its cell.
-                let (ox, oy) = ((i as u32 % 3) * cw + (cw - v.width()) / 2, (i as u32 / 3) * ch + ch - v.height());
+                let (ox, oy) = (
+                    (i as u32 % 3) * cw + (cw - v.width()) / 2,
+                    (i as u32 / 3) * ch + ch - v.height(),
+                );
                 image::imageops::replace(&mut sheet, v, ox as i64, oy as i64);
             }
             let p = path(name);
             sheet.save(&p).expect("save grid");
-            println!("{} seeds {seed}..{} age {age}: {}", sp.name, seed + 8, p.display());
+            println!(
+                "{} seeds {seed}..{} age {age}: {}",
+                sp.name,
+                seed + 8,
+                p.display()
+            );
         }
         return;
     }
@@ -204,17 +273,32 @@ fn main() {
         }
         let per = t0.elapsed().as_secs_f64() * 1e3 / n as f64;
         let t1 = std::time::Instant::now();
-        let nodes: usize = (0..n).map(|i| skeleton(sp, seed + i, age).nodes.len()).sum();
+        let nodes: usize = (0..n)
+            .map(|i| skeleton(sp, seed + i, age).nodes.len())
+            .sum();
         let skel = t1.elapsed().as_secs_f64() * 1e3 / n as f64;
-        println!("{} age {age}: {per:.3} ms per tree ({n} trees, {} blocks avg)", sp.name, blocks as u64 / n);
-        println!("  of which skeleton {skel:.3} ms ({} nodes avg)", nodes as u64 / n);
+        println!(
+            "{} age {age}: {per:.3} ms per tree ({n} trees, {} blocks avg)",
+            sp.name,
+            blocks as u64 / n
+        );
+        println!(
+            "  of which skeleton {skel:.3} ms ({} nodes avg)",
+            nodes as u64 / n
+        );
         return;
     }
     let sk = skeleton(sp, seed, age);
     let blocks = rasterize(&sk);
-    for (view, name) in [(View::Front, "front"), (View::Side, "side"), (View::Top, "top")] {
+    for (view, name) in [
+        (View::Front, "front"),
+        (View::Side, "side"),
+        (View::Top, "top"),
+    ] {
         let p = path(name);
-        render(&blocks, view, &pal, scale).save(&p).expect("save png");
+        render(&blocks, view, &pal, scale)
+            .save(&p)
+            .expect("save png");
         println!("{}", p.display());
     }
     let count = |part| blocks.iter().filter(|b| b.part == part).count();

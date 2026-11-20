@@ -3,5 +3,3 @@
 //! liquid blocks. [`floor_with_water`] builds it into a region's genesis
 //! columns (what the seam harness's ground hook uses); [`set_recipe_water`]
 //! writes it into an already built region (the hand-built fixtures).
-
-

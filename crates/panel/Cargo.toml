@@ -1,0 +1,22 @@
+[package]
+name = "panel"
+version = "0.1.0"
+edition = "2024"
+description = "The world panel: an operator page over the cluster's game worlds (status, start, stop, forge). R5b."
+# One integration-test binary: tests/it.rs.
+autotests = false
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+# The Kubernetes API over HTTPS: rustls with ring (never aws-lc-rs), as login's.
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+askama = "0.16"
+log = { workspace = true }
+simplelog = { workspace = true }
+
+[dev-dependencies]
+# Only to pin forge::PRESETS against the generator's list (tests/it.rs `presets`).
+worldgen = { workspace = true }

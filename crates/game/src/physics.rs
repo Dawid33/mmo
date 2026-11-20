@@ -1,4 +1,3 @@
-
 use rapier3d::prelude::*;
 use slotmapd::KeyData;
 
@@ -79,7 +78,9 @@ impl Controller for PhysicsController {
                     crate::GameDataTransactionKind::Do,
                     crate::GameDataUpdateKind::UpdateCameraViewMatrix(e_id, *b.position()),
                 ));
-            } else if data.ecs.motion.try_get(e_id).is_some() || data.ecs.voxel_body.try_get(e_id).is_some() {
+            } else if data.ecs.motion.try_get(e_id).is_some()
+                || data.ecs.voxel_body.try_get(e_id).is_some()
+            {
                 // Camera-less movers (mobs): their pose reaches the renderer
                 // only through this.
                 data.send(GameDataUpdate::new(

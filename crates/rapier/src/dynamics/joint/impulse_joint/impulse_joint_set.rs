@@ -73,13 +73,15 @@ pub struct ImpulseJointSet {
     /// insertion/removal, mutable joint access, user-changes to a rigid-body with attached joints).
     /// The solver reuses its joint assembly while this, the joint list, and the island epoch are unchanged.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — a memo key for the pipeline's joint assembly cache (serde-skipped).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — a memo key for the pipeline's joint assembly cache (serde-skipped).
     pub(crate) assembly_epoch: u32,
     /// The `(active_set_epoch, assembly_epoch)` the last [`Self::select_active_interactions`] ran
     /// with: while both are unchanged the selection (and the solver-body ids it stamps) is
     /// identical, so the caller's previous output is reused untouched.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — a memo key for the selection cache (serde-skipped).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — a memo key for the selection cache (serde-skipped).
     selection_epochs: Option<(u32, u32)>,
 }
 

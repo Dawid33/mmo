@@ -16,13 +16,13 @@
 //! to that high is drawn rather than near-clipped.
 
 use bevy::camera::ScalingMode;
-use bevy::light::CascadeShadowConfig;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::light::CascadeShadowConfig;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use game::movement::UNITS_PER_METER;
 use game::BLOCK_VOXELS;
+use game::movement::UNITS_PER_METER;
 
 use super::first_person::FirstPerson;
 use super::level::WorkingLevel;
@@ -34,7 +34,8 @@ pub const TOP_DOWN_KEY: KeyCode = KeyCode::KeyV;
 /// Whether a world opens in the top-down view.
 pub const TOP_DOWN_DEFAULT: bool = false;
 /// The zoom steps, in screen pixels per block (16 = one block texel per pixel).
-pub const TOP_DOWN_ZOOM_PX_PER_BLOCK: [f32; 9] = [4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0];
+pub const TOP_DOWN_ZOOM_PX_PER_BLOCK: [f32; 9] =
+    [4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0];
 /// The zoom step a world opens at (an index into [`TOP_DOWN_ZOOM_PX_PER_BLOCK`]).
 pub const TOP_DOWN_ZOOM_START: usize = 4;
 /// Keys that zoom in / out one step (as do Ctrl + the wheel).
@@ -70,7 +71,11 @@ pub struct TopDown {
 
 impl Default for TopDown {
     fn default() -> Self {
-        Self { on: TOP_DOWN_DEFAULT, zoom: TOP_DOWN_ZOOM_START, saved: None }
+        Self {
+            on: TOP_DOWN_DEFAULT,
+            zoom: TOP_DOWN_ZOOM_START,
+            saved: None,
+        }
     }
 }
 
@@ -121,7 +126,11 @@ pub fn top_down_rotation() -> Quat {
 /// cut plane at `cut_plane_y`, looking down.
 pub fn top_down_transform(focus: Vec2, cut_plane_y: f32) -> Transform {
     Transform {
-        translation: Vec3::new(focus.x, cut_plane_y + TOP_DOWN_EYE_HEIGHT_M * UNITS_PER_METER, focus.y),
+        translation: Vec3::new(
+            focus.x,
+            cut_plane_y + TOP_DOWN_EYE_HEIGHT_M * UNITS_PER_METER,
+            focus.y,
+        ),
         rotation: top_down_rotation(),
         scale: Vec3::ONE,
     }
@@ -193,8 +202,16 @@ pub fn top_down_input(
         *carry = [0.0; 2];
         return;
     }
-    *sprint = sprint.update(keys.just_pressed(super::SPRINT_TAP_KEY), keys.pressed(super::SPRINT_TAP_KEY), time.elapsed_secs());
-    let speed = if sprint.latched || keys.any_pressed(super::SPRINT_KEYS) { super::SPRINT_FACTOR } else { 1.0 };
+    *sprint = sprint.update(
+        keys.just_pressed(super::SPRINT_TAP_KEY),
+        keys.pressed(super::SPRINT_TAP_KEY),
+        time.elapsed_secs(),
+    );
+    let speed = if sprint.latched || keys.any_pressed(super::SPRINT_KEYS) {
+        super::SPRINT_FACTOR
+    } else {
+        1.0
+    };
     let size = window.size();
     let logical = units_per_px(td.px_per_block(), 1.0);
     let physical = units_per_px(td.px_per_block(), window.scale_factor());
@@ -231,14 +248,18 @@ pub fn top_down_input(
     }
     cam.focus += step;
 
-    let mut zoom = keys.any_just_pressed(TOP_DOWN_ZOOM_IN_KEYS) as i32 - keys.any_just_pressed(TOP_DOWN_ZOOM_OUT_KEYS) as i32;
+    let mut zoom = keys.any_just_pressed(TOP_DOWN_ZOOM_IN_KEYS) as i32
+        - keys.any_just_pressed(TOP_DOWN_ZOOM_OUT_KEYS) as i32;
     let notches = wheel_notches(&scroll);
     if notches != 0.0 && !over_minimap && !policy.ui_pointer {
         if keys.any_pressed(super::level::LEVEL_FAST_KEYS) {
             zoom += super::level::wheel_level_steps(notches, &mut carry[1]);
         } else if let Some(current) = working.level {
-            let range = grid.surface_range().map_or((current, current), super::level::level_range);
-            let next = super::level::wheel_step_level(current, notches, &mut carry[0], false, range);
+            let range = grid
+                .surface_range()
+                .map_or((current, current), super::level::level_range);
+            let next =
+                super::level::wheel_step_level(current, notches, &mut carry[0], false, range);
             if next != current {
                 working.level = Some(next);
             }
@@ -288,10 +309,19 @@ pub fn enter(td: &mut TopDown, cam: &CommanderCamera, working: &mut WorkingLevel
 /// (the focus, its height and the level stay where top-down left them);
 /// `cut`, when given, overrides the restored cut — leaving because the cut
 /// was turned off keeps it off.
-pub fn leave(td: &mut TopDown, cam: &mut CommanderCamera, working: &mut WorkingLevel, cut: Option<bool>) {
+pub fn leave(
+    td: &mut TopDown,
+    cam: &mut CommanderCamera,
+    working: &mut WorkingLevel,
+    cut: Option<bool>,
+) {
     if let Some(saved) = td.saved.take() {
-        (cam.yaw, cam.pitch, cam.distance, cam.target_distance) =
-            (saved.yaw, saved.pitch, saved.distance, saved.target_distance);
+        (cam.yaw, cam.pitch, cam.distance, cam.target_distance) = (
+            saved.yaw,
+            saved.pitch,
+            saved.distance,
+            saved.target_distance,
+        );
         working.cut = saved.cut;
     }
     if let Some(cut) = cut {
@@ -321,7 +351,8 @@ pub fn toggle_top_down(
     mut cam: ResMut<CommanderCamera>,
     mut working: ResMut<WorkingLevel>,
 ) {
-    let pressed = requests.read().count() > 0 || (keys.just_pressed(TOP_DOWN_KEY) && !policy.blocks_game());
+    let pressed =
+        requests.read().count() > 0 || (keys.just_pressed(TOP_DOWN_KEY) && !policy.blocks_game());
     if fp.is_some_and(|fp| fp.on) {
         return;
     }
@@ -345,9 +376,14 @@ pub fn sync_top_down_projection(
     let on = td.as_ref().is_some_and(|t| t.on);
     // The sun's cascades are measured from the eye: the top-down one is far
     // above the ground.
-    let cascades = if on { crate::renderer::atmosphere::top_down_cascades() } else { crate::renderer::atmosphere::sun_cascades() };
+    let cascades = if on {
+        crate::renderer::atmosphere::top_down_cascades()
+    } else {
+        crate::renderer::atmosphere::sun_cascades()
+    };
     for mut config in &mut suns {
-        if config.bounds != cascades.bounds || config.minimum_distance != cascades.minimum_distance {
+        if config.bounds != cascades.bounds || config.minimum_distance != cascades.minimum_distance
+        {
             *config = cascades.clone();
         }
     }
@@ -355,7 +391,10 @@ pub fn sync_top_down_projection(
     for mut projection in &mut views {
         match (on, &*projection) {
             (true, Projection::Orthographic(o)) => {
-                let want = top_down_projection(td.as_ref().map_or(TOP_DOWN_ZOOM_START, |t| t.zoom), scale_factor);
+                let want = top_down_projection(
+                    td.as_ref().map_or(TOP_DOWN_ZOOM_START, |t| t.zoom),
+                    scale_factor,
+                );
                 if o.scale != want.scale || o.far != want.far {
                     *projection = Projection::Orthographic(want);
                 }
@@ -369,4 +408,3 @@ pub fn sync_top_down_projection(
         }
     }
 }
-

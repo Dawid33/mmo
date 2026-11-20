@@ -81,8 +81,12 @@ pub fn decide(predicted: game::Tick, input: &ClockInput) -> ClockDecision {
     // pause (`just fly-probe`, 2026-09-23). Ahead only means the server
     // holds each input a little longer; the slew below closes it.
     let ahead_ok = error > 0 && error <= HOME_STALL_MIN_MS;
-    let step = (error.abs() > far && !ahead_ok)
-        .then(|| (error, (((error.abs() + rate / 2) / rate) as usize).min(MAX_ALIGN_TICKS)));
+    let step = (error.abs() > far && !ahead_ok).then(|| {
+        (
+            error,
+            (((error.abs() + rate / 2) / rate) as usize).min(MAX_ALIGN_TICKS),
+        )
+    });
     let server = input.server_rate_ms;
     let rate = if error < -CLIENT_LEAD_BAND_MS {
         ((server as f32 * 0.9) as u64, false)
@@ -91,7 +95,11 @@ pub fn decide(predicted: game::Tick, input: &ClockInput) -> ClockDecision {
     } else {
         (server, true)
     };
-    ClockDecision { drift_ms, step, rate }
+    ClockDecision {
+        drift_ms,
+        step,
+        rate,
+    }
 }
 
 /// The client's predicted world tick, steered by every region's samples.
@@ -162,7 +170,11 @@ mod tests {
     use super::*;
 
     fn sample(server_tick: game::Tick, rtt_ms: u64) -> ClockInput {
-        ClockInput { server_tick, server_rate_ms: 50, rtt_ms }
+        ClockInput {
+            server_tick,
+            server_rate_ms: 50,
+            rtt_ms,
+        }
     }
 
     /// Regression: crossing pause (new home sat out 6-10 ticks) seen with `just fly-probe` 2026-09-23 (comment in 67366206, memory region-crossing-pause)
@@ -171,6 +183,13 @@ mod tests {
     #[test]
     fn slightly_ahead_is_not_stalled() {
         let d = decide(120, &sample(100, 0));
-        assert_eq!(d, ClockDecision { drift_ms: 1000, step: None, rate: (55, true) });
+        assert_eq!(
+            d,
+            ClockDecision {
+                drift_ms: 1000,
+                step: None,
+                rate: (55, true)
+            }
+        );
     }
 }

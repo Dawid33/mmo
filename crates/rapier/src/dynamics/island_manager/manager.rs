@@ -26,8 +26,7 @@ use parry::utils::VecMap;
 ///
 /// You rarely interact with this directly - it's automatically managed by [`PhysicsPipeline`](crate::pipeline::PhysicsPipeline).
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Default, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct IslandManager {
     /// Bumped whenever any body's `active_set_id`/island assignment changes, so
     /// the solver's persistent constraint cache can cheaply detect that its cached
@@ -42,7 +41,8 @@ pub struct IslandManager {
     /// [`Self::update_substep_groups`]. Empty = one implicit group spanning the whole
     /// awake set (no body has `additional_solver_iterations > 0`).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — recomputed each step by update_substep_groups (serde-skipped).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — recomputed each step by update_substep_groups (serde-skipped).
     pub(crate) solve_groups: Vec<super::SolveGroup>,
     /// Workspace buffers for [`Self::update_substep_groups`].
     #[cfg_attr(feature = "serde-serialize", serde(skip))]

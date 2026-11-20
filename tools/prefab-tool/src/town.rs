@@ -3,15 +3,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use game::prefab::{column_top_world, load_prefab_dirs, BUILTIN_PREFAB_DIR};
+use game::prefab::{BUILTIN_PREFAB_DIR, column_top_world, load_prefab_dirs};
 use game::registry::BlockRegistry;
 use worldgen::material::Materials;
 use worldgen::sites::kit::town_kit;
-use worldgen::sites::town::{layout_town, TownLayout, TownParams};
-use worldgen::structures::{paint_at, Paint};
+use worldgen::sites::town::{TownLayout, TownParams, layout_town};
+use worldgen::structures::{Paint, paint_at};
 
-use crate::render::{write_png, BlockColours, Image};
-use crate::{load_registry, Failure, BLOCKS_DIR, USAGE};
+use crate::render::{BlockColours, Image, write_png};
+use crate::{BLOCKS_DIR, Failure, USAGE, load_registry};
 
 const FLAT_GROUND: i32 = 70;
 const MAX_WIDTH: u32 = 2048;
@@ -63,15 +63,26 @@ fn parse(args: &[String]) -> Result<TownArgs, Failure> {
     let mut it = args.iter();
     let bad = |m: String| -> Failure { (2, m) };
     while let Some(arg) = it.next() {
-        let mut value = |flag: &str| it.next().ok_or_else(|| bad(format!("{flag} needs a value")));
+        let mut value = |flag: &str| {
+            it.next()
+                .ok_or_else(|| bad(format!("{flag} needs a value")))
+        };
         match arg.as_str() {
             "-o" => a.out = Some(PathBuf::from(value("-o")?)),
             "--dirs" => {
-                a.dirs = Some(value("--dirs")?.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect())
+                a.dirs = Some(
+                    value("--dirs")?
+                        .split(':')
+                        .filter(|s| !s.is_empty())
+                        .map(PathBuf::from)
+                        .collect(),
+                )
             }
             "--seed" => {
                 let v = value("--seed")?;
-                a.seed = v.parse().map_err(|_| bad(format!("--seed: \"{v}\" is not a whole number")))?;
+                a.seed = v
+                    .parse()
+                    .map_err(|_| bad(format!("--seed: \"{v}\" is not a whole number")))?;
             }
             "--arms" => {
                 let v = value("--arms")?;
@@ -96,10 +107,16 @@ fn parse(args: &[String]) -> Result<TownArgs, Failure> {
                 let v = value("--scale")?;
                 match v.parse::<u32>() {
                     Ok(n) if n >= 1 => a.scale = Some(n),
-                    _ => return Err(bad(format!("--scale: \"{v}\" is not a whole number of at least 1"))),
+                    _ => {
+                        return Err(bad(format!(
+                            "--scale: \"{v}\" is not a whole number of at least 1"
+                        )));
+                    }
                 }
             }
-            flag if flag.starts_with('-') => return Err(bad(format!("unknown flag {flag}\n{USAGE}"))),
+            flag if flag.starts_with('-') => {
+                return Err(bad(format!("unknown flag {flag}\n{USAGE}")));
+            }
             _ if style.is_none() => style = Some(arg.clone()),
             _ => return Err(bad(USAGE.to_string())),
         }
@@ -110,14 +127,23 @@ fn parse(args: &[String]) -> Result<TownArgs, Failure> {
 
 /// Every sub-directory of `prefab-imports/`, sorted; none when it does not exist.
 fn default_dirs() -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(IMPORTS_DIR) else { return Vec::new() };
-    let mut dirs: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    let Ok(rd) = std::fs::read_dir(IMPORTS_DIR) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
     dirs.sort();
     dirs
 }
 
 fn block(registry: &BlockRegistry, name: &str) -> Result<game::BlockId, Failure> {
-    registry.id_of(name).ok_or((2, format!("block \"{name}\" is not in {BLOCKS_DIR}/blocks.ron")))
+    registry.id_of(name).ok_or((
+        2,
+        format!("block \"{name}\" is not in {BLOCKS_DIR}/blocks.ron"),
+    ))
 }
 
 /// Ground and water of the chosen terrain.
@@ -134,7 +160,8 @@ impl Terrain {
         }
     }
     fn wet(&self, x: i32, z: i32) -> bool {
-        self.mats.is_some_and(|m| worldgen::is_wet(x, z, self.seed, m))
+        self.mats
+            .is_some_and(|m| worldgen::is_wet(x, z, self.seed, m))
     }
 }
 
@@ -164,7 +191,11 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
 
     let terrain = Terrain {
         mats: a.seed_terrain.then(|| {
-            Materials::from_names(|n| registry.id_of(n).unwrap_or_else(|| panic!("block manifest must define \"{n}\"")))
+            Materials::from_names(|n| {
+                registry
+                    .id_of(n)
+                    .unwrap_or_else(|| panic!("block manifest must define \"{n}\""))
+            })
         }),
         seed: a.seed,
     };
@@ -180,21 +211,37 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
         [0, 0]
     };
 
-    let layout = layout_town(&kit, origin, &params, &|x, z| terrain.ground(x, z), &|x, z| terrain.wet(x, z));
+    let layout = layout_town(
+        &kit,
+        origin,
+        &params,
+        &|x, z| terrain.ground(x, z),
+        &|x, z| terrain.wet(x, z),
+    );
     let extent = extent_of(&layout, origin, &params);
-    let (w, d) = ((extent[2] - extent[0]) as u32, (extent[3] - extent[1]) as u32);
+    let (w, d) = (
+        (extent[2] - extent[0]) as u32,
+        (extent[3] - extent[1]) as u32,
+    );
     let scale = a.scale.unwrap_or_else(|| (MAX_WIDTH / w.max(1)).max(1));
-    let (pw, ph) = (u64::from(w) * u64::from(scale), u64::from(d) * u64::from(scale));
+    let (pw, ph) = (
+        u64::from(w) * u64::from(scale),
+        u64::from(d) * u64::from(scale),
+    );
     if pw > MAX_PICTURE_SIDE || ph > MAX_PICTURE_SIDE {
         return Err((
             2,
-            format!("the picture would be {pw}x{ph} px, over {MAX_PICTURE_SIDE} px a side: lower --scale (now {scale})"),
+            format!(
+                "the picture would be {pw}x{ph} px, over {MAX_PICTURE_SIDE} px a side: lower --scale (now {scale})"
+            ),
         ));
     }
 
     let colours = BlockColours::load(&registry, Path::new(BLOCKS_DIR));
     let image = draw(&layout, &colours, &terrain, extent, scale);
-    let out = a.out.unwrap_or_else(|| Path::new("target/prefab-view").join(format!("town-{}-{}.png", a.style, a.seed)));
+    let out = a.out.unwrap_or_else(|| {
+        Path::new("target/prefab-view").join(format!("town-{}-{}.png", a.style, a.seed))
+    });
     if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| (2, format!("{}: {e}", dir.display())))?;
     }
@@ -203,8 +250,15 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
     println!("{}", out.display());
     println!("style {}", a.style);
     println!("kit {} houses", kit.houses.len());
-    println!("lots {} laid, {} skipped", layout.lots.len(), layout.skipped);
-    println!("extent {w}x{d} blocks from ({}, {}), origin ({}, {}), scale {scale}", extent[0], extent[1], origin[0], origin[1]);
+    println!(
+        "lots {} laid, {} skipped",
+        layout.lots.len(),
+        layout.skipped
+    );
+    println!(
+        "extent {w}x{d} blocks from ({}, {}), origin ({}, {}), scale {scale}",
+        extent[0], extent[1], origin[0], origin[1]
+    );
     for lot in &layout.lots {
         let (min, max) = lot.bounds;
         let level = layout
@@ -232,11 +286,16 @@ fn dry_origin(terrain: &Terrain, p: &TownParams) -> Option<[i32; 2]> {
     let mid = p.plaza / 2 + 1 + p.arm_len / 2;
     let dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     let dry_site = |[x, z]: [i32; 2]| {
-        !terrain.wet(x, z) && dirs[..usize::from(p.arms.min(4))].iter().all(|[dx, dz]| !terrain.wet(x + dx * mid, z + dz * mid))
+        !terrain.wet(x, z)
+            && dirs[..usize::from(p.arms.min(4))]
+                .iter()
+                .all(|[dx, dz]| !terrain.wet(x + dx * mid, z + dz * mid))
     };
     (0..=ORIGIN_SCAN_RINGS)
         .flat_map(|r| {
-            (-r..=r).flat_map(move |j| (-r..=r).map(move |i| (i, j))).filter(move |&(i, j)| i.abs().max(j.abs()) == r)
+            (-r..=r)
+                .flat_map(move |j| (-r..=r).map(move |i| (i, j)))
+                .filter(move |&(i, j)| i.abs().max(j.abs()) == r)
         })
         .map(|(i, j)| [i * ORIGIN_SCAN_STEP, j * ORIGIN_SCAN_STEP])
         .find(|&c| dry_site(c))
@@ -250,7 +309,12 @@ fn extent_of(layout: &TownLayout, origin: [i32; 2], p: &TownParams) -> [i32; 4] 
     let end = h + 1 + p.arm_len;
     let mut e = [ox - h, oz - h, ox + h + 1, oz + h + 1];
     let mut grow = |r: [i32; 4]| {
-        e = [e[0].min(r[0]), e[1].min(r[1]), e[2].max(r[2]), e[3].max(r[3])];
+        e = [
+            e[0].min(r[0]),
+            e[1].min(r[1]),
+            e[2].max(r[2]),
+            e[3].max(r[3]),
+        ];
     };
     for arm in 0..p.arms.min(4) {
         grow(match arm {
@@ -274,10 +338,20 @@ fn lerp(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     [0, 1, 2].map(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8)
 }
 
-fn draw(layout: &TownLayout, colours: &BlockColours, terrain: &Terrain, extent: [i32; 4], scale: u32) -> Image {
+fn draw(
+    layout: &TownLayout,
+    colours: &BlockColours,
+    terrain: &Terrain,
+    extent: [i32; 4],
+    scale: u32,
+) -> Image {
     let [x0, z0, x1, z1] = extent;
     let (w, d) = ((x1 - x0) as u32, (z1 - z0) as u32);
-    let mut img = Image { width: w * scale, height: d * scale, rgb: vec![0; (w * scale * d * scale * 3) as usize] };
+    let mut img = Image {
+        width: w * scale,
+        height: d * scale,
+        rgb: vec![0; (w * scale * d * scale * 3) as usize],
+    };
 
     // Background: `ground_y` builds a terrain patch per call, far too slow per pixel, so the ground is
     // sampled once per GROUND_CELL x GROUND_CELL block cell (at its centre) and reused for the cell.
@@ -286,14 +360,23 @@ fn draw(layout: &TownLayout, colours: &BlockColours, terrain: &Terrain, extent: 
     let mut samples: BTreeMap<(i32, i32), (i32, bool)> = BTreeMap::new();
     for cz in 0..cells_z {
         for cx in 0..cells_x {
-            let (sx, sz) = (x0 + cx * GROUND_CELL + GROUND_CELL / 2, z0 + cz * GROUND_CELL + GROUND_CELL / 2);
+            let (sx, sz) = (
+                x0 + cx * GROUND_CELL + GROUND_CELL / 2,
+                z0 + cz * GROUND_CELL + GROUND_CELL / 2,
+            );
             samples.insert((cx, cz), (terrain.ground(sx, sz), terrain.wet(sx, sz)));
         }
     }
     let lo = samples.values().map(|s| s.0).min().unwrap_or(0);
     let hi = samples.values().map(|s| s.0).max().unwrap_or(0);
     let px = |img: &mut Image, bx: i32, bz: i32, c: [u8; 3]| {
-        img.fill((bx - x0) as u32 * scale, (bz - z0) as u32 * scale, scale, scale, c)
+        img.fill(
+            (bx - x0) as u32 * scale,
+            (bz - z0) as u32 * scale,
+            scale,
+            scale,
+            c,
+        )
     };
     for bz in z0..z1 {
         for bx in x0..x1 {
@@ -301,7 +384,15 @@ fn draw(layout: &TownLayout, colours: &BlockColours, terrain: &Terrain, extent: 
             let c = if wet {
                 WATER
             } else {
-                lerp(BACKGROUND_LOW, BACKGROUND_HIGH, if hi > lo { (g - lo) as f32 / (hi - lo) as f32 } else { 0.5 })
+                lerp(
+                    BACKGROUND_LOW,
+                    BACKGROUND_HIGH,
+                    if hi > lo {
+                        (g - lo) as f32 / (hi - lo) as f32
+                    } else {
+                        0.5
+                    },
+                )
             };
             px(&mut img, bx, bz, c);
         }
@@ -321,12 +412,18 @@ fn draw(layout: &TownLayout, colours: &BlockColours, terrain: &Terrain, extent: 
         let (min, max) = pl.bounds();
         let tops: Vec<(i32, i32, i32, game::BlockId)> = (min[2]..max[2])
             .flat_map(|z| (min[0]..max[0]).map(move |x| (x, z)))
-            .filter_map(|(x, z)| column_top_world(&pl.prefab, &pl.at, x, z).map(|(y, id)| (x, z, y, id)))
+            .filter_map(|(x, z)| {
+                column_top_world(&pl.prefab, &pl.at, x, z).map(|(y, id)| (x, z, y, id))
+            })
             .collect();
         let lo = tops.iter().map(|t| t.2).min().unwrap_or(0);
         let hi = tops.iter().map(|t| t.2).max().unwrap_or(0);
         for &(x, z, y, id) in &tops {
-            let f = if hi > lo { LOW_SHADE + (1.0 - LOW_SHADE) * (y - lo) as f32 / (hi - lo) as f32 } else { 1.0 };
+            let f = if hi > lo {
+                LOW_SHADE + (1.0 - LOW_SHADE) * (y - lo) as f32 / (hi - lo) as f32
+            } else {
+                1.0
+            };
             px(&mut img, x, z, shade(colours.of(id), f));
         }
     }
@@ -334,7 +431,10 @@ fn draw(layout: &TownLayout, colours: &BlockColours, terrain: &Terrain, extent: 
     for (i, pl) in layout.placements.iter().enumerate() {
         let (min, max) = pl.bounds();
         let (ix, iz) = ((min[0] - x0) as u32 * scale, (min[2] - z0) as u32 * scale);
-        let (iw, ih) = ((max[0] - min[0]) as u32 * scale, (max[2] - min[2]) as u32 * scale);
+        let (iw, ih) = (
+            (max[0] - min[0]) as u32 * scale,
+            (max[2] - min[2]) as u32 * scale,
+        );
         img.fill(ix, iz, iw, 1, OUTLINE);
         img.fill(ix, iz + ih - 1, iw, 1, OUTLINE);
         img.fill(ix, iz, 1, ih, OUTLINE);

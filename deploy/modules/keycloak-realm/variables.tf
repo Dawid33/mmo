@@ -60,10 +60,10 @@ variable "zulip_host" {
   default     = "chat.errantry.renownandruin.com"
 }
 
-variable "grafana_host" {
-  description = "Grafana's hostname: the only place a `grafana` login (staff realm) may redirect back to."
+variable "grafana_url" {
+  description = "Grafana's root URL (the monitoring root's grafana_url): the only place a `grafana` login (staff realm) may redirect back to. Default: the VPN-only name, plain HTTP inside the operator VPN."
   type        = string
-  default     = "grafana.errantry.renownandruin.com"
+  default     = "http://grafana.vpn.errantry.renownandruin.com"
 }
 
 variable "game_web_origins" {

@@ -1,3 +1,4 @@
+// mmo-fork: `f32::EPSILON` for upstream's deprecated `core::f32::EPSILON`.
 use parry3d::math::{Pose, Vector};
 use parry3d::query::IntersectResult;
 use parry3d::shape::TriMesh;
@@ -28,7 +29,7 @@ fn build_diamond(position: &Pose) -> TriMesh {
 fn trimesh_plane_edge_intersection() {
     let mesh = build_diamond(&Pose::identity());
 
-    let result = mesh.intersection_with_local_plane(Vector::Z, 0.5, core::f32::EPSILON);
+    let result = mesh.intersection_with_local_plane(Vector::Z, 0.5, f32::EPSILON);
 
     assert!(matches!(result, IntersectResult::Intersect(_)));
 
@@ -46,7 +47,7 @@ fn trimesh_plane_edge_intersection() {
 fn trimesh_plane_vertex_intersection() {
     let mesh = build_diamond(&Pose::identity());
 
-    let result = mesh.intersection_with_local_plane(Vector::Z, 0.0, core::f32::EPSILON);
+    let result = mesh.intersection_with_local_plane(Vector::Z, 0.0, f32::EPSILON);
 
     assert!(matches!(result, IntersectResult::Intersect(_)));
 
@@ -64,7 +65,7 @@ fn trimesh_plane_vertex_intersection() {
 fn trimesh_plane_mixed_intersection() {
     let mesh = build_diamond(&Pose::identity());
 
-    let result = mesh.intersection_with_local_plane(Vector::X, 0.0, core::f32::EPSILON);
+    let result = mesh.intersection_with_local_plane(Vector::X, 0.0, f32::EPSILON);
 
     assert!(matches!(result, IntersectResult::Intersect(_)));
 
@@ -84,7 +85,7 @@ fn trimesh_plane_multi_intersection() {
     let mut mesh = build_diamond(&Pose::identity());
     mesh.append(&build_diamond(&Pose::translation(-5.0, 0.0, 0.0)));
 
-    let result = mesh.intersection_with_local_plane(Vector::Z, 0.5, core::f32::EPSILON);
+    let result = mesh.intersection_with_local_plane(Vector::Z, 0.5, f32::EPSILON);
 
     assert!(matches!(result, IntersectResult::Intersect(_)));
 
@@ -107,7 +108,7 @@ fn trimesh_plane_multi_intersection() {
 fn trimesh_plane_above() {
     let mesh = build_diamond(&Pose::identity());
 
-    let result = mesh.intersection_with_local_plane(Vector::Z, -5.0, core::f32::EPSILON);
+    let result = mesh.intersection_with_local_plane(Vector::Z, -5.0, f32::EPSILON);
 
     assert!(matches!(result, IntersectResult::Positive));
 }
@@ -116,7 +117,7 @@ fn trimesh_plane_above() {
 fn trimesh_plane_below() {
     let mesh = build_diamond(&Pose::identity());
 
-    let result = mesh.intersection_with_local_plane(Vector::Z, 5.0, core::f32::EPSILON);
+    let result = mesh.intersection_with_local_plane(Vector::Z, 5.0, f32::EPSILON);
 
     assert!(matches!(result, IntersectResult::Negative));
 }

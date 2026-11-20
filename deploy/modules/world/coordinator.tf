@@ -93,8 +93,9 @@ resource "kubernetes_deployment_v1" "coordinator" {
           image_pull_policy = "IfNotPresent"
           dynamic "env" {
             for_each = merge(local.server_env, {
-              VOXEL_ROLE             = "coordinator"
-              VOXEL_COORDINATOR_BIND = "0.0.0.0:6480"
+              VOXEL_ROLE              = "coordinator"
+              VOXEL_COORDINATOR_BIND  = "0.0.0.0:6480"
+              OTEL_TRACES_SAMPLER_ARG = tostring(var.telemetry.coordinator_sampler_ratio)
               # The world map's tile route, plain HTTP for the web proxy (crates/server/src/map_api.rs).
               VOXEL_MAP_BIND = "0.0.0.0:${local.map_port}"
               }, local.fleet_env, {
@@ -111,6 +112,22 @@ resource "kubernetes_deployment_v1" "coordinator" {
               secret_key_ref {
                 name = kubernetes_secret_v1.db.metadata[0].name
                 key  = "url"
+              }
+            }
+          }
+          env {
+            name = "K8S_POD_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.name"
+              }
+            }
+          }
+          env {
+            name = "K8S_NAMESPACE_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.namespace"
               }
             }
           }

@@ -15,8 +15,7 @@ use num::AsPrimitive;
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct VoxelsShapeSubDetector {
     pub manifold_id: usize,
     pub selected_contacts: u32,
@@ -42,8 +41,7 @@ impl<const N: usize> From<[u32; N]> for VoxelsWorkspaceKey<N> {
 //       It is different from the trimesh cash though. Which one is better?
 /// A workspace for collision-detection against voxels shape.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Default, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct VoxelsShapeContactManifoldsWorkspace<const N: usize> {
     pub(crate) timestamp: bool,
     pub(crate) sub_detectors: HashMap<VoxelsWorkspaceKey<N>, VoxelsShapeSubDetector>,

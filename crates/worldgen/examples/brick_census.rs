@@ -12,7 +12,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use game::{Block, BlockId, BlockIndex, BlockPos, Column, ReadVol, RegionCoords, BRICKS_PER_CHUNK_EDGE, BRICK_BLOCKS, CHUNK_BLOCKS, REGION_BLOCKS};
+use game::{
+    BRICK_BLOCKS, BRICKS_PER_CHUNK_EDGE, Block, BlockId, BlockIndex, BlockPos, CHUNK_BLOCKS,
+    Column, REGION_BLOCKS, ReadVol, RegionCoords,
+};
 use worldgen::material::Materials;
 
 thread_local!(static IMPLIED_SOLID: std::cell::Cell<bool> = const { std::cell::Cell::new(true) });
@@ -36,21 +39,30 @@ fn main() {
     let manifest = include_str!("../../../assets/blocks/blocks.ron");
     let reg = game::BlockRegistry::from_ron(manifest).expect("valid block manifest");
     game::install_block_props(reg.props());
-    let mats = Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")));
-    let coords = RegionCoords { x: region.0, z: region.1 };
+    let mats =
+        Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")));
+    let coords = RegionCoords {
+        x: region.0,
+        z: region.1,
+    };
     let t = std::time::Instant::now();
     let columns = match &world {
         Some(path) => {
-            let w = worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let w = worldgen::forged::ForgedWorld::load(path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             worldgen::generate_region_forged(&w, coords, mats)
         }
         None => worldgen::generate_region(coords, worldgen::WORLD_SEED, mats),
     };
-    println!("region {region:?} ({REGION_BLOCKS} m) generated in {:.2?}", t.elapsed());
+    println!(
+        "region {region:?} ({REGION_BLOCKS} m) generated in {:.2?}",
+        t.elapsed()
+    );
 
     let props = game::block_props();
     let opaque = |b: Block| b.id != BlockId::AIR && props.is_solid(b.id) && !props.is_cutout(b.id);
-    let cols: HashMap<(usize, usize), &Column> = columns.iter().map(|(c, col)| ((c.x, c.z), col)).collect();
+    let cols: HashMap<(usize, usize), &Column> =
+        columns.iter().map(|(c, col)| ((c.x, c.z), col)).collect();
     let cb = CHUNK_BLOCKS as i32;
     // Global (region-local) block lookup; None outside the region.
     let block_at = |x: i32, y: i32, z: i32| -> Option<(Block, bool)> {
@@ -66,9 +78,11 @@ fn main() {
         let block = col.get(BlockPos::new(lx, y, lz));
         let sub_y = y.div_euclid(cb);
         let chiselled = match col.sub_chunk_at(sub_y) {
-            Some(game::SubChunk::Dense(c)) => {
-                c.chisel.contains_key(&BlockIndex::from_xyz(lx as usize, y.rem_euclid(cb) as usize, lz as usize))
-            }
+            Some(game::SubChunk::Dense(c)) => c.chisel.contains_key(&BlockIndex::from_xyz(
+                lx as usize,
+                y.rem_euclid(cb) as usize,
+                lz as usize,
+            )),
             _ => false,
         };
         Some((block, chiselled))
@@ -76,7 +90,8 @@ fn main() {
     let is_opaque = |x, y, z| block_at(x, y, z).is_some_and(|(b, ch)| !ch && opaque(b));
 
     let (mut chunks, mut uniform_solid_chunks) = (0usize, 0usize);
-    let (mut spawned, mut buried_global, mut with_faces, mut air) = (0usize, 0usize, 0usize, 0usize);
+    let (mut spawned, mut buried_global, mut with_faces, mut air) =
+        (0usize, 0usize, 0usize, 0usize);
     let n = BRICKS_PER_CHUNK_EDGE;
     let bb = BRICK_BLOCKS as i32;
     for (cc, col) in &columns {
@@ -102,7 +117,9 @@ fn main() {
                 }
                 (!any_solid, all_opaque)
             };
-            let classes: Vec<(bool, bool)> = (0..n * n * n).map(|i| brick_class([i % n, (i / n) % n, i / (n * n)])).collect();
+            let classes: Vec<(bool, bool)> = (0..n * n * n)
+                .map(|i| brick_class([i % n, (i / n) % n, i / (n * n)]))
+                .collect();
             let idx = |b: [usize; 3]| b[0] + n * (b[1] + n * b[2]);
             for i in 0..n * n * n {
                 let b = [i % n, (i / n) % n, i / (n * n)];
@@ -114,26 +131,52 @@ fn main() {
                 // Today's rule: buried only by in-chunk neighbours; face bricks always spawn.
                 let in_chunk_buried = is_opq
                     && b.iter().all(|&v| v > 0 && v < n - 1)
-                    && [[1i32, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].iter().all(|o| {
-                        let nb = [(b[0] as i32 + o[0]) as usize, (b[1] as i32 + o[1]) as usize, (b[2] as i32 + o[2]) as usize];
+                    && [
+                        [1i32, 0, 0],
+                        [-1, 0, 0],
+                        [0, 1, 0],
+                        [0, -1, 0],
+                        [0, 0, 1],
+                        [0, 0, -1],
+                    ]
+                    .iter()
+                    .all(|o| {
+                        let nb = [
+                            (b[0] as i32 + o[0]) as usize,
+                            (b[1] as i32 + o[1]) as usize,
+                            (b[2] as i32 + o[2]) as usize,
+                        ];
                         classes[idx(nb)].1
                     });
                 if in_chunk_buried {
                     continue;
                 }
                 spawned += 1;
-                let base = [origin[0] + b[0] as i32 * bb, origin[1] + b[1] as i32 * bb, origin[2] + b[2] as i32 * bb];
+                let base = [
+                    origin[0] + b[0] as i32 * bb,
+                    origin[1] + b[1] as i32 * bb,
+                    origin[2] + b[2] as i32 * bb,
+                ];
                 // Any block of the brick that is not opaque-surrounded => faces possible.
                 let mut faces = false;
                 'scan: for z in 0..bb {
                     for y in 0..bb {
                         for x in 0..bb {
                             let (px, py, pz) = (base[0] + x, base[1] + y, base[2] + z);
-                            let Some((blk, ch)) = block_at(px, py, pz) else { continue };
+                            let Some((blk, ch)) = block_at(px, py, pz) else {
+                                continue;
+                            };
                             if blk.id == BlockId::AIR && !ch {
                                 continue;
                             }
-                            for o in [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] {
+                            for o in [
+                                [1, 0, 0],
+                                [-1, 0, 0],
+                                [0, 1, 0],
+                                [0, -1, 0],
+                                [0, 0, 1],
+                                [0, 0, -1],
+                            ] {
                                 let (qx, qy, qz) = (px + o[0], py + o[1], pz + o[2]);
                                 // Outside the region: unknown, counts as a possible face.
                                 if block_at(qx, qy, qz).is_none() || !is_opaque(qx, qy, qz) {
@@ -156,7 +199,13 @@ fn main() {
     println!("sim chunks materialised: {chunks} ({uniform_solid_chunks} uniform opaque)");
     println!("bricks in those chunks:  {total} ({air} all-air)");
     println!("spawned as entities today: {spawned}");
-    println!("  ...can produce a face:    {with_faces} ({:.1}%)", 100.0 * with_faces as f64 / spawned.max(1) as f64);
+    println!(
+        "  ...can produce a face:    {with_faces} ({:.1}%)",
+        100.0 * with_faces as f64 / spawned.max(1) as f64
+    );
     println!("  ...buried across chunks:  {buried_global}");
-    println!("  ...other (no faces, not all-opaque): {}", spawned - with_faces - buried_global);
+    println!(
+        "  ...other (no faces, not all-opaque): {}",
+        spawned - with_faces - buried_global
+    );
 }

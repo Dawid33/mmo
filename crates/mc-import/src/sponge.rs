@@ -32,7 +32,10 @@ pub fn read_schem(bytes: &[u8]) -> Result<BlockVolume, ImportError> {
         Some(inner @ Tag::Compound(_)) => inner,
         _ => &root,
     };
-    let version = s.get("Version").and_then(Tag::as_i32).ok_or_else(|| bad("no Version"))?;
+    let version = s
+        .get("Version")
+        .and_then(Tag::as_i32)
+        .ok_or_else(|| bad("no Version"))?;
     let (palette_tag, data_tag, entities_tag) = match version {
         2 => (s.get("Palette"), s.get("BlockData"), s.get("BlockEntities")),
         3 => {
@@ -52,12 +55,19 @@ pub fn read_schem(bytes: &[u8]) -> Result<BlockVolume, ImportError> {
     }
 
     let palette = read_palette(palette_tag.ok_or_else(|| bad("no Palette"))?)?;
-    let data = data_tag.and_then(Tag::as_bytes).ok_or_else(|| bad("no block data"))?;
+    let data = data_tag
+        .and_then(Tag::as_bytes)
+        .ok_or_else(|| bad("no block data"))?;
     let blocks = decode_cells(data, cells as usize, palette.len())?;
     let block_entities = read_entities(entities_tag, version)?;
 
     let meta = s.get("Metadata");
-    let text = |k: &str| meta.and_then(|m| m.get(k)).and_then(Tag::as_str).unwrap_or("").to_string();
+    let text = |k: &str| {
+        meta.and_then(|m| m.get(k))
+            .and_then(Tag::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     Ok(BlockVolume {
         size,
         palette,
@@ -70,17 +80,27 @@ pub fn read_schem(bytes: &[u8]) -> Result<BlockVolume, ImportError> {
 }
 
 fn read_palette(t: &Tag) -> Result<Vec<BlockState>, ImportError> {
-    let m = t.as_compound().ok_or_else(|| bad("Palette is not a compound"))?;
+    let m = t
+        .as_compound()
+        .ok_or_else(|| bad("Palette is not a compound"))?;
     if m.len() > MAX_PALETTE {
-        return Err(ImportError::Unsupported(format!("palette of {} states", m.len())));
+        return Err(ImportError::Unsupported(format!(
+            "palette of {} states",
+            m.len()
+        )));
     }
     if m.is_empty() {
         return Err(bad("empty palette"));
     }
     let mut slots: Vec<Option<BlockState>> = vec![None; m.len()];
     for (state, idx) in m {
-        let i = idx.as_i32().ok_or_else(|| bad("palette index is not an int"))?;
-        let slot = usize::try_from(i).ok().and_then(|i| slots.get_mut(i)).ok_or_else(|| bad("palette indices are not 0..n"))?;
+        let i = idx
+            .as_i32()
+            .ok_or_else(|| bad("palette index is not an int"))?;
+        let slot = usize::try_from(i)
+            .ok()
+            .and_then(|i| slots.get_mut(i))
+            .ok_or_else(|| bad("palette indices are not 0..n"))?;
         if slot.is_some() {
             return Err(bad("palette indices are not 0..n (one is used twice)"));
         }
@@ -128,16 +148,29 @@ fn decode_cells(data: &[u8], cells: usize, palette_len: usize) -> Result<Vec<u16
 /// Sponge v3 wraps a block entity's own NBT in `Data` next to `Id` and `Pos`; v2 is flat.
 fn read_entities(t: Option<&Tag>, version: i32) -> Result<Vec<BlockEntity>, ImportError> {
     let Some(t) = t else { return Ok(Vec::new()) };
-    let list = t.as_list().ok_or_else(|| bad("BlockEntities is not a list"))?;
+    let list = t
+        .as_list()
+        .ok_or_else(|| bad("BlockEntities is not a list"))?;
     list.iter()
         .map(|e| {
-            let pos = e.get("Pos").and_then(Tag::as_ints).filter(|p| p.len() == 3).ok_or_else(|| bad("block entity without Pos"))?;
-            let id = e.get("Id").and_then(Tag::as_str).ok_or_else(|| bad("block entity without Id"))?;
+            let pos = e
+                .get("Pos")
+                .and_then(Tag::as_ints)
+                .filter(|p| p.len() == 3)
+                .ok_or_else(|| bad("block entity without Pos"))?;
+            let id = e
+                .get("Id")
+                .and_then(Tag::as_str)
+                .ok_or_else(|| bad("block entity without Id"))?;
             let nbt = match e.get("Data") {
                 Some(d @ Tag::Compound(_)) if version == 3 => d.clone(),
                 _ => e.clone(),
             };
-            Ok(BlockEntity { pos: [pos[0], pos[1], pos[2]], id: id.to_string(), nbt })
+            Ok(BlockEntity {
+                pos: [pos[0], pos[1], pos[2]],
+                id: id.to_string(),
+                nbt,
+            })
         })
         .collect()
 }

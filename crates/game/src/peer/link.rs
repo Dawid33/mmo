@@ -78,7 +78,12 @@ impl InlinePeerLink {
             step: [0; 2],
             sent: [0; 2],
         }));
-        let end = |end| InlinePeerLink { shared: shared.clone(), end, seed, max_delay_steps };
+        let end = |end| InlinePeerLink {
+            shared: shared.clone(),
+            end,
+            seed,
+            max_delay_steps,
+        };
         (end(0), end(1))
     }
 
@@ -111,7 +116,10 @@ impl InlinePeerLink {
 
     /// Test support: the messages to this end not read yet, in order.
     pub fn transit(&self) -> Vec<PeerMsg> {
-        self.shared().q[self.end].iter().map(|(_, m)| m.clone()).collect()
+        self.shared().q[self.end]
+            .iter()
+            .map(|(_, m)| m.clone())
+            .collect()
     }
 }
 
@@ -126,7 +134,10 @@ impl PeerLink for InlinePeerLink {
         let lag = mix(self.seed ^ to as u64, s.sent[to]) % (u64::from(self.max_delay_steps) + 1);
         s.sent[to] += 1;
         // Never before the message ahead of it: the order is kept.
-        let due = s.q[to].back().map_or(0, |(due, _)| *due).max(s.step[to] + lag);
+        let due = s.q[to]
+            .back()
+            .map_or(0, |(due, _)| *due)
+            .max(s.step[to] + lag);
         s.q[to].push_back((due, msg));
     }
 

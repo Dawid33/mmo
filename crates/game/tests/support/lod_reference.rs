@@ -5,6 +5,3 @@
 //! otherwise. Shared by `crates/game/tests/lod_streaming.rs` and
 //! `crates/worldgen/tests/lod_bricks.rs` through `#[path]` (integration tests
 //! cannot see the lib's `#[cfg(test)]` items).
-
-
-

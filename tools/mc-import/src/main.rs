@@ -6,11 +6,11 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
-use game::prefab::{prefab_to_bin, resolve, Trust, BIN_SUFFIX};
+use game::prefab::{BIN_SUFFIX, Trust, prefab_to_bin, resolve};
 use game::registry::BlockRegistry;
 use mc_import::{
-    convert, read_schem, slug, split, AirMode, Build, BlockVolume, ConvertOptions, GroundMode, Report, SplitOptions,
-    Table,
+    AirMode, BlockVolume, Build, ConvertOptions, GroundMode, Report, SplitOptions, Table, convert,
+    read_schem, slug, split,
 };
 
 const BLOCKS_RON: &str = "assets/blocks/blocks.ron";
@@ -85,7 +85,11 @@ fn parse(cmd: &str, args: &[String]) -> Result<Opts, Failure> {
     let name_flag = if cmd == "split" { "--prefix" } else { "--name" };
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        let mut value = |flag: &str| it.next().cloned().ok_or_else(|| usage(format!("{flag} needs a value")));
+        let mut value = |flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| usage(format!("{flag} needs a value")))
+        };
         match a.as_str() {
             f if f == name_flag && cmd != "report" => o.name = Some(value(f)?),
             "--out" if cmd != "report" => o.out = Some(value("--out")?),
@@ -103,19 +107,25 @@ fn parse(cmd: &str, args: &[String]) -> Result<Opts, Failure> {
             "--labels" if cmd == "split" => o.labels = true,
             "--gap" if cmd == "split" => {
                 let v = value("--gap")?;
-                o.gap = Some(v.parse().map_err(|_| usage(format!("--gap: \"{v}\" is not a whole number")))?);
+                o.gap = Some(
+                    v.parse()
+                        .map_err(|_| usage(format!("--gap: \"{v}\" is not a whole number")))?,
+                );
             }
             "--min-blocks" if cmd == "split" => {
                 let v = value("--min-blocks")?;
-                o.min_blocks = Some(v.parse().map_err(|_| usage(format!("--min-blocks: \"{v}\" is not a whole number")))?);
+                o.min_blocks =
+                    Some(v.parse().map_err(|_| {
+                        usage(format!("--min-blocks: \"{v}\" is not a whole number"))
+                    })?);
             }
             "--ground" if cmd == "split" => {
                 o.ground = Some(match value("--ground")?.as_str() {
                     "auto" => GroundMode::Auto,
                     "none" => GroundMode::None,
-                    v => GroundMode::Layers(
-                        v.parse().map_err(|_| usage(format!("--ground: \"{v}\" is not auto, none or a number")))?,
-                    ),
+                    v => GroundMode::Layers(v.parse().map_err(|_| {
+                        usage(format!("--ground: \"{v}\" is not auto, none or a number"))
+                    })?),
                 });
             }
             flag if flag.starts_with('-') => return Err(usage(format!("unknown flag {flag}"))),
@@ -154,17 +164,27 @@ fn run(args: &[String]) -> Result<u8, Failure> {
 }
 
 fn load_registry() -> Result<BlockRegistry, Failure> {
-    let src = std::fs::read_to_string(BLOCKS_RON)
-        .map_err(|e| (2, format!("cannot read {BLOCKS_RON}: {e} (run mc-import from the repository root)")))?;
+    let src = std::fs::read_to_string(BLOCKS_RON).map_err(|e| {
+        (
+            2,
+            format!("cannot read {BLOCKS_RON}: {e} (run mc-import from the repository root)"),
+        )
+    })?;
     BlockRegistry::from_ron(&src).map_err(|e| (2, format!("{BLOCKS_RON}: {e}")))
 }
 
 fn file_name(path: &str) -> String {
-    Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn file_stem(path: &str) -> String {
-    Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    Path::new(path)
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// The file's bytes and the volume read from them (the bytes are dropped on return).
@@ -176,9 +196,20 @@ fn load(path: &str) -> Result<(BlockVolume, String), Failure> {
 }
 
 fn non_air_cells(v: &BlockVolume) -> u64 {
-    let solid: Vec<bool> =
-        v.palette.iter().map(|s| !matches!(s.name.as_str(), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")).collect();
-    v.blocks.iter().filter(|&&i| solid.get(i as usize).copied().unwrap_or(false)).count() as u64
+    let solid: Vec<bool> = v
+        .palette
+        .iter()
+        .map(|s| {
+            !matches!(
+                s.name.as_str(),
+                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+            )
+        })
+        .collect();
+    v.blocks
+        .iter()
+        .filter(|&&i| solid.get(i as usize).copied().unwrap_or(false))
+        .count() as u64
 }
 
 fn report(path: &str) -> Result<bool, Failure> {
@@ -194,7 +225,11 @@ fn report(path: &str) -> Result<bool, Failure> {
         non_air_cells(&v),
         sp.ground_layers,
         sp.builds.len(),
-        if sp.builds.len() < 2 { "  \u{2192} whole" } else { "" }
+        if sp.builds.len() < 2 {
+            "  \u{2192} whole"
+        } else {
+            ""
+        }
     );
     let opts = ConvertOptions {
         name: "report".into(),
@@ -216,12 +251,19 @@ fn report(path: &str) -> Result<bool, Failure> {
             let mut top: Vec<(&String, &u64)> = r.unmapped.iter().collect();
             top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
             if !top.is_empty() {
-                let list: Vec<String> =
-                    top.iter().take(TOP_UNMAPPED).map(|(k, n)| format!("{k} \u{d7}{n}")).collect();
+                let list: Vec<String> = top
+                    .iter()
+                    .take(TOP_UNMAPPED)
+                    .map(|(k, n)| format!("{k} \u{d7}{n}"))
+                    .collect();
                 println!("  unmapped ({} kinds): {}", top.len(), list.join(", "));
             }
             if !r.dropped.is_empty() {
-                let list: Vec<String> = r.dropped.iter().map(|(k, n)| format!("{k} \u{d7}{n}")).collect();
+                let list: Vec<String> = r
+                    .dropped
+                    .iter()
+                    .map(|(k, n)| format!("{k} \u{d7}{n}"))
+                    .collect();
                 println!("  dropped: {}", list.join(", "));
             }
             if r.signs_unparsed > 0 {
@@ -235,7 +277,11 @@ fn report(path: &str) -> Result<bool, Failure> {
 
 /// `--out` as an absolute, lexically normalised path (no `..`), to see whether it lies under `assets`.
 fn under_assets(out: &Path) -> bool {
-    let abs = if out.is_absolute() { out.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(out) };
+    let abs = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(out)
+    };
     let mut parts: Vec<Component> = Vec::new();
     for c in abs.components() {
         match c {
@@ -246,7 +292,9 @@ fn under_assets(out: &Path) -> bool {
             c => parts.push(c),
         }
     }
-    parts.iter().any(|c| matches!(c, Component::Normal(n) if n.eq_ignore_ascii_case("assets")))
+    parts
+        .iter()
+        .any(|c| matches!(c, Component::Normal(n) if n.eq_ignore_ascii_case("assets")))
 }
 
 /// The prefab names of a split: `<prefix>-<nn>` by build position; with `use_labels`,
@@ -258,7 +306,13 @@ fn split_names(prefix: &str, builds: &[Build], use_labels: bool) -> Vec<String> 
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let labelled = b.label.as_deref().filter(|_| use_labels).map(slug).filter(|s| !s.is_empty()).map(|s| format!("{prefix}-{s}"));
+            let labelled = b
+                .label
+                .as_deref()
+                .filter(|_| use_labels)
+                .map(slug)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("{prefix}-{s}"));
             // One uniqueness step for every name: a label such as "03" can collide with a numbered one.
             let wanted = labelled.unwrap_or_else(|| format!("{prefix}-{:0width$}", i + 1));
             let mut name = wanted.clone();
@@ -277,19 +331,34 @@ fn warn(message: String) {
     eprintln!("warning: {message}");
 }
 
-fn write_prefabs(is_split: bool, path: &str, o: &Opts, registry: &BlockRegistry) -> Result<bool, Failure> {
+fn write_prefabs(
+    is_split: bool,
+    path: &str,
+    o: &Opts,
+    registry: &BlockRegistry,
+) -> Result<bool, Failure> {
     let stem = file_stem(path);
     let out_dir = match &o.out {
         Some(d) => PathBuf::from(d),
         None => Path::new(DEFAULT_OUT).join(&stem),
     };
     if under_assets(&out_dir) {
-        return Err((2, format!("{}: refusing to write under assets/ (imports go to {DEFAULT_OUT}/)", out_dir.display())));
+        return Err((
+            2,
+            format!(
+                "{}: refusing to write under assets/ (imports go to {DEFAULT_OUT}/)",
+                out_dir.display()
+            ),
+        ));
     }
     let (v, hash) = load(path)?;
     let table = Table::builtin();
     let base = slug(o.name.as_deref().unwrap_or(&stem));
-    let base = if base.is_empty() { "prefab".to_string() } else { base };
+    let base = if base.is_empty() {
+        "prefab".to_string()
+    } else {
+        base
+    };
 
     // (name, region) per prefab to write.
     let mut jobs: Vec<Job> = Vec::new();
@@ -332,8 +401,15 @@ fn write_prefabs(is_split: bool, path: &str, o: &Opts, registry: &BlockRegistry)
         for i in 0..sp.builds.len() {
             for j in i + 1..sp.builds.len() {
                 let (a, b) = (&sp.builds[i], &sp.builds[j]);
-                if a.min[0] < b.max[0] && b.min[0] < a.max[0] && a.min[2] < b.max[2] && b.min[2] < a.max[2] {
-                    warn(format!("builds {} and {} overlap in x/z", names[i], names[j]));
+                if a.min[0] < b.max[0]
+                    && b.min[0] < a.max[0]
+                    && a.min[2] < b.max[2]
+                    && b.min[2] < a.max[2]
+                {
+                    warn(format!(
+                        "builds {} and {} overlap in x/z",
+                        names[i], names[j]
+                    ));
                 }
             }
         }
@@ -399,7 +475,10 @@ fn finish(
         };
         // A prefab that does not resolve is never written.
         if let Err(problems) = resolve(&file, &|n| registry.id_of(n), Trust::Builtin) {
-            eprintln!("{name}: does not resolve, {} problem(s), not written:", problems.len());
+            eprintln!(
+                "{name}: does not resolve, {} problem(s), not written:",
+                problems.len()
+            );
             for p in &problems {
                 eprintln!("  {p}");
             }
@@ -420,7 +499,10 @@ fn finish(
         let txt = out_dir.join(format!("{name}{REPORT_SUFFIX}"));
         let written = std::fs::write(&bin, prefab_to_bin(&file))
             .map_err(|e| format!("{}: {e}", bin.display()))
-            .and_then(|()| std::fs::write(&txt, report.to_text(&name)).map_err(|e| format!("{}: {e}", txt.display())));
+            .and_then(|()| {
+                std::fs::write(&txt, report.to_text(&name))
+                    .map_err(|e| format!("{}: {e}", txt.display()))
+            });
         if let Err(e) = written {
             eprintln!("{name}: {e}");
             ok = false;
@@ -429,7 +511,10 @@ fn finish(
         summary_line(&name, &file.size, &report, file.markers.len());
         let unmapped: u64 = report.unmapped.values().sum();
         if unmapped > 0 || report.signs_unparsed > 0 {
-            warn(format!("{name}: {unmapped} unmapped cells, {} unparsed sign lines", report.signs_unparsed));
+            warn(format!(
+                "{name}: {unmapped} unmapped cells, {} unparsed sign lines",
+                report.signs_unparsed
+            ));
         }
     }
     Ok(ok)
@@ -442,5 +527,3 @@ fn summary_line(name: &str, size: &[u32; 3], r: &Report, markers: usize) {
         size[0], size[1], size[2], r.blocks, r.boxes, r.shaped, r.carved
     );
 }
-
-

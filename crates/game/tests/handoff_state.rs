@@ -1,5 +1,5 @@
-use game::Rollback;
 use game::Client;
+use game::Rollback;
 use game::StateHash;
 
 fn crc(rb: &Rollback) -> u32 {
@@ -82,6 +82,3 @@ fn arrival_preserves_camera_look_direction() {
 // ---- generated bundle: exhaustive classification (Task 2.2) ----
 
 // ---- dynamic bodies: EntityKind::Body (Task 7.2) ----
-
-
-

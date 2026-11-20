@@ -2,10 +2,10 @@
 //! `CHUNK_BLOCKS`³-block `SubChunk`s over one region-local (x, z) chunk column, with constant sentinels
 //! below/above the materialized band. Bevy-free and deterministic.
 
+use crate::Block;
 use crate::block::CHUNK_BLOCKS;
 use crate::registry::BlockId;
 use crate::voxel::Chunk;
-use crate::Block;
 
 /// Whole-block position. `x`/`z` are block coords within a footprint
 /// (0..CHUNK_BLOCKS); `y` is a block Y whose frame depends on the impl.
@@ -85,7 +85,9 @@ impl WriteVol for SubChunk {
         if let SubChunk::Air = self {
             *self = SubChunk::Dense(Box::default());
         }
-        let SubChunk::Dense(c) = self else { unreachable!() };
+        let SubChunk::Dense(c) = self else {
+            unreachable!()
+        };
         let prev = c.block_at(pos.x as usize, pos.y as usize, pos.z as usize);
         c.set_block(pos.x as usize, pos.y as usize, pos.z as usize, block);
         prev
@@ -117,7 +119,13 @@ impl Column {
     const SUB_BLOCKS_Y: i32 = CHUNK_BLOCKS as i32;
 
     pub fn new(base_sub_y: i32, below: Block, above: Block, sub_chunks: Vec<SubChunk>) -> Self {
-        let mut c = Self { base_sub_y, below, above, sub_chunks, ground: None };
+        let mut c = Self {
+            base_sub_y,
+            below,
+            above,
+            sub_chunks,
+            ground: None,
+        };
         c.normalize();
         c
     }
@@ -140,7 +148,13 @@ impl Column {
         ground: crate::ground::ColumnGround,
     ) -> Self {
         debug_assert_eq!(base_sub_y, ground.band_base_sub_y);
-        let mut c = Self { base_sub_y, below, above, sub_chunks, ground: Some(ground) };
+        let mut c = Self {
+            base_sub_y,
+            below,
+            above,
+            sub_chunks,
+            ground: Some(ground),
+        };
         c.normalize();
         c
     }
@@ -160,12 +174,18 @@ impl Column {
     /// The stored sub-chunk at absolute sub-Y, or None if outside the band.
     pub fn sub_chunk_at(&self, sub_y: i32) -> Option<&SubChunk> {
         let idx = sub_y.checked_sub(self.base_sub_y)?;
-        usize::try_from(idx).ok().and_then(|i| self.sub_chunks.get(i))
+        usize::try_from(idx)
+            .ok()
+            .and_then(|i| self.sub_chunks.get(i))
     }
 
     /// The sentinel block that applies at absolute `sub_y` (outside the band).
     fn sentinel_at(&self, sub_y: i32) -> Block {
-        if sub_y < self.base_sub_y { self.below } else { self.above }
+        if sub_y < self.base_sub_y {
+            self.below
+        } else {
+            self.above
+        }
     }
 
     /// Canonicalize: collapse all-air `Dense` to `Air`, trim edge slices that
@@ -184,7 +204,9 @@ impl Column {
         while matches!(self.sub_chunks.last(), Some(s) if s.is_uniform_block(self.above)) {
             self.sub_chunks.pop();
         }
-        while self.ground.is_none() && matches!(self.sub_chunks.first(), Some(s) if s.is_uniform_block(self.below)) {
+        while self.ground.is_none()
+            && matches!(self.sub_chunks.first(), Some(s) if s.is_uniform_block(self.below))
+        {
             self.sub_chunks.remove(0);
             self.base_sub_y += 1;
         }
@@ -251,4 +273,3 @@ impl WriteVol for Column {
         prev
     }
 }
-

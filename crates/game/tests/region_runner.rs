@@ -1,9 +1,9 @@
 use crossbeam::channel::unbounded;
-use game::{
-    Chunk, ChunkCoords, GameEventKind, Region, RegionCoords,
-    RegionInput, RegionOutput, RegionRunner,
-};
 use game::StateHash;
+use game::{
+    Chunk, ChunkCoords, GameEventKind, Region, RegionCoords, RegionInput, RegionOutput,
+    RegionRunner,
+};
 
 fn flat_chunks() -> Vec<(ChunkCoords, Chunk)> {
     (0..2)
@@ -17,7 +17,12 @@ fn crc(region: &Region) -> u32 {
     h.finalize()
 }
 
-fn runner(id: RegionCoords) -> (RegionRunner, crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>) {
+fn runner(
+    id: RegionCoords,
+) -> (
+    RegionRunner,
+    crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>,
+) {
     let (out_send, out_recv) = unbounded();
     let region = Region::from_chunks(id, flat_chunks());
     (RegionRunner::new(id, region, out_send), out_recv)
@@ -33,11 +38,16 @@ fn runner(id: RegionCoords) -> (RegionRunner, crossbeam::channel::Receiver<(Regi
 fn key_input(client: game::ClientId) -> GameEventKind {
     GameEventKind::PlayerInput(
         client,
-        game::InputEvent::Key { key: game::Key::KeyW, pressed: true },
+        game::InputEvent::Key {
+            key: game::Key::KeyW,
+            pressed: true,
+        },
     )
 }
 
-fn processed(out: &crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>) -> Vec<game::GameEvent> {
+fn processed(
+    out: &crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>,
+) -> Vec<game::GameEvent> {
     out.try_iter()
         .filter_map(|(_, o)| match o {
             RegionOutput::EventProcessed(ev) => Some(ev),
@@ -46,7 +56,10 @@ fn processed(out: &crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>) -
         .collect()
 }
 
-fn runner_with_player() -> (RegionRunner, crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>) {
+fn runner_with_player() -> (
+    RegionRunner,
+    crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>,
+) {
     let (mut r, out) = runner(RegionCoords::new(0, 0));
     r.handle_input(RegionInput::Event(GameEventKind::CreateClient(7)));
     r.tick();
@@ -60,17 +73,32 @@ fn input_predicted_after_a_future_tick_waits_for_it() {
     let (mut r, out) = runner_with_player();
     let now = r.current_tick();
     r.handle_input(RegionInput::EventAfterTick(key_input(7), now as u64 + 2));
-    assert!(processed(&out).is_empty(), "two ticks early: nothing applied yet");
+    assert!(
+        processed(&out).is_empty(),
+        "two ticks early: nothing applied yet"
+    );
 
     r.tick();
     let kinds: Vec<_> = processed(&out).into_iter().map(|e| e.kind).collect();
-    assert_eq!(kinds, vec![GameEventKind::Tick], "one tick early: still held");
+    assert_eq!(
+        kinds,
+        vec![GameEventKind::Tick],
+        "one tick early: still held"
+    );
 
     r.tick();
     let events = processed(&out);
     let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
-    assert_eq!(kinds, vec![GameEventKind::Tick, key_input(7)], "applied right after its tick");
-    assert_eq!(events[1].id, events[0].id + 1, "and takes the very next id, as the client predicted");
+    assert_eq!(
+        kinds,
+        vec![GameEventKind::Tick, key_input(7)],
+        "applied right after its tick"
+    );
+    assert_eq!(
+        events[1].id,
+        events[0].id + 1,
+        "and takes the very next id, as the client predicted"
+    );
 }
 
 /// A client two ticks ahead of the server predicts an input, and the server
@@ -108,7 +136,11 @@ fn rollbacks_of_a_leading_client(stamped: bool) -> u32 {
         .into_iter()
         .map(|ev| client.reconcile(ev).unwrap().mispredictions)
         .sum();
-    assert_eq!(crc(&client), crc(server.region_mut()), "client and server must agree either way");
+    assert_eq!(
+        crc(&client),
+        crc(server.region_mut()),
+        "client and server must agree either way"
+    );
     rollbacks
 }
 
@@ -127,4 +159,3 @@ fn leading_client_reconciles_a_stamped_input_without_rollback() {
 // A slot's region-to-region messages wait in the runner's `SlotInbox` and are
 // applied, sorted (stamp, class, key, arrival), right before the next `Tick`
 // — never on receipt, so thread timing cannot decide their order.
-

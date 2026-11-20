@@ -53,14 +53,21 @@ use crate::forge::erosion;
 use crate::forge::hydrology::LAKE_MIN_DEPTH_M;
 use crate::forge::par;
 use crate::forge::periodic::PeriodicX;
-use crate::forge::world::{hash01, smoothstep, EdgeKind, ForgeParams, World};
+use crate::forge::world::{EdgeKind, ForgeParams, World, hash01, smoothstep};
 
 /// Annual precipitation (mm/yr) by absolute latitude (deg), interpolated
 /// linearly: the climatological base before rain shadows. The 25° entry is
 /// the subtropical desert belt (real interiors there get 25–200 mm), so flat
 /// interiors under the subtropical high are desert, not savanna.
-pub const LATITUDE_PRECIP_MM: [(f32, f32); 7] =
-    [(0.0, 2500.0), (10.0, 1800.0), (25.0, 180.0), (40.0, 900.0), (55.0, 1000.0), (70.0, 400.0), (90.0, 200.0)];
+pub const LATITUDE_PRECIP_MM: [(f32, f32); 7] = [
+    (0.0, 2500.0),
+    (10.0, 1800.0),
+    (25.0, 180.0),
+    (40.0, 900.0),
+    (55.0, 1000.0),
+    (70.0, 400.0),
+    (90.0, 200.0),
+];
 
 /// Moisture (1 = saturated sea air) that air settles at over endless flat
 /// land: what it rains out is balanced by what the land gives back. Flat land
@@ -131,7 +138,11 @@ pub fn latitudes(nz: usize) -> Vec<f32> {
     (0..nz)
         .map(|z| {
             let t = (z as f64 + 0.5) / nz as f64; // 0 at the north edge, 1 at the south
-            let lat = if t < 0.5 { 90.0 - SPAN * 2.0 * t } else { -90.0 + SPAN * 2.0 * (1.0 - t) };
+            let lat = if t < 0.5 {
+                90.0 - SPAN * 2.0 * t
+            } else {
+                -90.0 + SPAN * 2.0 * (1.0 - t)
+            };
             lat.clamp(-90.0, 90.0) as f32
         })
         .collect()
@@ -146,15 +157,18 @@ pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
     if k.meander_amplitude_deg <= 0.0 {
         return 0.0;
     }
-    let wavelength =
-        (k.meander_wavelength_deg * metres_per_degree(p.height_m)).min(p.span_m() / MEANDER_MIN_WAVES).max(1.0);
+    let wavelength = (k.meander_wavelength_deg * metres_per_degree(p.height_m))
+        .min(p.span_m() / MEANDER_MIN_WAVES)
+        .max(1.0);
     let wrap = PeriodicX::for_world(p);
     let mut d = 0.0;
     for (wave, &(share, weight, spread)) in MEANDER_WAVES.iter().enumerate() {
         let angle = (hash01(p.seed, MEANDER_SALT, 2 * wave as u64) - 0.5) * 2.0 * spread;
         let phase = hash01(p.seed, MEANDER_SALT, 2 * wave as u64 + 1) * std::f64::consts::TAU;
         // |angle| < π/2, so the wave always travels east (cos > 0).
-        let cycles = (wrap.period_m * angle.cos() / (wavelength * share)).round().max(1.0);
+        let cycles = (wrap.period_m * angle.cos() / (wavelength * share))
+            .round()
+            .max(1.0);
         let turns = cycles * x_m / wrap.period_m + z_m * angle.sin() / (wavelength * share);
         d += weight * (std::f64::consts::TAU * turns + phase).sin();
     }
@@ -164,7 +178,13 @@ pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
 /// `meander_deg` at every cell centre of an `nx` x `nz` grid of `dx` cells.
 pub fn meander_field(nx: usize, nz: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
     (0..nx * nz)
-        .map(|i| meander_deg(((i % nx) as f64 + 0.5) * dx, ((i / nx) as f64 + 0.5) * dx, p) as f32)
+        .map(|i| {
+            meander_deg(
+                ((i % nx) as f64 + 0.5) * dx,
+                ((i / nx) as f64 + 0.5) * dx,
+                p,
+            ) as f32
+        })
         .collect()
 }
 
@@ -172,7 +192,9 @@ pub fn meander_field(nx: usize, nz: usize, dx: f64, p: &ForgeParams) -> Vec<f32>
 pub fn effective_latitudes(nx: usize, nz: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
     let rows = latitudes(nz);
     let meander = meander_field(nx, nz, dx, p);
-    (0..nx * nz).map(|i| (rows[i / nx] + meander[i]).clamp(-90.0, 90.0)).collect()
+    (0..nx * nz)
+        .map(|i| (rows[i / nx] + meander[i]).clamp(-90.0, 90.0))
+        .collect()
 }
 
 /// Metres of the world per degree of latitude: the pole-to-pole height
@@ -199,7 +221,11 @@ pub fn westerly_weight(lat_deg: f64, p: &ForgeParams) -> f64 {
 
 /// The prevailing wind at latitude `lat_deg` (the larger share).
 pub fn wind(lat_deg: f64, p: &ForgeParams) -> Wind {
-    if westerly_weight(lat_deg, p) >= 0.5 { Wind::FromWest } else { Wind::FromEast }
+    if westerly_weight(lat_deg, p) >= 0.5 {
+        Wind::FromWest
+    } else {
+        Wind::FromEast
+    }
 }
 
 /// `LATITUDE_PRECIP_MM` interpolated at `lat_deg` (absolute value taken).
@@ -217,7 +243,14 @@ pub fn base_precip_mm(lat_deg: f32) -> f32 {
 /// Box blur of an `nx` x `nz` raster along x (each row) or along z (each
 /// column). `wrap_x`: a row is a circle (column `nx - 1` beside 0), so the
 /// blur along x runs round the seam with the full `2 * radius + 1` box.
-fn box_blur_rows(src: &[f64], nx: usize, nz: usize, radius: usize, along_x: bool, wrap_x: bool) -> Vec<f64> {
+fn box_blur_rows(
+    src: &[f64],
+    nx: usize,
+    nz: usize,
+    radius: usize,
+    along_x: bool,
+    wrap_x: bool,
+) -> Vec<f64> {
     let mut out = vec![0.0; nx * nz];
     if along_x && wrap_x {
         // Columns b - radius ..= b + radius, mod nx (a box wider than the row
@@ -239,12 +272,22 @@ fn box_blur_rows(src: &[f64], nx: usize, nz: usize, radius: usize, along_x: bool
     // `lines` rows (or columns) of `len` cells each.
     let (lines, len) = if along_x { (nz, nx) } else { (nx, nz) };
     for a in 0..lines {
-        let at = |b: usize| if along_x { src[a * nx + b] } else { src[b * nx + a] };
+        let at = |b: usize| {
+            if along_x {
+                src[a * nx + b]
+            } else {
+                src[b * nx + a]
+            }
+        };
         let mut sum: f64 = (0..=radius.min(len - 1)).map(at).sum();
         let mut count = radius.min(len - 1) + 1;
         for b in 0..len {
             let v = sum / count as f64;
-            if along_x { out[a * nx + b] = v } else { out[b * nx + a] = v }
+            if along_x {
+                out[a * nx + b] = v
+            } else {
+                out[b * nx + a] = v
+            }
             if b + radius + 1 < len {
                 sum += at(b + radius + 1);
                 count += 1;
@@ -261,7 +304,9 @@ fn box_blur_rows(src: &[f64], nx: usize, nz: usize, radius: usize, along_x: bool
 /// Lakes as the climate sees them: land cells at least `LAKE_MIN_DEPTH_M`
 /// under the water surface `filled` (a flooded routing surface).
 pub fn lakes_from_filled(w: &World, filled: &[f64]) -> Vec<bool> {
-    (0..w.cells()).map(|i| !w.ocean[i] && filled[i] - w.h[i] >= LAKE_MIN_DEPTH_M).collect()
+    (0..w.cells())
+        .map(|i| !w.ocean[i] && filled[i] - w.h[i] >= LAKE_MIN_DEPTH_M)
+        .collect()
 }
 
 /// The climate of `w`, its lakes found with a Priority-Flood of the surface.
@@ -285,9 +330,19 @@ pub fn compute_with_lakes(w: &World, p: &ForgeParams, lakes: &[bool]) -> Climate
         })
         .collect();
 
-    let relative = if k.climate_strength <= 0.0 { vec![1.0; cells] } else { orographic(w, p, &lat, lakes) };
-    let precip_mm = (0..cells).map(|i| base_precip_mm(lat[i]) * relative[i] as f32).collect();
-    Climate { temperature_c, precip_mm, latitude_deg }
+    let relative = if k.climate_strength <= 0.0 {
+        vec![1.0; cells]
+    } else {
+        orographic(w, p, &lat, lakes)
+    };
+    let precip_mm = (0..cells)
+        .map(|i| base_precip_mm(lat[i]) * relative[i] as f32)
+        .collect();
+    Climate {
+        temperature_c,
+        precip_mm,
+        latitude_deg,
+    }
 }
 
 /// Blur radius (cells) of `metres` on a `dx` grid: the nearest whole number
@@ -295,7 +350,11 @@ pub fn compute_with_lakes(w: &World, p: &ForgeParams, lakes: &[bool]) -> Climate
 /// cell must not become a whole cell's box.
 fn radius_cells(metres: f64, dx: f64) -> usize {
     let cells = metres / dx;
-    if cells < 1.0 { 0 } else { cells.round() as usize }
+    if cells < 1.0 {
+        0
+    } else {
+        cells.round() as usize
+    }
 }
 
 /// Precipitation per cell relative to the latitude base, clamped and scaled
@@ -306,10 +365,22 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
     let ground: Vec<f64> = w.h.iter().map(|h| h.max(0.0)).collect();
     let terrain = radius_cells(TERRAIN_BLUR_M, dx);
     let wrap_x = w.wrap_x;
-    let ground =
-        box_blur_rows(&box_blur_rows(&ground, nx, nz, terrain, true, wrap_x), nx, nz, terrain, false, wrap_x);
+    let ground = box_blur_rows(
+        &box_blur_rows(&ground, nx, nz, terrain, true, wrap_x),
+        nx,
+        nz,
+        terrain,
+        false,
+        wrap_x,
+    );
     // `World::edges` order: N, E, S, W.
-    let inflow = |edge: usize| if w.edges[edge] == EdgeKind::Sea { 1.0 } else { CONTINENTAL_MOISTURE };
+    let inflow = |edge: usize| {
+        if w.edges[edge] == EdgeKind::Sea {
+            1.0
+        } else {
+            CONTINENTAL_MOISTURE
+        }
+    };
     let per_degree = metres_per_degree(p.height_m);
     let recharge = (dx / (k.sea_recharge_deg * per_degree)).min(1.0);
     let relax = (dx / (k.land_depletion_deg * per_degree)).min(1.0);
@@ -352,7 +423,9 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
         }
     };
     let rows: Vec<Vec<f64>> = par::map_range(nz, |z| {
-        let west: Vec<f64> = (0..nx).map(|x| westerly_weight(lat[z * nx + x] as f64, p)).collect();
+        let west: Vec<f64> = (0..nx)
+            .map(|x| westerly_weight(lat[z * nx + x] as f64, p))
+            .collect();
         let (mut from_west, mut from_east) = (vec![0.0; nx], vec![0.0; nx]);
         if west.iter().any(|&v| v > 0.0) {
             sweep(z, true, &mut from_west);
@@ -360,22 +433,35 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
         if west.iter().any(|&v| v < 1.0) {
             sweep(z, false, &mut from_east);
         }
-        (0..nx).map(|x| west[x] * from_west[x] + (1.0 - west[x]) * from_east[x]).collect()
+        (0..nx)
+            .map(|x| west[x] * from_west[x] + (1.0 - west[x]) * from_east[x])
+            .collect()
     });
     // Blur over the land only (the sea's zero would dry the coasts).
     let rain: Vec<f64> = rows.concat();
     let land: Vec<f64> = w.ocean.iter().map(|&o| if o { 0.0 } else { 1.0 }).collect();
-    let (cross, along) =
-        (radius_cells(RAIN_CROSS_BLUR_DEG * per_degree, dx), radius_cells(RAIN_ALONG_BLUR_DEG * per_degree, dx));
-    let blur =
-        |v: &[f64]| box_blur_rows(&box_blur_rows(v, nx, nz, cross, false, wrap_x), nx, nz, along, true, wrap_x);
+    let (cross, along) = (
+        radius_cells(RAIN_CROSS_BLUR_DEG * per_degree, dx),
+        radius_cells(RAIN_ALONG_BLUR_DEG * per_degree, dx),
+    );
+    let blur = |v: &[f64]| {
+        box_blur_rows(
+            &box_blur_rows(v, nx, nz, cross, false, wrap_x),
+            nx,
+            nz,
+            along,
+            true,
+            wrap_x,
+        )
+    };
     let (rain_sum, land_share) = (blur(&rain), blur(&land));
     (0..w.cells())
         .map(|i| {
             if w.ocean[i] || land_share[i] <= 0.0 {
                 1.0
             } else {
-                let relative = (rain_sum[i] / land_share[i]).clamp(k.rain_min, k.rain_max.max(k.rain_min));
+                let relative =
+                    (rain_sum[i] / land_share[i]).clamp(k.rain_min, k.rain_max.max(k.rain_min));
                 1.0 + k.climate_strength.min(1.0) * (relative - 1.0)
             }
         })
@@ -491,7 +577,11 @@ pub fn latitude_at(z_m: f64, height_m: f64) -> f64 {
     /// Degrees from a pole to the equator.
     const SPAN: f64 = 90.0;
     let t = z_m / height_m; // 0 at the north edge, 1 at the south
-    let lat = if t < 0.5 { 90.0 - SPAN * 2.0 * t } else { -90.0 + SPAN * 2.0 * (1.0 - t) };
+    let lat = if t < 0.5 {
+        90.0 - SPAN * 2.0 * t
+    } else {
+        -90.0 + SPAN * 2.0 * (1.0 - t)
+    };
     lat.clamp(-90.0, 90.0)
 }
 
@@ -501,7 +591,8 @@ pub fn latitude_at(z_m: f64, height_m: f64) -> f64 {
 /// placeholder nicety; Phase 3 stores real means). Its twelve values sum to 0.
 fn season_phase(m: usize, lag: f64) -> f64 {
     let months = game::CLIMATE_MONTHS as f64;
-    (std::f64::consts::TAU * (m as f64 + 0.5 - (game::SOLSTICE_NORTH_SUMMER_MONTHS + lag)) / months).cos()
+    (std::f64::consts::TAU * (m as f64 + 0.5 - (game::SOLSTICE_NORTH_SUMMER_MONTHS + lag)) / months)
+        .cos()
 }
 
 /// Climate rows `monthly_placeholder` computes in parallel before it
@@ -597,22 +688,34 @@ pub fn monthly_placeholder(w: &World, c: &Climate, p: &ForgeParams) -> MonthlyFi
                 let mean_c = sea_level_temperature_c(lat, p);
                 let d = coast[ci] as f64;
                 let k = d / (d + half_m);
-                let lag = SEASON_LAG_SEA_MONTHS + (SEASON_LAG_LAND_MONTHS - SEASON_LAG_SEA_MONTHS) * k;
+                let lag =
+                    SEASON_LAG_SEA_MONTHS + (SEASON_LAG_LAND_MONTHS - SEASON_LAG_SEA_MONTHS) * k;
                 let amp = lat.to_radians().sin()
-                    * (SEASON_AMP_MARITIME_C + (SEASON_AMP_CONTINENTAL_C - SEASON_AMP_MARITIME_C) * k);
-                let wet_season = PRECIP_SEASON_SHARE * (lat / PRECIP_SEASON_FULL_DEG).clamp(-1.0, 1.0);
+                    * (SEASON_AMP_MARITIME_C
+                        + (SEASON_AMP_CONTINENTAL_C - SEASON_AMP_MARITIME_C) * k);
+                let wet_season =
+                    PRECIP_SEASON_SHARE * (lat / PRECIP_SEASON_FULL_DEG).clamp(-1.0, 1.0);
                 let diurnal = DIURNAL_SEA_C
                     + DIURNAL_CONTINENT_C * k
-                    + DIURNAL_DRY_C * land * (1.0 - annual_precip / DIURNAL_DRY_REFERENCE_MM).clamp(0.0, 1.0);
+                    + DIURNAL_DRY_C
+                        * land
+                        * (1.0 - annual_precip / DIURNAL_DRY_REFERENCE_MM).clamp(0.0, 1.0);
                 let east = (2.0 * westerly_weight(lat, p) - 1.0) * WIND_PLACEHOLDER_MS;
                 std::array::from_fn(|m| {
                     let temp = mean_c + amp * season_phase(m, lag);
                     let precip = annual_precip / months as f64
                         * (1.0 + wet_season * season_phase(m, SEASON_LAG_LAND_MONTHS));
-                    let warmth = ((temp - WET_DAY_COOL_C) / (WET_DAY_HOT_C - WET_DAY_COOL_C)).clamp(0.0, 1.0);
+                    let warmth = ((temp - WET_DAY_COOL_C) / (WET_DAY_HOT_C - WET_DAY_COOL_C))
+                        .clamp(0.0, 1.0);
                     let amount = WET_DAY_MM_COOL + (WET_DAY_MM_HOT - WET_DAY_MM_COOL) * warmth;
                     let wet = (precip / (days * amount)).clamp(0.0, WET_DAY_MAX);
-                    [temp as f32, diurnal as f32, precip as f32, wet as f32, east as f32]
+                    [
+                        temp as f32,
+                        diurnal as f32,
+                        precip as f32,
+                        wet as f32,
+                        east as f32,
+                    ]
                 })
             })
             .collect()
@@ -650,12 +753,42 @@ impl MonthlyFields {
     /// The six planes with each one's denominator and integer bounds.
     fn planes(&self) -> [(&[f32], f64, f64, f64); 6] {
         [
-            (&self.temp_sea_c, game::CLIMATE_TEMP_PER_C, f64::from(i16::MIN), f64::from(i16::MAX)),
-            (&self.diurnal_c, game::CLIMATE_DIURNAL_PER_C, 0.0, f64::from(u8::MAX)),
-            (&self.precip_mm, game::CLIMATE_PRECIP_PER_MM, 0.0, f64::from(u16::MAX)),
-            (&self.wet_day, game::CLIMATE_WET_DAY_PER_ONE, 0.0, f64::from(u8::MAX)),
-            (&self.wind_east_ms, game::CLIMATE_WIND_PER_MS, f64::from(i8::MIN), f64::from(i8::MAX)),
-            (&self.wind_south_ms, game::CLIMATE_WIND_PER_MS, f64::from(i8::MIN), f64::from(i8::MAX)),
+            (
+                &self.temp_sea_c,
+                game::CLIMATE_TEMP_PER_C,
+                f64::from(i16::MIN),
+                f64::from(i16::MAX),
+            ),
+            (
+                &self.diurnal_c,
+                game::CLIMATE_DIURNAL_PER_C,
+                0.0,
+                f64::from(u8::MAX),
+            ),
+            (
+                &self.precip_mm,
+                game::CLIMATE_PRECIP_PER_MM,
+                0.0,
+                f64::from(u16::MAX),
+            ),
+            (
+                &self.wet_day,
+                game::CLIMATE_WET_DAY_PER_ONE,
+                0.0,
+                f64::from(u8::MAX),
+            ),
+            (
+                &self.wind_east_ms,
+                game::CLIMATE_WIND_PER_MS,
+                f64::from(i8::MIN),
+                f64::from(i8::MAX),
+            ),
+            (
+                &self.wind_south_ms,
+                game::CLIMATE_WIND_PER_MS,
+                f64::from(i8::MIN),
+                f64::from(i8::MAX),
+            ),
         ]
     }
 

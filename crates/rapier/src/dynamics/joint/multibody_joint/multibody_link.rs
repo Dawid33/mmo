@@ -9,8 +9,7 @@ use crate::prelude::RigidBodyVelocity;
 
 /// One link of a multibody.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyLink {
     // FIXME: make all those private.
     pub(crate) internal_id: usize,
@@ -120,8 +119,7 @@ impl MultibodyLink {
 
 // FIXME: keep this even if we already have the Index2 traits?
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct MultibodyLinkVec(pub Vec<MultibodyLink>);
 
 impl MultibodyLinkVec {

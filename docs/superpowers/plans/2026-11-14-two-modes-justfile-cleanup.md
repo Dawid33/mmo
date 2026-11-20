@@ -19,7 +19,7 @@ Today there are **five** ways to run the game, not two:
 | 1 | Single player: client spawns `server` with `VOXEL_SINGLE_PLAYER=1` on a free loopback port | `just play`, `just run`, `run-two`, `*-release` | **yes — mode A** |
 | 2 | Standalone dev server on 127.0.0.1:6466, local auth, reached by `VOXEL_SKIP_MENU=1` | `server`, `client`, `play-test`, `web`, `fly-probe`, `shuttle-probe`, `render-bench`, `diag`, `perf-capture`, `fps-steady`, `gpu-measure`, `trace-chrome`, `trace-join`, `profile-*`, `perf*` (22 recipes, 3 scripts) | no — folds into 1 |
 | 3 | Native multi-process multiplayer: login + coordinator + hosts as local processes, compose Postgres + Keycloak | `dev-login`, `run-online`, `coordinator`, `host`, `dev-r2`, `dev-r3`, `go-nogo-r3`, `login*`, `scripts/dev_r3.sh` | no — deleted in Phase 3; local multiplayer is the k3d twin (mode B) |
-| 4 | Public web build: the `all`-role server with **local auth on 0.0.0.0** in docker compose on the orion box | `deploy`, `deploy-build`, `deploy-push`, `deploy-logs`, `deploy/web/`, `scripts/deploy_push.sh` | no — R5 Phase D step 15 stops it, Task 11 deletes its files |
+| 4 | Public web build: the `all`-role server with **local auth on 0.0.0.0** in docker compose on the orion box | `deploy`, `deploy-build`, `deploy-push`, `deploy-logs`, `deploy/web/`, `scripts/deploy_push.sh` | no — superseded by R5's `world-images-build` / `orion-world-push` / `orion-world-update`; R5 Phase D step 15 stops it on the box, Task 11 deletes `just deploy` and its files |
 | 5 | Local k0s-in-docker cluster (Agones + CNPG; never ran a game role) | `dev-cluster-*`, `deploy-local*`, `kube`, `deploy/modules/platform` | no — removed by R5 Task 13, replaced by the k3d twin |
 
 Facts the tasks rest on:
@@ -34,7 +34,7 @@ Facts the tasks rest on:
 Mine unless marked. **D1 and D4 need your answer before the task that depends on them**; the rest are calls I made and you can overrule.
 
 - **D1 (yours, before Phase 1) — `run-two`.** Two clients in one single-player world over loopback (`--port` / `--join`). Loopback is not "external", so I keep it as a debug launch. If "single player" should mean exactly one client, say so and Task 4 also removes `--port` / `--join` and `run-two`.
-- **D2 — the public web build: settled by R5.** Its Phase D step 15 stops the compose `server` and `mmo-web` once the k3s world is played on; Task 11 then deletes the recipes, `deploy/web/` and `scripts/deploy_push.sh`.
+- **D2 — the public web build / `just deploy`: superseded by R5** (decided 2026-11-15). R5's world recipes ship the game; its Phase D step 15 stops the compose `server` and `mmo-web`; Task 11 then removes `just deploy`, `deploy-build`, `deploy-push`, `deploy-logs`, `orion-login-token-push`, `deploy/web/` and `scripts/deploy_push.sh`.
 - **D3 — `go-nogo-r3`: deleted with the rest** ("all the home-grown multi-process mp"). Its 2026-11-13 verdicts stay recorded in TODO.md; a host-seam measurement on the twin, if ever wanted, is new work.
 - **D4 (yours, before Task 9) — the browser client in dev.** `just web` (wasm-server-runner on :1334 plus a dev server on 6466) goes; the page then runs only from the twin's `web` image at `game.localhost:8480`, so every wasm change costs a `twin-images` round. If that loop is too slow, keep a `web` recipe that serves the page with `?login=http://127.0.0.1:8790` against the twin's port-forwarded login service — say so and Task 9 rewrites `web` instead of deleting it.
 - The dev Postgres and the dev Keycloak stay, as test and website fixtures only: `pg-*` for `test-pg`, `test-login-pg`, `test-r2`, `test-r3`, `test-r4`; `kc-*` for `site-dev`, `site-theme-check`.
@@ -269,20 +269,35 @@ R5 changes the same files (its Tasks 1-3: link addresses as names, link identiti
 - [ ] **Step 4:** Rerun; then, as this crosses the server's startup, each touched crate's whole non-client suite once (say so first; needs `just pg-up`): `just test-server`, `just test-r2`, `just test-r3`, `just test-r4`, `just test-login-pg`. Expected: PASS — the tests set pins and tokens explicitly through `test-hooks`; any that leaned on a default is fixed in the test.
 - [ ] **Step 5:** The twin still works with the new binary: `just twin-images twin-apply twin-check`. Expected: exit 0. Commit: `refactor(server): drop the dev-only auth, delay and path fallbacks`.
 
-### Task 11: Delete the compose-hosted public build's files
+### Task 11: Remove `just deploy` — superseded by R5's world recipes
 
-Gate: R5 Phase D step 15 done (the compose `server` and `mmo-web` stopped on the box). Independent of Tasks 8-10.
+`just deploy` (build the release `server` + the browser bundle, rsync them to `root@5.9.7.138:/srv/mmo`, restart the docker compose `server` and `mmo-web`) shipped the OLD public game: one `all`-role server, local auth on 0.0.0.0, at `orion.factoriosurvivalworld.com`. R5 replaces every part of it:
+
+| `just deploy` piece | R5 replacement |
+|---|---|
+| `deploy-build` (release `server` + `web-release` bundle) | `world-images-build` (release `server` + `worldctl`, bundle built with no `VOXEL_WEB_SERVER` / `VOXEL_LOGIN_URL`) |
+| `deploy-push` (`scripts/deploy_push.sh`: rsync + compose restart) | `orion-world-push` (images to ECR, digests printed) + `orion-world-update <server> <web>` (`scripts/world_update.sh`: stop → set images → start), `orion-world-rollback` |
+| `deploy-logs` (ssh + `docker compose logs`) | `world-logs <pod>`, `world-status`, `world-metrics` |
+| `deploy/web/compose.yml` (`server` + caddy `mmo-web`) | `deploy/modules/world` (coordinator, `hosts` StatefulSet, `web` = page + `/login` proxy, `client-tls`) |
+| `orion-login-token-push` (service token to `/srv/mmo/secrets/` for the compose host) | the `world` module takes the login module's service token as a Secret |
+
+Gate: R5 Phase D step 15 done — the world is played on at `game.errantry.renownandruin.com` and the compose `server` and `mmo-web` are stopped on the box. Until then `just deploy` is the only way to update the old public game; leave it working. Independent of Tasks 8-10.
 
 **Files:**
-- Delete: recipes `deploy`, `deploy-build`, `deploy-push`, `deploy-logs`, variable `web_server`'s compose-era comment, `deploy/web/`, `scripts/deploy_push.sh`
-- Keep: `web-release`, `web-check`, `scripts/web_release.sh`, `scripts/wasm_externref_check.py` (the bundle is still built; where it is served from changes), `tunnel` + `deploy_host`
-- Modify: `crates/client/src/frontend/mod.rs:303-308` + `crates/slint-ui/ui/…/main-menu.slint:65` (`JOIN_ONLY` Join-by-address → the Login screen is the page's only entry), `crates/client/src/session.rs:856-890` (`PendingServer`), `crates/client/src/web_endpoint.rs` (`web_server_for`, `PinnedLocal`, `VOXEL_WEB_SERVER`; `web_server_for_ticket` / `web_server_for_host` stay), `crates/server/src/webtransport.rs:325-331` (stop writing `assets/webtransport-cert-hash.json`; a ticket carries the hash)
-- Modify: `CLAUDE.md` ("the public web build `just deploy`…"), `TODO.md`
+- Delete recipes: `deploy`, `deploy-build`, `deploy-push`, `deploy-logs`, `orion-login-token-push`; variable `web_server` and its comment
+- Delete recipe `web-release` **if** nothing but `deploy-build` calls it after this task (`world-images-build` runs `scripts/web_release.sh` directly) — run `grep -n 'web-release' justfile just scripts CLAUDE.md`; if kept, drop its `VOXEL_WEB_SERVER={{web_server}}`
+- Delete: `deploy/web/` (`compose.yml`), `scripts/deploy_push.sh`
+- Keep: `scripts/web_release.sh`, `scripts/wasm_externref_check.py` (`world-images-build` uses them), `web-check`, `tunnel` + `deploy_host` (the k3s API tunnel to the same box; check `grep -n deploy_host justfile` has no other user once the above are gone)
+- Modify: `scripts/web_release.sh` — drop the `VOXEL_WEB_SERVER` input from its header and body
+- Modify: `crates/client/src/frontend/mod.rs` + `crates/slint-ui/ui/…/main-menu.slint` (`JOIN_ONLY` Join-by-address → the Login screen is the page's only entry), `crates/client/src/session.rs` (`PendingServer`, `begin_join`), `crates/client/src/web_endpoint.rs` (`web_server_for`, `PinnedLocal`, `Trusted`, the build-time `VOXEL_WEB_SERVER`; `web_server_for_ticket` / `web_server_for_host` stay), `crates/server/src/webtransport.rs` (stop writing `assets/webtransport-cert-hash.json`; a ticket carries the hash) — line numbers from 2026-11-14 are stale after R5 Task 6-8: find by name
+- Modify: `CLAUDE.md` — delete the "the OLD compose game on the box, `just deploy` (…)" sentence from Deployment and keep its binaryen rule on `world-images-build` ("`scripts/web_release.sh` — use the pinned binaryen under `target/tools`, never the distro's"); `TODO.md` ("the public web world" in the re-forge note)
+- Not here: the box itself (compose stack, `/srv/mmo`, the proxy site, UDP 6466/6467 firewall rules) and the `orion.factoriosurvivalworld.com` record — R5 Phase D step 15 and the hosts plan's Task 6 own those
 
-- [ ] **Step 1:** Confirm R5 Phase D step 15 is ticked (the compose stack is down on the box; that step and the hosts plan's Task 6 own the proxy, firewall and DNS clean-up — nothing here touches the box).
-- [ ] **Step 2:** Delete files and recipes; remove the join-by-address path. `VOXEL_BIND_ADDR`, `VOXEL_WT_CERT` / `_KEY` stay — cluster hosts use them.
-- [ ] **Step 3:** `just web-check && just slint-wasm && just client-wasm && just smoke`. Expected: all pass. The twin's page (`http://game.localhost:8480/` after `just twin-images twin-apply`) opens on Login.
-- [ ] **Step 4:** Commit: `refactor: the browser joins through login only; retire the compose deploy`.
+- [ ] **Step 1:** Confirm the gate: R5 Phase D step 15 is ticked in R5's plan / TODO.md.
+- [ ] **Step 2:** Delete the recipes, `deploy/web/`, `scripts/deploy_push.sh`; trim `web_release.sh`. Run: `grep -rn -E '\bdeploy-(build|push|logs)\b|just deploy\b|deploy_push|deploy/web|web_server\b|VOXEL_WEB_SERVER|orion-login-token-push' justfile just scripts crates CLAUDE.md TODO.md deploy`. Expected: no output (k8s `deploy/web` references in `scripts/world_update.sh` / `twin_check.sh` are the Deployment named `web` — exclude them with `| grep -v 'deploy/web web\|rollout status deploy/web\|set image deploy/web\|image_of deploy/web'` and check what is left by eye).
+- [ ] **Step 3:** Remove the join-by-address path in the client and the cert-hash file in the server. `VOXEL_BIND_ADDR` and `VOXEL_CLIENT_CERT` / `_KEY` stay — the world module sets them.
+- [ ] **Step 4:** `just web-check && just slint-wasm && just client-wasm && just smoke`. Expected: all pass. `just world-images-build` still produces `target/web/`. The twin's page (`http://game.localhost:8480/` after `just twin-images twin-apply`) opens on Login.
+- [ ] **Step 5:** Commit: `chore: remove just deploy — the world ships through R5's world-images-build / orion-world-push / orion-world-update`.
 
 ---
 
@@ -311,4 +326,4 @@ Gate: R5 Phase D step 15 done (the compose `server` and `mmo-web` stopped on the
 
 ## What is left when this is done
 
-Recipes removed here: 27 of 165 (`build-stable`, 4 profile, 5 standalone server/client, 7 native multiplayer, `login` + 3 wrappers, `web`, 4 compose deploy) plus 4 private helpers — and 6 k0s recipes by R5; `scripts-test` and `run-twin` added. Scripts removed: 12 (the 2024 leftovers, `run.sh`, `build.sh`, `perf.sh`, `dev_r3.sh`, `deploy_push.sh`; + up to 3 one-shot migrations). Env switches removed: `VOXEL_SKIP_MENU`, `VOXEL_JWT_ADMISSION`, `VOXEL_AUTH=token`, `VOXEL_PEER_LINK_DELAY_MS`, `VOXEL_WEB_SERVER`. Directories removed: `deploy/web`, `scripts/provisioning`. Ways to start the game: `play` / `run` / `run-two` (single player) and `twin-*` + `run-twin` / orion (multiplayer).
+Recipes removed here: 28-29 of 165 (`build-stable`, 4 profile, 5 standalone server/client, 7 native multiplayer, `login` + 3 wrappers, `web`, 4 compose deploy + `orion-login-token-push` + possibly `web-release`) plus 4 private helpers — and 6 k0s recipes by R5; `scripts-test` and `run-twin` added. Scripts removed: 12 (the 2024 leftovers, `run.sh`, `build.sh`, `perf.sh`, `dev_r3.sh`, `deploy_push.sh`; + up to 3 one-shot migrations). Env switches removed: `VOXEL_SKIP_MENU`, `VOXEL_JWT_ADMISSION`, `VOXEL_AUTH=token`, `VOXEL_PEER_LINK_DELAY_MS`, `VOXEL_WEB_SERVER`. Directories removed: `deploy/web`, `scripts/provisioning`. Ways to start the game: `play` / `run` / `run-two` (single player) and `twin-*` + `run-twin` / orion (multiplayer).

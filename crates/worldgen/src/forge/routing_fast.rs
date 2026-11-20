@@ -39,7 +39,7 @@
 
 use std::collections::VecDeque;
 
-use super::erosion::{Routing, StepScratch, NO_RECEIVER};
+use super::erosion::{NO_RECEIVER, Routing, StepScratch};
 use super::par;
 use super::world::World;
 
@@ -103,7 +103,11 @@ struct Grid<'a> {
 impl<'a> Grid<'a> {
     fn new(w: &'a World) -> Self {
         // Cells where drainage ends: the sea (the Planet's only outlets).
-        Grid { h: &w.h, ocean: &w.ocean, outlet: &w.outlet }
+        Grid {
+            h: &w.h,
+            ocean: &w.ocean,
+            outlet: &w.outlet,
+        }
     }
 
     #[inline]
@@ -115,7 +119,11 @@ impl<'a> Grid<'a> {
     /// at its own height.
     #[inline]
     fn surface(&self, i: usize) -> f64 {
-        if self.ocean[i] { OUTLET_LEVEL_M } else { self.h[i] }
+        if self.ocean[i] {
+            OUTLET_LEVEL_M
+        } else {
+            self.h[i]
+        }
     }
 }
 
@@ -192,7 +200,10 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     let (nx, nz, cells) = (w.nx, w.nz, w.cells());
     let (g, s) = (Grid::new(w), Steps::new(w));
     for i in w.border_cells() {
-        assert!(g.is_outlet(i), "route_fast: the map edge must be outlets (cell {i} is not)");
+        assert!(
+            g.is_outlet(i),
+            "route_fast: the map edge must be outlets (cell {i} is not)"
+        );
     }
     let FastScratch {
         down,
@@ -211,7 +222,14 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
         queue,
         roots,
     } = &mut scratch.fast;
-    let Routing { filled, receiver, receiver_dist, order, tree_starts, .. } = out;
+    let Routing {
+        filled,
+        receiver,
+        receiver_dist,
+        order,
+        tree_starts,
+        ..
+    } = out;
 
     // 1. Steepest descent on h. Outlets next to land sit at sea level in
     // `filled`, as the Priority-Flood seeds them; the rest keep their floor.
@@ -221,46 +239,66 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     filled.resize(cells, 0.0);
     down.resize(cells, NO_DIR);
     basin.resize(cells, NO_BASIN);
-    par::for_rows3(filled, down, basin, nx, roots, |z0, filled, down, basin, tops| {
-        let (g, s) = (g, s);
-        // Column x of this row has land in the row above, below or itself.
-        let mut land_near = vec![false; nx];
-        for (dz, ((filled, down), basin)) in filled.chunks_mut(nx).zip(down.chunks_mut(nx)).zip(basin.chunks_mut(nx)).enumerate() {
-            let z = z0 + dz;
-            let (above, below) = (z.saturating_sub(1), (z + 1).min(nz - 1));
-            for (x, near) in land_near.iter_mut().enumerate() {
-                *near = !(g.is_outlet(above * nx + x) && g.is_outlet(z * nx + x) && g.is_outlet(below * nx + x));
-            }
-            for x in 0..nx {
-                let i = z * nx + x;
-                if g.is_outlet(i) {
-                    // A shore outlet: land among its (on-map) neighbours,
-                    // round the seam when the world wraps east–west.
-                    let shore = if s.wrap_x {
-                        land_near[(x + nx - 1) % nx] || land_near[x] || land_near[(x + 1) % nx]
-                    } else {
-                        land_near[x.saturating_sub(1)..=(x + 1).min(nx - 1)].iter().any(|&l| l)
-                    };
-                    filled[x] = if shore && g.ocean[i] { OUTLET_LEVEL_M } else { g.h[i] };
-                    (down[x], basin[x]) = (NO_DIR, SEA);
-                    continue;
+    par::for_rows3(
+        filled,
+        down,
+        basin,
+        nx,
+        roots,
+        |z0, filled, down, basin, tops| {
+            let (g, s) = (g, s);
+            // Column x of this row has land in the row above, below or itself.
+            let mut land_near = vec![false; nx];
+            for (dz, ((filled, down), basin)) in filled
+                .chunks_mut(nx)
+                .zip(down.chunks_mut(nx))
+                .zip(basin.chunks_mut(nx))
+                .enumerate()
+            {
+                let z = z0 + dz;
+                let (above, below) = (z.saturating_sub(1), (z + 1).min(nz - 1));
+                for (x, near) in land_near.iter_mut().enumerate() {
+                    *near = !(g.is_outlet(above * nx + x)
+                        && g.is_outlet(z * nx + x)
+                        && g.is_outlet(below * nx + x));
                 }
-                let hi = g.h[i];
-                let (mut best, mut dir) = (0.0, NO_DIR);
-                for k in 0..8 {
-                    let slope = (hi - g.surface(s.at(i, k))) * s.inv_dist[k];
-                    if slope > best {
-                        best = slope;
-                        dir = k as u8;
+                for x in 0..nx {
+                    let i = z * nx + x;
+                    if g.is_outlet(i) {
+                        // A shore outlet: land among its (on-map) neighbours,
+                        // round the seam when the world wraps east–west.
+                        let shore = if s.wrap_x {
+                            land_near[(x + nx - 1) % nx] || land_near[x] || land_near[(x + 1) % nx]
+                        } else {
+                            land_near[x.saturating_sub(1)..=(x + 1).min(nx - 1)]
+                                .iter()
+                                .any(|&l| l)
+                        };
+                        filled[x] = if shore && g.ocean[i] {
+                            OUTLET_LEVEL_M
+                        } else {
+                            g.h[i]
+                        };
+                        (down[x], basin[x]) = (NO_DIR, SEA);
+                        continue;
+                    }
+                    let hi = g.h[i];
+                    let (mut best, mut dir) = (0.0, NO_DIR);
+                    for k in 0..8 {
+                        let slope = (hi - g.surface(s.at(i, k))) * s.inv_dist[k];
+                        if slope > best {
+                            best = slope;
+                            dir = k as u8;
+                        }
+                    }
+                    (filled[x], down[x], basin[x]) = (hi, dir, NO_BASIN);
+                    if dir == NO_DIR || g.is_outlet(s.at(i, dir as usize)) {
+                        tops.push(i as u32);
                     }
                 }
-                (filled[x], down[x], basin[x]) = (hi, dir, NO_BASIN);
-                if dir == NO_DIR || g.is_outlet(s.at(i, dir as usize)) {
-                    tops.push(i as u32);
-                }
             }
-        }
-    });
+        },
+    );
     donors.resize(cells, 0);
     let land = w.outlet.iter().filter(|&&o| !o).count();
 
@@ -382,13 +420,20 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
                 }
             }
         }
-        let (big, small) = if uf_size[ra] >= uf_size[rb] { (ra, rb) } else { (rb, ra) };
+        let (big, small) = if uf_size[ra] >= uf_size[rb] {
+            (ra, rb)
+        } else {
+            (rb, ra)
+        };
         uf_parent[small] = big as u32;
         uf_size[big] += uf_size[small];
         uf_sea[big] |= uf_sea[small];
         uf_next.swap(ra, rb); // splice the two circular member lists
     }
-    assert_eq!(unresolved, 0, "route_fast: {unresolved} basins have no way to an outlet");
+    assert_eq!(
+        unresolved, 0,
+        "route_fast: {unresolved} basins have no way to an outlet"
+    );
 
     // 5. Depression-free surface (only depression cells can rise) and
     // steepest descent on it.
@@ -472,29 +517,41 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     donors.resize(cells, 0);
     {
         let dir: &[u8] = dir;
-        par::for_rows3(receiver, receiver_dist, donors, nx, roots, |z0, receiver, receiver_dist, donors, roots| {
-            let (g, s, dir) = (g, s, dir);
-            for (j, ((r, rd), m)) in receiver.iter_mut().zip(receiver_dist.iter_mut()).zip(donors.iter_mut()).enumerate() {
-                let i = z0 * nx + j;
-                (*r, *rd, *m) = (NO_RECEIVER, 0.0, 0);
-                if g.is_outlet(i) {
-                    continue;
-                }
-                assert_ne!(dir[i], NO_DIR, "route_fast: land cell {i} has no way out");
-                let to = s.at(i, dir[i] as usize);
-                (*r, *rd) = (to as u32, s.dist[dir[i] as usize]);
-                if g.is_outlet(to) {
-                    roots.push(i as u32);
-                }
-                // Bit k: the neighbour in direction k drains into this cell
-                // (its direction leads back). Outlets keep no donors.
-                for (k, &back) in OPPOSITE.iter().enumerate() {
-                    if dir[s.at(i, k)] == back {
-                        *m |= 1 << k;
+        par::for_rows3(
+            receiver,
+            receiver_dist,
+            donors,
+            nx,
+            roots,
+            |z0, receiver, receiver_dist, donors, roots| {
+                let (g, s, dir) = (g, s, dir);
+                for (j, ((r, rd), m)) in receiver
+                    .iter_mut()
+                    .zip(receiver_dist.iter_mut())
+                    .zip(donors.iter_mut())
+                    .enumerate()
+                {
+                    let i = z0 * nx + j;
+                    (*r, *rd, *m) = (NO_RECEIVER, 0.0, 0);
+                    if g.is_outlet(i) {
+                        continue;
+                    }
+                    assert_ne!(dir[i], NO_DIR, "route_fast: land cell {i} has no way out");
+                    let to = s.at(i, dir[i] as usize);
+                    (*r, *rd) = (to as u32, s.dist[dir[i] as usize]);
+                    if g.is_outlet(to) {
+                        roots.push(i as u32);
+                    }
+                    // Bit k: the neighbour in direction k drains into this cell
+                    // (its direction leads back). Outlets keep no donors.
+                    for (k, &back) in OPPOSITE.iter().enumerate() {
+                        if dir[s.at(i, k)] == back {
+                            *m |= 1 << k;
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
     }
 
     // 6. Downstream-first order from the outlets, adding the epsilon gradient
@@ -502,11 +559,13 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     // tree is a contiguous run of `order`, starting at `tree_starts`.
     let groups: Vec<&[u32]> = roots.chunks(ROOTS_PER_TASK).collect();
     let traversed = {
-        let (receiver, receiver_dist, donors): (&[u32], &[f64], &[u8]) = (receiver, receiver_dist, donors);
+        let (receiver, receiver_dist, donors): (&[u32], &[f64], &[u8]) =
+            (receiver, receiver_dist, donors);
         let filled = par::Disjoint::new(filled);
         par::map(&groups, |group| {
             let (s, receiver, receiver_dist, donors) = (s, receiver, receiver_dist, donors);
-            let (mut cells_out, mut starts, mut stack) = (Vec::new(), Vec::with_capacity(group.len()), Vec::new());
+            let (mut cells_out, mut starts, mut stack) =
+                (Vec::new(), Vec::with_capacity(group.len()), Vec::new());
             for &root in group.iter() {
                 starts.push(cells_out.len() as u32);
                 stack.push(root);
@@ -516,7 +575,14 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
                     // SAFETY: a tree's cells are visited by its group's worker
                     // only, and a cell's receiver is in the same tree (written
                     // before it) or an outlet (never written here).
-                    unsafe { filled.set(c, filled.get(c).max(filled.get(r) + epsilon * receiver_dist[c])) };
+                    unsafe {
+                        filled.set(
+                            c,
+                            filled
+                                .get(c)
+                                .max(filled.get(r) + epsilon * receiver_dist[c]),
+                        )
+                    };
                     cells_out.push(c as u32);
                     let mut m = donors[c];
                     while m != 0 {
@@ -538,4 +604,3 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     }
     assert_eq!(order.len(), land, "route_fast: receivers form a cycle");
 }
-

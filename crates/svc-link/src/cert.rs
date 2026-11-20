@@ -13,7 +13,10 @@ pub const SERVICE_TOKEN_FILE_ENV: &str = "VOXEL_SERVICE_TOKEN_FILE";
 
 /// Lowercase hex SHA-256 of a DER certificate: the value dialers pin.
 pub fn cert_sha256_hex(cert_der: &[u8]) -> String {
-    Sha256::digest(cert_der).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(cert_der)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// A valid pin: 64 hex digits.
@@ -54,7 +57,11 @@ pub fn read_cert_hash(env_var: &str, file: &Path) -> io::Result<String> {
         _ => pin_beside(file)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no pin {} and no certificate {}.cert", file.display(), file.display()),
+                format!(
+                    "no pin {} and no certificate {}.cert",
+                    file.display(),
+                    file.display()
+                ),
             )
         })?,
     };
@@ -69,7 +76,8 @@ pub fn service_token_from_env() -> Result<String, String> {
         Err(_) => {
             let file = std::env::var(SERVICE_TOKEN_FILE_ENV)
                 .map_err(|_| format!("set {SERVICE_TOKEN_ENV} or {SERVICE_TOKEN_FILE_ENV}"))?;
-            std::fs::read_to_string(&file).map_err(|e| format!("{SERVICE_TOKEN_FILE_ENV} {file}: {e}"))?
+            std::fs::read_to_string(&file)
+                .map_err(|e| format!("{SERVICE_TOKEN_FILE_ENV} {file}: {e}"))?
         }
     };
     let token = token.trim().to_string();
@@ -150,9 +158,13 @@ fn pin_write_level(e: &io::Error, said: &AtomicBool) -> Option<log::Level> {
 
 /// A stored cert and key that still belong together.
 fn stored_pair_valid(cert_der: &[u8], key_der: &[u8]) -> bool {
-    let Ok(pair) = rcgen::KeyPair::try_from(key_der) else { return false };
+    let Ok(pair) = rcgen::KeyPair::try_from(key_der) else {
+        return false;
+    };
     // The cert's public key must be the key's.
-    cert_der.windows(pair.public_key_raw().len()).any(|w| w == pair.public_key_raw())
+    cert_der
+        .windows(pair.public_key_raw().len())
+        .any(|w| w == pair.public_key_raw())
 }
 
 /// The listener's identity. With a `hash_file` the cert and key persist beside it
@@ -177,19 +189,28 @@ pub(crate) fn load_or_generate(hash_file: Option<&Path>) -> io::Result<LinkIdent
                                  is derived from the certificate",
                                 file.display()
                             ),
-                            Some(_) => log::warn!("[svc-link] cannot write the pin file {}: {e}", file.display()),
+                            Some(_) => log::warn!(
+                                "[svc-link] cannot write the pin file {}: {e}",
+                                file.display()
+                            ),
                             None => {}
                         }
                     }
                 }
                 return Ok(LinkIdentity { cert_der, key_der });
             }
-            log::warn!("[svc-link] stored link cert/key under {} do not match; regenerating", file.display());
+            log::warn!(
+                "[svc-link] stored link cert/key under {} do not match; regenerating",
+                file.display()
+            );
         }
     }
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .map_err(|e| io::Error::other(format!("link certificate: {e}")))?;
-    let id = LinkIdentity { cert_der: cert.cert.der().to_vec(), key_der: cert.signing_key.serialize_der() };
+    let id = LinkIdentity {
+        cert_der: cert.cert.der().to_vec(),
+        key_der: cert.signing_key.serialize_der(),
+    };
     if let Some(file) = hash_file {
         write_atomic(&sibling(file, ".key"), &id.key_der, true)?;
         write_atomic(&sibling(file, ".cert"), &id.cert_der, false)?;
@@ -241,7 +262,11 @@ mod tests {
         }
         let refused = refused.expect("a read-only directory refuses the pin file");
         let said = AtomicBool::new(false);
-        assert_eq!(pin_write_level(&refused, &said), Some(log::Level::Info), "the designed pod layout");
+        assert_eq!(
+            pin_write_level(&refused, &said),
+            Some(log::Level::Info),
+            "the designed pod layout"
+        );
         assert_eq!(pin_write_level(&refused, &said), None, "said once");
     }
 }

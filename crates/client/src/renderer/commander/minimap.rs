@@ -13,11 +13,11 @@ use bevy::window::PrimaryWindow;
 use game::EntityKind;
 
 use super::selection::Selection;
-use crate::renderer::map::views::MINIMAP_M_PER_PX;
-use crate::renderer::map::MapView;
 use super::{CommanderCamera, CommanderView};
 use crate::renderer::bridge::{SimEntity, SimKind};
 use crate::renderer::cursor::CursorPolicy;
+use crate::renderer::map::MapView;
+use crate::renderer::map::views::MINIMAP_M_PER_PX;
 
 /// Edge of the minimap on screen, logical pixels.
 pub const MINIMAP_SIZE_PX: f32 = 220.0;
@@ -88,12 +88,18 @@ pub fn update_minimap_view(
     mut zoom: ResMut<MinimapZoom>,
 ) {
     let Ok(mut view) = views.single_mut() else {
-        commands.spawn((MinimapView, MapView::default(), crate::session::SessionScoped));
+        commands.spawn((
+            MinimapView,
+            MapView::default(),
+            crate::session::SessionScoped,
+        ));
         return;
     };
     let Ok(window) = window.single() else { return };
     let rect = screen_rect(window.size());
-    let over = window.cursor_position().is_some_and(|c| rect.contains(c)) && !policy.blocks_game() && !policy.ui_pointer;
+    let over = window.cursor_position().is_some_and(|c| rect.contains(c))
+        && !policy.blocks_game()
+        && !policy.ui_pointer;
     for event in wheel.read() {
         if !over {
             continue;
@@ -102,7 +108,8 @@ pub fn update_minimap_view(
             MouseScrollUnit::Line => event.y,
             MouseScrollUnit::Pixel => event.y / WHEEL_LINE_PX,
         };
-        zoom.0 = (zoom.0 * MINIMAP_ZOOM_STEP.powf(-notches)).clamp(MINIMAP_M_PER_PX_MIN, MINIMAP_M_PER_PX_MAX);
+        zoom.0 = (zoom.0 * MINIMAP_ZOOM_STEP.powf(-notches))
+            .clamp(MINIMAP_M_PER_PX_MIN, MINIMAP_M_PER_PX_MAX);
     }
     let scale = window.scale_factor();
     view.rect = Rect::from_corners(rect.min * scale, rect.max * scale);
@@ -138,7 +145,10 @@ pub struct MinimapPixels {
 
 impl Default for MinimapPixels {
     fn default() -> Self {
-        Self { overlay: vec![[0; 4]; (OVERLAY_PX * OVERLAY_PX) as usize], overlay_dirty: false }
+        Self {
+            overlay: vec![[0; 4]; (OVERLAY_PX * OVERLAY_PX) as usize],
+            overlay_dirty: false,
+        }
     }
 }
 
@@ -156,7 +166,9 @@ pub fn minimap_pointer(
         pointer.dragging = false;
     }
     let Ok(window) = window.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
     let rect = screen_rect(window.size());
     if buttons.just_pressed(MouseButton::Left)
         && !policy.blocks_game()
@@ -168,7 +180,8 @@ pub fn minimap_pointer(
     let Ok(view) = views.single() else { return };
     if pointer.dragging && view.visible {
         let unit = game::movement::UNITS_PER_METER as f64;
-        let at = view.screen_to_world(cursor.clamp(rect.min, rect.max) * window.scale_factor()) * unit;
+        let at =
+            view.screen_to_world(cursor.clamp(rect.min, rect.max) * window.scale_factor()) * unit;
         cam.focus = Vec2::new(at.x as f32, at.y as f32);
         follow.0 = None;
     }
@@ -248,7 +261,11 @@ fn draw_overlay(
         }
         let p = gt.translation();
         let at = world_to_overlay(map, Vec2::new(p.x, p.z), px).as_ivec2();
-        let color = if selection.contains(sim.region, sim.key) { SELECTED_DOT_COLOR } else { DOT_COLOR };
+        let color = if selection.contains(sim.region, sim.key) {
+            SELECTED_DOT_COLOR
+        } else {
+            DOT_COLOR
+        };
         for dy in -DOT_RADIUS_PX..=DOT_RADIUS_PX {
             for dx in -DOT_RADIUS_PX..=DOT_RADIUS_PX {
                 put(at.x + dx, at.y + dy, color);
@@ -258,7 +275,12 @@ fn draw_overlay(
     if let Ok((camera, tf)) = view.single() {
         let gt = GlobalTransform::from(*tf);
         if let Some(size) = camera.logical_viewport_size() {
-            let corners = [Vec2::ZERO, Vec2::new(size.x, 0.0), size, Vec2::new(0.0, size.y)];
+            let corners = [
+                Vec2::ZERO,
+                Vec2::new(size.x, 0.0),
+                size,
+                Vec2::new(0.0, size.y),
+            ];
             let rays = corners.map(|c| camera.viewport_to_world(&gt, c).ok());
             if let [Some(a), Some(b), Some(c), Some(d)] = rays {
                 let quad = footprint([a, b, c, d], cam.ground_y);
@@ -275,4 +297,3 @@ fn draw_overlay(
         }
     }
 }
-

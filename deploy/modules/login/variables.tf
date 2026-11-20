@@ -90,6 +90,34 @@ variable "postgres_volume_size" {
   default     = "2Gi"
 }
 
+variable "database" {
+  description = "Management PostgreSQL connection. null keeps this module's old login-postgres StatefulSet."
+  type = object({
+    host     = string
+    port     = number
+    database = string
+    user     = string
+    password = string
+  })
+  default   = null
+  nullable  = true
+  sensitive = true
+}
+
+variable "own_postgres" {
+  description = "Lifecycle of the old login PostgreSQL. Use stopped during the verified move window; absent only after the owner retires the retained PVC."
+  type        = string
+  default     = "running"
+  validation {
+    condition     = contains(["running", "stopped", "absent"], var.own_postgres)
+    error_message = "own_postgres must be running, stopped, or absent."
+  }
+  validation {
+    condition     = var.database != null || var.own_postgres == "running"
+    error_message = "The old login PostgreSQL must stay running while no external database is configured."
+  }
+}
+
 variable "replicas" {
   description = "Login pods. Two keep logins up through a deploy or a crashed pod; the node and the single PostgreSQL stay single points. A PodDisruptionBudget exists only above 1."
   type        = number
@@ -100,6 +128,42 @@ variable "metrics" {
   description = "A ServiceMonitor for /metrics. Needs the monitoring root applied first (the ServiceMonitor CRD)."
   type        = bool
   default     = true
+}
+
+variable "telemetry" {
+  description = "Application traces and continuous CPU profiles. Endpoints are credential-free in-cluster DNS names; production keeps profiles opt-in until enabled explicitly."
+  type = object({
+    tracing_enabled           = optional(bool, true)
+    otlp_endpoint             = optional(string, "http://alloy.monitoring.svc:4318")
+    otlp_protocol             = optional(string, "http/protobuf")
+    trace_sampler             = optional(string, "parentbased_traceidratio")
+    trace_sampler_ratio       = optional(number, 0.25)
+    bsp_max_queue_size        = optional(number, 2048)
+    bsp_schedule_delay_ms     = optional(number, 5000)
+    bsp_max_export_batch_size = optional(number, 512)
+    bsp_export_timeout_ms     = optional(number, 5000)
+    profile_enabled           = optional(bool, false)
+    profile_endpoint          = optional(string, "http://pyroscope.monitoring.svc:4040")
+    profile_sample_rate       = optional(number, 100)
+    environment               = optional(string, "production")
+    cluster                   = optional(string, "orion")
+  })
+  default = {}
+  validation {
+    condition     = var.telemetry.trace_sampler_ratio >= 0 && var.telemetry.trace_sampler_ratio <= 1
+    error_message = "telemetry.trace_sampler_ratio: between 0 and 1."
+  }
+  validation {
+    condition = alltrue([
+      var.telemetry.bsp_max_queue_size > 0,
+      var.telemetry.bsp_schedule_delay_ms > 0,
+      var.telemetry.bsp_max_export_batch_size > 0,
+      var.telemetry.bsp_max_export_batch_size <= var.telemetry.bsp_max_queue_size,
+      var.telemetry.bsp_export_timeout_ms > 0,
+      var.telemetry.profile_sample_rate > 0,
+    ])
+    error_message = "telemetry: queue, batch, timeout and profile sample rate values must be positive; the export batch cannot exceed the queue."
+  }
 }
 
 variable "memory_limits" {

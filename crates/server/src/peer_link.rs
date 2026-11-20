@@ -68,8 +68,12 @@ pub const PEER_DISCOVERY_SECS: u64 = 2;
 /// The peer listener's address from [`PEER_BIND_ENV`]'s value; unset or empty is
 /// [`DEFAULT_PEER_BIND`] (nothing is derived from a host number any more).
 pub fn peer_bind_from(value: Option<&str>) -> Result<SocketAddr, String> {
-    let v = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_PEER_BIND);
-    v.parse().map_err(|_| format!("{PEER_BIND_ENV}={v:?} is not an address (ip:port)"))
+    let v = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_PEER_BIND);
+    v.parse()
+        .map_err(|_| format!("{PEER_BIND_ENV}={v:?} is not an address (ip:port)"))
 }
 
 /// The peer pin file from [`PEER_CERT_HASH_FILE_ENV`]'s value; unset or empty is
@@ -77,14 +81,20 @@ pub fn peer_bind_from(value: Option<&str>) -> Result<SocketAddr, String> {
 pub fn peer_cert_hash_file_from(name: &str, value: Option<&str>) -> PathBuf {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         Some(v) => PathBuf::from(v),
-        None => PathBuf::from(format!("target/dev-r3/{}.peer.cert-sha256", crate::file_word(name))),
+        None => PathBuf::from(format!(
+            "target/dev-r3/{}.peer.cert-sha256",
+            crate::file_word(name)
+        )),
     }
 }
 
 /// The advertised QUIC address from [`ADVERTISE_QUIC_ENV`]'s value; unset or empty is
 /// `127.0.0.1:{port}` (the server's own port).
 pub fn advertise_quic_from(value: Option<&str>, port: u16) -> String {
-    value.map(str::trim).filter(|v| !v.is_empty()).map_or_else(|| format!("127.0.0.1:{port}"), str::to_string)
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| format!("127.0.0.1:{port}"), str::to_string)
 }
 
 /// The address peers dial from [`ADVERTISE_PEER_ENV`]'s value; unset or empty is `bound`.
@@ -93,23 +103,29 @@ pub fn advertise_quic_from(value: Option<&str>, port: u16) -> String {
 pub fn advertise_peer_from(value: Option<&str>, bound: SocketAddr) -> Result<SocketAddr, String> {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         Some(v) => {
-            let addr: SocketAddr =
-                v.parse().map_err(|_| format!("{ADVERTISE_PEER_ENV}={v:?} is not an address (ip:port, no names)"))?;
+            let addr: SocketAddr = v.parse().map_err(|_| {
+                format!("{ADVERTISE_PEER_ENV}={v:?} is not an address (ip:port, no names)")
+            })?;
             if addr.ip().is_unspecified() {
-                return Err(format!("{ADVERTISE_PEER_ENV}={v:?} is a wildcard address nobody can dial"));
+                return Err(format!(
+                    "{ADVERTISE_PEER_ENV}={v:?} is a wildcard address nobody can dial"
+                ));
             }
             Ok(addr)
         }
-        None if bound.ip().is_unspecified() => {
-            Err(format!("the peer listener is bound to the wildcard {bound}: set {ADVERTISE_PEER_ENV} to the ip:port peers dial"))
-        }
+        None if bound.ip().is_unspecified() => Err(format!(
+            "the peer listener is bound to the wildcard {bound}: set {ADVERTISE_PEER_ENV} to the ip:port peers dial"
+        )),
         None => Ok(bound),
     }
 }
 
 /// The advertised WebTransport address from [`ADVERTISE_WT_ENV`]'s value (none by default).
 pub fn advertise_wt_from(value: Option<&str>) -> Option<String> {
-    value.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string)
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// The injected delay from [`PEER_LINK_DELAY_MS_ENV`]'s value; unset or empty is 0.
@@ -140,12 +156,20 @@ impl PeerLinkConfig {
         let var = |name: &str| std::env::var(name).ok();
         let config = PeerLinkConfig {
             bind: peer_bind_from(var(PEER_BIND_ENV).as_deref())?,
-            cert_hash_file: peer_cert_hash_file_from(host_name, var(PEER_CERT_HASH_FILE_ENV).as_deref()),
+            cert_hash_file: peer_cert_hash_file_from(
+                host_name,
+                var(PEER_CERT_HASH_FILE_ENV).as_deref(),
+            ),
             delay: peer_link_delay_from(var(PEER_LINK_DELAY_MS_ENV).as_deref())?,
-            world: crate::login_link::link_world_from(var(crate::auth_edge::WORLD_ID_ENV).as_deref()),
+            world: crate::login_link::link_world_from(
+                var(crate::auth_edge::WORLD_ID_ENV).as_deref(),
+            ),
         };
         if !config.delay.is_zero() {
-            log::warn!("[peers] {PEER_LINK_DELAY_WARNING}: {} ms on every outgoing frame", config.delay.as_millis());
+            log::warn!(
+                "[peers] {PEER_LINK_DELAY_WARNING}: {} ms on every outgoing frame",
+                config.delay.as_millis()
+            );
         }
         Ok(config)
     }
@@ -157,8 +181,16 @@ impl PeerLinkConfig {
 /// on the world generation, so a clean row always names the boot that left). A crashed host's
 /// row is dirty: it is not one of them. Read at boot for
 /// [`game::WorldManager::note_left_peers`]; a later boot is expected again from its hello.
-pub fn left_cleanly(store: &world_store::StoreHandle, me: HostId) -> Result<Vec<(HostId, u64)>, world_store::StoreError> {
-    Ok(store.hosts()?.into_iter().filter(|r| r.clean && r.id != me).map(|r| (r.id, r.boot)).collect())
+pub fn left_cleanly(
+    store: &world_store::StoreHandle,
+    me: HostId,
+) -> Result<Vec<(HostId, u64)>, world_store::StoreError> {
+    Ok(store
+        .hosts()?
+        .into_iter()
+        .filter(|r| r.clean && r.id != me)
+        .map(|r| (r.id, r.boot))
+        .collect())
 }
 
 // --- the link --------------------------------------------------------------------------
@@ -353,7 +385,11 @@ impl PeerLink for QuicPeerLink {
                 Inbound::Up(tag) => {
                     self.live = Some(tag);
                     self.connection += 1;
-                    log::info!("[peers] link to host {} up (connection {})", self.peer, self.connection);
+                    log::info!(
+                        "[peers] link to host {} up (connection {})",
+                        self.peer,
+                        self.connection
+                    );
                 }
                 Inbound::Down(_) => {
                     self.live = None;
@@ -365,7 +401,11 @@ impl PeerLink for QuicPeerLink {
 
     fn close(&mut self) {
         let Some(tag) = self.live.take() else { return };
-        log::warn!("[peers] closing connection {} to host {}", self.connection, self.peer);
+        log::warn!(
+            "[peers] closing connection {} to host {}",
+            self.connection,
+            self.peer
+        );
         self.wire.close(tag);
         // Nothing of the closed connection surfaces any more.
         self.inbox.clear();
@@ -392,8 +432,11 @@ fn cached_live_row(cache: LiveCache, store: StoreHandle) -> LiveRow {
             return Ok(true);
         }
         let rows = store.hosts().map_err(|e| e.to_string())?;
-        let live: BTreeMap<HostId, u64> =
-            rows.iter().filter(|r| r.state == game::HOST_LIVE && !r.clean).map(|r| (r.id, r.boot)).collect();
+        let live: BTreeMap<HostId, u64> = rows
+            .iter()
+            .filter(|r| r.state == game::HOST_LIVE && !r.clean)
+            .map(|r| (r.id, r.boot))
+            .collect();
         let ok = live.get(&id) == Some(&boot);
         *cache.lock().unwrap_or_else(|e| e.into_inner()) = live;
         Ok(ok)
@@ -413,7 +456,11 @@ struct Admission {
 
 impl Admission {
     fn new(mine: HostId, live_row: LiveRow) -> Self {
-        Admission { mine, live_row, live: BTreeMap::new() }
+        Admission {
+            mine,
+            live_row,
+            live: BTreeMap::new(),
+        }
     }
 
     /// `peer` said hello as `role`: its id and the connection it replaces, or why it is
@@ -462,7 +509,11 @@ fn route_listener(
             LinkEvent::Up(hello) => match admission.admit(peer, &hello.role) {
                 Ok((ordinal, replaced)) => {
                     if let Some(old) = replaced {
-                        log::info!("[peers] host {ordinal}: connection {} replaces {}", peer.0, old.0);
+                        log::info!(
+                            "[peers] host {ordinal}: connection {} replaces {}",
+                            peer.0,
+                            old.0
+                        );
                         of_peer.remove(&old);
                         senders.close(old);
                     }
@@ -470,7 +521,8 @@ fn route_listener(
                     if !links.contains_key(&ordinal) {
                         let (inbound, link_events) = crossbeam::channel::unbounded();
                         let wire = Box::new(ListenerWire(senders.clone()));
-                        let link = QuicPeerLink::new(ordinal, wire, link_events, delay, wake.clone());
+                        let link =
+                            QuicPeerLink::new(ordinal, wire, link_events, delay, wake.clone());
                         log::info!("[peers] host {ordinal} dialed in: a link to it");
                         if arrivals.send((ordinal, Box::new(link))).is_err() {
                             return;
@@ -497,7 +549,10 @@ fn route_listener(
                 if link.send(inbound).is_err() {
                     // The manager dropped the link (it forgot the host): nothing is routed to
                     // it any more, and its connection is closed.
-                    log::info!("[peers] host {ordinal} is forgotten here: its connection {} is closed", peer.0);
+                    log::info!(
+                        "[peers] host {ordinal} is forgotten here: its connection {} is closed",
+                        peer.0
+                    );
                     links.remove(&ordinal);
                     senders.close(peer);
                     continue;
@@ -526,13 +581,17 @@ enum Found {
 /// Host `ordinal`'s peer address and pin from the `hosts` table.
 fn lookup(store: &StoreHandle, ordinal: HostId) -> Result<Found, String> {
     let rows = store.hosts().map_err(|e| e.to_string())?;
-    let Some(row) = rows.into_iter().find(|r| r.id == ordinal) else { return Ok(Found::Gone) };
+    let Some(row) = rows.into_iter().find(|r| r.id == ordinal) else {
+        return Ok(Found::Gone);
+    };
     if row.state != game::HOST_LIVE {
         return Ok(Found::Gone);
     }
     match (row.peer_addr, row.peer_cert) {
         (Some(addr), Some(pin)) => {
-            let addr = addr.parse().map_err(|_| format!("host {ordinal}'s peer address {addr:?} is not ip:port"))?;
+            let addr = addr
+                .parse()
+                .map_err(|_| format!("host {ordinal}'s peer address {addr:?} is not ip:port"))?;
             Ok(Found::Listening(addr, pin))
         }
         _ => Ok(Found::Missing),
@@ -588,7 +647,9 @@ fn dial_peer(
                 }
                 Ok(Found::Missing) => {
                     if !said_missing {
-                        log::info!("[peers] host {peer} has no peer listener in the hosts table yet; looking again");
+                        log::info!(
+                            "[peers] host {peer} has no peer listener in the hosts table yet; looking again"
+                        );
                         said_missing = true;
                     }
                 }
@@ -598,7 +659,9 @@ fn dial_peer(
                     // stays down until the manager forgets the host and drops it.
                     drop(dialer.take());
                     dialing.store(false, std::sync::atomic::Ordering::SeqCst);
-                    log::info!("[peers] host {peer}'s hosts row is dead or gone: it is never dialed again");
+                    log::info!(
+                        "[peers] host {peer}'s hosts row is dead or gone: it is never dialed again"
+                    );
                     return;
                 }
                 Err(e) => {
@@ -614,8 +677,14 @@ fn dial_peer(
                 }
             }
         }
-        let dial_events = dialer.as_ref().map_or_else(crossbeam::channel::never, |d| d.1.clone());
-        let timeout = if live.is_some() { discovery } else { next_lookup.saturating_duration_since(Instant::now()) };
+        let dial_events = dialer
+            .as_ref()
+            .map_or_else(crossbeam::channel::never, |d| d.1.clone());
+        let timeout = if live.is_some() {
+            discovery
+        } else {
+            next_lookup.saturating_duration_since(Instant::now())
+        };
         let mut sent: Option<Inbound> = None;
         crossbeam::channel::select! {
             recv(cmds) -> cmd => match cmd {
@@ -692,19 +761,40 @@ impl PeerListener {
     /// Binds `config.bind` (its pin written to `config.cert_hash_file`) with the shared service
     /// `token`; what peers dial is [`ADVERTISE_PEER_ENV`], else the bound address.
     pub fn bind(config: PeerLinkConfig, token: String) -> io::Result<PeerListener> {
-        if let Some(dir) = config.cert_hash_file.parent().filter(|d| !d.as_os_str().is_empty()) {
+        if let Some(dir) = config
+            .cert_hash_file
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+        {
             std::fs::create_dir_all(dir)?;
         }
-        let (listener, events, senders) =
-            LinkListener::bind::<PeerMsg, PeerMsg>(config.bind, token.clone(), config.world.clone(), Some(config.cert_hash_file.clone()))?;
-        let advertised = advertise_peer_from(std::env::var(ADVERTISE_PEER_ENV).ok().as_deref(), listener.local_addr())
-            .map_err(io::Error::other)?;
-        Ok(PeerListener { listener, events, senders, advertised, token, config })
+        let (listener, events, senders) = LinkListener::bind::<PeerMsg, PeerMsg>(
+            config.bind,
+            token.clone(),
+            config.world.clone(),
+            Some(config.cert_hash_file.clone()),
+        )?;
+        let advertised = advertise_peer_from(
+            std::env::var(ADVERTISE_PEER_ENV).ok().as_deref(),
+            listener.local_addr(),
+        )
+        .map_err(io::Error::other)?;
+        Ok(PeerListener {
+            listener,
+            events,
+            senders,
+            advertised,
+            token,
+            config,
+        })
     }
 
     /// What the `hosts` row names: the address peers dial and the listener's pin.
     pub fn row_fields(&self) -> (String, String) {
-        (self.advertised.to_string(), self.listener.cert_sha256().to_string())
+        (
+            self.advertised.to_string(),
+            self.listener.cert_sha256().to_string(),
+        )
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -735,15 +825,35 @@ impl PeerLinks {
     /// (one read; later ones come by [`Self::refresh`]), and an admission of higher hosts by
     /// their live rows — each one's link is made when it first dials in
     /// ([`Self::take_arrived`]).
-    pub fn start(listener: PeerListener, me: HostId, boot: u64, store: StoreHandle) -> io::Result<PeerLinks> {
-        let PeerListener { listener, events, senders, advertised, token, config } = listener;
+    pub fn start(
+        listener: PeerListener,
+        me: HostId,
+        boot: u64,
+        store: StoreHandle,
+    ) -> io::Result<PeerLinks> {
+        let PeerListener {
+            listener,
+            events,
+            senders,
+            advertised,
+            token,
+            config,
+        } = listener;
         let rows = store.hosts().map_err(io::Error::other)?;
         log::info!(
             "[peers] host {me}: peers dial {advertised} (bound {}, pin {})",
             listener.local_addr(),
             listener.cert_sha256()
         );
-        let hello = LinkHello::new(token, PeerRole::Host { id: me, boot, reg: me.0 }, config.world.clone());
+        let hello = LinkHello::new(
+            token,
+            PeerRole::Host {
+                id: me,
+                boot,
+                reg: me.0,
+            },
+            config.world.clone(),
+        );
         let (wake_tx, wake) = crossbeam::channel::bounded(1);
         let live: LiveCache = std::sync::Arc::default();
         let live_row = cached_live_row(live.clone(), store.clone());
@@ -752,7 +862,16 @@ impl PeerLinks {
         let router_wake = wake_tx.clone();
         std::thread::Builder::new()
             .name("peer-listener".into())
-            .spawn(move || route_listener(Admission::new(me, live_row), events, senders, arrivals_tx, delay, router_wake))?;
+            .spawn(move || {
+                route_listener(
+                    Admission::new(me, live_row),
+                    events,
+                    senders,
+                    arrivals_tx,
+                    delay,
+                    router_wake,
+                )
+            })?;
         let mut links = PeerLinks {
             listener,
             links: Vec::new(),
@@ -777,29 +896,51 @@ impl PeerLinks {
     /// started before its row was read). Each link is returned once, for
     /// [`game::WorldManager::set_peer`]. A host whose dialer is gone (its row dead or gone) is
     /// never dialed again.
-    pub fn refresh(&mut self, rows: &[world_store::HostRow]) -> Vec<(HostId, Box<dyn PeerLink + Send>)> {
-        let live: BTreeMap<HostId, u64> =
-            rows.iter().filter(|r| r.state == game::HOST_LIVE && !r.clean).map(|r| (r.id, r.boot)).collect();
-        let lower: Vec<HostId> = live.keys().copied().filter(|id| *id < self.me && !self.dialing.contains_key(id)).collect();
+    pub fn refresh(
+        &mut self,
+        rows: &[world_store::HostRow],
+    ) -> Vec<(HostId, Box<dyn PeerLink + Send>)> {
+        let live: BTreeMap<HostId, u64> = rows
+            .iter()
+            .filter(|r| r.state == game::HOST_LIVE && !r.clean)
+            .map(|r| (r.id, r.boot))
+            .collect();
+        let lower: Vec<HostId> = live
+            .keys()
+            .copied()
+            .filter(|id| *id < self.me && !self.dialing.contains_key(id))
+            .collect();
         *self.live.lock().unwrap_or_else(|e| e.into_inner()) = live;
         let mut out: Vec<(HostId, Box<dyn PeerLink + Send>)> = Vec::new();
         for other in lower {
             let (inbound, link_events) = crossbeam::channel::unbounded();
             let (cmds_tx, cmds) = crossbeam::channel::unbounded();
-            let (hello, store, wake) = (self.hello.clone(), self.store.clone(), self.wake_tx.clone());
+            let (hello, store, wake) =
+                (self.hello.clone(), self.store.clone(), self.wake_tx.clone());
             let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             self.dialing.insert(other, flag.clone());
             let spawned = std::thread::Builder::new()
                 .name(format!("peer-dial-{other}"))
                 .spawn(move || dial_peer(other, hello, store, inbound, cmds, wake, flag));
             if let Err(e) = spawned {
-                log::error!("[peers] starting the dialer of host {other}: {e}; tried again at the next read");
+                log::error!(
+                    "[peers] starting the dialer of host {other}: {e}; tried again at the next read"
+                );
                 self.dialing.remove(&other);
                 continue;
             }
             log::info!("[peers] host {other} found in the hosts table: dialing it");
             let wire: Box<dyn PeerWire + Send> = Box::new(DialerWire(cmds_tx));
-            out.push((other, Box::new(QuicPeerLink::new(other, wire, link_events, self.delay, self.wake_tx.clone()))));
+            out.push((
+                other,
+                Box::new(QuicPeerLink::new(
+                    other,
+                    wire,
+                    link_events,
+                    self.delay,
+                    self.wake_tx.clone(),
+                )),
+            ));
         }
         out
     }
@@ -835,11 +976,12 @@ impl PeerLinks {
     /// dialer now (`None`: `peer` is not dialed by this host). A dead boot's is dropped.
     #[doc(hidden)]
     pub fn dialing(&self, peer: HostId) -> Option<bool> {
-        self.dialing.get(&peer).map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+        self.dialing
+            .get(&peer)
+            .map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     pub fn cert_sha256(&self) -> &str {
         self.listener.cert_sha256()
     }
 }
-

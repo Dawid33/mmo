@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
-use crate::session::{world_systems_enabled, SessionResetExt};
+use crate::session::{SessionResetExt, world_systems_enabled};
 
 pub mod command;
 pub mod run;
@@ -59,7 +59,11 @@ pub struct ChatLog {
 
 impl ChatLog {
     fn push(&mut self, kind: ChatKind, text: String, now: f64) {
-        self.lines.push_back(ChatLine { kind, text, at: now });
+        self.lines.push_back(ChatLine {
+            kind,
+            text,
+            at: now,
+        });
         while self.lines.len() > CHAT_LOG_LINES {
             self.lines.pop_front();
         }
@@ -101,7 +105,13 @@ impl ChatLog {
     /// The lines shown while the box is closed: the newest
     /// [`CHAT_RECENT_LINES`] younger than [`CHAT_RECENT_SECS`], oldest first.
     pub fn recent(&self, now: f64) -> impl Iterator<Item = &ChatLine> {
-        let fresh = self.lines.iter().rev().take(CHAT_RECENT_LINES).take_while(|l| now - l.at < CHAT_RECENT_SECS).count();
+        let fresh = self
+            .lines
+            .iter()
+            .rev()
+            .take(CHAT_RECENT_LINES)
+            .take_while(|l| now - l.at < CHAT_RECENT_SECS)
+            .count();
         self.lines.iter().skip(self.lines.len() - fresh)
     }
 }
@@ -115,10 +125,15 @@ impl Plugin for ChatPlugin {
             .add_session_message_clear::<ui::ChatSubmitted>()
             .add_systems(
                 Update,
-                (ui::open_chat, ui::chat_keys, ui::chat_accept, run::run_commands, ui::sync_chat)
+                (
+                    ui::open_chat,
+                    ui::chat_keys,
+                    ui::chat_accept,
+                    run::run_commands,
+                    ui::sync_chat,
+                )
                     .chain()
                     .run_if(world_systems_enabled()),
             );
     }
 }
-

@@ -18,7 +18,7 @@ data "aws_route53_zone" "zone" {
 
 resource "aws_iam_user" "dns01" {
   name = var.iam_user_name
-  tags = { purpose = "cert-manager DNS-01 for ${var.vpn_domain} on orion" }  # no parentheses: IAM tag values reject them
+  tags = { purpose = "cert-manager DNS-01 for ${var.vpn_domain} on orion" } # no parentheses: IAM tag values reject them
 }
 
 resource "aws_iam_user_policy" "dns01" {

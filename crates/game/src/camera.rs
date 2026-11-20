@@ -1,6 +1,6 @@
+use glamx::{Mat4, Quat, Vec4};
 #[allow(unused)]
 use log::info;
-use glamx::{Mat4, Quat, Vec4};
 use rapier3d::math::Vector;
 use rapier3d::prelude::RigidBodyHandle;
 use std::f32::consts::FRAC_PI_2;
@@ -43,7 +43,7 @@ pub fn apply_look(yaw: f32, pitch: f32, dx: f32, dy: f32) -> (f32, f32) {
     let new_yaw = yaw - look_delta_rad(dx, LOOK_BASE_X);
     // Compare-and-select: a NaN pitch passes through unchanged (unreachable:
     // the deltas are sanitised above and the stored pitch was clamped).
-    let p =pitch - look_delta_rad(dy, LOOK_BASE_Y);
+    let p = pitch - look_delta_rad(dy, LOOK_BASE_Y);
     let new_pitch = if p < -PITCH_LIMIT {
         -PITCH_LIMIT
     } else if p > PITCH_LIMIT {
@@ -81,7 +81,9 @@ pub fn look_quat(yaw: f32, pitch: f32) -> Quat {
 /// from the matrix, as nalgebra's accessors do. Near/far describe `m[2][2]`
 /// and `m[3][2]` (row 2), so for a matrix built by `Camera::new` (projection
 /// times the OpenGL→wgpu depth remap) they are those of the remapped matrix.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, state_hash::StateHash,
+)]
 pub struct Perspective3 {
     matrix: Mat4,
 }
@@ -89,7 +91,10 @@ pub struct Perspective3 {
 impl Perspective3 {
     /// nalgebra `Perspective3::new`: fovy in radians.
     pub fn new(aspect: f32, fovy: f32, znear: f32, zfar: f32) -> Self {
-        assert!(zfar != znear, "The near-plane and far-plane must not be superimposed.");
+        assert!(
+            zfar != znear,
+            "The near-plane and far-plane must not be superimposed."
+        );
         assert!(aspect != 0.0, "The aspect ratio must not be zero.");
         let mut res = Self::from_matrix_unchecked(Mat4::IDENTITY);
         res.set_fovy(fovy);
@@ -153,7 +158,9 @@ impl Perspective3 {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, state_hash::StateHash)]
+#[derive(
+    Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, state_hash::StateHash,
+)]
 #[module(crate)]
 pub struct Camera {
     pub opengl_to_wgpu_matrix: Mat4,
@@ -174,11 +181,8 @@ impl Camera {
         Camera {
             proj_matrix: Perspective3::from_matrix_unchecked(
                 *Perspective3::new(
-                    ASPECT,
-                    FOV_Y,
-                    // 1 unit = 1/16 m: near 6 cm, far 125 m.
-                    1.0,
-                    2000.0,
+                    ASPECT, FOV_Y, // 1 unit = 1/16 m: near 6 cm, far 125 m.
+                    1.0, 2000.0,
                 )
                 .as_matrix()
                     * m,
@@ -203,11 +207,8 @@ impl Default for Camera {
             // nalgebra's `Matrix4::default()` is all zeros (glam's is identity).
             opengl_to_wgpu_matrix: Mat4::ZERO,
             proj_matrix: Perspective3::new(
-                ASPECT,
-                FOV_Y,
-                // 1 unit = 1/16 m: near 6 cm, far 125 m.
-                1.0,
-                2000.0,
+                ASPECT, FOV_Y, // 1 unit = 1/16 m: near 6 cm, far 125 m.
+                1.0, 2000.0,
             ),
             view_matrix: Default::default(),
             yaw: 0.0,
@@ -265,23 +266,33 @@ impl Controller for CameraController {
             // the walk (`tick_walkers_safe`).
             let walk = match ecs.walker.try_get(e_id) {
                 Some(w) if client.mode == crate::PlayMode::Adventure && !active => {
-                    Some(crate::steer(w, crate::feet_of(b.translation()), motion0.grounded, region, map))
+                    Some(crate::steer(
+                        w,
+                        crate::feet_of(b.translation()),
+                        motion0.grounded,
+                        region,
+                        map,
+                    ))
                 }
                 _ => None,
             };
             let (keys, yaw) = match walk {
                 Some((keys, yaw)) => (keys, yaw),
                 None => {
-                    let held = |key: Key| active && client.input.key_held(&key);
+                    // An open inventory holds the keys back (opened mid-walk, the
+                    // body stops; gravity still acts). Mouse look is the client's
+                    // to withhold: the pointer is free while it is open.
+                    let drive = active && !client.inventory_open;
+                    let held = |key: Key| drive && client.input.key_held(&key);
                     let keys = MoveKeys {
                         forward: held(Key::KeyW),
                         back: held(Key::KeyS),
                         left: held(Key::KeyA),
                         right: held(Key::KeyD),
-                        jump_pressed: active && client.input.key_pressed(&Key::Space),
+                        jump_pressed: drive && client.input.key_pressed(&Key::Space),
                         jump_held: held(Key::Space),
                         descend: held(Key::ShiftLeft),
-                        sprint: held(Key::ControlLeft),
+                        sprint: held(Key::ControlLeft) || held(Key::Sprint),
                     };
                     (keys, yaw0)
                 }
@@ -335,7 +346,9 @@ impl Controller for CameraController {
                         c.pitch = pitch0;
                     });
                     let r = crate::look_quat(yaw, 0.0);
-                    data.physics.bodies.mutate_body_safe(handle, move |b| b.set_next_kinematic_rotation(r));
+                    data.physics
+                        .bodies
+                        .mutate_body_safe(handle, move |b| b.set_next_kinematic_rotation(r));
                 }
                 continue;
             }
@@ -364,9 +377,9 @@ impl Controller for CameraController {
                 // entry as the translation site above (set_next_kinematic_
                 // rotation wakes + marks the body — all inside the footprint).
                 let r = crate::look_quat(new_yaw, new_pitch);
-                data.physics.bodies.mutate_body_safe(handle, move |b| {
-                    b.set_next_kinematic_rotation(r)
-                });
+                data.physics
+                    .bodies
+                    .mutate_body_safe(handle, move |b| b.set_next_kinematic_rotation(r));
             }
         }
     }

@@ -10,7 +10,9 @@
 
 use std::collections::VecDeque;
 
-use crate::{EntityId, GameEventKind, Intent, IntentMsg, IntentRefusal, IntentReply, RegionCoords, Tick};
+use crate::{
+    EntityId, GameEventKind, Intent, IntentMsg, IntentRefusal, IntentReply, RegionCoords, Tick,
+};
 
 /// Where a message sorts within its stamp. Within a class, by the message's own
 /// key, then arrival (one FIFO per source, so equal keys keep their source's order):
@@ -189,12 +191,19 @@ struct ReplyTie {
 }
 
 fn reply_tie(kind: &GameEventKind) -> Option<ReplyTie> {
-    let GameEventKind::Intent(IntentMsg::Reply(sent)) = kind else { return None };
+    let GameEventKind::Intent(IntentMsg::Reply(sent)) = kind else {
+        return None;
+    };
     let (intent, refusal) = match sent.reply {
         IntentReply::Granted(i) => (i, None),
         IntentReply::Refused(i, r) => (i, Some(r)),
     };
-    Some(ReplyTie { intent, refusal, hops: sent.hops, hint: sent.hint })
+    Some(ReplyTie {
+        intent,
+        refusal,
+        hops: sent.hops,
+        hint: sent.hint,
+    })
 }
 
 struct Entry {
@@ -222,14 +231,37 @@ impl SlotInbox {
         Self::default()
     }
 
-    fn add(&mut self, kind: GameEventKind, stamp: Tick, class: SlotClass, key: Key, tie: Option<ReplyTie>) {
+    fn add(
+        &mut self,
+        kind: GameEventKind,
+        stamp: Tick,
+        class: SlotClass,
+        key: Key,
+        tie: Option<ReplyTie>,
+    ) {
         self.add_entry(kind, stamp, class, key, tie, 0);
     }
 
-    fn add_entry(&mut self, kind: GameEventKind, stamp: Tick, class: SlotClass, key: Key, tie: Option<ReplyTie>, follower: u8) {
+    fn add_entry(
+        &mut self,
+        kind: GameEventKind,
+        stamp: Tick,
+        class: SlotClass,
+        key: Key,
+        tie: Option<ReplyTie>,
+        follower: u8,
+    ) {
         let arrival = self.next_arrival;
         self.next_arrival += 1;
-        self.entries.push_back(Entry { stamp, class, key, tie, follower, arrival, kind });
+        self.entries.push_back(Entry {
+            stamp,
+            class,
+            key,
+            tie,
+            follower,
+            arrival,
+            kind,
+        });
     }
 
     /// Buffer a message; its class and key come from the kind.
@@ -302,8 +334,13 @@ impl SlotInbox {
 
     /// The stamp and kind of the first buffered entry (in arrival order)
     /// matching `pred`: what a follower needs to address it.
-    pub fn holds_entry(&self, pred: impl Fn(&GameEventKind) -> bool) -> Option<(Tick, &GameEventKind)> {
-        self.entries.iter().find(|e| pred(&e.kind)).map(|e| (e.stamp, &e.kind))
+    pub fn holds_entry(
+        &self,
+        pred: impl Fn(&GameEventKind) -> bool,
+    ) -> Option<(Tick, &GameEventKind)> {
+        self.entries
+            .iter()
+            .find(|e| pred(&e.kind))
+            .map(|e| (e.stamp, &e.kind))
     }
 }
-

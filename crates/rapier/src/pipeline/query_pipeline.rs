@@ -590,11 +590,17 @@ impl<'a> QueryPipeline<'a> {
             (opposing >= 0.0, -opposing, part_id)
         };
         let better = |a: &(bool, Real, u32), b: &(bool, Real, u32)| {
-            a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)).is_lt()
+            a.0.cmp(&b.0)
+                .then(a.1.total_cmp(&b.1))
+                .then(a.2.cmp(&b.2))
+                .is_lt()
         };
         let (mut best_id, mut best_hit) = (id, hit);
         let mut best_rank = rank(id, &hit);
-        for part_id in self.bvh.leaves(|node: &BvhNode| node_toi(node, toi).is_some()) {
+        for part_id in self
+            .bvh
+            .leaves(|node: &BvhNode| node_toi(node, toi).is_some())
+        {
             if part_id == id {
                 continue;
             }
@@ -663,7 +669,8 @@ impl<'a> QueryPipeline<'a> {
             .dispatcher
             .cast_shapes(pos12, local_vel12, g1, g2, raw)
             .ok()??;
-        let normal1 = without_internal_edges(hit.normal1, hit.witness1, AxisMask::all(), Some(probe));
+        let normal1 =
+            without_internal_edges(hit.normal1, hit.witness1, AxisMask::all(), Some(probe));
         if normal1 != hit.normal1 {
             hit.normal1 = normal1;
             hit.normal2 = pos12.rotation.inverse() * -normal1;

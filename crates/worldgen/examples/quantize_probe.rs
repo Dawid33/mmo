@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use game::{BlockId, Chunk, ChunkCoords, Region, RegionCoords, SlopeShape, CHUNK_BLOCKS};
+use game::{BlockId, CHUNK_BLOCKS, Chunk, ChunkCoords, Region, RegionCoords, SlopeShape};
 
 macro_rules! size {
     ($value:expr) => {
@@ -29,7 +29,10 @@ fn ground_tops(chunks: &[(ChunkCoords, Chunk)]) -> BTreeMap<(i32, i32), (i32, Op
             if block.id == BlockId::AIR || block.id == WATER {
                 continue;
             }
-            let key = ((cc.x * CHUNK_BLOCKS + bx) as i32, (cc.z * CHUNK_BLOCKS + bz) as i32);
+            let key = (
+                (cc.x * CHUNK_BLOCKS + bx) as i32,
+                (cc.z * CHUNK_BLOCKS + bz) as i32,
+            );
             let y = cc.y * CHUNK_BLOCKS as i32 + by as i32;
             let slope = chunk.chisel.get(&bi).and_then(game::slope::classify);
             let e = out.entry(key).or_insert((y, slope));
@@ -42,7 +45,10 @@ fn ground_tops(chunks: &[(ChunkCoords, Chunk)]) -> BTreeMap<(i32, i32), (i32, Op
 }
 
 fn main() {
-    let args: Vec<i32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
+    let args: Vec<i32> = std::env::args()
+        .skip(1)
+        .filter_map(|a| a.parse().ok())
+        .collect();
     let rc = RegionCoords::new(*args.first().unwrap_or(&0), *args.get(1).unwrap_or(&0));
     let mats = worldgen::material::Materials {
         stone: BlockId(2),
@@ -64,7 +70,11 @@ fn main() {
                 .map(move |(sub_y, ch)| (ChunkCoords::new(cc.x, sub_y, cc.z), ch))
         })
         .collect();
-    println!("region {rc:?}: generate_region {:.0} ms, {} chunks", t.elapsed().as_secs_f64() * 1e3, base.len());
+    println!(
+        "region {rc:?}: generate_region {:.0} ms, {} chunks",
+        t.elapsed().as_secs_f64() * 1e3,
+        base.len()
+    );
 
     {
         let chunks = base;
@@ -95,13 +105,19 @@ fn main() {
         let (mut flat, mut walkable, mut jump, mut cliff, mut pairs) = (0, 0, 0, 0, 0);
         for (&(x, z), &(h, slope)) in &tops {
             for (dx, dz) in [(1, 0), (0, 1)] {
-                let Some(&(hn, slope_n)) = tops.get(&(x + dx, z + dz)) else { continue };
+                let Some(&(hn, slope_n)) = tops.get(&(x + dx, z + dz)) else {
+                    continue;
+                };
                 pairs += 1;
                 match (h - hn).abs() {
                     0 => flat += 1,
                     1 => {
                         // The high column's slope, and the low side from it.
-                        let (high, from) = if h > hn { (slope, [dx, dz]) } else { (slope_n, [-dx, -dz]) };
+                        let (high, from) = if h > hn {
+                            (slope, [dx, dz])
+                        } else {
+                            (slope_n, [-dx, -dz])
+                        };
                         if high.is_some_and(|s| game::walk_up(s, from)) {
                             walkable += 1;
                         } else {
@@ -122,14 +138,30 @@ fn main() {
         let wire = game::encode_packet(&packet).expect("encodes");
 
         println!("  chiseled blocks {chiseled:>6}   chisel data {chisel_mib:>6.2} MiB");
-        println!("  collider cells: {block_cells} block-scale, {half_cells} half-block, {voxel_cells} voxel-scale");
-        println!("  snapshot {:>6.2} MiB (colliders {:.2} MiB), wire {:.2} MiB, Region::from_chunks {build_ms:.0} ms",
-            size!(&**region.data()), size!(&region.data().data.physics.colliders), wire.len() as f64 / (1024.0 * 1024.0));
-        println!("  slopes {}: straight {straight}, outer {outer}, inner {inner}", straight + outer + inner);
-        println!("  neighbour rises ({pairs} pairs): flat {:.1}%  1 block walkable (slope) {:.1}%  1 block jump {:.1}%  cliff (2+) {:.1}%",
-            pct(flat), pct(walkable), pct(jump), pct(cliff));
+        println!(
+            "  collider cells: {block_cells} block-scale, {half_cells} half-block, {voxel_cells} voxel-scale"
+        );
+        println!(
+            "  snapshot {:>6.2} MiB (colliders {:.2} MiB), wire {:.2} MiB, Region::from_chunks {build_ms:.0} ms",
+            size!(&**region.data()),
+            size!(&region.data().data.physics.colliders),
+            wire.len() as f64 / (1024.0 * 1024.0)
+        );
+        println!(
+            "  slopes {}: straight {straight}, outer {outer}, inner {inner}",
+            straight + outer + inner
+        );
+        println!(
+            "  neighbour rises ({pairs} pairs): flat {:.1}%  1 block walkable (slope) {:.1}%  1 block jump {:.1}%  cliff (2+) {:.1}%",
+            pct(flat),
+            pct(walkable),
+            pct(jump),
+            pct(cliff)
+        );
         let rises = walkable + jump;
-        println!("  one-block rises walkable without a jump: {walkable}/{rises} ({:.1}%)",
-            100.0 * walkable as f64 / rises.max(1) as f64);
+        println!(
+            "  one-block rises walkable without a jump: {walkable}/{rises} ({:.1}%)",
+            100.0 * walkable as f64 / rises.max(1) as f64
+        );
     }
 }

@@ -9,8 +9,8 @@
 //! when deployed a real certificate for the page's hostname read from files and reloaded
 //! when they change (renewals; `client_cert`).
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use crossbeam::channel::Sender;
@@ -20,9 +20,9 @@ use log::{debug, info, warn};
 use quinn::rustls;
 use wtransport::{Endpoint, ServerConfig};
 
+use crate::ClientSink;
 use crate::client_cert::ClientCert;
 use crate::player_store::{HELLO_MAX_BYTES, HELLO_TIMEOUT};
-use crate::ClientSink;
 
 /// Max size of a single packet stream; region snapshots are the largest
 /// payloads and stay well under this.
@@ -32,11 +32,13 @@ const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 /// served without touching the endpoint), TLS 1.3 and the WebTransport ALPN only — what
 /// `wtransport::Identity`'s default TLS configuration sets, with ring named.
 fn server_config(bind: SocketAddr, cert: &ClientCert) -> ServerConfig {
-    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("ring supports TLS 1.3")
-        .with_no_client_auth()
-        .with_cert_resolver(cert.rustls_resolver());
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("ring supports TLS 1.3")
+    .with_no_client_auth()
+    .with_cert_resolver(cert.rustls_resolver());
     tls.alpn_protocols = vec![wtransport::tls::WEBTRANSPORT_ALPN.to_vec()];
     ServerConfig::builder()
         .with_bind_address(bind)
@@ -70,7 +72,9 @@ pub async fn serve(
             Ok(true) => {}
             // A deployed binary (a container image) has no source tree; its clients pin the
             // hash each `HostEndpoint` carries.
-            Ok(false) => debug!("no assets/ directory of the build's source tree: the dev cert-hash files are not written"),
+            Ok(false) => debug!(
+                "no assets/ directory of the build's source tree: the dev cert-hash files are not written"
+            ),
             Err(e) => warn!("could not write cert-hash file (browser clients need it): {e:?}"),
         }
     }
@@ -106,11 +110,10 @@ async fn accept_loop(
             };
             // The handshake comes first: no session (and no sink) exists until
             // the connection's Hello has resolved to a player.
-            let hello =
-                match web_hello(&session, &players, &auth).await {
-                    Ok(resolved) => resolved,
-                    Err(why) => return refuse(&session, &why).await,
-                };
+            let hello = match web_hello(&session, &players, &auth).await {
+                Ok(resolved) => resolved,
+                Err(why) => return refuse(&session, &why).await,
+            };
             let (player, ticket) = (hello.player, hello.ticket.clone());
             // The id exists only now that the session is authenticated; the sink is
             // claimed in the same step, so a replayed ticket never replaces a live one.
@@ -122,7 +125,11 @@ async fn accept_loop(
                 return refuse(&session, &why).await;
             }
             info!("webtransport client {id} connected (player {})", player.0);
-            game::perf_event!("client_connected", "client={id} player={} transport=webtransport", player.0);
+            game::perf_event!(
+                "client_connected",
+                "client={id} player={} transport=webtransport",
+                player.0
+            );
 
             loop {
                 let stream = match session.accept_uni().await {
@@ -148,12 +155,20 @@ async fn accept_loop(
                 }
                 match game::decode_packet::<ClientPacket>(&buf) {
                     Ok(packet) => {
-                        crate::player_store::forward_packet(&sinks, &send, id, |live| live.same_connection(&mine), packet);
+                        crate::player_store::forward_packet(
+                            &sinks,
+                            &send,
+                            id,
+                            |live| live.same_connection(&mine),
+                            packet,
+                        );
                     }
                     Err(e) => warn!("failed deserializing packet {e:?}"),
                 }
             }
-            crate::player_store::release_sink(&sinks, &send, id, |live| live.same_connection(&mine));
+            crate::player_store::release_sink(&sinks, &send, id, |live| {
+                live.same_connection(&mine)
+            });
             if let Some(ticket) = &ticket {
                 auth.session_closed(ticket);
             }
@@ -173,7 +188,10 @@ async fn web_hello(
     auth: &crate::auth_edge::Authenticator,
 ) -> Result<crate::player_store::HelloSession, String> {
     let first = tokio::time::timeout(HELLO_TIMEOUT, async {
-        let stream = session.accept_uni().await.map_err(|e| format!("no first packet: {e}"))?;
+        let stream = session
+            .accept_uni()
+            .await
+            .map_err(|e| format!("no first packet: {e}"))?;
         let mut buf = Vec::new();
         let mut limited = tokio::io::AsyncReadExt::take(stream, (HELLO_MAX_BYTES as u64) + 1);
         tokio::io::AsyncReadExt::read_to_end(&mut limited, &mut buf)
@@ -182,7 +200,8 @@ async fn web_hello(
         if buf.len() > HELLO_MAX_BYTES {
             return Err(format!("first packet over {HELLO_MAX_BYTES} bytes"));
         }
-        game::decode_packet::<ClientPacket>(&buf).map_err(|e| format!("first packet does not decode: {e}"))
+        game::decode_packet::<ClientPacket>(&buf)
+            .map_err(|e| format!("first packet does not decode: {e}"))
     })
     .await
     .map_err(|_| format!("no Hello within {HELLO_TIMEOUT:?}"))??;
@@ -191,11 +210,16 @@ async fn web_hello(
 
 /// Tell the client why (best effort), then close the session.
 async fn refuse(session: &wtransport::Connection, why: &str) {
-    warn!("refusing a webtransport session from {}: {why}", session.remote_address());
+    warn!(
+        "refusing a webtransport session from {}: {why}",
+        session.remote_address()
+    );
     if let Ok(packet) = game::encode_packet(&game::ServerPacket::Refused(why.to_string())) {
         let _ = tokio::time::timeout(REFUSE_FLUSH, async {
             let mut stream = session.open_uni().await.ok()?.await.ok()?;
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &packet).await.ok()?;
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &packet)
+                .await
+                .ok()?;
             stream.finish().await.ok()
         })
         .await;
@@ -213,14 +237,21 @@ pub fn cert_hash_file_names(name: &str) -> Vec<String> {
     if name.trim().is_empty() {
         vec!["webtransport-cert-hash.json".to_string()]
     } else {
-        vec![format!("webtransport-cert-hash-{}.json", crate::file_word(name))]
+        vec![format!(
+            "webtransport-cert-hash-{}.json",
+            crate::file_word(name)
+        )]
     }
 }
 
 /// Dev-mode CA substitute: the page fetches this (wasm-server-runner serves
 /// assets/ over HTTP) and passes the hash to serverCertificateHashes. `Ok(false)`: no
 /// source tree here, nothing written (see [`write_cert_hash_files_into`]).
-fn write_cert_hash_file(hex: &str, port: u16, host_name: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+fn write_cert_hash_file(
+    hex: &str,
+    port: u16,
+    host_name: &str,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Resolve the repo-root assets dir from the crate location, not the CWD:
     // the binary is run from the repo root but tests run from crates/server.
     // (env! bakes a build-machine path; acceptable for this localhost-dev file.)
@@ -258,7 +289,10 @@ mod cert_tests {
     fn no_assets_directory_writes_nothing() {
         let dir = std::env::temp_dir().join(format!("cert-hash-missing-{}", std::process::id()));
         assert!(!dir.exists());
-        assert!(!write_cert_hash_files_into(&dir, "ab", 6467, "").expect("a missing directory is not an error"));
+        assert!(
+            !write_cert_hash_files_into(&dir, "ab", 6467, "")
+                .expect("a missing directory is not an error")
+        );
         assert!(!dir.exists(), "nothing created");
     }
 }

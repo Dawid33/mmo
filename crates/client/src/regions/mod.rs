@@ -4,5 +4,5 @@
 //! harnesses, wasm) or on one thread per region (native play).
 //! Plan: `docs/superpowers/plans/2026-11-02-client-region-threads.md`.
 pub mod clock;
-pub mod runner;
 pub mod host;
+pub mod runner;

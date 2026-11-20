@@ -92,13 +92,18 @@ fn check_artifact_file(terrain: &Path) -> Result<(), String> {
 }
 
 fn check_version(v: u32) -> Result<(), String> {
-    use crate::forged::{ArtifactError, ARTIFACT_VERSION};
+    use crate::forged::{ARTIFACT_VERSION, ArtifactError};
     if v == ARTIFACT_VERSION {
         Ok(())
     } else if v < ARTIFACT_VERSION {
-        Err(format!("needs re-forge: {}", ArtifactError::OldVersion { found: v }))
+        Err(format!(
+            "needs re-forge: {}",
+            ArtifactError::OldVersion { found: v }
+        ))
     } else {
-        Err(format!("world file version {v} is newer than the {ARTIFACT_VERSION} this build reads"))
+        Err(format!(
+            "world file version {v} is newer than the {ARTIFACT_VERSION} this build reads"
+        ))
     }
 }
 
@@ -109,12 +114,19 @@ fn read_meta(path: &Path) -> Result<WorldMeta, String> {
     let unreadable = || format!("{META_FILE} is missing or unreadable");
     let bytes = std::fs::read(path).map_err(|_| unreadable())?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| unreadable())?;
-    match value.get("format_version").and_then(serde_json::Value::as_u64) {
+    match value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+    {
         Some(v) if v < u64::from(META_FORMAT) => {
-            return Err(format!("needs re-forge: {META_FILE} format {v} is older than {META_FORMAT}: re-forge this world"))
+            return Err(format!(
+                "needs re-forge: {META_FILE} format {v} is older than {META_FORMAT}: re-forge this world"
+            ));
         }
         Some(v) if v > u64::from(META_FORMAT) => {
-            return Err(format!("{META_FILE} format {v} is newer than the {META_FORMAT} this build reads"))
+            return Err(format!(
+                "{META_FILE} format {v} is newer than the {META_FORMAT} this build reads"
+            ));
         }
         _ => {}
     }
@@ -161,11 +173,24 @@ pub fn list(root: &Path) -> Vec<WorldEntry> {
                 .map(drop)
                 .and_then(|()| check_meta(&meta))
                 .and_then(|()| check_terrain(&terrain, &store, &meta));
-            found.push(WorldEntry { dir, terrain, store, preview, meta, legacy: false, loadable });
+            found.push(WorldEntry {
+                dir,
+                terrain,
+                store,
+                preview,
+                meta,
+                legacy: false,
+                loadable,
+            });
         }
     }
     found.sort_by(|a, b| {
-        let key = |e: &WorldEntry| e.meta.as_ref().map(|m| m.created_utc.clone()).unwrap_or_default();
+        let key = |e: &WorldEntry| {
+            e.meta
+                .as_ref()
+                .map(|m| m.created_utc.clone())
+                .unwrap_or_default()
+        };
         key(b).cmp(&key(a)).then_with(|| a.dir.cmp(&b.dir))
     });
     // Listed while its forge file waits for import OR once the server has
@@ -177,7 +202,11 @@ pub fn list(root: &Path) -> Vec<WorldEntry> {
             dir: root.to_path_buf(),
             // A store-only legacy world has no `world.json` to check: the
             // server checks the stored artifact when it opens the store.
-            loadable: if legacy.is_file() { check_artifact_file(&legacy) } else { Ok(()) },
+            loadable: if legacy.is_file() {
+                check_artifact_file(&legacy)
+            } else {
+                Ok(())
+            },
             store: legacy_store,
             terrain: legacy,
             preview: None,
@@ -217,10 +246,18 @@ pub fn staging_dir(root: &Path, slug: &str) -> PathBuf {
 
 /// Writes the world into [`staging_dir`], then renames it to `root/<slug>/`.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn create(root: &Path, meta: &WorldMeta, artifact: &WorldArtifact, preview_png: &[u8]) -> io::Result<PathBuf> {
+pub fn create(
+    root: &Path,
+    meta: &WorldMeta,
+    artifact: &WorldArtifact,
+    preview_png: &[u8],
+) -> io::Result<PathBuf> {
     let tmp = staging_dir(root, &meta.slug);
     if root.join(&meta.slug).exists() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists", root.join(&meta.slug).display())));
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} exists", root.join(&meta.slug).display()),
+        ));
     }
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
@@ -241,10 +278,16 @@ pub fn finish_staged(root: &Path, meta: &WorldMeta, preview_png: &[u8]) -> io::R
     let fin = root.join(&meta.slug);
     let written = (|| {
         if fin.exists() {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists", fin.display())));
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists", fin.display()),
+            ));
         }
         if !tmp.join(TERRAIN_FILE).is_file() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} has no terrain", tmp.display())));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} has no terrain", tmp.display()),
+            ));
         }
         std::fs::write(tmp.join(PREVIEW_FILE), preview_png)?;
         let json = serde_json::to_vec_pretty(meta).map_err(io::Error::other)?;
@@ -260,10 +303,16 @@ pub fn finish_staged(root: &Path, meta: &WorldMeta, preview_png: &[u8]) -> io::R
 /// Removes a world's directory. The legacy `default.world` is never deleted.
 pub fn delete(root: &Path, entry: &WorldEntry) -> io::Result<()> {
     if entry.legacy {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the legacy default world is not deletable"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the legacy default world is not deletable",
+        ));
     }
     if entry.dir.parent() != Some(root) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "world is not under the worlds directory"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "world is not under the worlds directory",
+        ));
     }
     std::fs::remove_dir_all(&entry.dir)
 }
@@ -274,7 +323,11 @@ pub fn delete(root: &Path, entry: &WorldEntry) -> io::Result<()> {
 pub fn size_text(width_m: f64, height_m: f64) -> String {
     let longer = width_m.max(height_m);
     let km = |side: f64, whole: bool| {
-        if whole && side >= 1000.0 { format!("{}", (side / 1000.0).round() as u64) } else { format!("{:.1}", side / 1000.0) }
+        if whole && side >= 1000.0 {
+            format!("{}", (side / 1000.0).round() as u64)
+        } else {
+            format!("{:.1}", side / 1000.0)
+        }
     };
     if longer >= 10_000.0 {
         format!("{} × {} km", km(width_m, true), km(height_m, true))
@@ -292,4 +345,3 @@ pub fn knobs_map(knobs: &Knobs) -> BTreeMap<String, f64> {
         .filter_map(|s| knobs.get(s.key).map(|v| (s.key.to_string(), v)))
         .collect()
 }
-

@@ -28,7 +28,9 @@ use std::time::Duration;
 
 use crossbeam::channel::{Receiver, Sender};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use quinn::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
 use quinn::rustls::crypto::{CryptoProvider, ring};
 use quinn::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use quinn::rustls::{self, DigitallySignedStruct, SignatureScheme};
@@ -36,7 +38,10 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream, TransportConfig};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-pub use cert::{SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, ct_eq, pin_beside, read_cert_hash, service_token_from_env};
+pub use cert::{
+    SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, ct_eq, pin_beside, read_cert_hash,
+    service_token_from_env,
+};
 pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
 pub use target::LinkTarget;
 
@@ -71,7 +76,9 @@ pub use target::LinkTarget;
 /// 13: Elastic 5 — moving occupied land in place: `CoordMsg::BeginCut.moves`, `MoveLand`,
 /// `ExpectLand`, `MoveOff`, `CutFailure::MoveRefused`, `Reliable::PlayerMove.place`,
 /// `ServerPacket::LandMoving`.
-pub const LINK_PROTOCOL_VERSION: u32 = 13;
+/// 14: a sampled login order may cross the coordinator's durable mailbox as the
+/// append-only `CoordMsg::LoginTraced` variant; `CoordMsg::Login` remains decodable.
+pub const LINK_PROTOCOL_VERSION: u32 = 14;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;
@@ -106,7 +113,11 @@ pub enum PeerRole {
     /// `reg` (its `hosts` row's, one more than any before it): a boot that registered later
     /// has the higher one, so a listener keeping one peer per ordinal can tell a stale
     /// process (about to be fenced) from its replacement — whatever it claims or loses.
-    Host { id: game::HostId, boot: u64, reg: u64 },
+    Host {
+        id: game::HostId,
+        boot: u64,
+        reg: u64,
+    },
     /// Unsent since version 12 (the login service reaches the coordinator over HTTPS, and a
     /// role-`all` server's login routes too); kept for the wire's order.
     Login,
@@ -179,7 +190,9 @@ pub struct PeerSenders<Out> {
 
 impl<Out> Clone for PeerSenders<Out> {
     fn clone(&self) -> Self {
-        Self { peers: self.peers.clone() }
+        Self {
+            peers: self.peers.clone(),
+        }
     }
 }
 
@@ -223,7 +236,8 @@ pub struct LinkListener {
 
 impl Drop for LinkListener {
     fn drop(&mut self) {
-        self.endpoint.close(CLOSE_NORMAL.into(), b"listener stopped");
+        self.endpoint
+            .close(CLOSE_NORMAL.into(), b"listener stopped");
         if let Some(rt) = self.runtime.take() {
             drop(rt);
         }
@@ -233,7 +247,9 @@ impl Drop for LinkListener {
 fn transport() -> Arc<TransportConfig> {
     let mut t = TransportConfig::default();
     t.keep_alive_interval(Some(LINK_KEEP_ALIVE));
-    t.max_idle_timeout(Some(LINK_IDLE_TIMEOUT.try_into().expect("idle timeout fits")));
+    t.max_idle_timeout(Some(
+        LINK_IDLE_TIMEOUT.try_into().expect("idle timeout fits"),
+    ));
     // One bidirectional stream (the dialer's) and no unidirectional ones: quinn's defaults
     // (100 + 100 streams, ~1.25 MB each) would let an unauthenticated peer make the other
     // end buffer hundreds of MB during the hello.
@@ -245,7 +261,11 @@ fn transport() -> Arc<TransportConfig> {
 }
 
 fn runtime(name: &str) -> io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name(name).enable_all().build()
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name(name)
+        .enable_all()
+        .build()
 }
 
 /// Why a hello is refused, if it is: `token` and `world` are the listener's.
@@ -254,13 +274,21 @@ fn check_hello(hello: &LinkHello, token: &str, world: &str) -> Result<(), String
         return Err("bad service token".to_string());
     }
     if hello.protocol != LINK_PROTOCOL_VERSION {
-        return Err(format!("link protocol {} != {LINK_PROTOCOL_VERSION}", hello.protocol));
+        return Err(format!(
+            "link protocol {} != {LINK_PROTOCOL_VERSION}",
+            hello.protocol
+        ));
     }
     // Exact: the empty id (no `VOXEL_WORLD_ID`) matches only itself, never a named world.
     if hello.world != world {
-        return Err(format!("the peer serves world {:?}, this listener world {world:?}", hello.world));
+        return Err(format!(
+            "the peer serves world {:?}, this listener world {world:?}",
+            hello.world
+        ));
     }
-    if hello.region_blocks != game::REGION_BLOCKS as u32 || hello.chunk_blocks != game::CHUNK_BLOCKS as u32 {
+    if hello.region_blocks != game::REGION_BLOCKS as u32
+        || hello.chunk_blocks != game::CHUNK_BLOCKS as u32
+    {
         return Err(format!(
             "world dials differ: peer region/chunk blocks {}/{}, ours {}/{}",
             hello.region_blocks,
@@ -282,25 +310,33 @@ impl LinkListener {
         token: String,
         world: String,
         cert_hash_file: Option<std::path::PathBuf>,
-    ) -> io::Result<(LinkListener, Receiver<(PeerId, LinkEvent<In>)>, PeerSenders<Out>)>
+    ) -> io::Result<(
+        LinkListener,
+        Receiver<(PeerId, LinkEvent<In>)>,
+        PeerSenders<Out>,
+    )>
     where
         In: DeserializeOwned + Send + 'static,
         Out: Serialize + Send + 'static,
     {
         if token.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "the service token is empty"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the service token is empty",
+            ));
         }
         let id = cert::load_or_generate(cert_hash_file.as_deref())?;
         let cert_sha256 = cert::cert_sha256_hex(&id.cert_der);
-        let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(io::Error::other)?
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from(id.cert_der)],
-                PrivatePkcs8KeyDer::from(id.key_der).into(),
-            )
-            .map_err(io::Error::other)?;
+        let mut crypto =
+            rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .map_err(io::Error::other)?
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(id.cert_der)],
+                    PrivatePkcs8KeyDer::from(id.key_der).into(),
+                )
+                .map_err(io::Error::other)?;
         crypto.alpn_protocols = vec![LINK_ALPN.to_vec()];
         let mut config = quinn::ServerConfig::with_crypto(Arc::new(
             QuicServerConfig::try_from(crypto).map_err(io::Error::other)?,
@@ -315,7 +351,9 @@ impl LinkListener {
         let addr = endpoint.local_addr()?;
         let (event_tx, event_rx) = crossbeam::channel::unbounded();
         let peers: Arc<Mutex<BTreeMap<PeerId, UnboundedSender<Out>>>> = Arc::default();
-        let senders = PeerSenders { peers: peers.clone() };
+        let senders = PeerSenders {
+            peers: peers.clone(),
+        };
         let accept_endpoint = endpoint.clone();
         runtime.spawn(async move {
             let next_peer = Arc::new(AtomicU64::new(1));
@@ -340,7 +378,16 @@ impl LinkListener {
             }
         });
         log::info!("[svc-link] listening on {addr} (cert sha256 {cert_sha256})");
-        Ok((LinkListener { runtime: Some(runtime), endpoint, addr, cert_sha256 }, event_rx, senders))
+        Ok((
+            LinkListener {
+                runtime: Some(runtime),
+                endpoint,
+                addr,
+                cert_sha256,
+            },
+            event_rx,
+            senders,
+        ))
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -371,9 +418,13 @@ async fn serve_peer<In, Out>(
     Out: Serialize + Send + 'static,
 {
     let handshake = tokio::time::timeout(LINK_HELLO_TIMEOUT, async {
-        let (send, mut recv) = connection.accept_bi().await.map_err(|e| format!("no hello stream: {e}"))?;
-        let hello: LinkHello =
-            frame::read_frame(&mut recv, LINK_HELLO_MAX_BYTES, true).await.map_err(|e| format!("hello: {e}"))?;
+        let (send, mut recv) = connection
+            .accept_bi()
+            .await
+            .map_err(|e| format!("no hello stream: {e}"))?;
+        let hello: LinkHello = frame::read_frame(&mut recv, LINK_HELLO_MAX_BYTES, true)
+            .await
+            .map_err(|e| format!("hello: {e}"))?;
         Ok::<_, String>((send, recv, hello))
     })
     .await;
@@ -444,7 +495,9 @@ where
             match sent {
                 Ok(()) => {}
                 // Too big to send: drop that message, keep the link.
-                Err(FrameError::Unsendable(why)) => log::error!("[svc-link] dropping an unsendable message: {why}"),
+                Err(FrameError::Unsendable(why)) => {
+                    log::error!("[svc-link] dropping an unsendable message: {why}")
+                }
                 Err(e) => return e.to_string(),
             }
         }
@@ -478,10 +531,15 @@ impl ServerCertVerifier for PinnedCert {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if cert::ct_eq(cert::cert_sha256_hex(end_entity).as_bytes(), self.pin.as_bytes()) {
+        if cert::ct_eq(
+            cert::cert_sha256_hex(end_entity).as_bytes(),
+            self.pin.as_bytes(),
+        ) {
             Ok(ServerCertVerified::assertion())
         } else {
-            Err(rustls::Error::General("service link certificate does not match the pinned sha256".into()))
+            Err(rustls::Error::General(
+                "service link certificate does not match the pinned sha256".into(),
+            ))
         }
     }
 
@@ -491,7 +549,12 @@ impl ServerCertVerifier for PinnedCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -500,11 +563,18 @@ impl ServerCertVerifier for PinnedCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -513,12 +583,17 @@ impl ServerCertVerifier for PinnedCert {
 /// HTTP API dials with `h2`; the QUIC link below with its own).
 pub fn pinned_client_config(pin: &str) -> io::Result<rustls::ClientConfig> {
     let provider = Arc::new(ring::default_provider());
-    Ok(rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(io::Error::other)?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinnedCert { pin: pin.to_string(), provider }))
-        .with_no_client_auth())
+    Ok(
+        rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .map_err(io::Error::other)?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedCert {
+                pin: pin.to_string(),
+                provider,
+            }))
+            .with_no_client_auth(),
+    )
 }
 
 /// How long a [`pinned_http2_client`] waits for a new connection (TCP and TLS) to the
@@ -552,7 +627,9 @@ pub fn pinned_http2_client(pin: &str) -> io::Result<reqwest::Client> {
         .http2_prior_knowledge()
         .no_proxy()
         .connect_timeout(std::time::Duration::from_millis(HTTP_CONNECT_TIMEOUT_MS))
-        .http2_keep_alive_interval(std::time::Duration::from_millis(HTTP_KEEP_ALIVE_INTERVAL_MS))
+        .http2_keep_alive_interval(std::time::Duration::from_millis(
+            HTTP_KEEP_ALIVE_INTERVAL_MS,
+        ))
         .http2_keep_alive_timeout(std::time::Duration::from_millis(HTTP_KEEP_ALIVE_TIMEOUT_MS))
         .http2_keep_alive_while_idle(true)
         .build()
@@ -574,15 +651,22 @@ pub fn error_chain(e: &dyn std::error::Error) -> String {
 /// A rustls server config for a TLS listener over the identity stored beside `hash_file`
 /// (`<file>.cert` / `.key`, generated when missing, as [`LinkListener::bind`]), ALPN `alpn`, ring
 /// provider. Returns the config and the certificate's SHA-256 pin (hex).
-pub fn pinned_server_config(hash_file: &std::path::Path, alpn: &[&[u8]]) -> io::Result<(Arc<rustls::ServerConfig>, String)> {
+pub fn pinned_server_config(
+    hash_file: &std::path::Path,
+    alpn: &[&[u8]],
+) -> io::Result<(Arc<rustls::ServerConfig>, String)> {
     let id = cert::load_or_generate(Some(hash_file))?;
     let pin = cert::cert_sha256_hex(&id.cert_der);
-    let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(io::Error::other)?
-        .with_no_client_auth()
-        .with_single_cert(vec![CertificateDer::from(id.cert_der)], PrivatePkcs8KeyDer::from(id.key_der).into())
-        .map_err(io::Error::other)?;
+    let mut crypto =
+        rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(io::Error::other)?
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(id.cert_der)],
+                PrivatePkcs8KeyDer::from(id.key_der).into(),
+            )
+            .map_err(io::Error::other)?;
     crypto.alpn_protocols = alpn.iter().map(|a| a.to_vec()).collect();
     Ok((Arc::new(crypto), pin))
 }
@@ -590,8 +674,9 @@ pub fn pinned_server_config(hash_file: &std::path::Path, alpn: &[&[u8]]) -> io::
 fn client_config(pin: &str) -> io::Result<quinn::ClientConfig> {
     let mut crypto = pinned_client_config(pin)?;
     crypto.alpn_protocols = vec![LINK_ALPN.to_vec()];
-    let mut config =
-        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).map_err(io::Error::other)?));
+    let mut config = quinn::ClientConfig::new(Arc::new(
+        QuicClientConfig::try_from(crypto).map_err(io::Error::other)?,
+    ));
     config.transport_config(transport());
     Ok(config)
 }
@@ -670,16 +755,26 @@ async fn attempt(
     config: &quinn::ClientConfig,
     hello: &LinkHello,
 ) -> Result<(Connection, SendStream, RecvStream), String> {
-    let connecting = endpoint.connect_with(config.clone(), addr, LINK_SERVER_NAME).map_err(|e| e.to_string())?;
+    let connecting = endpoint
+        .connect_with(config.clone(), addr, LINK_SERVER_NAME)
+        .map_err(|e| e.to_string())?;
     let connection = tokio::time::timeout(LINK_HELLO_TIMEOUT, connecting)
         .await
         .map_err(|_| "connect timed out".to_string())?
         .map_err(|e| format!("connect: {e}"))?;
     let handshake = tokio::time::timeout(LINK_HELLO_TIMEOUT, async {
         let (mut send, mut recv) = connection.open_bi().await.map_err(|e| e.to_string())?;
-        frame::write_frame(&mut send, hello).await.map_err(|e| e.to_string())?;
-        let ok: bool = frame::read_frame(&mut recv, LINK_HELLO_MAX_BYTES, true).await.map_err(|e| e.to_string())?;
-        if ok { Ok((send, recv)) } else { Err("hello not accepted".to_string()) }
+        frame::write_frame(&mut send, hello)
+            .await
+            .map_err(|e| e.to_string())?;
+        let ok: bool = frame::read_frame(&mut recv, LINK_HELLO_MAX_BYTES, true)
+            .await
+            .map_err(|e| e.to_string())?;
+        if ok {
+            Ok((send, recv))
+        } else {
+            Err("hello not accepted".to_string())
+        }
     })
     .await;
     match handshake {
@@ -690,10 +785,11 @@ async fn attempt(
                 _ => "hello timed out".to_string(),
             };
             // A refusal arrives as the peer's close reason; prefer it over the stream error.
-            let why = match tokio::time::timeout(Duration::from_millis(500), connection.closed()).await {
-                Ok(closed) => closed.to_string(),
-                Err(_) => why,
-            };
+            let why =
+                match tokio::time::timeout(Duration::from_millis(500), connection.closed()).await {
+                    Ok(closed) => closed.to_string(),
+                    Err(_) => why,
+                };
             Err(why)
         }
     }
@@ -721,18 +817,27 @@ async fn dial_loop<In, Out>(
     let mut last_dial_log: Option<std::time::Instant> = None;
     while !stop.load(Ordering::SeqCst) {
         let tried = async {
-            let addrs = target.resolve_all().await.map_err(|e| format!("resolve {target}: {e}"))?;
+            let addrs = target
+                .resolve_all()
+                .await
+                .map_err(|e| format!("resolve {target}: {e}"))?;
             let Some(&first) = addrs.first() else {
                 return Err(format!("resolve {target}: no address"));
             };
             if dialer.is_none() {
-                let bind: SocketAddr = if first.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0u16; 8], 0).into() };
+                let bind: SocketAddr = if first.is_ipv4() {
+                    ([0, 0, 0, 0], 0).into()
+                } else {
+                    ([0u16; 8], 0).into()
+                };
                 let parts = Endpoint::client(bind).and_then(|e| Ok((e, client_config(&pin)?)));
                 dialer = Some(parts.map_err(|e| format!("dialer setup failed: {e}"))?);
             }
             let (endpoint, config) = dialer.as_ref().expect("bound above");
             // Every address in turn, starting after the one that last failed.
-            let start = last.and_then(|l| addrs.iter().position(|a| *a == l)).map_or(0, |i| i + 1);
+            let start = last
+                .and_then(|l| addrs.iter().position(|a| *a == l))
+                .map_or(0, |i| i + 1);
             let mut whys: Vec<String> = Vec::new();
             for k in 0..addrs.len() {
                 let addr = addrs[(start + k) % addrs.len()];
@@ -740,7 +845,11 @@ async fn dial_loop<In, Out>(
                     Ok(up) => return Ok((addr, up)),
                     Err(why) => {
                         last = Some(addr);
-                        whys.push(if addrs.len() == 1 { why } else { format!("{addr}: {why}") });
+                        whys.push(if addrs.len() == 1 {
+                            why
+                        } else {
+                            format!("{addr}: {why}")
+                        });
                     }
                 }
             }
@@ -770,9 +879,10 @@ async fn dial_loop<In, Out>(
                     break;
                 }
                 let deliver_events = events.clone();
-                let reason =
-                    pump(connection.clone(), send, recv, rx, move |m: In| deliver_events.send(LinkEvent::Msg(m)).is_ok())
-                        .await;
+                let reason = pump(connection.clone(), send, recv, rx, move |m: In| {
+                    deliver_events.send(LinkEvent::Msg(m)).is_ok()
+                })
+                .await;
                 slot.lock().unwrap().take();
                 connection.close(CLOSE_NORMAL.into(), b"link ended");
                 log::warn!("[svc-link] link to {target} ({addr}) down: {reason}");
@@ -785,11 +895,15 @@ async fn dial_loop<In, Out>(
             }
             Err(why) => {
                 unlogged_failures += 1;
-                if last_dial_log.is_none_or(|t| t.elapsed() >= Duration::from_secs(LINK_DIAL_LOG_EVERY_SECS)) {
+                if last_dial_log
+                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(LINK_DIAL_LOG_EVERY_SECS))
+                {
                     if last_dial_log.is_none() {
                         log::warn!("[svc-link] dial {target} failed: {why}");
                     } else {
-                        log::warn!("[svc-link] dial {target} failed: {why} ({unlogged_failures} failed attempts since the last line)");
+                        log::warn!(
+                            "[svc-link] dial {target} failed: {why} ({unlogged_failures} failed attempts since the last line)"
+                        );
                     }
                     last_dial_log = Some(std::time::Instant::now());
                     unlogged_failures = 0;
@@ -812,4 +926,3 @@ async fn dial_loop<In, Out>(
         endpoint.close(CLOSE_NORMAL.into(), b"dialer stopped");
     }
 }
-

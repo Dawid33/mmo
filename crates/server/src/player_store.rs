@@ -78,7 +78,11 @@ pub enum Resolving {
     /// Answered already (taken by the first [`Resolving::poll`] that sees it).
     Done(Option<Resolved>),
     /// Asked of the world store's thread.
-    Store(crossbeam::channel::Receiver<Result<(PlayerId, Option<PlayerRecord>), world_store::StoreError>>),
+    Store(
+        crossbeam::channel::Receiver<
+            Result<(PlayerId, Option<PlayerRecord>), world_store::StoreError>,
+        >,
+    ),
 }
 
 impl Resolving {
@@ -90,9 +94,9 @@ impl Resolving {
             Resolving::Store(rx) => match rx.try_recv() {
                 Ok(answer) => Some(answer.map_err(io::Error::other)),
                 Err(crossbeam::channel::TryRecvError::Empty) => None,
-                Err(crossbeam::channel::TryRecvError::Disconnected) => {
-                    Some(Err(io::Error::other("the world store stopped before it answered")))
-                }
+                Err(crossbeam::channel::TryRecvError::Disconnected) => Some(Err(io::Error::other(
+                    "the world store stopped before it answered",
+                ))),
             },
         }
     }
@@ -167,7 +171,9 @@ pub fn seat_observer<V>(
     match sinks.entry(id) {
         dashmap::mapref::entry::Entry::Occupied(mut slot) => {
             if is_home(slot.get()) {
-                log::info!("[server] client {id}: an observer connection refused: its home session is live here");
+                log::info!(
+                    "[server] client {id}: an observer connection refused: its home session is live here"
+                );
                 return Err(sink);
             }
             let older = slot.insert(sink);
@@ -199,7 +205,9 @@ pub fn forward_packet<V>(
             true
         }
         _ => {
-            log::debug!("[server] a packet of client {id}'s replaced or refused connection dropped");
+            log::debug!(
+                "[server] a packet of client {id}'s replaced or refused connection dropped"
+            );
             false
         }
     }
@@ -235,7 +243,11 @@ pub fn release_sink<V>(
 /// holds `id` yet. `Err` hands the sink back: the id is live (a replayed ticket), the caller
 /// refuses that connection with [`REFUSE_ALREADY_CONNECTED`] and sends no `ClientConnected`,
 /// no `ClientDisconnected` and no `session_ended` for it (the live session owns all three).
-pub fn claim_sink<V>(sinks: &dashmap::DashMap<game::ClientId, V>, id: game::ClientId, sink: V) -> Result<(), V> {
+pub fn claim_sink<V>(
+    sinks: &dashmap::DashMap<game::ClientId, V>,
+    id: game::ClientId,
+    sink: V,
+) -> Result<(), V> {
     match sinks.entry(id) {
         dashmap::mapref::entry::Entry::Occupied(_) => Err(sink),
         dashmap::mapref::entry::Entry::Vacant(slot) => {
@@ -252,7 +264,9 @@ pub async fn resolve_hello(
     auth: &crate::auth_edge::Authenticator,
     first: ClientPacket,
 ) -> Result<(PlayerId, Option<PlayerRecord>), String> {
-    resolve_session(store, auth, first).await.map(|s| (s.player, s.record))
+    resolve_session(store, auth, first)
+        .await
+        .map(|s| (s.player, s.record))
 }
 
 /// [`resolve_hello`] with the session's spawn-order ticket. A ticket whose
@@ -269,13 +283,21 @@ pub async fn resolve_session(
     let key = match admitted.who {
         // Vouched for by another host: no store, no record, no login.
         crate::auth_edge::AdmittedAs::Observer { client, player } => {
-            return Ok(HelloSession { player, record: None, ticket: None, session_epoch: None, observer: Some(client) });
+            return Ok(HelloSession {
+                player,
+                record: None,
+                ticket: None,
+                session_epoch: None,
+                observer: Some(client),
+            });
         }
         crate::auth_edge::AdmittedAs::Player(key) => key,
     };
     let store = store.clone();
     let resolved = tokio::task::spawn_blocking(move || {
-        let mut store = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut store = store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         store.resolve(&key)
     })
     .await
@@ -287,9 +309,13 @@ pub async fn resolve_session(
         })
     });
     match resolved {
-        Ok((player, record)) => {
-            Ok(HelloSession { player, record, ticket: admitted.ticket, session_epoch: admitted.session_epoch, observer: None })
-        }
+        Ok((player, record)) => Ok(HelloSession {
+            player,
+            record,
+            ticket: admitted.ticket,
+            session_epoch: admitted.session_epoch,
+            observer: None,
+        }),
         Err(why) => {
             if let Some(ticket) = &admitted.ticket {
                 auth.session_ended(ticket);
@@ -328,11 +354,17 @@ pub fn announce_session(
                 player_token: ticket.player_token.clone(),
                 session_epoch: ticket.session_epoch,
             },
-            _ => game::ServerEvent::ClientConnected { client, player, record },
+            _ => game::ServerEvent::ClientConnected {
+                client,
+                player,
+                record,
+            },
         };
         let _ = send.send(event);
     })
-    .inspect_err(|why| log::info!("[server] client {client}: its login was revoked while it connected: {why}"))
+    .inspect_err(|why| {
+        log::info!("[server] client {client}: its login was revoked while it connected: {why}")
+    })
 }
 
 /// Nothing persisted: ids from 0 per process, no records (a player parked
@@ -360,7 +392,9 @@ pub struct StorePlayers(pub world_store::StoreHandle);
 
 impl PlayerStore for StorePlayers {
     fn resolve(&mut self, key: &PlayerKey) -> io::Result<(PlayerId, Option<PlayerRecord>)> {
-        self.0.resolve_player(&key.store_key()).map_err(io::Error::other)
+        self.0
+            .resolve_player(&key.store_key())
+            .map_err(io::Error::other)
     }
 
     fn resolve_later(&mut self, key: &PlayerKey) -> Resolving {

@@ -10,24 +10,42 @@
 # Env: OUT (default target/web), CAP (the justfile's core-pinning prefix),
 # VOXEL_REGION_BLOCKS / VOXEL_CHUNK_BLOCKS (must match the server's build),
 # VOXEL_WEB_SERVER (the main menu's prefilled Join server address).
+# Memory-intensive stages run in a systemd user scope (including descendants):
+# WASM_BUILD_MEMORY_HIGH=14G, WASM_BUILD_MEMORY_MAX=16G, and
+# WASM_BUILD_MEMORY_SWAP_MAX=0; each accepts `none` as an explicit override.
+# Missing/unavailable cgroups fail closed; tool downloads do not need the guard.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out="${OUT:-target/web}"
-cap="${CAP:-}"
+read -r -a cap <<<"${CAP:-}"
+guard="$PWD/scripts/wasm_build_guard.sh"
 
 # wasm-bindgen's CLI must match Cargo.lock's wasm-bindgen exactly (same install
 # as `just determinism-wasm`).
 ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
 tools="$PWD/target/tools/wasm-bindgen-$ver"
-[ -x "$tools/bin/wasm-bindgen" ] || $cap cargo install --locked wasm-bindgen-cli --version "$ver" --root "$tools"
+[ -x "$tools/bin/wasm-bindgen" ] || "$guard" wasm-bindgen-install -- "${cap[@]}" cargo install \
+    --locked wasm-bindgen-cli --version "$ver" --root "$tools"
 
-$cap cargo build -p client --profile wasm-release --target wasm32-unknown-unknown
+"$guard" wasm-cargo-build -- "${cap[@]}" cargo build -p client --profile wasm-release \
+    --target wasm32-unknown-unknown
 
 rm -rf "$out.tmp"
 mkdir -p "$out.tmp/api"
-"$tools/bin/wasm-bindgen" --target web --no-typescript --out-name wasm --out-dir "$out.tmp/api" \
+"$guard" wasm-bindgen -- "$tools/bin/wasm-bindgen" --target web --no-typescript \
+    --out-name wasm --out-dir "$out.tmp/api" \
     target/wasm32-unknown-unknown/wasm-release/client.wasm
-mv "$out.tmp/api/wasm_bg.wasm" "$out.tmp/api/wasm.wasm"
+wasm="$out.tmp/api/wasm.wasm"
+legacy_wasm="$out.tmp/api/wasm_bg.wasm"
+if [ -e "$wasm" ] && [ -e "$legacy_wasm" ]; then
+    echo "web-release: wasm-bindgen produced both $wasm and $legacy_wasm; refusing ambiguous output" >&2
+    exit 1
+elif [ -e "$legacy_wasm" ]; then
+    mv "$legacy_wasm" "$wasm"
+elif [ ! -e "$wasm" ]; then
+    echo "web-release: wasm-bindgen produced neither $wasm nor $legacy_wasm" >&2
+    exit 1
+fi
 
 # wasm-opt from a pinned binaryen release under target/tools (downloaded on first
 # use). NOT the distro's: Ubuntu 24.04's binaryen 108 re-points wasm-bindgen's
@@ -45,7 +63,8 @@ if [ "$binaryen" != none ]; then
     fi
     # -O3: the sim runs in the browser, so speed over size. The feature flags are
     # the ones rustc's wasm32 target emits by default.
-    $cap "$bdir/bin/wasm-opt" -O3 --enable-bulk-memory --enable-nontrapping-float-to-int \
+    "$guard" wasm-opt -- "${cap[@]}" "$bdir/bin/wasm-opt" -O3 \
+        --enable-bulk-memory --enable-nontrapping-float-to-int \
         --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue \
         -o "$out.tmp/api/wasm.wasm" "$out.tmp/api/wasm.wasm"
 fi

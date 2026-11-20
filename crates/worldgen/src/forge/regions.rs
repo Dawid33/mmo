@@ -15,13 +15,13 @@
 //! `MAX_REGIONS`, the merge size doubles (and may cross those lines) until it
 //! fits.
 
-use game::{classify, region_type, Biome, RegionType};
+use game::{Biome, RegionType, classify, region_type};
 use serde::{Deserialize, Serialize};
 
 use crate::forge::par;
+use crate::forge::periodic::PeriodicX;
 use crate::forge::world::hash01;
 use crate::forged::WorldArtifact;
-use crate::forge::periodic::PeriodicX;
 use crate::noise::OctaveNoise;
 
 /// Edge of one DF world tile (m): 16 × 16 embarks of 48 m. DF Medium
@@ -87,8 +87,22 @@ pub fn min_region_cells(cell_m: f64) -> u32 {
 /// in raster order of each region's first cell. `wrap_x`: columns 0 and
 /// `nx - 1` are neighbours (a world that wraps east-west), so a region may
 /// run across that seam.
-pub fn flood(biome: &[u8], drainage: &[u8], nx: usize, nz: usize, cell_m: f64, wrap_x: bool) -> (Vec<u16>, Vec<RegionRecord>) {
-    flood_with(biome, drainage, (nx, nz), wrap_x, min_region_cells(cell_m), MAX_REGIONS)
+pub fn flood(
+    biome: &[u8],
+    drainage: &[u8],
+    nx: usize,
+    nz: usize,
+    cell_m: f64,
+    wrap_x: bool,
+) -> (Vec<u16>, Vec<RegionRecord>) {
+    flood_with(
+        biome,
+        drainage,
+        (nx, nz),
+        wrap_x,
+        min_region_cells(cell_m),
+        MAX_REGIONS,
+    )
 }
 
 /// `flood` with the merge size (cells) and the region cap as arguments.
@@ -104,7 +118,10 @@ pub fn flood_with(
     assert_eq!(drainage.len(), nx * nz);
     assert!(max_regions >= 1 && max_regions <= MAX_REGIONS);
     let kind: Vec<RegionType> = par::map_range(nx * nz, |i| {
-        region_type(Biome::from_u8(biome[i]).unwrap_or(Biome::Ocean), drainage[i])
+        region_type(
+            Biome::from_u8(biome[i]).unwrap_or(Biome::Ocean),
+            drainage[i],
+        )
     });
     let mut f = Flood::components(&kind, nx, nz, wrap_x);
     let mut count = f.merge(nx, nz, wrap_x, min_cells, false);
@@ -174,7 +191,12 @@ impl Flood {
             kinds.push(k);
         }
         let parent = (0..size.len() as u32).collect();
-        Flood { label, parent, size, kind: kinds }
+        Flood {
+            label,
+            parent,
+            size,
+            kind: kinds,
+        }
     }
 
     fn find(&mut self, mut a: u32) -> u32 {
@@ -187,14 +209,23 @@ impl Flood {
     }
 
     fn roots(&mut self) -> usize {
-        (0..self.parent.len() as u32).filter(|&a| self.parent[a as usize] == a).count()
+        (0..self.parent.len() as u32)
+            .filter(|&a| self.parent[a as usize] == a)
+            .count()
     }
 
     /// Merges every region under `min_cells` into its largest neighbour
     /// (same merge class unless `cross_class`), pass after pass until none
     /// can merge. Single-threaded and ordered by id: the result depends only
     /// on the rasters. Returns the region count.
-    fn merge(&mut self, nx: usize, nz: usize, wrap_x: bool, min_cells: u32, cross_class: bool) -> usize {
+    fn merge(
+        &mut self,
+        nx: usize,
+        nz: usize,
+        wrap_x: bool,
+        min_cells: u32,
+        cross_class: bool,
+    ) -> usize {
         loop {
             // Root of every cell, then the (small root, neighbour root) pairs.
             let roots: Vec<u32> = (0..nx * nz).map(|i| self.find(self.label[i])).collect();
@@ -272,8 +303,14 @@ impl Flood {
             let r = self.find(self.label[i]) as usize;
             if id_of[r] == u32::MAX {
                 id_of[r] = records.len() as u32;
-                let id = u16::try_from(records.len()).expect("merge kept the region count within u16");
-                records.push(RegionRecord { id, kind: self.kind[r], cells: self.size[r], alignment: 0 });
+                let id =
+                    u16::try_from(records.len()).expect("merge kept the region count within u16");
+                records.push(RegionRecord {
+                    id,
+                    kind: self.kind[r],
+                    cells: self.size[r],
+                    alignment: 0,
+                });
             }
             out[i] = id_of[r] as u16;
         }
@@ -301,20 +338,31 @@ fn size_bucket(cells: u32, cell_m: f64) -> usize {
 /// goal forces at least one whole region of that size class") unless that
 /// region is over `FORCED_REGION_MAX_GOALS` goals. The sea stays
 /// neutral and out of the shares — it is one region the size of the ocean.
-pub fn assign_alignment(regions: &mut [RegionRecord], seed: u64, good_share: f64, evil_share: f64, cell_m: f64) {
+pub fn assign_alignment(
+    regions: &mut [RegionRecord],
+    seed: u64,
+    good_share: f64,
+    evil_share: f64,
+    cell_m: f64,
+) {
     for r in regions.iter_mut() {
         r.alignment = 0;
     }
     for bucket in 0..3 {
         let mut members: Vec<usize> = (0..regions.len())
-            .filter(|&i| regions[i].kind != RegionType::Ocean && size_bucket(regions[i].cells, cell_m) == bucket)
+            .filter(|&i| {
+                regions[i].kind != RegionType::Ocean
+                    && size_bucket(regions[i].cells, cell_m) == bucket
+            })
             .collect();
         if members.is_empty() {
             continue;
         }
         let total: f64 = members.iter().map(|&i| regions[i].cells as f64).sum();
         members.sort_by(|&a, &b| {
-            hash01(seed, 0xA11C + bucket as u64, a as u64).total_cmp(&hash01(seed, 0xA11C + bucket as u64, b as u64)).then(a.cmp(&b))
+            hash01(seed, 0xA11C + bucket as u64, a as u64)
+                .total_cmp(&hash01(seed, 0xA11C + bucket as u64, b as u64))
+                .then(a.cmp(&b))
         });
         for (alignment, share) in [(1i8, good_share), (-1i8, evil_share)] {
             let goal = share.max(0.0) * total;
@@ -330,8 +378,13 @@ pub fn assign_alignment(regions: &mut [RegionRecord], seed: u64, good_share: f64
                 }
             }
             if got == 0.0 {
-                let forced = members.iter().filter(|&&i| regions[i].alignment == 0).min_by_key(|&&i| (regions[i].cells, i));
-                if let Some(&i) = forced.filter(|&&i| regions[i].cells as f64 <= FORCED_REGION_MAX_GOALS * goal) {
+                let forced = members
+                    .iter()
+                    .filter(|&&i| regions[i].alignment == 0)
+                    .min_by_key(|&&i| (regions[i].cells, i));
+                if let Some(&i) =
+                    forced.filter(|&&i| regions[i].cells as f64 <= FORCED_REGION_MAX_GOALS * goal)
+                {
                     regions[i].alignment = alignment;
                 }
             }
@@ -350,15 +403,23 @@ pub fn savagery(seed: u64, nx: usize, nz: usize, cell_m: f64, wrap: Option<Perio
     par::map_range(nx * nz, |i| {
         let value = match &wrap {
             Some(wrap) => {
-                let (mx, mz) = (((i % nx) as f64 + 0.5) * cell_m, ((i / nx) as f64 + 0.5) * cell_m);
+                let (mx, mz) = (
+                    ((i % nx) as f64 + 0.5) * cell_m,
+                    ((i / nx) as f64 + 0.5) * cell_m,
+                );
                 wrap.sample(mx, mz, |x, z| noise.sample2(x * scale, z * scale))
             }
             None => {
-                let (x, z) = (((i % nx) as f64 + 0.5) * cell_m * scale, ((i / nx) as f64 + 0.5) * cell_m * scale);
+                let (x, z) = (
+                    ((i % nx) as f64 + 0.5) * cell_m * scale,
+                    ((i / nx) as f64 + 0.5) * cell_m * scale,
+                );
                 noise.sample2(x, z)
             }
         };
-        (50.0 + 50.0 * SAVAGERY_GAIN * value).round().clamp(0.0, 100.0) as u8
+        (50.0 + 50.0 * SAVAGERY_GAIN * value)
+            .round()
+            .clamp(0.0, 100.0) as u8
     })
 }
 
@@ -392,8 +453,11 @@ pub fn biome_shares(biome: &[u8]) -> Vec<(Biome, f64)> {
         count[(b as usize).min(Biome::ALL.len() - 1)] += 1;
     }
     let total = biome.len().max(1) as f64;
-    let mut out: Vec<(Biome, f64)> =
-        Biome::ALL.iter().filter(|b| count[**b as usize] > 0).map(|&b| (b, count[b as usize] as f64 / total)).collect();
+    let mut out: Vec<(Biome, f64)> = Biome::ALL
+        .iter()
+        .filter(|b| count[**b as usize] > 0)
+        .map(|&b| (b, count[b as usize] as f64 / total))
+        .collect();
     out.sort_by(|p, q| q.1.total_cmp(&p.1));
     out
 }
@@ -406,4 +470,3 @@ pub fn region_counts(regions: &[RegionRecord]) -> Vec<(RegionType, usize)> {
         .filter(|&(_, c)| c > 0)
         .collect()
 }
-

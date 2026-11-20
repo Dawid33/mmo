@@ -2,7 +2,7 @@
 //! mesh time. Render-derived data only — never part of rollback state.
 //! Reference: https://0fps.net/2013/07/03/ambient-occlusion-for-minecraft-like-worlds/
 
-use super::binary::{cross_axes, CutoutTable, PaddedVoxels};
+use super::binary::{CutoutTable, PaddedVoxels, cross_axes};
 
 /// Vertex color multiplier per AO level (0 = fully occluded corner). Tunable.
 pub const AO_CURVE: [f32; 4] = [0.55, 0.70, 0.85, 1.0];
@@ -78,4 +78,3 @@ pub fn face_ao(
 pub fn ao_flips_quad(ao: &[u8; 4]) -> bool {
     ao[0] + ao[3] > ao[1] + ao[2]
 }
-

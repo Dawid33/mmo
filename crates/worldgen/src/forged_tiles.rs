@@ -27,7 +27,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::forged::{ArtifactError, ByteRasterId, ForgedWorld, QRasterId, Rasters, Segment, WorldGlobals, BUCKET_M};
+use crate::forged::{
+    ArtifactError, BUCKET_M, ByteRasterId, ForgedWorld, QRasterId, Rasters, Segment, WorldGlobals,
+};
 
 /// Tile edge in raster cells (Decision 1): 4,096 m at 16 m cells, one
 /// super-region of 16 x 16 256 m regions.
@@ -65,8 +67,8 @@ pub const MAX_READ_RADIUS_CELLS: u32 = 4;
 /// (3 cells at 16 m, 4 at 8 m). River segments are read by 64 m bucket, which
 /// `prefetch_rect` covers separately.
 pub fn read_radius_cells(cell_m: f64) -> u32 {
-    let reach_m =
-        (crate::habitat::SLOPE_PROBE_M + 2.0 * cell_m).max(crate::forged::BIOME_DITHER_M + 0.5 * cell_m);
+    let reach_m = (crate::habitat::SLOPE_PROBE_M + 2.0 * cell_m)
+        .max(crate::forged::BIOME_DITHER_M + 0.5 * cell_m);
     ((reach_m / cell_m).ceil() as u32).max(1)
 }
 
@@ -79,7 +81,9 @@ pub fn tile_cache_budget_from_env() -> usize {
         Ok(v) => match v.trim().parse::<usize>() {
             Ok(mb) if mb > 0 => mb.saturating_mul(1 << 20),
             _ => {
-                log::warn!("[forged-tiles] {TILE_CACHE_MB_ENV}={v:?} is not a positive number of MiB; using the default");
+                log::warn!(
+                    "[forged-tiles] {TILE_CACHE_MB_ENV}={v:?} is not a positive number of MiB; using the default"
+                );
                 TILE_CACHE_BYTES
             }
         },
@@ -148,7 +152,11 @@ impl Tile {
             + cells * 4
             + self.lake_runs.len() * std::mem::size_of::<(u32, u32, f32)>()
             + self.segments.len() * std::mem::size_of::<(u32, Segment)>()
-            + self.buckets.iter().map(|b| std::mem::size_of::<Vec<u32>>() + b.len() * 4).sum::<usize>()
+            + self
+                .buckets
+                .iter()
+                .map(|b| std::mem::size_of::<Vec<u32>>() + b.len() * 4)
+                .sum::<usize>()
     }
 }
 
@@ -202,8 +210,12 @@ impl ForgedMeta {
             )));
         }
         let g = TileGeometry::new(&self.globals, self.tile_cells);
-        if g.buckets_x > g.tiles_x as usize * g.buckets_per_tile || g.buckets_z > g.tiles_z as usize * g.buckets_per_tile {
-            return Err(ArtifactError::Format("river buckets reach past the last tile".into()));
+        if g.buckets_x > g.tiles_x as usize * g.buckets_per_tile
+            || g.buckets_z > g.tiles_z as usize * g.buckets_per_tile
+        {
+            return Err(ArtifactError::Format(
+                "river buckets reach past the last tile".into(),
+            ));
         }
         Ok(())
     }
@@ -258,7 +270,12 @@ impl TileGeometry {
     /// Cells of the tile at `t`: `(x0, z0, w, h)`.
     fn cells(&self, t: TileCoords) -> (u32, u32, u32, u32) {
         let (x0, z0) = (t.tx * self.tile_cells, t.tz * self.tile_cells);
-        (x0, z0, self.tile_cells.min(self.nx - x0), self.tile_cells.min(self.nz - z0))
+        (
+            x0,
+            z0,
+            self.tile_cells.min(self.nx - x0),
+            self.tile_cells.min(self.nz - z0),
+        )
     }
 
     /// Buckets of the tile at `t`: `(bx0, bz0, bw, bh)` (bucket `b` lives in
@@ -267,7 +284,12 @@ impl TileGeometry {
         let per = self.buckets_per_tile;
         let (bx0, bz0) = (t.tx as usize * per, t.tz as usize * per);
         let span = |b0: usize, buckets: usize| per.min(buckets.saturating_sub(b0));
-        (bx0, bz0, span(bx0, self.buckets_x), span(bz0, self.buckets_z))
+        (
+            bx0,
+            bz0,
+            span(bx0, self.buckets_x),
+            span(bz0, self.buckets_z),
+        )
     }
 
     /// The tile and local index of CLAMPED global cell `i`.
@@ -275,7 +297,10 @@ impl TileGeometry {
         let nx = self.nx as usize;
         debug_assert!(i < nx * self.nz as usize, "cell {i} outside the raster");
         let (ix, iz) = ((i % nx) as u32, (i / nx) as u32);
-        let t = TileCoords { tx: ix / self.tile_cells, tz: iz / self.tile_cells };
+        let t = TileCoords {
+            tx: ix / self.tile_cells,
+            tz: iz / self.tile_cells,
+        };
         let (lx, lz) = (ix % self.tile_cells, iz % self.tile_cells);
         (t, lz as usize, lx)
     }
@@ -283,10 +308,16 @@ impl TileGeometry {
     /// The tile and local bucket index of global bucket `b`.
     fn route_bucket(&self, b: usize) -> (TileCoords, usize) {
         let per_x = self.buckets_x;
-        assert!(b < per_x * self.buckets_z, "river bucket {b} outside the map");
+        assert!(
+            b < per_x * self.buckets_z,
+            "river bucket {b} outside the map"
+        );
         let (bx, bz) = (b % per_x, b / per_x);
         let per = self.buckets_per_tile;
-        let t = TileCoords { tx: (bx / per) as u32, tz: (bz / per) as u32 };
+        let t = TileCoords {
+            tx: (bx / per) as u32,
+            tz: (bz / per) as u32,
+        };
         let (bx0, bz0, bw, _) = self.bucket_span(t);
         (t, (bz - bz0) * bw + (bx - bx0))
     }
@@ -300,7 +331,10 @@ impl TileGeometry {
 /// is not a whole number of 64 m river buckets, or a cell size whose
 /// sampling reads farther than [`MAX_READ_RADIUS_CELLS`] (cells under 8 m):
 /// a world the tiled store could not load back is never written.
-pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Tile>), ArtifactError> {
+pub fn split(
+    world: &ForgedWorld,
+    tile_cells: u32,
+) -> Result<(ForgedMeta, Vec<Tile>), ArtifactError> {
     let globals = world.globals();
     let check = ForgedMeta {
         format_version: TILED_FORMAT_VERSION,
@@ -311,7 +345,9 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Ti
     };
     check.validate()?;
     let Rasters::Whole(whole) = world.rasters() else {
-        return Err(ArtifactError::Format("split needs a whole world, not a tiled one".into()));
+        return Err(ArtifactError::Format(
+            "split needs a whole world, not a tiled one".into(),
+        ));
     };
     let artifact = &whole.artifact;
     let rasters = world.rasters();
@@ -325,7 +361,8 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Ti
             let origin = TileCoords { tx, tz };
             let (x0, z0, w, h) = geometry.cells(origin);
             let indices = || {
-                (z0..z0 + h).flat_map(move |iz| (x0..x0 + w).map(move |ix| iz as usize * n + ix as usize))
+                (z0..z0 + h)
+                    .flat_map(move |iz| (x0..x0 + w).map(move |ix| iz as usize * n + ix as usize))
             };
             let q = std::array::from_fn(|r| indices().map(|i| qrasters[r].data[i]).collect());
             let bytes = std::array::from_fn(|r| indices().map(|i| byte_rasters[r][i]).collect());
@@ -339,9 +376,17 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Ti
             for iz in z0..z0 + h {
                 for ix in x0..x0 + w {
                     let i = iz as usize * n + ix as usize;
-                    let Some(level) = rasters.lake_level(i) else { continue };
+                    let Some(level) = rasters.lake_level(i) else {
+                        continue;
+                    };
                     match lake_runs.last_mut() {
-                        Some(run) if run.1 as usize == i && ix != x0 && run.2.to_bits() == level.to_bits() => run.1 += 1,
+                        Some(run)
+                            if run.1 as usize == i
+                                && ix != x0
+                                && run.2.to_bits() == level.to_bits() =>
+                        {
+                            run.1 += 1
+                        }
                         _ => lake_runs.push((i as u32, i as u32 + 1, level)),
                     }
                 }
@@ -355,14 +400,33 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Ti
             let mut ids: Vec<u32> = buckets.iter().flatten().copied().collect();
             ids.sort_unstable();
             ids.dedup();
-            let segments = ids.into_iter().map(|id| (id, whole.segments[id as usize])).collect();
-            tiles.push(Tile { origin, w, h, q, bytes, region, coast, lake_runs, segments, buckets });
+            let segments = ids
+                .into_iter()
+                .map(|id| (id, whole.segments[id as usize]))
+                .collect();
+            tiles.push(Tile {
+                origin,
+                w,
+                h,
+                q,
+                bytes,
+                region,
+                coast,
+                lake_runs,
+                segments,
+                buckets,
+            });
         }
     }
     let lakes = artifact
         .lakes
         .iter()
-        .map(|l| LakeRecord { level: l.level, area_m2: l.area_m2, max_depth: l.max_depth, outlet: l.outlet })
+        .map(|l| LakeRecord {
+            level: l.level,
+            area_m2: l.area_m2,
+            max_depth: l.max_depth,
+            outlet: l.outlet,
+        })
         .collect();
     Ok((ForgedMeta { lakes, ..check }, tiles))
 }
@@ -402,23 +466,29 @@ fn unwrap(magic: &[u8; 4], what: &str, bytes: &[u8]) -> Result<Vec<u8>, Artifact
     let crc = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     let packed = &bytes[HEADER_BYTES..];
     if crc32fast::hash(packed) != crc {
-        return Err(ArtifactError::Format(format!("corrupt {what}: crc32 mismatch")));
+        return Err(ArtifactError::Format(format!(
+            "corrupt {what}: crc32 mismatch"
+        )));
     }
-    zstd::stream::decode_all(packed).map_err(|e| ArtifactError::Format(format!("corrupt {what}: {e}")))
+    zstd::stream::decode_all(packed)
+        .map_err(|e| ArtifactError::Format(format!("corrupt {what}: {e}")))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn encode_meta(meta: &ForgedMeta) -> Vec<u8> {
     let mut wire = meta.clone();
     wire.climate.delta_encode();
-    wrap(META_MAGIC, &bincode::serialize(&wire).expect("meta serializes"))
+    wrap(
+        META_MAGIC,
+        &bincode::serialize(&wire).expect("meta serializes"),
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn decode_meta(bytes: &[u8]) -> Result<ForgedMeta, ArtifactError> {
     let body = unwrap(META_MAGIC, "tiled world meta", bytes)?;
-    let mut meta: ForgedMeta =
-        bincode::deserialize(&body).map_err(|e| ArtifactError::Format(format!("corrupt tiled world meta: {e}")))?;
+    let mut meta: ForgedMeta = bincode::deserialize(&body)
+        .map_err(|e| ArtifactError::Format(format!("corrupt tiled world meta: {e}")))?;
     // The planes' sizes are checked before they are un-deltaed (the rest of
     // the meta is checked by `ForgedMeta::validate` when a world is made).
     let g = &meta.globals;
@@ -441,7 +511,10 @@ pub fn encode_tile(tile: &Tile) -> Vec<u8> {
         delta_rows_u8(r, w);
     }
     delta_rows(&mut wire.region, w);
-    wrap(TILE_MAGIC, &bincode::serialize(&wire).expect("tile serializes"))
+    wrap(
+        TILE_MAGIC,
+        &bincode::serialize(&wire).expect("tile serializes"),
+    )
 }
 
 /// Inverse of [`encode_tile`]; checks that every per-cell vector holds
@@ -450,15 +523,17 @@ pub fn encode_tile(tile: &Tile) -> Vec<u8> {
 pub fn decode_tile(bytes: &[u8]) -> Result<Tile, ArtifactError> {
     use crate::forged::{undelta_rows, undelta_rows_u8};
     let body = unwrap(TILE_MAGIC, "forged tile", bytes)?;
-    let mut tile: Tile =
-        bincode::deserialize(&body).map_err(|e| ArtifactError::Format(format!("corrupt forged tile: {e}")))?;
+    let mut tile: Tile = bincode::deserialize(&body)
+        .map_err(|e| ArtifactError::Format(format!("corrupt forged tile: {e}")))?;
     let cells = tile.w as usize * tile.h as usize;
     if tile.q.iter().any(|r| r.len() != cells)
         || tile.bytes.iter().any(|r| r.len() != cells)
         || tile.region.len() != cells
         || tile.coast.len() != cells
     {
-        return Err(ArtifactError::Format("forged tile: raster size does not match w * h".into()));
+        return Err(ArtifactError::Format(
+            "forged tile: raster size does not match w * h".into(),
+        ));
     }
     let w = tile.w as usize;
     for r in &mut tile.q {
@@ -494,7 +569,10 @@ pub struct MemTiles(pub BTreeMap<TileCoords, Vec<u8>>);
 
 impl TileLoader for MemTiles {
     fn load(&self, t: TileCoords) -> Result<Vec<u8>, String> {
-        self.0.get(&t).cloned().ok_or_else(|| format!("no tile ({}, {})", t.tx, t.tz))
+        self.0
+            .get(&t)
+            .cloned()
+            .ok_or_else(|| format!("no tile ({}, {})", t.tx, t.tz))
     }
 }
 
@@ -705,7 +783,8 @@ impl TileCache {
     /// generation never makes terrain without its tiles (generating paths
     /// pin theirs up front).
     pub fn tile(&self, t: TileCoords) -> Arc<Tile> {
-        self.try_tile(t).unwrap_or_else(|e| panic!("forged tile ({}, {}): {e}", t.tx, t.tz))
+        self.try_tile(t)
+            .unwrap_or_else(|e| panic!("forged tile ({}, {}): {e}", t.tx, t.tz))
     }
 
     /// [`Self::tile`] that reports a failed load instead of panicking.
@@ -724,7 +803,9 @@ impl TileCache {
         let found = self.slots.read().expect("tile cache lock")[index].clone();
         let slot = found.unwrap_or_else(|| {
             let mut slots = self.slots.write().expect("tile cache lock");
-            slots[index].get_or_insert_with(|| Arc::new(Slot::new(now))).clone()
+            slots[index]
+                .get_or_insert_with(|| Arc::new(Slot::new(now)))
+                .clone()
         });
         slot.last_use.store(now, Ordering::Relaxed);
         if let Some(Ok(tile)) = slot.tile.get() {
@@ -762,7 +843,11 @@ impl TileCache {
     /// Loads and pins every tile in `tx0..=tx1` x `tz0..=tz1` (clamped to the
     /// grid), row by row. The first tile that fails ends it with an error
     /// naming the tile; the tiles pinned so far are unpinned.
-    pub(crate) fn pin_rect(self: &Arc<Self>, (tx0, tz0): (u32, u32), (tx1, tz1): (u32, u32)) -> Result<TilePins, String> {
+    pub(crate) fn pin_rect(
+        self: &Arc<Self>,
+        (tx0, tz0): (u32, u32),
+        (tx1, tz1): (u32, u32),
+    ) -> Result<TilePins, String> {
         let last_x = self.geometry.tiles_x - 1;
         let columns: Vec<u32> = (tx0.min(last_x)..=tx1.min(last_x)).collect();
         self.pin_tiles(&columns, (tz0, tz1))
@@ -771,13 +856,22 @@ impl TileCache {
     /// Loads and pins the tiles of tile columns `columns` (each in the grid)
     /// in rows `tz0..=tz1` (clamped to the grid), row by row; errors as
     /// [`Self::pin_rect`].
-    pub(crate) fn pin_tiles(self: &Arc<Self>, columns: &[u32], (tz0, tz1): (u32, u32)) -> Result<TilePins, String> {
+    pub(crate) fn pin_tiles(
+        self: &Arc<Self>,
+        columns: &[u32],
+        (tz0, tz1): (u32, u32),
+    ) -> Result<TilePins, String> {
         let last_z = self.geometry.tiles_z - 1;
-        let mut pins = TilePins { tiles: Vec::new(), cache: Some(self.clone()) };
+        let mut pins = TilePins {
+            tiles: Vec::new(),
+            cache: Some(self.clone()),
+        };
         for tz in tz0.min(last_z)..=tz1.min(last_z) {
             for &tx in columns {
                 let t = TileCoords { tx, tz };
-                let tile = self.pin(t).map_err(|e| format!("forged tile ({tx}, {tz}): {e}"))?;
+                let tile = self
+                    .pin(t)
+                    .map_err(|e| format!("forged tile ({tx}, {tz}): {e}"))?;
                 pins.tiles.push((t, tile));
             }
         }
@@ -791,12 +885,17 @@ impl TileCache {
             let tile = self.try_tile(t)?;
             let slots = self.slots.write().expect("tile cache lock");
             let Some(slot) = &slots[index] else { continue }; // evicted since: load again
-            if !slot.tile.get().is_some_and(|r| r.as_ref().is_ok_and(|cur| Arc::ptr_eq(cur, &tile))) {
+            if !slot
+                .tile
+                .get()
+                .is_some_and(|r| r.as_ref().is_ok_and(|cur| Arc::ptr_eq(cur, &tile)))
+            {
                 continue;
             }
             if slot.pins.fetch_add(1, Ordering::Relaxed) == 0 {
                 // 0 while not yet admitted: `admit` counts it then.
-                self.pinned.fetch_add(slot.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
+                self.pinned
+                    .fetch_add(slot.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
             }
             return Ok(tile);
         }
@@ -807,9 +906,12 @@ impl TileCache {
     fn unpin(&self, tiles: &[(TileCoords, Arc<Tile>)]) {
         let mut slots = self.slots.write().expect("tile cache lock");
         for (t, _) in tiles {
-            let slot = slots[self.slot_index(*t)].as_ref().expect("a pinned tile stays cached");
+            let slot = slots[self.slot_index(*t)]
+                .as_ref()
+                .expect("a pinned tile stays cached");
             if slot.pins.fetch_sub(1, Ordering::Relaxed) == 1 {
-                self.pinned.fetch_sub(slot.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
+                self.pinned
+                    .fetch_sub(slot.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
             }
         }
         self.trim(&mut slots, None);
@@ -834,7 +936,10 @@ impl TileCache {
         let tile = decode_tile(bytes).map_err(|e| e.to_string())?;
         let (x0, z0, w, h) = self.geometry.cells(t);
         if tile.origin != t || tile.w != w || tile.h != h {
-            return Err(format!("holds tile {:?} of {}x{} cells, not the {w}x{h} asked for", tile.origin, tile.w, tile.h));
+            return Err(format!(
+                "holds tile {:?} of {}x{} cells, not the {w}x{h} asked for",
+                tile.origin, tile.w, tile.h
+            ));
         }
         let (_, _, bw, bh) = self.geometry.bucket_span(t);
         if tile.buckets.len() != bw * bh {
@@ -850,7 +955,10 @@ impl TileCache {
         if tile.region.iter().any(|&r| r as usize >= self.region_count) {
             return Err("region id out of range".into());
         }
-        if tile.bytes[ByteRasterId::Biome as usize].iter().any(|&b| game::Biome::from_u8(b).is_none()) {
+        if tile.bytes[ByteRasterId::Biome as usize]
+            .iter()
+            .any(|&b| game::Biome::from_u8(b).is_none())
+        {
             return Err("unknown biome".into());
         }
         if tile.coast.iter().any(|c| c.is_nan()) {
@@ -904,7 +1012,9 @@ impl TileCache {
                 .enumerate()
                 .filter_map(|(k, s)| Some((k, s.as_ref()?)))
                 .filter(|&(k, s)| {
-                    Some(k) != keep && s.bytes.load(Ordering::Relaxed) > 0 && s.pins.load(Ordering::Relaxed) == 0
+                    Some(k) != keep
+                        && s.bytes.load(Ordering::Relaxed) > 0
+                        && s.pins.load(Ordering::Relaxed) == 0
                 })
                 .min_by_key(|(_, s)| s.last_use.load(Ordering::Relaxed))
                 .map(|(k, _)| k);
@@ -944,7 +1054,9 @@ impl TileCache {
         let mut f = Some(f);
         let hit = LAST_TILE.with(|memo| {
             let memo = memo.borrow();
-            let m = memo.as_ref().filter(|m| m.cache == self.id && m.coords == t)?;
+            let m = memo
+                .as_ref()
+                .filter(|m| m.cache == self.id && m.coords == t)?;
             if m.slot.evicted.load(Ordering::Relaxed) {
                 return None;
             }
@@ -957,9 +1069,18 @@ impl TileCache {
         if let Some(r) = hit {
             return r;
         }
-        let (slot, tile) = self.fetch(t).unwrap_or_else(|e| panic!("forged tile ({}, {}): {e}", t.tx, t.tz));
+        let (slot, tile) = self
+            .fetch(t)
+            .unwrap_or_else(|e| panic!("forged tile ({}, {}): {e}", t.tx, t.tz));
         let r = (f.take().expect("unused"))(&tile);
-        let old = LAST_TILE.with(|memo| memo.replace(Some(Memo { cache: self.id, coords: t, slot, tile })));
+        let old = LAST_TILE.with(|memo| {
+            memo.replace(Some(Memo {
+                cache: self.id,
+                coords: t,
+                slot,
+                tile,
+            }))
+        });
         drop(old); // outside the borrow
         r
     }
@@ -974,7 +1095,9 @@ impl TileCache {
     pub(crate) fn q(&self, r: QRasterId, i: usize) -> f32 {
         let (min, step) = self.q_scale[r as usize];
         // `QRaster::get`'s arithmetic exactly.
-        self.with_cell(i, |tile, local| min + tile.q[r as usize][local] as f32 * step)
+        self.with_cell(i, |tile, local| {
+            min + tile.q[r as usize][local] as f32 * step
+        })
     }
 
     pub(crate) fn byte(&self, r: ByteRasterId, i: usize) -> u8 {
@@ -1006,7 +1129,10 @@ impl TileCache {
             tile.buckets[local]
                 .iter()
                 .map(|&id| {
-                    let k = tile.segments.binary_search_by_key(&id, |&(s, _)| s).expect("checked at load");
+                    let k = tile
+                        .segments
+                        .binary_search_by_key(&id, |&(s, _)| s)
+                        .expect("checked at load");
                     tile.segments[k]
                 })
                 .collect::<Vec<_>>()
@@ -1030,7 +1156,11 @@ impl TileCache {
     }
 
     /// The tiles holding raster cells `x0..=x1` x `z0..=z1` (clamped).
-    pub(crate) fn tiles_of_cells(&self, (x0, z0): (u32, u32), (x1, z1): (u32, u32)) -> ((u32, u32), (u32, u32)) {
+    pub(crate) fn tiles_of_cells(
+        &self,
+        (x0, z0): (u32, u32),
+        (x1, z1): (u32, u32),
+    ) -> ((u32, u32), (u32, u32)) {
         let c = self.geometry.tile_cells;
         ((x0 / c, z0 / c), (x1 / c, z1 / c))
     }

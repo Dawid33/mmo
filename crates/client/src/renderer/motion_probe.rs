@@ -43,7 +43,11 @@ impl Series {
         self.max = self.max.max(v);
     }
     fn avg(&self) -> f32 {
-        if self.n > 0 { self.sum / self.n as f32 } else { 0.0 }
+        if self.n > 0 {
+            self.sum / self.n as f32
+        } else {
+            0.0
+        }
     }
 }
 
@@ -90,7 +94,11 @@ pub fn probe_camera_motion(
     s.crossing_frames_left = s.crossing_frames_left.saturating_sub(1);
 
     let frame_ms = time.delta_secs() * 1000.0;
-    if crossing { s.crossing_frame_ms.add(frame_ms) } else { s.frame_ms.add(frame_ms) }
+    if crossing {
+        s.crossing_frame_ms.add(frame_ms)
+    } else {
+        s.frame_ms.add(frame_ms)
+    }
 
     if let Some(last) = s.last_target {
         let step = target.goal() - last;
@@ -112,7 +120,11 @@ pub fn probe_camera_motion(
     }
     let trail = tf.translation.distance(target.goal());
     if trail > MIN_STEP {
-        if crossing { s.crossing_trail.add(trail) } else { s.trail.add(trail) }
+        if crossing {
+            s.crossing_trail.add(trail)
+        } else {
+            s.trail.add(trail)
+        }
     }
     s.last_target = Some(target.goal());
     s.last_camera = Some(tf.translation);
@@ -216,7 +228,11 @@ pub fn probe_still_frames(
         s.lod_frames,
         s.lod_cells,
     );
-    *s = StillProbe { window_start: Some(now), last: s.last, ..Default::default() };
+    *s = StillProbe {
+        window_start: Some(now),
+        last: s.last,
+        ..Default::default()
+    };
 }
 
 /// How long after a home-region flip frames still count toward that crossing.
@@ -279,7 +295,11 @@ pub fn probe_region_crossing(
     }
     s.home = hud.home_region.or(s.home);
 
-    let stats = if s.open.is_some() { &mut s.after } else { &mut s.before };
+    let stats = if s.open.is_some() {
+        &mut s.after
+    } else {
+        &mut s.before
+    };
     let frame_ms = time.delta_secs() * 1000.0;
     stats.frames += 1;
     stats.frame_max_ms = stats.frame_max_ms.max(frame_ms);
@@ -290,7 +310,9 @@ pub fn probe_region_crossing(
         let step = goal - last;
         if step.length() > MIN_STEP {
             if let Some(since) = s.held_since.take() {
-                stats.hold_max_ms = stats.hold_max_ms.max(now.duration_since(since).as_secs_f32() * 1000.0);
+                stats.hold_max_ms = stats
+                    .hold_max_ms
+                    .max(now.duration_since(since).as_secs_f32() * 1000.0);
             }
             stats.jump_max = stats.jump_max.max(step.length());
             if let Some(heading) = s.heading {

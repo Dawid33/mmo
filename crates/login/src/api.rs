@@ -10,14 +10,14 @@
 //!   transaction, `LoginStore::rotate_refresh`); presenting a spent token revokes
 //!   the whole family.
 //! - **Nothing secret is logged**: no refresh token or whole JWT, and no request
-//!   or response body (the `login-api` DTOs' `Debug` prints them). Joins log account id + `kid`.
+//!   or response body (the `login-api` DTOs' `Debug` prints them).
 
 use std::future::Future;
 use std::sync::Arc;
 
 use axum::extract::{FromRequest, MatchedPath, Request, State};
-use axum::middleware::{self, Next};
 use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -28,14 +28,15 @@ use rand_core::{OsRng, RngCore};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::Instrument;
 
+use crate::AccountId;
 use crate::config::LoginConfig;
+use crate::config::OidcConfig;
 use crate::host_link::WorldClients;
 use crate::metrics::{JoinOutcome, Metrics, OidcOutcome};
 use crate::oidc::{OidcError, OidcVerifier};
-use crate::config::OidcConfig;
 use crate::store::{AccountRow, LoginError, LoginStore, OidcUpsert, RefreshOutcome};
-use crate::AccountId;
 
 /// Random bytes in a refresh token.
 pub const TOKEN_BYTES: usize = 32;
@@ -48,7 +49,8 @@ const SECS_PER_DAY: u64 = 86_400;
 const REVOKED_MSG: &str = "signed out: please log in again";
 const IDENTITY_REFUSED_MSG: &str = "the identity provider's token was refused: sign in again";
 const IDENTITY_CONFLICT_MSG: &str = "this email address belongs to another account";
-const WORLD_UNAVAILABLE_MSG: &str = "the world server is not reachable right now; try again shortly";
+const WORLD_UNAVAILABLE_MSG: &str =
+    "the world server is not reachable right now; try again shortly";
 /// The `Refused` text a kicked session gets after a logout everywhere.
 pub const KICK_LOGOUT_ALL: &str = "signed out everywhere";
 /// The `Refused` text a kicked session gets after an operator revoked the account (`login account revoke`).
@@ -78,8 +80,18 @@ impl AppState {
         clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> AppState {
         let metrics = Metrics::new();
-        let world_clients = Arc::new(WorldClients::new(None, store.clone(), clock.clone()).with_metrics(metrics.clone()));
-        AppState { store, signer, config, clock, world_clients, oidc: None, metrics }
+        let world_clients = Arc::new(
+            WorldClients::new(None, store.clone(), clock.clone()).with_metrics(metrics.clone()),
+        );
+        AppState {
+            store,
+            signer,
+            config,
+            clock,
+            world_clients,
+            oidc: None,
+            metrics,
+        }
     }
 
     /// Log players in with the identity provider's tokens, checked by `verifier` (the settings
@@ -113,7 +125,6 @@ impl AppState {
     fn now_db(&self) -> i64 {
         i64::try_from(self.now()).unwrap_or(i64::MAX)
     }
-
 }
 
 /// The real clock.
@@ -136,7 +147,11 @@ pub struct Fail {
 
 impl Fail {
     fn new(status: StatusCode, code: ApiErrorCode, message: impl Into<String>) -> Fail {
-        Fail { status, code, message: message.into() }
+        Fail {
+            status,
+            code,
+            message: message.into(),
+        }
     }
     pub(crate) fn bad_request(message: impl Into<String>) -> Fail {
         Fail::new(StatusCode::BAD_REQUEST, ApiErrorCode::BadRequest, message)
@@ -145,29 +160,57 @@ impl Fail {
         Fail::new(StatusCode::UNAUTHORIZED, ApiErrorCode::Revoked, REVOKED_MSG)
     }
     fn world_unavailable() -> Fail {
-        Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable, WORLD_UNAVAILABLE_MSG)
+        Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ApiErrorCode::WorldUnavailable,
+            WORLD_UNAVAILABLE_MSG,
+        )
     }
     /// No host of the world takes logins and it is starting one (Elastic 4): the client repeats
     /// the join.
     fn world_starting() -> Fail {
-        Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldStarting, login_api::WORLD_STARTING_MESSAGE)
+        Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ApiErrorCode::WorldStarting,
+            login_api::WORLD_STARTING_MESSAGE,
+        )
     }
     fn identity_refused() -> Fail {
-        Fail::new(StatusCode::UNAUTHORIZED, ApiErrorCode::IdentityRefused, IDENTITY_REFUSED_MSG)
+        Fail::new(
+            StatusCode::UNAUTHORIZED,
+            ApiErrorCode::IdentityRefused,
+            IDENTITY_REFUSED_MSG,
+        )
     }
     /// The identity provider could not be reached to check a token: try again later.
     fn provider_unavailable() -> Fail {
-        Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::Internal, "the identity provider is unavailable")
+        Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ApiErrorCode::Internal,
+            "the identity provider is unavailable",
+        )
     }
     fn identity_conflict() -> Fail {
-        Fail::new(StatusCode::CONFLICT, ApiErrorCode::IdentityConflict, IDENTITY_CONFLICT_MSG)
+        Fail::new(
+            StatusCode::CONFLICT,
+            ApiErrorCode::IdentityConflict,
+            IDENTITY_CONFLICT_MSG,
+        )
     }
     /// A route of a feature this deployment does not run.
     fn not_configured() -> Fail {
-        Fail::new(StatusCode::NOT_FOUND, ApiErrorCode::BadRequest, "not available")
+        Fail::new(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::BadRequest,
+            "not available",
+        )
     }
     fn internal() -> Fail {
-        Fail::new(StatusCode::INTERNAL_SERVER_ERROR, ApiErrorCode::Internal, "internal error")
+        Fail::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiErrorCode::Internal,
+            "internal error",
+        )
     }
 }
 
@@ -180,7 +223,14 @@ impl From<LoginError> for Fail {
 
 impl IntoResponse for Fail {
     fn into_response(self) -> Response {
-        (self.status, Json(ApiError { code: self.code, message: self.message })).into_response()
+        (
+            self.status,
+            Json(ApiError {
+                code: self.code,
+                message: self.message,
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -224,15 +274,29 @@ pub fn token_hash(token: &str) -> [u8; 32] {
 
 /// A new player token: [`PLAYER_TOKEN_BYTES`] random bytes as lowercase hex.
 fn new_player_token() -> String {
-    random::<PLAYER_TOKEN_BYTES>().iter().map(|b| format!("{b:02x}")).collect()
+    random::<PLAYER_TOKEN_BYTES>()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// A new refresh token of a new family for `account`, stored with the normal expiry
 /// ([`REFRESH_TTL_DAYS`] from `now`). The handlers and `login account issue-refresh` both make
 /// their tokens here.
-pub async fn mint_refresh(store: &LoginStore, account: AccountId, now: i64) -> Result<String, LoginError> {
+pub async fn mint_refresh(
+    store: &LoginStore,
+    account: AccountId,
+    now: i64,
+) -> Result<String, LoginError> {
     let token = new_token();
-    store.insert_refresh(token_hash(&token), account, random::<FAMILY_BYTES>(), refresh_expiry_from(now)).await?;
+    store
+        .insert_refresh(
+            token_hash(&token),
+            account,
+            random::<FAMILY_BYTES>(),
+            refresh_expiry_from(now),
+        )
+        .await?;
     Ok(token)
 }
 
@@ -264,15 +328,19 @@ async fn rotate_refresh(state: &AppState, presented: &str) -> Result<(AccountRow
     let now = state.now_db();
     let successor = new_token();
     let expires = refresh_expiry(state);
-    match state.store.rotate_refresh(token_hash(presented), token_hash(&successor), expires, now).await? {
+    match state
+        .store
+        .rotate_refresh(token_hash(presented), token_hash(&successor), expires, now)
+        .await?
+    {
         RefreshOutcome::Valid { account, .. } => {
             let Some(row) = state.store.account(account).await? else {
                 return Err(Fail::revoked());
             };
             Ok((row, successor))
         }
-        RefreshOutcome::Reused { account, family } => {
-            log::warn!("[login] refresh token reused: account {account}'s token family revoked");
+        RefreshOutcome::Reused { account: _, family } => {
+            log::warn!("[login] refresh token reused: its token family was revoked");
             state.store.revoke_family(family, now).await?;
             Err(Fail::revoked())
         }
@@ -288,23 +356,38 @@ fn oidc_parts(s: &AppState) -> Result<(&Arc<OidcVerifier>, &OidcConfig), Fail> {
     }
 }
 
-async fn login_oidc(State(s): State<AppState>, ApiJson(req): ApiJson<OidcLoginRequest>) -> Result<Json<LoginResponse>, Fail> {
+async fn login_oidc(
+    State(s): State<AppState>,
+    ApiJson(req): ApiJson<OidcLoginRequest>,
+) -> Result<Json<LoginResponse>, Fail> {
     let (verifier, _) = oidc_parts(&s)?;
-    let identity = verifier.verify_refreshing(&req.access_token, s.now()).await.map_err(|e| match e {
-        // The provider's keys could not be fetched: our problem, not the player's.
-        OidcError::Fetch(_) => {
-            log::warn!("[login] identity-provider login unavailable: {e}");
-            s.metrics.oidc_login(OidcOutcome::ProviderUnavailable);
-            Fail::provider_unavailable()
-        }
-        // The variant only: never the token or the claims.
-        _ => {
-            log::warn!("[login] identity-provider token refused: {e}");
-            s.metrics.oidc_login(OidcOutcome::Refused);
-            Fail::identity_refused()
-        }
-    })?;
-    let account = match s.store.upsert_oidc_account(&identity.subject, &identity.email, &identity.name, s.now_db()).await? {
+    let identity = verifier
+        .verify_refreshing(&req.access_token, s.now())
+        .await
+        .map_err(|e| match e {
+            // The provider's keys could not be fetched: our problem, not the player's.
+            OidcError::Fetch(_) => {
+                log::warn!("[login] identity-provider login unavailable: {e}");
+                s.metrics.oidc_login(OidcOutcome::ProviderUnavailable);
+                Fail::provider_unavailable()
+            }
+            // The variant only: never the token or the claims.
+            _ => {
+                log::warn!("[login] identity-provider token refused: {e}");
+                s.metrics.oidc_login(OidcOutcome::Refused);
+                Fail::identity_refused()
+            }
+        })?;
+    let account = match s
+        .store
+        .upsert_oidc_account(
+            &identity.subject,
+            &identity.email,
+            &identity.name,
+            s.now_db(),
+        )
+        .await?
+    {
         OidcUpsert::Created(id) => {
             s.metrics.oidc_login(OidcOutcome::Created);
             id
@@ -319,7 +402,9 @@ async fn login_oidc(State(s): State<AppState>, ApiJson(req): ApiJson<OidcLoginRe
         }
         OidcUpsert::EmailTaken => {
             s.metrics.oidc_login(OidcOutcome::EmailTaken);
-            log::warn!("[login] identity-provider login refused: its email belongs to another account");
+            log::warn!(
+                "[login] identity-provider login refused: its email belongs to another account"
+            );
             return Err(Fail::identity_conflict());
         }
     };
@@ -327,16 +412,22 @@ async fn login_oidc(State(s): State<AppState>, ApiJson(req): ApiJson<OidcLoginRe
         return Err(Fail::internal());
     };
     let token = mint_refresh(&s.store, account, s.now_db()).await?;
-    log::info!("[login] account {account} logged in with the identity provider");
+    log::info!("[login] an identity-provider login succeeded");
     Ok(Json(login_response(&row, token)))
 }
 
 async fn config(State(s): State<AppState>) -> Result<Json<LoginConfigResponse>, Fail> {
     let (_, oidc) = oidc_parts(&s)?;
-    Ok(Json(LoginConfigResponse { oidc_issuer: oidc.issuer.clone(), oidc_client_id: oidc.client_id.clone() }))
+    Ok(Json(LoginConfigResponse {
+        oidc_issuer: oidc.issuer.clone(),
+        oidc_client_id: oidc.client_id.clone(),
+    }))
 }
 
-async fn refresh(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest>) -> Result<Json<LoginResponse>, Fail> {
+async fn refresh(
+    State(s): State<AppState>,
+    ApiJson(req): ApiJson<RefreshRequest>,
+) -> Result<Json<LoginResponse>, Fail> {
     let rotated = rotate_refresh(&s, &req.refresh_token).await;
     // An internal error (database) is neither: the request counters show it as a 500.
     match &rotated {
@@ -351,20 +442,33 @@ async fn refresh(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest
 /// Always 204: revokes the token's family if the token is known. With `all` (and a known
 /// token, live or already rotated), every refresh token of the account too, and its session
 /// in every world is kicked.
-async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<LogoutRequest>) -> Result<StatusCode, Fail> {
+async fn logout(
+    State(s): State<AppState>,
+    ApiJson(req): ApiJson<LogoutRequest>,
+) -> Result<StatusCode, Fail> {
     let now = s.now_db();
-    match s.store.take_refresh(token_hash(&req.refresh_token), now).await? {
+    match s
+        .store
+        .take_refresh(token_hash(&req.refresh_token), now)
+        .await?
+    {
         // A reused (already rotated) token with `all` signs out everywhere too: it may be the
         // stolen copy's owner who saw the theft — its sessions must not survive.
-        RefreshOutcome::Valid { account, family } | RefreshOutcome::Reused { account, family } if req.all => {
+        RefreshOutcome::Valid { account, family } | RefreshOutcome::Reused { account, family }
+            if req.all =>
+        {
             s.store.revoke_family(family, now).await?;
-            let kicks = s.store.revoke_account_with_kicks(account, now, KICK_LOGOUT_ALL).await?;
-            log::info!("[login] account {account} logged out everywhere ({kicks} kick(s) queued)");
+            let kicks = s
+                .store
+                .revoke_account_with_kicks(account, now, KICK_LOGOUT_ALL)
+                .await?;
+            log::info!("[login] an account logged out everywhere ({kicks} kick(s) queued)");
             s.world_clients.wake_kicks();
         }
-        RefreshOutcome::Valid { account, family } | RefreshOutcome::Reused { account, family } => {
+        RefreshOutcome::Valid { account: _, family }
+        | RefreshOutcome::Reused { account: _, family } => {
             s.store.revoke_family(family, now).await?;
-            log::info!("[login] account {account} logged out");
+            log::info!("[login] an account logged out");
         }
         RefreshOutcome::Unknown => {}
     }
@@ -373,16 +477,39 @@ async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<LogoutRequest>)
 
 async fn worlds(State(s): State<AppState>) -> Result<Json<Vec<WorldEntry>>, Fail> {
     let rows = s.store.worlds().await?;
-    Ok(Json(rows.into_iter().map(|w| WorldEntry { id: w.world_id, name: w.name, status: w.status, map_url: w.map_url }).collect()))
+    Ok(Json(
+        rows.into_iter()
+            .map(|w| WorldEntry {
+                id: w.world_id,
+                name: w.name,
+                status: w.status,
+                map_url: w.map_url,
+            })
+            .collect(),
+    ))
 }
 
-async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> Result<Json<JoinResponse>, Fail> {
-    let result = join_inner(&s, req).await;
+async fn join(
+    State(s): State<AppState>,
+    ApiJson(req): ApiJson<JoinRequest>,
+) -> Result<Json<JoinResponse>, Fail> {
+    let world_id = req.world.clone();
+    let span = tracing::info_span!("login.join", "mmo.world_id" = %world_id, outcome = tracing::field::Empty);
+    let result = join_inner(&s, req).instrument(span.clone()).await;
+    let outcome = match &result {
+        Ok(_) => "ok".to_owned(),
+        Err(error) => format!("{:?}", error.code),
+    };
+    span.record("outcome", outcome.as_str());
     // Counted once, where the outcome is known. An internal error (database) is neither.
     match &result {
         Ok(_) => s.metrics.join(JoinOutcome::Ok),
-        Err(f) if f.code == ApiErrorCode::WorldUnavailable => s.metrics.join(JoinOutcome::WorldUnavailable),
-        Err(f) if f.code == ApiErrorCode::WorldStarting => s.metrics.join(JoinOutcome::WorldStarting),
+        Err(f) if f.code == ApiErrorCode::WorldUnavailable => {
+            s.metrics.join(JoinOutcome::WorldUnavailable)
+        }
+        Err(f) if f.code == ApiErrorCode::WorldStarting => {
+            s.metrics.join(JoinOutcome::WorldStarting)
+        }
         Err(f) if f.code != ApiErrorCode::Internal => s.metrics.join(JoinOutcome::Refused),
         Err(_) => {}
     }
@@ -391,49 +518,85 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
 
 async fn join_inner(s: &AppState, req: JoinRequest) -> Result<Json<JoinResponse>, Fail> {
     // The world first, so a bad world id does not spend the client's refresh token.
-    let Some(world) = s.store.world(&req.world).await? else {
-        return Err(Fail::new(StatusCode::NOT_FOUND, ApiErrorCode::UnknownWorld, "no such world"));
+    let Some(world) = s
+        .store
+        .world(&req.world)
+        .instrument(tracing::info_span!("login.world_lookup"))
+        .await?
+    else {
+        return Err(Fail::new(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownWorld,
+            "no such world",
+        ));
     };
     if world.status != WorldStatus::Open {
-        return Err(Fail::new(StatusCode::FORBIDDEN, ApiErrorCode::WorldClosed, "this world is closed"));
+        return Err(Fail::new(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::WorldClosed,
+            "this world is closed",
+        ));
     }
     // The account first, WITHOUT spending the token: a host that does not take the spawn order
     // answers 503 and the client keeps its refresh token. The rotation comes after the ack.
     let presented = token_hash(&req.refresh_token);
-    let Some(account_id) = s.store.live_refresh_account(presented, s.now_db()).await? else {
+    let Some(account_id) = s
+        .store
+        .live_refresh_account(presented, s.now_db())
+        .instrument(tracing::info_span!("login.refresh_validation"))
+        .await?
+    else {
         // Not live: the rotation answers it (a spent token revokes its family).
         rotate_refresh(s, &req.refresh_token).await?;
         return Err(Fail::revoked());
     };
-    let Some(account) = s.store.account(account_id).await? else {
+    let Some(account) = s
+        .store
+        .account(account_id)
+        .instrument(tracing::info_span!("login.account_lookup"))
+        .await?
+    else {
         return Err(Fail::revoked());
     };
     let now = s.now();
-    let player_token =
-        s.store.player_token_for(account.account_id, &world.world_id, s.now_db(), new_player_token).await?;
-    let session_epoch = s.store.bump_session(account.account_id, &world.world_id, s.now_db()).await?;
+    let player_token = s
+        .store
+        .player_token_for(
+            account.account_id,
+            &world.world_id,
+            s.now_db(),
+            new_player_token,
+        )
+        .await?;
+    let session_epoch = s
+        .store
+        .bump_session(account.account_id, &world.world_id, s.now_db())
+        .await?;
     // The host parks any session of this player now (newest wins) and admits this epoch only.
     // A 503 does not mean nothing happened: an order that reached the host and was applied
     // (its ack lost, or later than the timeout) has already parked the player's online
     // session there — the player is then logged out of that world and must join again.
     // The order is relayed to the world's gate host, and may be placed on another host: the
     // ticket names the addresses its ack gave (else the world row's).
-    let place = match s.world_clients.spawn(&world, &player_token, session_epoch).await {
+    let place = match s
+        .world_clients
+        .spawn(&world, &player_token, session_epoch)
+        .instrument(tracing::info_span!("login.coordinator_order"))
+        .await
+    {
         Ok(place) => place,
         // No host takes logins and the world is starting one: the client waits and repeats the
         // join (with the same, unspent refresh token).
         Err(crate::host_link::SpawnError::Starting) => {
             log::info!(
-                "[login] join: account {} world {} epoch {session_epoch}: the world is starting a host",
-                account.account_id,
+                "[login] join: world {} epoch {session_epoch}: the world is starting a host",
                 world.world_id
             );
             return Err(Fail::world_starting());
         }
         Err(e) => {
             log::warn!(
-                "[login] join: account {} world {} epoch {session_epoch}: {e}",
-                account.account_id,
+                "[login] join: world {} epoch {session_epoch}: {e}",
                 world.world_id
             );
             return Err(Fail::world_unavailable());
@@ -467,10 +630,9 @@ async fn join_inner(s: &AppState, req: JoinRequest) -> Result<Json<JoinResponse>
         iat: now,
         exp: now + JOIN_JWT_TTL_SECS,
     };
-    let jwt = s.signer.sign(&claims);
+    let jwt = tracing::info_span!("login.ticket_sign").in_scope(|| s.signer.sign(&claims));
     log::info!(
-        "[login] join: account {} world {} epoch {session_epoch} kid {}",
-        account.account_id,
+        "[login] join: world {} epoch {session_epoch} kid {}",
         world.world_id,
         s.signer.signing_key().kid()
     );
@@ -497,7 +659,10 @@ async fn healthz() -> &'static str {
 }
 
 async fn metrics(State(s): State<AppState>) -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], s.metrics.render())
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        s.metrics.render(),
+    )
 }
 
 /// Counts every request but the scrape and the probe, by matched route template (`other` for an
@@ -510,7 +675,49 @@ async fn count_requests(State(s): State<AppState>, req: Request, next: Next) -> 
     let start = std::time::Instant::now();
     let response = next.run(req).await;
     if route != "/metrics" && route != "/healthz" {
-        s.metrics.http_request(&route, response.status().as_u16(), start.elapsed().as_secs_f64());
+        s.metrics.http_request(
+            &route,
+            response.status().as_u16(),
+            start.elapsed().as_secs_f64(),
+        );
+    }
+    response
+}
+
+/// Trace an inbound login request, extracting an untrusted W3C parent before
+/// request processing. Only fixed route templates and bounded status categories
+/// are recorded.
+async fn trace_request(req: Request, next: Next) -> Response {
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("other", MatchedPath::as_str);
+    let method = req.method().as_str().to_owned();
+    let span = tracing::info_span!(
+        "login.http.request",
+        "http.request.method" = %method,
+        "http.route" = route,
+        "http.response.status_code" = tracing::field::Empty,
+        "mmo.operation_id" = tracing::field::Empty
+    );
+    let operation_id = span.in_scope(observability::operation_id);
+    span.record("mmo.operation_id", operation_id.as_str());
+    let span_for_response = span.clone();
+    let (mut response, trace_id) = async move {
+        let response = next.run(req).await;
+        span_for_response.record("http.response.status_code", response.status().as_u16());
+        let trace_id = observability::current_trace_id();
+        (response, trace_id)
+    }
+    .instrument(span)
+    .await;
+    if let Ok(value) = HeaderValue::from_str(&operation_id) {
+        response.headers_mut().insert("x-mmo-operation-id", value);
+    }
+    if let Some(trace_id) = trace_id {
+        if let Ok(value) = HeaderValue::from_str(&trace_id) {
+            response.headers_mut().insert("x-trace-id", value);
+        }
     }
     response
 }
@@ -548,6 +755,10 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics))
         .layer(cors)
-        .layer(middleware::from_fn_with_state(state.clone(), count_requests))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            count_requests,
+        ))
+        .layer(middleware::from_fn(trace_request))
         .with_state(state)
 }

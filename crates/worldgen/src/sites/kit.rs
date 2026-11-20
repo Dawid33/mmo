@@ -42,7 +42,10 @@ fn extents(p: &ResolvedPrefab) -> (i32, i32, i32) {
 /// Whether at least `KIT_MIN_FILL_PCT` percent of the box's (x, z) columns hold a block.
 fn filled_enough(p: &ResolvedPrefab) -> bool {
     let (sx, _, sz) = extents(p);
-    let filled = (0..sz).flat_map(|z| (0..sx).map(move |x| (x, z))).filter(|&(x, z)| p.column_top(x, z).is_some()).count() as u64;
+    let filled = (0..sz)
+        .flat_map(|z| (0..sx).map(move |x| (x, z)))
+        .filter(|&(x, z)| p.column_top(x, z).is_some())
+        .count() as u64;
     filled * 100 >= u64::from(KIT_MIN_FILL_PCT) * (sx as u64 * sz as u64)
 }
 
@@ -52,7 +55,9 @@ fn filled_enough(p: &ResolvedPrefab) -> bool {
 pub fn front_of(prefab: &ResolvedPrefab) -> Facing {
     let (sx, _, sz) = extents(prefab);
     let doors: Vec<_> = prefab.markers.iter().filter(|m| m.kind == "door").collect();
-    let Some(low) = doors.iter().map(|m| m.at[1]).min() else { return Facing::South };
+    let Some(low) = doors.iter().map(|m| m.at[1]).min() else {
+        return Facing::South;
+    };
     doors
         .iter()
         .enumerate()
@@ -92,7 +97,12 @@ pub fn town_kit(set: &PrefabSet, style: &str) -> Result<TownKit, String> {
                 Facing::North | Facing::South => (x, z),
                 Facing::East | Facing::West => (z, x),
             };
-            houses.push(KitHouse { prefab: p.clone(), front, frontage, depth });
+            houses.push(KitHouse {
+                prefab: p.clone(),
+                front,
+                frontage,
+                depth,
+            });
         }
         if (has(p, "statue") || has(p, "decor")) && x.max(z) <= KIT_CENTRE_MAX_SIDE {
             centrepieces.push(p.clone());
@@ -104,7 +114,11 @@ pub fn town_kit(set: &PrefabSet, style: &str) -> Result<TownKit, String> {
             houses.len()
         ));
     }
-    Ok(TownKit { style: style.to_string(), houses, centrepieces })
+    Ok(TownKit {
+        style: style.to_string(),
+        houses,
+        centrepieces,
+    })
 }
 
 /// The quarter turns that make a house's front face `toward`.

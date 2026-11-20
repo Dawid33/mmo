@@ -1,0 +1,11 @@
+- Wood
+- Stone
+	- Gravel
+	- Sand
+	- Dirt
+- Non-Block Plants
+	- Flowers
+	- Crops
+		- Potatoes
+- Ores
+	- Haematite

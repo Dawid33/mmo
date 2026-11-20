@@ -42,7 +42,10 @@ fn main() {
         .next()
         .and_then(|a| {
             let (x, z) = a.split_once(',')?;
-            Some(RegionCoords::new(x.trim().parse().ok()?, z.trim().parse().ok()?))
+            Some(RegionCoords::new(
+                x.trim().parse().ok()?,
+                z.trim().parse().ok()?,
+            ))
         })
         .unwrap_or(RegionCoords::new(0, 0));
     let people: u32 = args.next().and_then(|a| a.parse().ok()).unwrap_or(0);
@@ -53,9 +56,14 @@ fn main() {
     let registry = game::BlockRegistry::from_ron(manifest).expect("invalid block manifest");
     game::install_block_props(registry.props());
     let materials = worldgen::material::Materials::from_names(|name| {
-        registry.id_of(name).unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+        registry
+            .id_of(name)
+            .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
     });
-    match std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().filter(|p| !p.is_empty() && p != "procedural") {
+    match std::env::var(worldgen::forged::WORLD_FILE_ENV)
+        .ok()
+        .filter(|p| !p.is_empty() && p != "procedural")
+    {
         Some(path) => {
             let world = worldgen::forged::ForgedWorld::load(std::path::Path::new(&path))
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -75,21 +83,27 @@ fn main() {
     );
 
     // The center first, so `regions=1` runs the center itself.
-    let mut window: Vec<RegionCoords> =
-        (-1..=1).flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(center.x + x, center.z + z))).collect();
+    let mut window: Vec<RegionCoords> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(center.x + x, center.z + z)))
+        .collect();
     window.sort_by_key(|rc| rc != &center);
     let regions: Vec<RegionCoords> = window.into_iter().take(count.max(1)).collect();
     let (out_send, out_recv) = crossbeam::channel::unbounded();
     // Production path: region threads generate their own columns.
-    let generator: server::region_threads::SharedRegionGenerator =
-        std::sync::Arc::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials));
+    let generator: server::region_threads::SharedRegionGenerator = std::sync::Arc::new(move |rc| {
+        worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)
+    });
     let mut spawner = server::region_threads::ThreadRegionSpawner::with_region_generator(generator);
     let started = Instant::now();
     let mut inputs = Vec::new();
     for &rc in &regions {
         inputs.push(spawner.spawn(rc, RegionSeed::Deferred(None), out_send.clone()));
     }
-    println!("spawned {} region threads in {:.1} ms", regions.len(), started.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "spawned {} region threads in {:.1} ms",
+        regions.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
     let mut pending: std::collections::BTreeSet<RegionCoords> = regions.iter().copied().collect();
     while !pending.is_empty() {
         let (rc, _output) = out_recv.recv().expect("region thread died");
@@ -102,18 +116,31 @@ fn main() {
         }
     }
     if people > 0 {
-        let at = regions.iter().position(|&rc| rc == center).expect("the center region runs");
+        let at = regions
+            .iter()
+            .position(|&rc| rc == center)
+            .expect("the center region runs");
         let edge = game::REGION_BLOCKS as u32;
-        let grid: Vec<[u32; 2]> =
-            (4..edge - 4).step_by(4).flat_map(|z| (4..edge - 4).step_by(4).map(move |x| [x, z])).collect();
-        assert!(people as usize <= grid.len(), "at most {} people fit the grid", grid.len());
+        let grid: Vec<[u32; 2]> = (4..edge - 4)
+            .step_by(4)
+            .flat_map(|z| (4..edge - 4).step_by(4).map(move |x| [x, z]))
+            .collect();
+        assert!(
+            people as usize <= grid.len(),
+            "at most {} people fit the grid",
+            grid.len()
+        );
         for (i, &column) in grid.iter().take(people as usize).enumerate() {
             let spawn = game::PersonSpawn {
                 person: game::history::PersonId(i as u32),
                 at: game::SpawnAt::Column(column),
                 walk_to: None,
             };
-            inputs[at].send(game::RegionInput::Event(game::GameEventKind::SpawnPerson(spawn))).expect("region input");
+            inputs[at]
+                .send(game::RegionInput::Event(game::GameEventKind::SpawnPerson(
+                    spawn,
+                )))
+                .expect("region input");
         }
         println!("spawned {people} people in {center:?}");
     }

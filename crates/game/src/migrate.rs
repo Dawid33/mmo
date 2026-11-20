@@ -5,7 +5,10 @@
 //! it travels.
 
 use crate::Ecs;
-use crate::{Camera, Client, ClientId, EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback};
+use crate::{
+    Camera, Client, ClientId, EntityKey, GameDataTransactionKind, GameDataUpdate,
+    GameDataUpdateKind, Rollback,
+};
 
 /// The ECS components that ride in an [`crate::EntityBundle`] besides the
 /// body, kind and id.
@@ -49,8 +52,12 @@ impl Client {
             cursor,
             // Mining: a region-local target and a start tick of the old clock.
             mining: _,
+            // Damaged blocks: region-local cells and ticks of the old clock.
+            damaged: _,
             // An absolute tick of the old region's progress; none in the new.
             break_cooldown_until: _,
+            // Likewise an absolute tick of the old region's place repeat.
+            place_repeat_at: _,
             // A world cell: the chest stays open across the seam; the new
             // region closes it if it is out of reach or unseen
             // (`Rollback::close_far_containers_safe`).
@@ -65,7 +72,9 @@ impl Client {
             selected,
             cursor,
             mining: None,
+            damaged: Vec::new(),
             break_cooldown_until: 0,
+            place_repeat_at: 0,
             open_container,
         }
     }
@@ -98,7 +107,10 @@ impl Rollback {
             id: _,
         } = &*self.data.ecs;
         let mut voxel_body = voxel_body.try_get(key).clone();
-        let drops = voxel_body.as_mut().map(|vb| std::mem::take(&mut vb.drops)).unwrap_or_default();
+        let drops = voxel_body
+            .as_mut()
+            .map(|vb| std::mem::take(&mut vb.drops))
+            .unwrap_or_default();
         Carried {
             camera: camera.try_get(key).as_ref().map(|c| (c.yaw, c.pitch)),
             motion: *motion.try_get(key),
@@ -114,7 +126,12 @@ impl Rollback {
     /// Put `c` on `e` (overwriting what is there, so a replayed arrival
     /// re-applies the whole bundle). `client` is the player attached to `e`;
     /// only a player gets a camera.
-    pub(crate) fn restore_components_safe(&mut self, e: EntityKey, c: &Carried, client: Option<ClientId>) {
+    pub(crate) fn restore_components_safe(
+        &mut self,
+        e: EntityKey,
+        c: &Carried,
+        client: Option<ClientId>,
+    ) {
         self.restore_voxel_body_safe(e, c);
         self.data.ecs.motion.set_safe(e, c.motion);
         self.data.ecs.slime.set_safe(e, c.slime);
@@ -133,14 +150,24 @@ impl Rollback {
                 cam.pitch = pitch;
                 self.data.ecs.camera.set_safe(e, Some(cam));
             } else {
-                let handle = self.data.ecs.rigidbody.try_get(e).expect("camera needs a body");
+                let handle = self
+                    .data
+                    .ecs
+                    .rigidbody
+                    .try_get(e)
+                    .expect("camera needs a body");
                 let pose = *self.data.physics.bodies.get(handle).unwrap().position();
                 let mut cam = Camera::new(handle);
                 cam.yaw = yaw;
                 cam.pitch = pitch;
                 self.data.send(GameDataUpdate::new(
                     GameDataTransactionKind::Do,
-                    GameDataUpdateKind::AddCameraComponent(e, client_id, cam.proj_matrix.clone(), pose),
+                    GameDataUpdateKind::AddCameraComponent(
+                        e,
+                        client_id,
+                        cam.proj_matrix.clone(),
+                        pose,
+                    ),
                 ));
                 self.data.ecs.camera.emit_on_undo(GameDataUpdate::new(
                     GameDataTransactionKind::Undo,
@@ -158,10 +185,15 @@ impl Rollback {
     /// today) are put down where `e` is rather than lost.
     fn restore_voxel_body_safe(&mut self, e: EntityKey, c: &Carried) {
         let handle = *self.data.ecs.rigidbody.try_get(e);
-        let pose = handle.and_then(|h| self.data.physics.bodies.get(h)).map(|b| *b.position());
+        let pose = handle
+            .and_then(|h| self.data.physics.bodies.get(h))
+            .map(|b| *b.position());
         let Some(vb) = &c.voxel_body else {
             if !c.drops.is_empty() {
-                log::error!("drops {:?} arrived on {e:?} with no voxel body to hold them: put down", c.drops);
+                log::error!(
+                    "drops {:?} arrived on {e:?} with no voxel body to hold them: put down",
+                    c.drops
+                );
                 if let Some(pose) = pose {
                     let t = pose.translation;
                     let bv = crate::BLOCK_VOXELS as f32;
@@ -178,10 +210,17 @@ impl Rollback {
         if self.data.ecs.voxel_body.try_get(e).is_none() {
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
-                GameDataUpdateKind::AddVoxelBody(e, pose.unwrap_or_else(rapier3d::math::Pose::identity), Box::new(vb.model.clone())),
+                GameDataUpdateKind::AddVoxelBody(
+                    e,
+                    pose.unwrap_or_else(rapier3d::math::Pose::identity),
+                    Box::new(vb.model.clone()),
+                ),
             ));
         }
-        let vb = crate::voxel_body::VoxelBody { drops: c.drops.clone(), ..vb.clone() };
+        let vb = crate::voxel_body::VoxelBody {
+            drops: c.drops.clone(),
+            ..vb.clone()
+        };
         self.data.ecs.voxel_body.set_safe(e, Some(vb));
     }
 }

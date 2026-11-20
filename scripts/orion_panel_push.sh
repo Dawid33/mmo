@@ -24,6 +24,7 @@ bin="${PANEL_BIN:-target/release/panel}"
 tofu="${TOFU:-tofu}"
 
 [ -x "$bin" ] || { echo "orion-panel-push: no $bin (run just orion-panel-build)" >&2; exit 1; }
+PYTHONPATH="$PWD/scripts" python3 -m deploy.images verify-dials panel
 
 repo="${IMAGE_REPOSITORY:-}"
 if [ -z "$repo" ]; then
@@ -42,14 +43,15 @@ registry="${repo%%/*}"
 image="$repo:latest"
 
 rev=$(git rev-parse --short HEAD)
-if [ -n "$(git status --porcelain -- crates/panel Cargo.lock)" ]; then
+if [ -n "$(git status --porcelain)" ]; then
     rev="$rev-dirty"
-    echo "orion-panel-push: uncommitted changes under crates/panel or Cargo.lock: revision $rev" >&2
+    echo "orion-panel-push: uncommitted checkout changes: revision $rev" >&2
 fi
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cp "$bin" "$stage/panel"
+cp target/release/panel.build-dials "$stage/build-dials"
 cp deploy/images/panel/Dockerfile "$stage/Dockerfile"
 content=$(PYTHONPATH="$PWD/scripts" python3 -m deploy.images hash "$stage")
 echo "orion-panel: building $image (revision $rev, content $content)"

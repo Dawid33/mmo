@@ -32,18 +32,18 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::rapier3d::math::Vector;
 use game::{
-    pick_level_cell, pick_visible_cell, validate, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
-    RegionId, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY,
-    REGION_BLOCKS,
+    BLOCK_VOXELS, DEFAULT_PRIORITY, Designation, DesignationKind, Invalid, MAX_ORDER_TILES,
+    MAX_PRIORITY, OpId, Order, OrderSummary, REGION_BLOCKS, RegionId, TileBox, TilePos, TileSource,
+    pick_level_cell, pick_visible_cell, validate,
 };
 
+use super::CommanderView;
 use super::level::WorkingLevel;
 use super::minimap::{self, MinimapPointer};
 use super::selection::DRAG_THRESHOLD_PX;
 use super::tiles::TileMirror;
-use super::CommanderView;
 use crate::renderer::cursor::CursorPolicy;
-use crate::renderer::fortress_view::{overlay_base_level, DragPreview};
+use crate::renderer::fortress_view::{DragPreview, overlay_base_level};
 use crate::renderer::{GameEvents, LocalPlayer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +151,11 @@ pub enum CornerPhase {
     Idle,
     /// The left button is down. `start` is the box's first corner: the
     /// pressed tile, or the anchor when the press came while `anchored`.
-    Pressed { start: TilePos, press_px: Vec2, anchored: bool },
+    Pressed {
+        start: TilePos,
+        press_px: Vec2,
+        anchored: bool,
+    },
     /// The first corner is set by a click; the next click sets the second.
     Anchored { anchor: TilePos },
 }
@@ -180,7 +184,10 @@ pub enum CornerEvent {
 pub enum CornerOutcome {
     None,
     /// The box from `a` to `b` is picked: send it.
-    Commit { a: TilePos, b: TilePos },
+    Commit {
+        a: TilePos,
+        b: TilePos,
+    },
     /// An open box was dropped.
     Cancelled,
 }
@@ -192,17 +199,36 @@ pub enum CornerOutcome {
 /// from the anchor (a drag finishes an anchored box rather than starting a
 /// new one). Cancel drops an open box; with none it is a no-op here (the
 /// caller then puts the tool down).
-pub fn step_corners(phase: &mut CornerPhase, ev: CornerEvent, drag_threshold_px: f32) -> CornerOutcome {
+pub fn step_corners(
+    phase: &mut CornerPhase,
+    ev: CornerEvent,
+    drag_threshold_px: f32,
+) -> CornerOutcome {
     match (*phase, ev) {
         (CornerPhase::Idle, CornerEvent::Press { cell, px }) => {
-            *phase = CornerPhase::Pressed { start: cell, press_px: px, anchored: false };
+            *phase = CornerPhase::Pressed {
+                start: cell,
+                press_px: px,
+                anchored: false,
+            };
             CornerOutcome::None
         }
         (CornerPhase::Anchored { anchor }, CornerEvent::Press { px, .. }) => {
-            *phase = CornerPhase::Pressed { start: anchor, press_px: px, anchored: true };
+            *phase = CornerPhase::Pressed {
+                start: anchor,
+                press_px: px,
+                anchored: true,
+            };
             CornerOutcome::None
         }
-        (CornerPhase::Pressed { start, press_px, anchored }, CornerEvent::Release { cell, px }) => {
+        (
+            CornerPhase::Pressed {
+                start,
+                press_px,
+                anchored,
+            },
+            CornerEvent::Release { cell, px },
+        ) => {
             if !anchored && px.distance(press_px) <= drag_threshold_px {
                 *phase = CornerPhase::Anchored { anchor: start };
                 CornerOutcome::None
@@ -260,7 +286,9 @@ impl DesignateState {
 
     /// Esc / right click: drop the open box if there is one, else the tool.
     pub fn cancel(&mut self) {
-        if step_corners(&mut self.corners, CornerEvent::Cancel, DRAG_THRESHOLD_PX) == CornerOutcome::None {
+        if step_corners(&mut self.corners, CornerEvent::Cancel, DRAG_THRESHOLD_PX)
+            == CornerOutcome::None
+        {
             self.tool = None;
         }
         self.drag = None;
@@ -305,7 +333,12 @@ pub fn no_tool_active(state: Res<DesignateState>) -> bool {
 /// Ctrl (of the tool's kind only), otherwise the tool's designation.
 pub fn order_for(tool: Tool, area: TileBox, erase: bool, op: OpId, priority: u8) -> Order {
     match tool.kind() {
-        Some(kind) if !erase => Order::Designate { op, kind, priority, area },
+        Some(kind) if !erase => Order::Designate {
+            op,
+            kind,
+            priority,
+            area,
+        },
         only => Order::Erase { area, only },
     }
 }
@@ -324,7 +357,9 @@ pub fn merge_runs(tiles: impl Iterator<Item = TilePos>) -> Vec<TileBox> {
     let mut out: Vec<TileBox> = Vec::new();
     for p in tiles {
         match out.last_mut() {
-            Some(b) if b.max[1] == p[1] && b.max[2] == p[2] && b.max[0] + 1 == p[0] => b.max[0] = p[0],
+            Some(b) if b.max[1] == p[1] && b.max[2] == p[2] && b.max[0] + 1 == p[0] => {
+                b.max[0] = p[0]
+            }
             _ => out.push(TileBox { min: p, max: p }),
         }
     }
@@ -394,7 +429,10 @@ fn erase_summary(
         .iter()
         .filter(|(p, d)| area.contains(**p) && only.is_none_or(|k| k.same_tool(d.kind)))
         .count() as u64;
-    OrderSummary { valid, invalid: BTreeMap::new() }
+    OrderSummary {
+        valid,
+        invalid: BTreeMap::new(),
+    }
 }
 
 /// Keep a picked tile's column inside the home region.
@@ -413,7 +451,11 @@ pub fn follow_corner(corner: TilePos, hover: Option<TilePos>, level: Option<i32>
 }
 
 fn clamp_to_region(p: TilePos) -> TilePos {
-    [p[0].clamp(0, REGION_BLOCKS as i32 - 1), p[1], p[2].clamp(0, REGION_BLOCKS as i32 - 1)]
+    [
+        p[0].clamp(0, REGION_BLOCKS as i32 - 1),
+        p[1],
+        p[2].clamp(0, REGION_BLOCKS as i32 - 1),
+    ]
 }
 
 fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
@@ -437,7 +479,9 @@ pub fn designate_keys(
     if ctrl && keys.just_pressed(KeyCode::KeyZ) {
         if let (Some(op), Some(client)) = (state.sent.last().copied(), local.0) {
             state.sent.pop();
-            let _ = events.0.send(game::GameEventKind::Order(client, Order::CancelOp(op)));
+            let _ = events
+                .0
+                .send(game::GameEventKind::Order(client, Order::CancelOp(op)));
         }
     }
     if keys.just_pressed(KeyCode::Escape) {
@@ -489,9 +533,20 @@ pub fn update_hover(
         if policy.blocks_game() || policy.ui_pointer {
             return None;
         }
-        let ray = cursor_ray(window.single().ok()?, view.single().ok()?, mirror.region()?, &frame)?;
-        let visible = (!working.cut).then(|| pick_visible_xray(ray, tool == Tool::Build, &mirror, xray)).flatten();
-        let p = visible.or_else(|| pick_level_cell(ray.0, ray.1, working.level?, |p| game::block_props().blocks_ray(mirror.block(p))))?;
+        let ray = cursor_ray(
+            window.single().ok()?,
+            view.single().ok()?,
+            mirror.region()?,
+            &frame,
+        )?;
+        let visible = (!working.cut)
+            .then(|| pick_visible_xray(ray, tool == Tool::Build, &mirror, xray))
+            .flatten();
+        let p = visible.or_else(|| {
+            pick_level_cell(ray.0, ray.1, working.level?, |p| {
+                game::block_props().blocks_ray(mirror.block(p))
+            })
+        })?;
         Some(clamp_to_region(p))
     })();
     if state.hover != hover {
@@ -507,23 +562,35 @@ pub fn cursor_ray(
     region: RegionId,
     frame: &crate::wrap_frame::WrapFrame,
 ) -> Option<(Vector, Vector)> {
-    let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), window.cursor_position()?).ok()?;
+    let ray = camera
+        .viewport_to_world(&GlobalTransform::from(*tf), window.cursor_position()?)
+        .ok()?;
     let origin = ray.origin - Vec3::from_array(frame.offset(region));
     let dir = *ray.direction;
-    Some((Vector::new(origin.x, origin.y, origin.z), Vector::new(dir.x, dir.y, dir.z)))
+    Some((
+        Vector::new(origin.x, origin.y, origin.z),
+        Vector::new(dir.x, dir.y, dir.z),
+    ))
 }
 
 /// The block the cursor ray meets first in the mirrored region, at whatever
 /// level ([`pick_visible_cell`]); with `face` the air cell in front of the
 /// face it entered through.
 pub fn pick_visible(ray: (Vector, Vector), face: bool, mirror: &TileMirror) -> Option<TilePos> {
-    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| game::block_props().blocks_ray(mirror.block(p)))
+    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| {
+        game::block_props().blocks_ray(mirror.block(p))
+    })
 }
 
 /// [`pick_visible`] under the dug-space x-ray (`xray`, cut off): through
 /// the terrain in front of a dug space, onto the floor or wall seen there
 /// ([`game::pick_xray_cell`]).
-pub fn pick_visible_xray(ray: (Vector, Vector), face: bool, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
+pub fn pick_visible_xray(
+    ray: (Vector, Vector),
+    face: bool,
+    mirror: &TileMirror,
+    xray: bool,
+) -> Option<TilePos> {
     if !xray {
         return pick_visible(ray, face, mirror);
     }
@@ -576,19 +643,34 @@ pub fn drag_input(
     let cursor = window.cursor_position();
     if buttons.just_pressed(MouseButton::Left) {
         let over_minimap = cursor.is_some_and(|c| minimap::screen_rect(window.size()).contains(c));
-        let blocked = policy.blocks_game() || policy.ui_pointer || minimap_pointer.dragging || over_minimap;
+        let blocked =
+            policy.blocks_game() || policy.ui_pointer || minimap_pointer.dragging || over_minimap;
         if let (false, Some(at), Some(px)) = (blocked, state.hover, cursor) {
-            step_corners(&mut state.corners, CornerEvent::Press { cell: at, px }, DRAG_THRESHOLD_PX);
+            step_corners(
+                &mut state.corners,
+                CornerEvent::Press { cell: at, px },
+                DRAG_THRESHOLD_PX,
+            );
         }
     }
-    let Some(start) = state.corners.start() else { return };
+    let Some(start) = state.corners.start() else {
+        return;
+    };
     // The moving corner follows the hover and the working level, whether
     // the button is held (a drag) or not (anchored, waiting for the click).
     // With the cut off the hover is on whatever level the cursor is on, so
     // the corner takes its level from the hover instead.
-    let level = if working.cut { working.level } else { state.hover.map(|h| h[1]) };
+    let level = if working.cut {
+        working.level
+    } else {
+        state.hover.map(|h| h[1])
+    };
     let corner = follow_corner(state.drag.map_or(start, |d| d.corner), state.hover, level);
-    let drag = Drag { anchor: start, corner, erase: ctrl };
+    let drag = Drag {
+        anchor: start,
+        corner,
+        erase: ctrl,
+    };
     if state.drag != Some(drag) {
         state.drag = Some(drag);
     }
@@ -602,19 +684,26 @@ pub fn drag_input(
     }
     // Releasing with the cursor outside the window counts as a drag.
     let px = cursor.unwrap_or(Vec2::INFINITY);
-    let CornerOutcome::Commit { a, b } =
-        step_corners(&mut state.corners, CornerEvent::Release { cell: corner, px }, DRAG_THRESHOLD_PX)
-    else {
+    let CornerOutcome::Commit { a, b } = step_corners(
+        &mut state.corners,
+        CornerEvent::Release { cell: corner, px },
+        DRAG_THRESHOLD_PX,
+    ) else {
         return;
     };
     state.drag = None;
     let area = TileBox::new(a, b);
-    let fits = area.clip_to_region().is_some_and(|a| a.tile_count() <= MAX_ORDER_TILES);
+    let fits = area
+        .clip_to_region()
+        .is_some_and(|a| a.tile_count() <= MAX_ORDER_TILES);
     let Some(client) = local.0 else { return };
     if !fits {
         return;
     }
-    let op = OpId { client, seq: state.next_seq };
+    let op = OpId {
+        client,
+        seq: state.next_seq,
+    };
     let order = order_for(tool, area, drag.erase, op, state.priority);
     if matches!(order, Order::Designate { .. }) {
         state.next_seq += 1;
@@ -664,15 +753,26 @@ pub fn update_drag_preview(
                 (drag_text(area, kind, &summary_of(&cells)), cells)
             }
             None => {
-                let only = if tool == Tool::Erase { None } else { tool.kind() };
+                let only = if tool == Tool::Erase {
+                    None
+                } else {
+                    tool.kind()
+                };
                 let summary = erase_summary(mirror.designations(), a, only);
-                (drag_text(area, None, &summary), a.tiles().map(|p| (p, Ok(()))).collect())
+                (
+                    drag_text(area, None, &summary),
+                    a.tiles().map(|p| (p, Ok(()))).collect(),
+                )
             }
         },
         Some(_) => (too_large_text(area), Vec::new()),
         None => (drag_text(area, kind, &OrderSummary::default()), Vec::new()),
     };
-    *preview = DragPreview { area: Some(area), kind, cells };
+    *preview = DragPreview {
+        area: Some(area),
+        kind,
+        cells,
+    };
     readout.0 = text;
 }
 
@@ -681,8 +781,13 @@ pub fn update_drag_preview(
 fn tile_box_transform(b: TileBox, offset: Vec3, inflate: f32) -> Transform {
     let size = BLOCK_VOXELS as f32;
     let min = Vec3::new(b.min[0] as f32, b.min[1] as f32, b.min[2] as f32) * size;
-    let max = Vec3::new(b.max[0] as f32 + 1.0, b.max[1] as f32 + 1.0, b.max[2] as f32 + 1.0) * size;
-    Transform::from_translation(offset + (min + max) / 2.0).with_scale(max - min + Vec3::splat(2.0 * inflate))
+    let max = Vec3::new(
+        b.max[0] as f32 + 1.0,
+        b.max[1] as f32 + 1.0,
+        b.max[2] as f32 + 1.0,
+    ) * size;
+    Transform::from_translation(offset + (min + max) / 2.0)
+        .with_scale(max - min + Vec3::splat(2.0 * inflate))
 }
 
 fn kind_color(kind: Option<DesignationKind>) -> Color {
@@ -713,7 +818,9 @@ pub fn draw_designate_gizmos(
     mut ghosts: crate::session::SessionLocal<GhostCache>,
 ) {
     let ghosts = ghosts.get();
-    let Some(origin) = mirror.home_offset() else { return };
+    let Some(origin) = mirror.home_offset() else {
+        return;
+    };
     if let Some(level) = working.level {
         let key = Some((mirror.version(), level));
         if ghosts.key != key {
@@ -722,7 +829,9 @@ pub fn draw_designate_gizmos(
             let mut builds: Vec<TilePos> = mirror
                 .designations()
                 .iter()
-                .filter(|(p, d)| matches!(d.kind, DesignationKind::Build(_)) && (lo..=hi).contains(&p[1]))
+                .filter(|(p, d)| {
+                    matches!(d.kind, DesignationKind::Build(_)) && (lo..=hi).contains(&p[1])
+                })
                 .map(|(p, _)| *p)
                 .collect();
             builds.sort_unstable_by_key(|p| (p[1], p[2], p[0]));
@@ -734,14 +843,23 @@ pub fn draw_designate_gizmos(
         }
     }
     if let Some((_, area, _)) = state.drag_area() {
-        let too_large = area.clip_to_region().is_some_and(|a| a.tile_count() > MAX_ORDER_TILES);
-        let color = if too_large { TOO_LARGE_COLOR } else { kind_color(preview.kind) };
+        let too_large = area
+            .clip_to_region()
+            .is_some_and(|a| a.tile_count() > MAX_ORDER_TILES);
+        let color = if too_large {
+            TOO_LARGE_COLOR
+        } else {
+            kind_color(preview.kind)
+        };
         let tf = tile_box_transform(area, origin, HOVER_INFLATE);
         gizmos.cube(tf, color);
         hidden.cube(tf, color.with_alpha(HIDDEN_EDGE_ALPHA));
     }
     if let (Some(_), Some(p)) = (state.tool, state.hover) {
-        gizmos.cube(tile_box_transform(TileBox { min: p, max: p }, origin, HOVER_INFLATE), HOVER_COLOR);
+        gizmos.cube(
+            tile_box_transform(TileBox { min: p, max: p }, origin, HOVER_INFLATE),
+            HOVER_COLOR,
+        );
     }
 }
 
@@ -750,4 +868,3 @@ pub fn setup_designate_gizmos(mut store: ResMut<GizmoConfigStore>) {
     let (config, _) = store.config_mut::<HiddenEdgeGizmos>();
     config.depth_bias = -1.0;
 }
-

@@ -43,6 +43,7 @@ pub mod cut_entities;
 pub mod designate;
 pub mod first_person;
 pub mod follow;
+pub mod hand;
 pub mod height;
 pub mod level;
 pub mod minimap;
@@ -50,6 +51,7 @@ pub mod move_order;
 pub mod selection;
 pub mod tiles;
 pub mod top_down;
+pub mod view_feel;
 pub mod visible;
 
 use crate::renderer::voxel_pull::xray::xray_on;
@@ -60,7 +62,7 @@ use bevy::window::PrimaryWindow;
 use game::movement::UNITS_PER_METER;
 
 use super::cursor::CursorPolicy;
-use crate::session::{world_systems_enabled, SessionResetExt};
+use crate::session::{SessionResetExt, world_systems_enabled};
 use height::HeightGrid;
 
 /// Which view the client renders from.
@@ -197,13 +199,16 @@ impl CommanderCamera {
 
 impl Default for CommanderCamera {
     fn default() -> Self {
-        let d = start_angle_deg("VOXEL_CAMERA_DISTANCE_M").unwrap_or(ZOOM_START_M) * UNITS_PER_METER;
+        let d =
+            start_angle_deg("VOXEL_CAMERA_DISTANCE_M").unwrap_or(ZOOM_START_M) * UNITS_PER_METER;
         Self {
             focus: region_rect(game::RegionCoords { x: 0, z: 0 }).center(),
             ground_y: sea_level_units(),
             distance: d,
             target_distance: d,
-            yaw: start_angle_deg("VOXEL_CAMERA_YAW_DEG").unwrap_or(0.0).to_radians(),
+            yaw: start_angle_deg("VOXEL_CAMERA_YAW_DEG")
+                .unwrap_or(0.0)
+                .to_radians(),
             pitch: start_angle_deg("VOXEL_CAMERA_PITCH_DEG")
                 .unwrap_or(PITCH_DEG)
                 .clamp(PITCH_MIN_DEG, PITCH_MAX_DEG)
@@ -241,7 +246,12 @@ pub struct CommanderView;
 /// the `WrapFrame` (render space).
 pub fn region_rect(rc: game::RegionCoords) -> Rect {
     let o = rc.world_offset();
-    Rect::new(o[0], o[2], o[0] + game::REGION_SIZE, o[2] + game::REGION_SIZE)
+    Rect::new(
+        o[0],
+        o[2],
+        o[0] + game::REGION_SIZE,
+        o[2] + game::REGION_SIZE,
+    )
 }
 
 /// The sea surface's height in sim units.
@@ -279,7 +289,8 @@ pub fn ground_dir(dir: Vec2, yaw: f32) -> Vec2 {
 pub fn orbit(yaw: f32, pitch: f32, delta: Vec2) -> (f32, f32) {
     let rate = ORBIT_DEG_PER_PX.to_radians();
     let yaw = (yaw - delta.x * rate).rem_euclid(std::f32::consts::TAU);
-    let pitch = (pitch + delta.y * rate).clamp(PITCH_MIN_DEG.to_radians(), PITCH_MAX_DEG.to_radians());
+    let pitch =
+        (pitch + delta.y * rate).clamp(PITCH_MIN_DEG.to_radians(), PITCH_MAX_DEG.to_radians());
     (yaw, pitch)
 }
 
@@ -290,14 +301,22 @@ pub fn orbit(yaw: f32, pitch: f32, delta: Vec2) -> (f32, f32) {
 /// below it (looking around, up to the sky). A drag crossing that pitch
 /// splits at it. Returns the new (focus, yaw, pitch); the distance is
 /// unchanged.
-pub fn orbit_about(focus: Vec3, distance: f32, yaw: f32, pitch: f32, pivot: Vec3, delta: Vec2) -> (Vec3, f32, f32) {
+pub fn orbit_about(
+    focus: Vec3,
+    distance: f32,
+    yaw: f32,
+    pitch: f32,
+    pivot: Vec3,
+    delta: Vec2,
+) -> (Vec3, f32, f32) {
     let (new_yaw, new_pitch) = orbit(yaw, pitch, delta);
     let band = ORBIT_GROUND_MIN_DEG.to_radians();
     let turn = |focus: Vec3, from: (f32, f32), to: (f32, f32), about: Option<Vec3>| {
         if from == to {
             return focus;
         }
-        let about = about.unwrap_or_else(|| camera_transform(focus, distance, from.0, from.1).translation);
+        let about =
+            about.unwrap_or_else(|| camera_transform(focus, distance, from.0, from.1).translation);
         let r = view_rotation(to.0, to.1) * view_rotation(from.0, from.1).inverse();
         about + r * (focus - about)
     };
@@ -317,7 +336,13 @@ pub fn orbit_about(focus: Vec3, distance: f32, yaw: f32, pitch: f32, pivot: Vec3
 /// the distance that leaves the camera where it is, so a turn about an
 /// off-centre pivot hands back an ordinary rig with no rise. `None` when the
 /// ray does not reach the plane.
-pub fn reanchor(focus: Vec3, distance: f32, yaw: f32, pitch: f32, baseline: f32) -> Option<(Vec3, f32)> {
+pub fn reanchor(
+    focus: Vec3,
+    distance: f32,
+    yaw: f32,
+    pitch: f32,
+    baseline: f32,
+) -> Option<(Vec3, f32)> {
     let tf = camera_transform(focus, distance, yaw, pitch);
     let forward = *tf.forward();
     let t = (baseline - tf.translation.y) / forward.y;
@@ -501,6 +526,7 @@ impl Plugin for CommanderPlugin {
             .add_session_reset::<designate::DragReadout>()
             .add_session_reset::<adventure::ClientPlayMode>()
             .add_session_reset::<follow::Follow>()
+            .add_session_reset::<view_feel::SprintInput>()
             .add_session_reset::<first_person::FirstPerson>()
             .add_session_reset::<top_down::TopDown>()
             .add_session_reset::<RightPress>()
@@ -517,10 +543,7 @@ impl Plugin for CommanderPlugin {
             .add_systems(PreUpdate, yield_commander_camera)
             .add_systems(
                 Startup,
-                (
-                    spawn_commander_camera,
-                    designate::setup_designate_gizmos,
-                ),
+                (spawn_commander_camera, designate::setup_designate_gizmos),
             )
             .add_systems(
                 Update,
@@ -531,16 +554,32 @@ impl Plugin for CommanderPlugin {
                     place_on_body,
                     (minimap::update_minimap_view, minimap::minimap_pointer).chain(),
                     hold_pointer_while_orbiting.run_if(first_person::inactive),
-                    grab_orbit_pivot.run_if(first_person::inactive).run_if(top_down::inactive),
+                    grab_orbit_pivot
+                        .run_if(first_person::inactive)
+                        .run_if(top_down::inactive),
                     // After `level_input`: a C that turns the cut off leaves top-down
                     // in the same frame, before `track_camera_level` sees it.
-                    (level::init_level, level::level_input.run_if(first_person::inactive), top_down::toggle_top_down).chain(),
                     (
-                        pan_and_zoom.run_if(first_person::inactive).run_if(top_down::inactive),
-                        top_down::top_down_input.run_if(first_person::inactive).run_if(top_down::active),
+                        level::init_level,
+                        level::level_input.run_if(first_person::inactive),
+                        top_down::toggle_top_down,
                     )
                         .chain(),
-                    (follow_terrain, follow::follow_camera, bounds::clamp_to_window, level::track_camera_level)
+                    (
+                        pan_and_zoom
+                            .run_if(first_person::inactive)
+                            .run_if(top_down::inactive),
+                        top_down::top_down_input
+                            .run_if(first_person::inactive)
+                            .run_if(top_down::active),
+                    )
+                        .chain(),
+                    (
+                        follow_terrain,
+                        follow::follow_camera,
+                        bounds::clamp_to_window,
+                        level::track_camera_level,
+                    )
                         .chain(),
                     (underground_view, first_person_water_fog),
                     (top_down::sync_top_down_projection, apply_camera_transform).chain(),
@@ -562,7 +601,9 @@ impl Plugin for CommanderPlugin {
                     )
                         .chain()
                         .run_if(first_person::inactive),
-                    selection::select_input.run_if(designate::no_tool_active).run_if(first_person::inactive),
+                    selection::select_input
+                        .run_if(designate::no_tool_active)
+                        .run_if(first_person::inactive),
                     follow::rekey_local_player,
                     selection::prune_selection,
                     selection::draw_selection_rings,
@@ -581,10 +622,12 @@ impl Plugin for CommanderPlugin {
                     first_person::ensure_first_person,
                     first_person::cycle_body_view,
                     // Before the eyes are moved toward their new target.
-                    first_person::sync_first_person_camera.before(super::interpolate::interpolate_transforms),
+                    first_person::sync_first_person_camera
+                        .before(super::interpolate::interpolate_transforms),
                     // The glide works on the eye: last frame's third-person
                     // pull comes off first.
-                    first_person::restore_eye_point.before(super::interpolate::interpolate_transforms),
+                    first_person::restore_eye_point
+                        .before(super::interpolate::interpolate_transforms),
                     adventure::sync_body_visibility,
                 )
                     .chain()
@@ -602,6 +645,24 @@ impl Plugin for CommanderPlugin {
             )
             .add_systems(
                 Update,
+                (
+                    // The glide works on the eye: last frame's bob comes off first.
+                    view_feel::restore_view_feel.before(super::interpolate::interpolate_transforms),
+                    // On the eye with its look, after the probe measured it,
+                    // before the third-person camera leaves it.
+                    view_feel::apply_view_feel
+                        .after(super::look::apply_local_look)
+                        .after(super::interpolate::interpolate_transforms)
+                        .after(super::motion_probe::probe_camera_motion)
+                        .before(first_person::place_third_person_camera),
+                    // The first-person arm: under the eyes, posed after their bob.
+                    hand::spawn_hand.after(first_person::sync_first_person_camera),
+                    hand::pose_hand.after(view_feel::apply_view_feel),
+                )
+                    .run_if(world_systems_enabled()),
+            )
+            .add_systems(
+                Update,
                 cut_entities::hide_cut_entities
                     .after(super::interpolate::interpolate_transforms)
                     .after(level::track_camera_level)
@@ -612,7 +673,11 @@ impl Plugin for CommanderPlugin {
                 Update,
                 (
                     super::fortress_view::update_overlay_grid,
-                    (super::fortress_view::update_fortress_view, super::voxel_material::sync_chunk_material_cut).chain(),
+                    (
+                        super::fortress_view::update_fortress_view,
+                        super::voxel_material::sync_chunk_material_cut,
+                    )
+                        .chain(),
                 )
                     .after(level::track_camera_level)
                     .after(tiles::update_tile_mirror)
@@ -684,30 +749,18 @@ fn spawn_commander_camera(mut commands: Commands, cam: Res<CommanderCamera>) {
 /// the focus is pulled into the new region.
 fn track_home_region(
     status: Res<super::hud::HudStatus>,
-    mut pending_play: ResMut<crate::renderer::world_map::PendingPlay>,
-    mut level: ResMut<level::WorkingLevel>,
     mut cam: ResMut<CommanderCamera>,
     frame: Option<Res<crate::wrap_frame::WrapFrame>>,
 ) {
     let frame = frame.as_deref().copied().unwrap_or_default();
-    let bounds = status.home_region.map(|home| region_rect(frame.alias(home)));
+    let bounds = status
+        .home_region
+        .map(|home| region_rect(frame.alias(home)));
     if cam.bounds != bounds {
-        let change = cam.bounds.is_some() && bounds.is_some();
-        // Only a Play re-places the camera over the new region's body; a
-        // walking home change (a seam crossing) keeps the focus where it is
-        // (Adventure's `bounds::clamp_to_window` confines it). The very first
-        // home keeps the normal first placement.
-        let walked = change && !pending_play.0;
-        if change {
-            if pending_play.0 {
-                cam.placed = false;
-                // The level is region-local: the old region's would put the
-                // camera anywhere in the new one's ground. `init_level` /
-                // `place_on_body` pick it again from the new surface.
-                level.level = None;
-            }
-            pending_play.0 = false;
-        }
+        // A home change keeps the focus where it is (Adventure's
+        // `bounds::clamp_to_window` confines it); the very first home keeps
+        // the normal first placement.
+        let walked = cam.bounds.is_some() && bounds.is_some();
         cam.bounds = bounds;
         if !walked {
             cam.focus = home_change_focus(cam.focus, bounds, cam.placed);
@@ -716,8 +769,8 @@ fn track_home_region(
 }
 
 /// The focus right after the home rect changed to `bounds`: centred on the
-/// new rect while the camera waits for `place_on_body` (a Play, or the first
-/// home), so a travelled-to region is not entered at the edge nearest the old
+/// new rect while the camera waits for `place_on_body` (an adventure's start, or
+/// the first home), so a travelled-to region is not entered at the edge nearest the old
 /// place; kept (clamped) when the camera is already placed.
 pub fn home_change_focus(focus: Vec2, bounds: Option<Rect>, placed: bool) -> Vec2 {
     match bounds {
@@ -732,7 +785,7 @@ fn inside_bounds(x: f32, z: f32, bounds: Option<Rect>) -> bool {
 }
 
 /// Put the camera over the local (inert) body the first time it is placed
-/// (and after every Play): above ground, on the surface of the body's column,
+/// (and after every adventure start): above ground, on the surface of the body's column,
 /// with the working level there too — not the level picked under the region
 /// centre while the camera waited, nor the previous region's. Waits until the
 /// height grid has that column, so the surface is the real one.
@@ -746,12 +799,17 @@ fn place_on_body(
         return;
     }
     // A freshly spawned body reads the origin until transforms propagate.
-    let Some(at) = body.iter().map(|gt| gt.translation()).find(|p| *p != Vec3::ZERO && inside_bounds(p.x, p.z, cam.bounds))
+    let Some(at) = body
+        .iter()
+        .map(|gt| gt.translation())
+        .find(|p| *p != Vec3::ZERO && inside_bounds(p.x, p.z, cam.bounds))
     else {
         return;
     };
     let focus = clamp_focus(Vec2::new(at.x, at.z), cam.bounds);
-    let Some(surface) = level::focus_surface(&grid, focus) else { return };
+    let Some(surface) = level::focus_surface(&grid, focus) else {
+        return;
+    };
     cam.focus = focus;
     cam.ground_y = surface;
     cam.rise = 0.0;
@@ -797,14 +855,20 @@ fn hold_pointer_while_orbiting(
     if press.released.is_some() {
         press.released = None;
     }
-    let Ok(mut window) = window.single_mut() else { return };
+    let Ok(mut window) = window.single_mut() else {
+        return;
+    };
     if buttons.just_pressed(MouseButton::Right)
         && window.focused
         && !policy.blocks_game()
         && !policy.ui_pointer
     {
         *anchor = window.cursor_position();
-        *press = RightPress { at: *anchor, motion_px: 0.0, released: None };
+        *press = RightPress {
+            at: *anchor,
+            motion_px: 0.0,
+            released: None,
+        };
     }
     let held = buttons.pressed(MouseButton::Right) && window.focused && !policy.blocks_game();
     let Some(at) = *anchor else { return };
@@ -818,8 +882,13 @@ fn hold_pointer_while_orbiting(
         *anchor = None;
         // Only a real release of the button (window focused, game not
         // blocked by a menu) is a click; focus loss or Esc just ends the drag.
-        let clicked = buttons.just_released(MouseButton::Right) && window.focused && !policy.blocks_game();
-        *press = RightPress { at: None, motion_px: 0.0, released: clicked.then_some(press.motion_px) };
+        let clicked =
+            buttons.just_released(MouseButton::Right) && window.focused && !policy.blocks_game();
+        *press = RightPress {
+            at: None,
+            motion_px: 0.0,
+            released: clicked.then_some(press.motion_px),
+        };
     }
     let orbit = held && turns;
     if policy.orbit != orbit {
@@ -834,7 +903,10 @@ fn hold_pointer_while_orbiting(
 /// position" every frame), and the browser's pointer lock already holds it.
 #[cfg(not(target_arch = "wasm32"))]
 fn warp_pointer(window: &mut Mut<Window>, at: Vec2) {
-    if window.cursor_position().is_none_or(|c| c.distance(at) > 0.5) {
+    if window
+        .cursor_position()
+        .is_none_or(|c| c.distance(at) > 0.5)
+    {
         window.set_cursor_position(Some(at));
     }
 }
@@ -873,9 +945,20 @@ fn grab_orbit_pivot(
     }
     let tf = camera_transform(focus, cam.distance, cam.yaw, cam.pitch);
     // The ground the player sees: with the cut on, never the cut-away rock.
-    let ground =
-        visible::visible_ground(tf.translation, *tf.forward(), selection::PICK_REACH_M * UNITS_PER_METER, &grid, &working, &tiles, xray_on(xray.as_deref(), working.cut));
-    cam.pivot = Some(if working.cut { orbit_pivot(ground, focus) } else { free_orbit_pivot(ground, tf.translation, focus) });
+    let ground = visible::visible_ground(
+        tf.translation,
+        *tf.forward(),
+        selection::PICK_REACH_M * UNITS_PER_METER,
+        &grid,
+        &working,
+        &tiles,
+        xray_on(xray.as_deref(), working.cut),
+    );
+    cam.pivot = Some(if working.cut {
+        orbit_pivot(ground, focus)
+    } else {
+        free_orbit_pivot(ground, tf.translation, focus)
+    });
 }
 
 /// Keyboard, screen-edge and middle/right-drag input → focus, heading,
@@ -900,14 +983,22 @@ fn pan_and_zoom(
 ) {
     let Ok(window) = window.single() else { return };
     let sprint = sprint.get();
-    // A client-local overlay (dev panel) or the menu / world map owns the
+    // A client-local overlay or the menu / world map owns the
     // pointer and the keyboard.
     if policy.blocks_game() {
         *sprint = Sprint::default();
         return;
     }
-    *sprint = sprint.update(keys.just_pressed(SPRINT_TAP_KEY), keys.pressed(SPRINT_TAP_KEY), time.elapsed_secs());
-    let speed = if sprint.latched || keys.any_pressed(SPRINT_KEYS) { SPRINT_FACTOR } else { 1.0 };
+    *sprint = sprint.update(
+        keys.just_pressed(SPRINT_TAP_KEY),
+        keys.pressed(SPRINT_TAP_KEY),
+        time.elapsed_secs(),
+    );
+    let speed = if sprint.latched || keys.any_pressed(SPRINT_KEYS) {
+        SPRINT_FACTOR
+    } else {
+        1.0
+    };
     let dt = time.delta_secs();
     let size = window.size();
 
@@ -937,13 +1028,30 @@ fn pan_and_zoom(
         }
     }
     let middle = buttons.pressed(MouseButton::Middle) && window.focused;
-    let depth = (working.cut || middle).then(|| pan_depth(centre_ray_hit(&cam, &grid, &working, &tiles, xray_on(xray.as_deref(), working.cut)), cam.distance));
+    let depth = (working.cut || middle).then(|| {
+        pan_depth(
+            centre_ray_hit(
+                &cam,
+                &grid,
+                &working,
+                &tiles,
+                xray_on(xray.as_deref(), working.cut),
+            ),
+            cam.distance,
+        )
+    });
     let mut step = match depth {
         Some(depth) if working.cut => zoom_pan_step(dir, depth, dt) * speed,
         _ => pan_step(dir, dt) * speed,
     };
     if let (true, Some(depth)) = (middle, depth) {
-        step += drag_pan(motion.delta, depth, FOV_Y_DEG.to_radians(), size.y, cam.pitch);
+        step += drag_pan(
+            motion.delta,
+            depth,
+            FOV_Y_DEG.to_radians(),
+            size.y,
+            cam.pitch,
+        );
     }
     // Any pan ends following; zoom and orbit do not.
     if step != Vec2::ZERO && follow.0.is_some() {
@@ -957,7 +1065,14 @@ fn pan_and_zoom(
     }
 
     if let (true, Some(pivot)) = (policy.orbit, cam.pivot) {
-        let (focus, yaw, pitch) = orbit_about(focus_point(&cam), cam.distance, cam.yaw, cam.pitch, pivot, motion.delta);
+        let (focus, yaw, pitch) = orbit_about(
+            focus_point(&cam),
+            cam.distance,
+            cam.yaw,
+            cam.pitch,
+            pivot,
+            motion.delta,
+        );
         cam.focus = Vec2::new(focus.x, focus.z);
         cam.rise = focus.y - cam.ground_y;
         (cam.yaw, cam.pitch) = (yaw, pitch);
@@ -976,7 +1091,13 @@ fn pan_and_zoom(
             // Looking along or above the horizon: the view ray meets the
             // floor far away or never, and re-anchoring onto it would throw
             // the zoom distance out — keep the rise instead.
-        } else if let Some((focus, d)) = reanchor(focus_point(&cam), cam.distance, cam.yaw, cam.pitch, cam.ground_y) {
+        } else if let Some((focus, d)) = reanchor(
+            focus_point(&cam),
+            cam.distance,
+            cam.yaw,
+            cam.pitch,
+            cam.ground_y,
+        ) {
             cam.focus = Vec2::new(focus.x, focus.z);
             cam.rise = 0.0;
             (cam.distance, cam.target_distance) = (d, d);
@@ -1094,7 +1215,10 @@ pub fn eye_in_water(mirror: &tiles::TileMirror, eye: Vec3) -> bool {
         return false;
     }
     let n = game::REGION_BLOCKS as i32;
-    game::TileSource::water_units(mirror, [bx.rem_euclid(n), world.y.floor() as i32, bz.rem_euclid(n)]) > 0
+    game::TileSource::water_units(
+        mirror,
+        [bx.rem_euclid(n), world.y.floor() as i32, bz.rem_euclid(n)],
+    ) > 0
 }
 
 /// Keeps the first-person (body) camera's fog in step with the water: the
@@ -1104,7 +1228,10 @@ pub fn eye_in_water(mirror: &tiles::TileMirror, eye: Vec3) -> bool {
 pub fn first_person_water_fog(
     mirror: Res<tiles::TileMirror>,
     view: Option<Res<crate::renderer::atmosphere::ViewDistance>>,
-    mut cams: Query<(&GlobalTransform, &mut bevy::pbr::DistanceFog), (With<Camera3d>, With<first_person::Eyes>)>,
+    mut cams: Query<
+        (&GlobalTransform, &mut bevy::pbr::DistanceFog),
+        (With<Camera3d>, With<first_person::Eyes>),
+    >,
 ) {
     for (gt, mut fog) in &mut cams {
         let want = if eye_in_water(&mirror, gt.translation()) {
@@ -1131,7 +1258,13 @@ fn underground_view(
     ambient: Option<ResMut<GlobalAmbientLight>>,
     sky: Option<Res<crate::renderer::skybox::SkyboxCubemap>>,
     rock: Option<Res<crate::renderer::skybox::UndergroundCubemap>>,
-    mut views: Query<(Option<&mut bevy::core_pipeline::Skybox>, Option<&mut bevy::pbr::DistanceFog>), With<CommanderView>>,
+    mut views: Query<
+        (
+            Option<&mut bevy::core_pipeline::Skybox>,
+            Option<&mut bevy::pbr::DistanceFog>,
+        ),
+        With<CommanderView>,
+    >,
     mut surface_ambient: Local<Option<f32>>,
     td: Option<Res<top_down::TopDown>>,
     working: Res<level::WorkingLevel>,
@@ -1144,16 +1277,27 @@ fn underground_view(
     let top = td.is_some_and(|t| t.on);
     // Underground beats underwater beats open air.
     let (under, wet) = if top {
-        (top_down::top_down_underground(working.level, top_down::lowest_surface_level(grid.surface_range())), false)
+        (
+            top_down::top_down_underground(
+                working.level,
+                top_down::lowest_surface_level(grid.surface_range()),
+            ),
+            false,
+        )
     } else {
         let eye = camera_transform(focus_point(&cam), cam.distance, cam.yaw, cam.pitch).translation;
-        let under = eye_in_block(home_block_solid(&mirror, eye), eye, grid.surface_at(eye.x, eye.z));
+        let under = eye_in_block(
+            home_block_solid(&mirror, eye),
+            eye,
+            grid.surface_at(eye.x, eye.z),
+        );
         (under, !under && eye_in_water(&mirror, eye))
     };
     let fog_choice = fog_choice.get();
     let new_fog = *fog_choice != Some((top, under, wet));
     for (skybox, fog) in &mut views {
-        if let (Some(mut skybox), Some(sky), Some(rock)) = (skybox, sky.as_deref(), rock.as_deref()) {
+        if let (Some(mut skybox), Some(sky), Some(rock)) = (skybox, sky.as_deref(), rock.as_deref())
+        {
             let want = if under { &rock.0 } else { &sky.0 };
             if skybox.image.as_ref() != Some(want) {
                 skybox.image = Some(want.clone());
@@ -1167,7 +1311,9 @@ fn underground_view(
             } else if wet {
                 crate::renderer::atmosphere::underwater_fog()
             } else {
-                crate::renderer::atmosphere::distance_fog(&view.as_deref().copied().unwrap_or_default())
+                crate::renderer::atmosphere::distance_fog(
+                    &view.as_deref().copied().unwrap_or_default(),
+                )
             };
             // The top-down fog shares the surface fog's colour, so the
             // colour alone cannot tell them apart.
@@ -1179,7 +1325,11 @@ fn underground_view(
         }
     }
     let base = *surface_ambient.get_or_insert(ambient.brightness);
-    let want = if under { base * UNDERGROUND_AMBIENT_GAIN } else { base };
+    let want = if under {
+        base * UNDERGROUND_AMBIENT_GAIN
+    } else {
+        base
+    };
     if ambient.brightness != want {
         ambient.brightness = want;
     }
@@ -1202,7 +1352,10 @@ fn apply_camera_transform(
         Some(td) if td.on => {
             // Straight down over the focus, the block grid on whole pixels.
             let scale = window.single().map_or(1.0, |w| w.scale_factor());
-            let focus = top_down::snap_to_pixel(cam.focus, top_down::units_per_px(td.px_per_block(), scale));
+            let focus = top_down::snap_to_pixel(
+                cam.focus,
+                top_down::units_per_px(td.px_per_block(), scale),
+            );
             let cut = level::camera_cut(&working, &tiles).unwrap_or(cam.ground_y);
             top_down::top_down_transform(focus, cut)
         }
@@ -1212,4 +1365,3 @@ fn apply_camera_transform(
         tf.set_if_neq(want);
     }
 }
-

@@ -14,8 +14,8 @@
 //!   (`IntegrationParameters::length_unit`); run with `-- --nocapture` for
 //!   the numbers in `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md`.
 use game::movement::{
-    AUTOSTEP_MIN_WIDTH_M, CHARACTER_SKIN, GROUND_SNAP, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT,
-    UNITS_PER_METER,
+    AUTOSTEP_MIN_WIDTH_M, CHARACTER_SKIN, GROUND_SNAP, PLAYER_CAPSULE_HALF_HEIGHT,
+    PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, UNITS_PER_METER,
 };
 use physics_next::PhysicsWorld;
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
@@ -55,7 +55,11 @@ fn walking_step() -> Vector {
 
 fn assert_floor_hit(hit: Option<ShapeCastHit>, context: &str) {
     let hit = hit.unwrap_or_else(|| panic!("{context}: the floor was missed"));
-    assert!(hit.time_of_impact < 1.0e-3, "{context}: toi {}", hit.time_of_impact);
+    assert!(
+        hit.time_of_impact < 1.0e-3,
+        "{context}: toi {}",
+        hit.time_of_impact
+    );
     let n = hit.normal1;
     assert!(
         n.x.abs() < 1.0e-4 && n.z.abs() < 1.0e-4 && n.y > 0.9999,
@@ -78,11 +82,25 @@ fn assert_floor_hit(hit: Option<ShapeCastHit>, context: &str) {
 fn cast_starting_at_the_target_distance_hits_with_the_true_normal() {
     let cuboid = Cuboid::new(v(8.0, 8.0, 8.0));
     let capsule = Capsule::new_y(HALF_HEIGHT, RADIUS);
-    for gap in [SKIN + 0.0015, SKIN + 0.0005, SKIN, SKIN - 0.0005, SKIN - 0.006] {
+    for gap in [
+        SKIN + 0.0015,
+        SKIN + 0.0005,
+        SKIN,
+        SKIN - 0.0005,
+        SKIN - 0.006,
+    ] {
         for z in [-6.0, -2.5, 0.0, 2.01, 5.0] {
             let pos2 = at(0.3, 8.0 + HALF_HEIGHT + RADIUS + gap, z);
-            let hit = cast_shapes(&Pose::IDENTITY, Vector::ZERO, &cuboid, &pos2, walking_step(), &capsule, skin_cast(1.0))
-                .unwrap();
+            let hit = cast_shapes(
+                &Pose::IDENTITY,
+                Vector::ZERO,
+                &cuboid,
+                &pos2,
+                walking_step(),
+                &capsule,
+                skin_cast(1.0),
+            )
+            .unwrap();
             assert_floor_hit(hit, &format!("gap {gap} z {z}"));
         }
     }
@@ -95,8 +113,20 @@ fn cast_moving_away_from_within_the_target_distance_is_free() {
     let capsule = Capsule::new_y(HALF_HEIGHT, RADIUS);
     let pos2 = at(0.0, 8.0 + HALF_HEIGHT + RADIUS + SKIN, 0.0);
     for vel in [v(0.0, 0.0, 3.0), v(0.0, 1.0, 3.0)] {
-        let hit = cast_shapes(&Pose::IDENTITY, Vector::ZERO, &cuboid, &pos2, vel, &capsule, skin_cast(1.0)).unwrap();
-        assert!(hit.is_none(), "sliding along or lifting off the floor is no hit: {hit:?}");
+        let hit = cast_shapes(
+            &Pose::IDENTITY,
+            Vector::ZERO,
+            &cuboid,
+            &pos2,
+            vel,
+            &capsule,
+            skin_cast(1.0),
+        )
+        .unwrap();
+        assert!(
+            hit.is_none(),
+            "sliding along or lifting off the floor is no hit: {hit:?}"
+        );
     }
 }
 
@@ -115,7 +145,16 @@ fn cast_on_floor(floor: &Voxels, size: f32, x: f32, z: f32, vel: Vector) -> Opti
     let capsule = Capsule::new_y(HALF_HEIGHT, RADIUS);
     let pos2 = at(x, size + HALF_HEIGHT + RADIUS + SKIN + 0.001, z);
     let distance = vel.length();
-    cast_shapes(&Pose::IDENTITY, Vector::ZERO, floor, &pos2, vel / distance, &capsule, skin_cast(distance)).unwrap()
+    cast_shapes(
+        &Pose::IDENTITY,
+        Vector::ZERO,
+        floor,
+        &pos2,
+        vel / distance,
+        &capsule,
+        skin_cast(distance),
+    )
+    .unwrap()
 }
 
 /// Gate: mmo-fork hunk parry shape_cast_voxels_shape.rs:1 search domain seeded from loosened AABB (b6abc1e9; failed on pristine; seam bug 4173c4ef)
@@ -127,8 +166,15 @@ fn cast_on_floor(floor: &Voxels, size: f32, x: f32, z: f32, vel: Vector) -> Opti
 /// Task 3.2 (loosened, grown search domain).
 fn voxels_cast_sees_the_voxel_under_a_hovering_shape() {
     let floor = voxel_floor(BLOCK);
-    for z in [BLOCK + 9.443, 2.0 * BLOCK - RADIUS - 0.16, 2.0 * BLOCK - RADIUS - 0.01] {
-        assert_floor_hit(cast_on_floor(&floor, BLOCK, 1.5 * BLOCK, z, walking_step()), &format!("z {z}"));
+    for z in [
+        BLOCK + 9.443,
+        2.0 * BLOCK - RADIUS - 0.16,
+        2.0 * BLOCK - RADIUS - 0.01,
+    ] {
+        assert_floor_hit(
+            cast_on_floor(&floor, BLOCK, 1.5 * BLOCK, z, walking_step()),
+            &format!("z {z}"),
+        );
     }
 }
 
@@ -173,12 +219,22 @@ fn game_controller() -> KinematicCharacterController {
 }
 
 fn add_player(w: &mut PhysicsWorld, pos: Vector) -> (RigidBodyHandle, ColliderHandle) {
-    let body = w.bodies.insert(RigidBodyBuilder::kinematic_position_based().translation(pos));
-    let collider = w.colliders.insert_with_parent(ColliderBuilder::capsule_y(HALF_HEIGHT, RADIUS), body, &mut w.bodies);
+    let body = w
+        .bodies
+        .insert(RigidBodyBuilder::kinematic_position_based().translation(pos));
+    let collider = w.colliders.insert_with_parent(
+        ColliderBuilder::capsule_y(HALF_HEIGHT, RADIUS),
+        body,
+        &mut w.bodies,
+    );
     (body, collider)
 }
 
-fn kcc_move(w: &PhysicsWorld, body: RigidBodyHandle, desired: Vector) -> rapier3d::control::EffectiveCharacterMovement {
+fn kcc_move(
+    w: &PhysicsWorld,
+    body: RigidBodyHandle,
+    desired: Vector,
+) -> rapier3d::control::EffectiveCharacterMovement {
     kcc_move_with(&game_controller(), w, body, desired)
 }
 
@@ -195,7 +251,14 @@ fn kcc_move_with(
         QueryFilter::default().exclude_rigid_body(body),
     );
     let shape = Capsule::new_y(HALF_HEIGHT, RADIUS);
-    controller.move_shape(w.params.dt, &qp, &shape, w.bodies[body].position(), desired, |_| {})
+    controller.move_shape(
+        w.params.dt,
+        &qp,
+        &shape,
+        w.bodies[body].position(),
+        desired,
+        |_| {},
+    )
 }
 
 /// Gate: mmo-fork (D7) hunk rapier character_controller.rs:206/225/323 `depenetrate` flag: asserts default true and false leaves a buried body (38cd3da5)
@@ -210,21 +273,54 @@ fn kcc_move_with(
 fn kcc_zero_motion_moves_a_body_the_lift_leaves_buried() {
     let chunk = 2.0 * BLOCK;
     let sink = STEP_HEIGHT * UNITS_PER_METER + 1.0;
-    let mut w = PhysicsWorld { params: IntegrationParameters { dt: game::TICK_RATE as f32 / 1000.0, ..Default::default() }, ..Default::default() };
+    let mut w = PhysicsWorld {
+        params: IntegrationParameters {
+            dt: game::TICK_RATE as f32 / 1000.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     let ground = w.bodies.insert(RigidBodyBuilder::fixed());
     let half = 0.5 * chunk;
-    w.colliders.insert_with_parent(ColliderBuilder::cuboid(half, half, half).translation(v(half, BLOCK - half, half)), ground, &mut w.bodies);
-    let (body, _) = add_player(&mut w, v(0.5 * BLOCK, BLOCK + HALF_HEIGHT + RADIUS - sink, 0.5 * BLOCK));
+    w.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(half, half, half).translation(v(half, BLOCK - half, half)),
+        ground,
+        &mut w.bodies,
+    );
+    let (body, _) = add_player(
+        &mut w,
+        v(
+            0.5 * BLOCK,
+            BLOCK + HALF_HEIGHT + RADIUS - sink,
+            0.5 * BLOCK,
+        ),
+    );
     w.step(&mut PhysicsPipeline::new());
     let quarter_height = 0.25 * 2.0 * (HALF_HEIGHT + RADIUS);
 
-    assert!(KinematicCharacterController::default().depenetrate, "upstream's behaviour stays the default");
+    assert!(
+        KinematicCharacterController::default().depenetrate,
+        "upstream's behaviour stays the default"
+    );
     let still = kcc_move(&w, body, Vector::ZERO);
-    println!("D7 cuboid buried {sink}: still {:?} (cap {quarter_height})", still.translation);
-    assert!(still.translation.y > 0.5 * quarter_height, "#485 moved a buried body: {:?}", still.translation);
+    println!(
+        "D7 cuboid buried {sink}: still {:?} (cap {quarter_height})",
+        still.translation
+    );
+    assert!(
+        still.translation.y > 0.5 * quarter_height,
+        "#485 moved a buried body: {:?}",
+        still.translation
+    );
 
-    let off = KinematicCharacterController { depenetrate: false, ..game_controller() };
+    let off = KinematicCharacterController {
+        depenetrate: false,
+        ..game_controller()
+    };
     let still = kcc_move_with(&off, &w, body, Vector::ZERO);
-    assert_eq!(still.translation, Vector::ZERO, "depenetrate: false leaves a buried body where it is");
+    assert_eq!(
+        still.translation,
+        Vector::ZERO,
+        "depenetrate: false leaves a buried body where it is"
+    );
 }
-

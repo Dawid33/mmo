@@ -158,7 +158,8 @@ Places where this plan goes beyond the spec or revisits a **[call]**. None reope
       logical line and is followed by an identifier or a string;
     - `default`, when it is the first token of a logical line and is followed by a string;
     - `per`, directly after `once`;
-    - `at`, on a line begun by `objective`.
+    - `at`, on a line begun by `objective`;
+    - `topic` and `priority`, on a line begun by `dialogue`, after the parameter list.
 
     Scripts keep these words as variable names (`match stage:`); the grammar sees distinct tokens, so LR(1)
     stays conflict-free.
@@ -445,8 +446,8 @@ error[recursion]: recursive call cycle: f -> f
   `fn` / `dialogue`) and `let`, each optionally `pub`.
 - **Dialogue and quest grammar (spec §5.11–5.13, decision 19).** A dialogue body is **steps**, a grammar of its
   own (`Steps` / `StepBlock`), not statements. The rules that keep it LR(1) with no conflict:
-  - **Dialogue item:** `Decorator* "pub"? "dialogue" Ident Params ("for" Expr)? ":" Newline Indent (Node | Step)+
-    Dedent`, with `Node = "node" Ident ("when" Cond)? ":" StepBlock`. Nodes mixed with steps are refused by
+  - **Dialogue item:** `Decorator* "pub"? "dialogue" Ident Params ("for" Expr)? Topic? ":" Newline Indent
+    (Node | Step)+ Dedent`, with `Topic = "topic" (Str | FString) LineId? ("if" Expr)? ("priority" Int)?`; with `Node = "node" Ident ("when" Cond)? ":" StepBlock`. Nodes mixed with steps are refused by
     resolve (`mixed-dialogue-body`); a node inside a step block is a `syntax` error.
   - **Line step:** `(Ident ":")? (Str | FString) LineId? ("when" Cond)? Newline`, with
     `LineId = "@" Ident ("." Ident)*`. No expression statement exists among steps, so a string at the start of
@@ -1259,7 +1260,8 @@ Tests:
   `once per p:` → `Once Per Ident Colon`; `let per = 1` keeps `Ident`; `default "Option 1?":` →
   `Default Str Colon`, but `default = 3` keeps `Ident`; `emit Accepted(player=p)` → `Emit Ident LParen …`,
   `detour farmer_secret` → `Detour Ident`, `event Accepted:` → `Event Ident Colon`, while `let event = 1` and
-  `emit(x)` keep `Ident`. (Decision 20)
+  `emit(x)` keep `Ident`; `dialogue d(p: Player, npc: Person) for f topic "Dog?" priority 2:` →
+  `… Topic Str Priority Int Colon`, while `let topic = 1` keeps `Ident`. (Decision 20)
 
 - [ ] **Step 1:** tests. - [ ] **Step 2:** `just quest-test "-p quest-lang --test lex"` → FAIL.
 - [ ] **Step 3:** implement. - [ ] **Step 4:** PASS; `just quest-check`.
@@ -1870,51 +1872,12 @@ Tests (`determinism.rs`, each `#[cfg_attr(target_arch = "wasm32", wasm_bindgen_t
 
 ---
 
-## Phase 10 — Dialogue and quests (outline; detail it before starting, after the MVP review)
+## Phase 10 — Dialogue and quests (detailed 2026-11-17 in its own plan)
 
-Spec §5.11–5.13; decision 19. Phase 4 already parses and resolves everything here; this phase removes `not-yet`.
-**Dialogue is data the region runs, never VM code** (owner, 2026-11-16): the VM evaluates only pure condition
-functions and runs the handlers that `emit`ted events reach. These are initial-implementation tests of a new
-feature, not the post-MVP regression rule.
-
-- **Task 36: The dialogue graph format (`quest-vm/src/dialogue.rs`).**
-  - `DialogueGraph`: dialogues → nodes → steps (`Line`, `Choice`, `LineGroup`, `When`, `Once`, `Jump`,
-    `Detour`, `Emit`, `Return`), options, group members with their condition-function ids, line ids, the
-    `for` target function and the `@pick` strategy.
-  - Stored in `Program.dialogues`, inside `Program::to_bytes()` / `from_bytes` and its validation (every
-    referenced function id is a pure function of the right arity; hostile bytes → `Err`, never a panic).
-  - `Vm::eval_pure(fn_id, args, fuel) -> Result<WireValue, PureFault>`: runs one pure function with no task,
-    no segment, no commands and no undo-log entries beyond its own locals. Running out of fuel or a fault is
-    an `Err`; the caller treats it as false.
-- **Task 37: Checks.**
-  - Line text is a literal (`bad-line-text`); a speaker is `p`, `npc` or a `Person` / `Player` in scope.
-  - Conditions are `bool`, `timeout` is an `int`, and `emit` arguments match the event's fields.
-  - **Purity** (`impure-condition`) over each condition, substitution, `emit` argument and `for` target,
-    and transitively over the `fn`s they call: no assignment to non-locals, no host command or request, no
-    `emit`, no `await`, no escaping error.
-  - Role types, `role-assign`, and the expression subset a `where` may use (`bad-where`).
-  - Line ids: provisional ids and `missing-line-id`.
-- **Task 38: Lowering.**
-  - Each dialogue becomes a `DialogueGraph` entry. Each condition, substitution, `emit` argument and `for`
-    target becomes a pure function in the `Program`, taking `p`, `npc` and the referenced roles.
-  - Script `event` items become event types in the program's type table, deliverable like host events.
-  - A quest becomes a generated stage enum (a persistent global) and handlers guarded by stage; `-> Stage`
-    is a set plus a return; stage dialogues carry their stage as an extra attachment condition.
-  - The string table is emitted beside the `Program` (`Compiled.lines`).
-- **Task 39: The reference runner (`quest-vm/src/dialogue_run.rs`) and the CLI.**
-  - `Conversation` is the engine-agnostic state machine the game's region code will embed: start (collect
-    attached dialogues, pick the entry), step (lines out, `emit`ted events queued to the VM, choices offered,
-    jumps, detours on an explicit return stack capped by `DIALOGUE_STACK_MAX`), pick, leave, timeout. Its
-    state (and the per-instance pick counts and `once` / `visited` records) is plain data with `StateHash`.
-  - The stub host gains `Talked` / `DialogueEnded` and scripted picks (`StubConfig.picks`).
-  - `quest run --talk <npc>` prints lines and reads picks from stdin; `--picks 1,2,1` is the scripted form;
-    `--roles` gives a quest's role values as wire literals.
-- **Task 40: Corpus.**
-  - Cases: the §5.11 farmer and greeting dialogues; the §5.12 quest, its stage dialogue attached and
-    detached as the stage changes; a detour cycle and a self-detour that end; one that hits
-    `DIALOGUE_STACK_MAX` (`TooDeep`); a condition that faults (counts as false, reported); an `emit` whose
-    handler changes what a later condition sees; an edit that removes the current node (`Edited`).
-  - Goldens for each (lines, events, state hash), reproduced on wasm32.
+Detailed into Tasks 36–49 in `2026-11-17-quest-phase-10-dialogue-and-quests.md`, from spec §5.11–5.13 and §9.1
+as folded on 2026-11-17 (the accepted quest construction design). The outline that stood here (Tasks 36–40) is
+superseded by it. Phase 10's tests are initial-implementation tests (Dawid, 2026-11-17); the regression-only rule
+resumes after it.
 
 ---
 
@@ -1930,7 +1893,7 @@ feature, not the post-MVP regression rule.
 | §5.7 errors, faults | 9, 12, 22, 27, 33 |
 | §5.8–5.9 collections, strings, numbers | 5, 6, 9, 10, 21, 26 |
 | §5.10 modules | 19 |
-| §5.11–5.13 dialogue, quests, their lexis | 16, 18, 19 (front end, `not-yet`); 36–40 (Phase 10) |
+| §5.11–5.13 dialogue, quests, their lexis | 16, 18, 19 (front end, `not-yet`); 36–49 (Phase 10, its own plan) |
 | §6.1–6.2 static frames, fuel | 8, 9, 10 |
 | §6.3–6.5 flat memory, VM state, determinism | 2–7, 14, 34 |
 | §6.6 undo, segments, buffered effects | 2, 3, 12, 13, 14, 33 |
@@ -2031,7 +1994,7 @@ Every bullet is covered; no test was added in this task.
 Everything below went into `2026-11-17-quest-script-completion.md` (one plan to finish the language, the game
 integration and packages; it supersedes the Phase 10 plan); each line says where.
 
-- **Phase 10** (Tasks 36–40): lowering of `dialogue` and `quest` items (they parse, resolve and type-check, then report `not-yet`), and the host-side use of the language in the game.
+- **Phase 10** (Tasks 36–49, `2026-11-17-quest-phase-10-dialogue-and-quests.md`): lowering of `dialogue` and `quest` items (they parse and resolve, then report `not-yet`), and the host-side use of the language in the game.
 - **`not-yet` in the core language**: fallible host queries and commands (built: completion plan Tasks 37,
   37b), and an unawaited `all(...)` (still `not-yet`).
 - **Fuzzing** (planned; from here on tests are regression-only): completion plan Part 3.

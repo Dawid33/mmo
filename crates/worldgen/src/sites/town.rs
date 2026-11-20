@@ -7,10 +7,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use game::prefab::{placement_bounds, Facing, Placement, ResolvedPrefab};
 use game::BlockId;
+use game::prefab::{Facing, Placement, ResolvedPrefab, placement_bounds};
 
-use super::kit::{turn_to_face, TownKit};
+use super::kit::{TownKit, turn_to_face};
 use crate::structures::{Pad, Paint, StructurePlacement};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,12 +118,22 @@ fn facing_of(v: [i32; 2]) -> Facing {
 
 /// The world rectangle [x0, z0, x1, z1] (max exclusive) covering the half-open range `[a0, a1)` along
 /// unit `along` and `[c0, c1)` along unit `across`, both measured from `origin`.
-fn world_rect(origin: [i32; 2], along: [i32; 2], (a0, a1): (i32, i32), across: [i32; 2], (c0, c1): (i32, i32)) -> [i32; 4] {
+fn world_rect(
+    origin: [i32; 2],
+    along: [i32; 2],
+    (a0, a1): (i32, i32),
+    across: [i32; 2],
+    (c0, c1): (i32, i32),
+) -> [i32; 4] {
     let mut r = [origin[0], origin[1], origin[0] + 1, origin[1] + 1];
     for (u, (lo, hi)) in [(along, (a0, a1)), (across, (c0, c1))] {
         let (axis, sign) = if u[0] != 0 { (0, u[0]) } else { (1, u[1]) };
         let o = origin[axis];
-        let (min, max) = if sign > 0 { (o + lo, o + hi) } else { (o - hi + 1, o - lo + 1) };
+        let (min, max) = if sign > 0 {
+            (o + lo, o + hi)
+        } else {
+            (o - hi + 1, o - lo + 1)
+        };
         r[axis] = min;
         r[axis + 2] = max;
     }
@@ -141,7 +151,14 @@ fn meet(a: [i32; 4], b: [i32; 4]) -> bool {
 
 /// The middle column of a lot's front face (rounding down along the arm), as a one-column world rectangle:
 /// its ground gives the lot's pad level.
-fn front_middle(origin: [i32; 2], d: [i32; 2], out_dir: [i32; 2], t: i32, frontage: i32, near: i32) -> [i32; 4] {
+fn front_middle(
+    origin: [i32; 2],
+    d: [i32; 2],
+    out_dir: [i32; 2],
+    t: i32,
+    frontage: i32,
+    near: i32,
+) -> [i32; 4] {
     let a = t + (frontage - 1) / 2;
     world_rect(origin, d, (a, a + 1), out_dir, (near, near + 1))
 }
@@ -149,9 +166,17 @@ fn front_middle(origin: [i32; 2], d: [i32; 2], out_dir: [i32; 2], t: i32, fronta
 /// The placement putting `prefab` (turned `turn`) with its x/z box at (`x0`, `z0`) and its lowest layer
 /// at `level + 1`.
 fn place_at(prefab: &Arc<ResolvedPrefab>, turn: u8, x0: i32, z0: i32, level: i32) -> Placement {
-    let trial = Placement { anchor: [0, 0, 0], turn, mirror: false };
+    let trial = Placement {
+        anchor: [0, 0, 0],
+        turn,
+        mirror: false,
+    };
     let (min, _) = placement_bounds(prefab, &trial);
-    Placement { anchor: [x0 - min[0], level + 1 - min[1], z0 - min[2]], turn, mirror: false }
+    Placement {
+        anchor: [x0 - min[0], level + 1 - min[1], z0 - min[2]],
+        turn,
+        mirror: false,
+    }
 }
 
 /// An arm side ends only when NO house has room left on the arm, not when the house picked first is too
@@ -168,8 +193,18 @@ pub fn layout_town(
     // again and again: each column is asked once per layout.
     let ground_memo = RefCell::new(BTreeMap::new());
     let wet_memo = RefCell::new(BTreeMap::new());
-    let ground = |x: i32, z: i32| *ground_memo.borrow_mut().entry((x, z)).or_insert_with(|| ground(x, z));
-    let wet = |x: i32, z: i32| *wet_memo.borrow_mut().entry((x, z)).or_insert_with(|| wet(x, z));
+    let ground = |x: i32, z: i32| {
+        *ground_memo
+            .borrow_mut()
+            .entry((x, z))
+            .or_insert_with(|| ground(x, z))
+    };
+    let wet = |x: i32, z: i32| {
+        *wet_memo
+            .borrow_mut()
+            .entry((x, z))
+            .or_insert_with(|| wet(x, z))
+    };
     let [ox, oz] = origin;
     let (h, s) = (p.plaza / 2, p.street_w / 2);
     let arms = p.arms.min(4);
@@ -181,8 +216,16 @@ pub fn layout_town(
         })
         .collect();
 
-    let mut out = TownLayout { placements: Vec::new(), paints: Vec::new(), lots: Vec::new(), skipped: 0 };
-    out.paints.push(Paint { rect: plaza, block: p.plaza_block });
+    let mut out = TownLayout {
+        placements: Vec::new(),
+        paints: Vec::new(),
+        lots: Vec::new(),
+        skipped: 0,
+    };
+    out.paints.push(Paint {
+        rect: plaza,
+        block: p.plaza_block,
+    });
     // Every placed x/z box, the centrepiece too.
     let mut boxes: Vec<[i32; 4]> = Vec::new();
 
@@ -191,13 +234,22 @@ pub fn layout_town(
         let (sx, sz) = (c.size[0] as i32, c.size[2] as i32);
         let (x0, z0) = (ox - (sx - 1) / 2, oz - (sz - 1) / 2);
         // A wet origin or box corner: no centrepiece (the plaza is painted anyway).
-        let corners = [(x0, z0), (x0 + sx - 1, z0), (x0, z0 + sz - 1), (x0 + sx - 1, z0 + sz - 1)];
+        let corners = [
+            (x0, z0),
+            (x0 + sx - 1, z0),
+            (x0, z0 + sz - 1),
+            (x0 + sx - 1, z0 + sz - 1),
+        ];
         if !wet(ox, oz) && !corners.iter().any(|&(x, z)| wet(x, z)) {
             let level = ground(ox, oz);
             let at = place_at(c, 0, x0, z0, level);
             let (min, max) = placement_bounds(c, &at);
             boxes.push([min[0], min[2], max[0], max[2]]);
-            out.placements.push(StructurePlacement { prefab: c.clone(), at, pad: Some(Pad { level, skirt: 0 }) });
+            out.placements.push(StructurePlacement {
+                prefab: c.clone(),
+                at,
+                pad: Some(Pad { level, skirt: 0 }),
+            });
         }
     }
 
@@ -224,10 +276,17 @@ pub fn layout_town(
                 let mut fitting: Vec<(usize, u8, i32, [i32; 4])> = Vec::new();
                 for (i, house) in kit.houses.iter().enumerate() {
                     let turn = turn_to_face(house.front, faces);
-                    let trial = Placement { anchor: [0, 0, 0], turn, mirror: false };
+                    let trial = Placement {
+                        anchor: [0, 0, 0],
+                        turn,
+                        mirror: false,
+                    };
                     let (tmin, tmax) = placement_bounds(&house.prefab, &trial);
                     let trial_rect = [tmin[0], tmin[2], tmax[0], tmax[2]];
-                    let (frontage, depth) = (extent_along(trial_rect, d), extent_along(trial_rect, out_dir));
+                    let (frontage, depth) = (
+                        extent_along(trial_rect, d),
+                        extent_along(trial_rect, out_dir),
+                    );
                     if t + frontage > h + 1 + p.arm_len {
                         continue;
                     }
@@ -235,18 +294,28 @@ pub fn layout_town(
                     let r = world_rect(origin, d, (t, t + frontage), out_dir, (near, near + depth));
                     let grown = [r[0] - 1, r[1] - 1, r[2] + 1, r[3] + 1];
                     // Cheapest test first: a house already rejected never asks the terrain.
-                    let (cx, cz) = ((r[0] + r[2] - 1).div_euclid(2), (r[1] + r[3] - 1).div_euclid(2));
+                    let (cx, cz) = (
+                        (r[0] + r[2] - 1).div_euclid(2),
+                        (r[1] + r[3] - 1).div_euclid(2),
+                    );
                     let [mx, mz, ..] = front_middle(origin, d, out_dir, t, frontage, near);
                     // The corners, the centre, and the column whose ground gives the pad level.
-                    let samples =
-                        [(r[0], r[1]), (r[2] - 1, r[1]), (r[0], r[3] - 1), (r[2] - 1, r[3] - 1), (cx, cz), (mx, mz)];
+                    let samples = [
+                        (r[0], r[1]),
+                        (r[2] - 1, r[1]),
+                        (r[0], r[3] - 1),
+                        (r[2] - 1, r[3] - 1),
+                        (cx, cz),
+                        (mx, mz),
+                    ];
                     let rejected = meet(grown, plaza)
                         || boxes.iter().any(|&b| meet(grown, b))
                         || strips.iter().any(|&b| meet(grown, b))
                         || samples.iter().any(|&(x, z)| wet(x, z))
                         || {
                             let heights = samples.map(|(x, z)| ground(x, z));
-                            heights.iter().max().unwrap() - heights.iter().min().unwrap() > p.max_relief
+                            heights.iter().max().unwrap() - heights.iter().min().unwrap()
+                                > p.max_relief
                         };
                     if !rejected {
                         fitting.push((i, turn, frontage, r));
@@ -262,9 +331,14 @@ pub fn layout_town(
                     continue;
                 }
                 // No repeats while there is a choice: prefer the houses not yet placed in this town.
-                let fresh: Vec<_> = fitting.iter().filter(|f| !used.contains(&f.0)).copied().collect();
+                let fresh: Vec<_> = fitting
+                    .iter()
+                    .filter(|f| !used.contains(&f.0))
+                    .copied()
+                    .collect();
                 let pool = if fresh.is_empty() { &fitting } else { &fresh };
-                let (hi, turn, frontage, r) = pool[(roll(p.seed, stream, n, 0) % pool.len() as u64) as usize];
+                let (hi, turn, frontage, r) =
+                    pool[(roll(p.seed, stream, n, 0) % pool.len() as u64) as usize];
                 used.insert(hi);
                 let house = &kit.houses[hi];
                 let mid = front_middle(origin, d, out_dir, t, frontage, near);
@@ -272,11 +346,20 @@ pub fn layout_town(
                 let at = place_at(&house.prefab, turn, r[0], r[1], level);
                 let bounds = placement_bounds(&house.prefab, &at);
                 boxes.push(r);
-                out.lots.push(Lot { name: house.prefab.name.clone(), bounds, faces, arm, left: is_left });
+                out.lots.push(Lot {
+                    name: house.prefab.name.clone(),
+                    bounds,
+                    faces,
+                    arm,
+                    left: is_left,
+                });
                 out.placements.push(StructurePlacement {
                     prefab: house.prefab.clone(),
                     at,
-                    pad: Some(Pad { level, skirt: p.pad_skirt }),
+                    pad: Some(Pad {
+                        level,
+                        skirt: p.pad_skirt,
+                    }),
                 });
                 far = Some(far.map_or(t + frontage, |f: i32| f.max(t + frontage)));
                 t += frontage + p.gap_min + (roll(p.seed, stream, n, 1) % gap_span) as i32;
@@ -284,7 +367,10 @@ pub fn layout_town(
             }
         }
         if let Some(far) = far {
-            out.paints.push(Paint { rect: world_rect(origin, d, (h + 1, far), left, (-s, s + 1)), block: p.road });
+            out.paints.push(Paint {
+                rect: world_rect(origin, d, (h + 1, far), left, (-s, s + 1)),
+                block: p.road,
+            });
         }
     }
     out

@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
-use game::prefab::{placement_bounds, Placement, ResolvedPrefab};
 use game::BlockId;
+use game::prefab::{Placement, ResolvedPrefab, placement_bounds};
 
 /// Level the ground under a placement. `level` is the world y of the top ground block inside the
 /// placement's x/z box (the prefab's lowest layer normally sits at level + 1); over `skirt` further
@@ -68,7 +68,14 @@ pub trait StructureSource: Send + Sync {
     /// Placements whose `reach_xz` grown by `margin` intersects the half-open x/z rectangle
     /// `[x0, x1) x [z0, z1)`, in the source's own fixed order, each once. Must not depend on anything
     /// but its arguments.
-    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>>;
+    fn placements_in(
+        &self,
+        x0: i32,
+        z0: i32,
+        x1: i32,
+        z1: i32,
+        margin: i32,
+    ) -> Vec<Arc<StructurePlacement>>;
     /// Identity of the whole source, for the worldgen cache key.
     fn content_hash(&self) -> u32;
     /// A region `rc` is starting to run on this server: the server's region-thread generator calls it once
@@ -109,7 +116,14 @@ pub fn paint_at(paints: &[Paint], x: i32, z: i32) -> Option<BlockId> {
 pub struct NoStructures;
 
 impl StructureSource for NoStructures {
-    fn placements_in(&self, _: i32, _: i32, _: i32, _: i32, _: i32) -> Vec<Arc<StructurePlacement>> {
+    fn placements_in(
+        &self,
+        _: i32,
+        _: i32,
+        _: i32,
+        _: i32,
+        _: i32,
+    ) -> Vec<Arc<StructurePlacement>> {
         Vec::new()
     }
     fn content_hash(&self) -> u32 {
@@ -131,14 +145,26 @@ impl WrappedStructures<'_> {
     /// The image shifts (blocks) a query of x span `[gx0, gx1)`, margin included, may reach: one image
     /// more on each side, for what reaches past its anchor's image.
     fn shifts(origin: i32, width: i32, gx0: i32, gx1: i32) -> impl Iterator<Item = i32> {
-        let (k0, k1) = ((gx0 - origin).div_euclid(width) - 1, (gx1 - 1 - origin).div_euclid(width) + 1);
+        let (k0, k1) = (
+            (gx0 - origin).div_euclid(width) - 1,
+            (gx1 - 1 - origin).div_euclid(width) + 1,
+        );
         (k0..=k1).map(move |k| k * width)
     }
 }
 
 impl StructureSource for WrappedStructures<'_> {
-    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
-        let Some((origin, width)) = self.frame else { return self.inner.placements_in(x0, z0, x1, z1, margin) };
+    fn placements_in(
+        &self,
+        x0: i32,
+        z0: i32,
+        x1: i32,
+        z1: i32,
+        margin: i32,
+    ) -> Vec<Arc<StructurePlacement>> {
+        let Some((origin, width)) = self.frame else {
+            return self.inner.placements_in(x0, z0, x1, z1, margin);
+        };
         let mut out = Vec::new();
         for s in Self::shifts(origin, width, x0 - margin, x1 + margin) {
             for p in self.inner.placements_in(x0 - s, z0, x1 - s, z1, margin) {
@@ -158,7 +184,9 @@ impl StructureSource for WrappedStructures<'_> {
     }
 
     fn paints_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Paint> {
-        let Some((origin, width)) = self.frame else { return self.inner.paints_in(x0, z0, x1, z1, margin) };
+        let Some((origin, width)) = self.frame else {
+            return self.inner.paints_in(x0, z0, x1, z1, margin);
+        };
         let mut out = Vec::new();
         for s in Self::shifts(origin, width, x0 - margin, x1 + margin) {
             for mut p in self.inner.paints_in(x0 - s, z0, x1 - s, z1, margin) {
@@ -229,7 +257,11 @@ impl StructureList {
 
     /// A list that also carries paints. They are hashed after the placements (rect and block, in
     /// order): a list without paints hashes exactly as `new` always has.
-    pub fn with_paints(placements: Vec<StructurePlacement>, paints: Vec<Paint>, set_hash: u32) -> Self {
+    pub fn with_paints(
+        placements: Vec<StructurePlacement>,
+        paints: Vec<Paint>,
+        set_hash: u32,
+    ) -> Self {
         let b = STRUCTURE_BUCKET_BLOCKS;
         let mut buckets: BTreeMap<[i32; 2], Vec<u32>> = BTreeMap::new();
         let mut h = crc32fast::Hasher::new();
@@ -283,7 +315,14 @@ impl StructureList {
 }
 
 impl StructureSource for StructureList {
-    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
+    fn placements_in(
+        &self,
+        x0: i32,
+        z0: i32,
+        x1: i32,
+        z1: i32,
+        margin: i32,
+    ) -> Vec<Arc<StructurePlacement>> {
         if x0 >= x1 || z0 >= z1 {
             return Vec::new();
         }
@@ -346,7 +385,10 @@ pub fn pad_at(placements: &[&StructurePlacement], x: i32, z: i32, natural: i32) 
         let Some(pad) = p.pad else { continue };
         let (min, max) = p.bounds();
         if box_distance(min, max, x, z) == 0 {
-            return PadEffect::Level { surface: pad.level, in_box: true };
+            return PadEffect::Level {
+                surface: pad.level,
+                in_box: true,
+            };
         }
     }
     for p in placements {
@@ -357,7 +399,10 @@ pub fn pad_at(placements: &[&StructurePlacement], x: i32, z: i32, natural: i32) 
         if d <= skirt {
             let level = pad.level as i64;
             let surface = level + (natural as i64 - level) * d / (skirt + 1);
-            return PadEffect::Level { surface: surface as i32, in_box: false };
+            return PadEffect::Level {
+                surface: surface as i32,
+                in_box: false,
+            };
         }
     }
     PadEffect::None
@@ -406,7 +451,10 @@ pub const DEV_GAP_BLOCKS: i32 = 6;
 /// dx, dz and turn are trimmed of whitespace. A name is non-empty and has no `:`, `;` or whitespace
 /// inside; an empty entry (a trailing `;` too) is an error. Errors name the entry.
 pub fn parse_dev_spec(spec: &str) -> Result<Vec<DevEntry>, String> {
-    spec.split(';').enumerate().map(|(i, e)| parse_dev_entry(i + 1, e)).collect()
+    spec.split(';')
+        .enumerate()
+        .map(|(i, e)| parse_dev_entry(i + 1, e))
+        .collect()
 }
 
 fn parse_dev_entry(position: usize, entry: &str) -> Result<DevEntry, String> {
@@ -425,8 +473,14 @@ fn parse_dev_entry(position: usize, entry: &str) -> Result<DevEntry, String> {
     let offset = match parts.next() {
         None => None,
         Some(o) => {
-            let (dx, dz) = o.split_once(',').ok_or_else(|| bad("offset must be dx,dz"))?;
-            let num = |s: &str| s.trim().parse::<i32>().map_err(|_| bad(&format!("\"{}\" is not a number", s.trim())));
+            let (dx, dz) = o
+                .split_once(',')
+                .ok_or_else(|| bad("offset must be dx,dz"))?;
+            let num = |s: &str| {
+                s.trim()
+                    .parse::<i32>()
+                    .map_err(|_| bad(&format!("\"{}\" is not a number", s.trim())))
+            };
             Some([num(dx)?, num(dz)?])
         }
     };
@@ -440,7 +494,11 @@ fn parse_dev_entry(position: usize, entry: &str) -> Result<DevEntry, String> {
     if parts.next().is_some() {
         return Err(bad("too many ':' parts"));
     }
-    Ok(DevEntry { prefab: name.to_string(), offset, turn })
+    Ok(DevEntry {
+        prefab: name.to_string(),
+        offset,
+        turn,
+    })
 }
 
 /// Lays the entries out beside `origin` (a world x/z, e.g. a landing column): an entry with an offset
@@ -461,7 +519,11 @@ pub fn dev_placements(
             .named(&e.prefab)
             .ok_or_else(|| format!("unknown prefab \"{}\" in the dev structure spec", e.prefab))?
             .clone();
-        let at = |x: i32, y: i32, z: i32| Placement { anchor: [x, y, z], turn: e.turn, mirror: false };
+        let at = |x: i32, y: i32, z: i32| Placement {
+            anchor: [x, y, z],
+            turn: e.turn,
+            mirror: false,
+        };
         let [x, z] = match e.offset {
             Some([dx, dz]) => [origin[0] + dx, origin[1] + dz],
             None => {
@@ -476,7 +538,10 @@ pub fn dev_placements(
         out.push(StructurePlacement {
             prefab,
             at: at(x, level + 1, z),
-            pad: Some(Pad { level, skirt: DEV_PAD_SKIRT }),
+            pad: Some(Pad {
+                level,
+                skirt: DEV_PAD_SKIRT,
+            }),
         });
     }
     Ok(out)
@@ -515,7 +580,11 @@ impl DevRegionSource {
         let mut reach = 0i32;
         for p in &dummy {
             let [x0, z0, x1, z1] = p.reach_xz();
-            reach = reach.max(x0.abs()).max(z0.abs()).max(x1.abs()).max(z1.abs());
+            reach = reach
+                .max(x0.abs())
+                .max(z0.abs())
+                .max(x1.abs())
+                .max(z1.abs());
         }
         let max_offset = entries
             .iter()
@@ -551,7 +620,12 @@ impl DevRegionSource {
     }
 
     fn region(&self, rx: i32, rz: i32) -> Arc<Vec<Arc<StructurePlacement>>> {
-        let cached = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&[rx, rz]).cloned();
+        let cached = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&[rx, rz])
+            .cloned();
         if let Some(c) = cached {
             return c;
         }
@@ -560,12 +634,24 @@ impl DevRegionSource {
         let placements = dev_placements(&self.entries, origin, &self.prefabs, &*self.ground)
             .expect("checked in DevRegionSource::new");
         let value = Arc::new(placements.into_iter().map(Arc::new).collect::<Vec<_>>());
-        self.cache.lock().unwrap_or_else(|e| e.into_inner()).entry([rx, rz]).or_insert(value).clone()
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry([rx, rz])
+            .or_insert(value)
+            .clone()
     }
 }
 
 impl StructureSource for DevRegionSource {
-    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
+    fn placements_in(
+        &self,
+        x0: i32,
+        z0: i32,
+        x1: i32,
+        z1: i32,
+        margin: i32,
+    ) -> Vec<Arc<StructurePlacement>> {
         if x0 >= x1 || z0 >= z1 {
             return Vec::new();
         }
@@ -644,7 +730,14 @@ impl DevHomeSource {
             }
             h.update(&[e.turn]);
         }
-        Ok(Self { entries, prefabs: prefabs.clone(), origin_of, ground, hash: h.finalize(), home: OnceLock::new() })
+        Ok(Self {
+            entries,
+            prefabs: prefabs.clone(),
+            origin_of,
+            ground,
+            hash: h.finalize(),
+            home: OnceLock::new(),
+        })
     }
 
     /// The home region, once one was requested.
@@ -654,8 +747,17 @@ impl DevHomeSource {
 }
 
 impl StructureSource for DevHomeSource {
-    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
-        let Some((_, placements)) = self.home.get() else { return Vec::new() };
+    fn placements_in(
+        &self,
+        x0: i32,
+        z0: i32,
+        x1: i32,
+        z1: i32,
+        margin: i32,
+    ) -> Vec<Arc<StructurePlacement>> {
+        let Some((_, placements)) = self.home.get() else {
+            return Vec::new();
+        };
         if x0 >= x1 || z0 >= z1 {
             return Vec::new();
         }
@@ -677,8 +779,8 @@ impl StructureSource for DevHomeSource {
     fn region_requested(&self, rc: game::RegionCoords) {
         self.home.get_or_init(|| {
             let origin = (self.origin_of)(rc);
-            let placements =
-                dev_placements(&self.entries, origin, &self.prefabs, &*self.ground).expect("checked in DevHomeSource::new");
+            let placements = dev_placements(&self.entries, origin, &self.prefabs, &*self.ground)
+                .expect("checked in DevHomeSource::new");
             log::info!(
                 "[structures] home region {},{}: {} placement(s) beside column {},{}",
                 rc.x,
@@ -706,7 +808,11 @@ pub struct DevTownSource {
     ground: GroundOf,
     wet: WetOf,
     hash: u32,
-    home: OnceLock<(game::RegionCoords, crate::sites::town::TownLayout, Vec<Arc<StructurePlacement>>)>,
+    home: OnceLock<(
+        game::RegionCoords,
+        crate::sites::town::TownLayout,
+        Vec<Arc<StructurePlacement>>,
+    )>,
 }
 
 impl DevTownSource {
@@ -727,13 +833,29 @@ impl DevTownSource {
         let p = &params;
         h.update(&p.seed.to_le_bytes());
         h.update(&[p.arms]);
-        for v in [p.arm_len, p.street_w, p.plaza, p.setback, p.gap_min, p.gap_max, p.max_relief] {
+        for v in [
+            p.arm_len,
+            p.street_w,
+            p.plaza,
+            p.setback,
+            p.gap_min,
+            p.gap_max,
+            p.max_relief,
+        ] {
             h.update(&v.to_le_bytes());
         }
         h.update(&p.pad_skirt.to_le_bytes());
         h.update(&p.road.0.to_le_bytes());
         h.update(&p.plaza_block.0.to_le_bytes());
-        Self { kit, params, origin_of, ground, wet, hash: h.finalize(), home: OnceLock::new() }
+        Self {
+            kit,
+            params,
+            origin_of,
+            ground,
+            wet,
+            hash: h.finalize(),
+            home: OnceLock::new(),
+        }
     }
 
     /// The home region, once one was requested.
@@ -748,8 +870,17 @@ impl DevTownSource {
 }
 
 impl StructureSource for DevTownSource {
-    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
-        let Some((_, _, placements)) = self.home.get() else { return Vec::new() };
+    fn placements_in(
+        &self,
+        x0: i32,
+        z0: i32,
+        x1: i32,
+        z1: i32,
+        margin: i32,
+    ) -> Vec<Arc<StructurePlacement>> {
+        let Some((_, _, placements)) = self.home.get() else {
+            return Vec::new();
+        };
         if x0 >= x1 || z0 >= z1 {
             return Vec::new();
         }
@@ -765,7 +896,9 @@ impl StructureSource for DevTownSource {
     }
 
     fn paints_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Paint> {
-        let Some((_, layout, _)) = self.home.get() else { return Vec::new() };
+        let Some((_, layout, _)) = self.home.get() else {
+            return Vec::new();
+        };
         if x0 >= x1 || z0 >= z1 {
             return Vec::new();
         }

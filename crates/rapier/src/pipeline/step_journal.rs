@@ -46,8 +46,8 @@
 use crate::alloc_prelude::*;
 
 use crate::dynamics::{
-    CCDSolver, ImpulseJointSet, IslandManager, MultibodyJointSet, RigidBody, RigidBodyHandle, RigidBodySet,
-    SoftBodySet,
+    CCDSolver, ImpulseJointSet, IslandManager, MultibodyJointSet, RigidBody, RigidBodyHandle,
+    RigidBodySet, SoftBodySet,
 };
 use crate::geometry::{BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, NarrowPhase};
 
@@ -179,17 +179,27 @@ impl StepJournal {
             self.wholesale.is_none() && self.is_empty(),
             "a StepJournal records exactly one step"
         );
-        debug_assert!(p.soft_bodies.is_empty(), "the journal does not capture soft bodies");
+        debug_assert!(
+            p.soft_bodies.is_empty(),
+            "the journal does not capture soft bodies"
+        );
         debug_assert!(
             p.bodies.capture.is_none() && p.colliders.capture.is_none(),
             "nested journaled steps"
         );
 
-        let (joints, quiescent_joints) = if joint_sets_touchable(p.impulse_joints, p.multibody_joints) {
-            (Some((p.impulse_joints.clone(), p.multibody_joints.clone())), None)
-        } else {
-            (None, Some(joint_sets_hash(p.impulse_joints, p.multibody_joints)))
-        };
+        let (joints, quiescent_joints) =
+            if joint_sets_touchable(p.impulse_joints, p.multibody_joints) {
+                (
+                    Some((p.impulse_joints.clone(), p.multibody_joints.clone())),
+                    None,
+                )
+            } else {
+                (
+                    None,
+                    Some(joint_sets_hash(p.impulse_joints, p.multibody_joints)),
+                )
+            };
         self.wholesale = Some(Box::new(Wholesale {
             islands: p.islands.clone(),
             narrow_phase: p.narrow_phase.clone(),
@@ -217,7 +227,10 @@ impl StepJournal {
     /// pre-step hash when they weren't cloned (see the module docs). Equal to
     /// [`Self::revert_digest`] iff the revert restored that footprint exactly.
     pub fn pre_digest(&self) -> u32 {
-        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        let w = self
+            .wholesale
+            .as_ref()
+            .expect("digest of a journal that recorded no step");
         digest_footprint(Footprint {
             bodies: self.bodies.iter().map(|(h, b)| (*h, Some(b))).collect(),
             colliders: self.colliders.iter().map(|(h, c)| (*h, Some(c))).collect(),
@@ -230,7 +243,10 @@ impl StepJournal {
     /// values of everything the step touched. [`Self::revert_digest`] is this,
     /// right after the revert.
     pub fn live_digest(&self, parts: &PhysicsParts<'_>) -> u32 {
-        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        let w = self
+            .wholesale
+            .as_ref()
+            .expect("digest of a journal that recorded no step");
         let bodies: Vec<_> = self.bodies.iter().map(|(h, _)| *h).collect();
         let colliders: Vec<_> = self.colliders.iter().map(|(h, _)| *h).collect();
         live_footprint_digest(bodies, colliders, w.quiescent_joints.is_some(), parts)
@@ -239,7 +255,10 @@ impl StepJournal {
     /// Reverts (see [`Self::revert`]) and returns the post-revert footprint
     /// digest, to compare with the [`Self::pre_digest`] taken at step time.
     pub fn revert_digest(self, parts: PhysicsParts<'_>) -> u32 {
-        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        let w = self
+            .wholesale
+            .as_ref()
+            .expect("digest of a journal that recorded no step");
         let quiescent_joints = w.quiescent_joints.is_some();
         let bodies: Vec<_> = self.bodies.iter().map(|(h, _)| *h).collect();
         let colliders: Vec<_> = self.colliders.iter().map(|(h, _)| *h).collect();
@@ -271,7 +290,10 @@ impl StepJournal {
             soft_bodies,
             ccd_solver,
         } = parts;
-        debug_assert!(soft_bodies.is_empty(), "the journal does not capture soft bodies");
+        debug_assert!(
+            soft_bodies.is_empty(),
+            "the journal does not capture soft bodies"
+        );
         let w = self
             .wholesale
             .expect("revert of a journal that recorded no step");
@@ -330,9 +352,16 @@ fn live_footprint_digest(
     parts: &PhysicsParts<'_>,
 ) -> u32 {
     digest_footprint(Footprint {
-        bodies: bodies.into_iter().map(|h| (h, parts.bodies.get(h))).collect(),
-        colliders: colliders.into_iter().map(|h| (h, parts.colliders.get(h))).collect(),
-        quiescent_joints: quiescent_joints.then(|| joint_sets_hash(parts.impulse_joints, parts.multibody_joints)),
+        bodies: bodies
+            .into_iter()
+            .map(|h| (h, parts.bodies.get(h)))
+            .collect(),
+        colliders: colliders
+            .into_iter()
+            .map(|h| (h, parts.colliders.get(h)))
+            .collect(),
+        quiescent_joints: quiescent_joints
+            .then(|| joint_sets_hash(parts.impulse_joints, parts.multibody_joints)),
     })
 }
 
@@ -360,7 +389,8 @@ struct Footprint<'a> {
 fn digest_footprint(mut f: Footprint<'_>) -> u32 {
     use state_hash::StateHash;
     f.bodies.sort_unstable_by_key(|(h, _)| *h);
-    f.colliders.sort_unstable_by_key(|(h, _)| h.into_raw_parts());
+    f.colliders
+        .sort_unstable_by_key(|(h, _)| h.into_raw_parts());
     let mut h = crc32fast::Hasher::new();
     f.bodies.state_hash(&mut h);
     f.colliders.state_hash(&mut h);

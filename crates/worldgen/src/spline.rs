@@ -22,7 +22,11 @@ impl Spline {
     }
 
     pub fn point(location: f64, value: Spline, derivative: f64) -> Point {
-        Point { location, value: Box::new(value), derivative }
+        Point {
+            location,
+            value: Box::new(value),
+            derivative,
+        }
     }
 
     // Boxed-recursive eval: the runtime path uses `FlatSpline::eval` instead
@@ -95,7 +99,7 @@ impl FlatSpline {
                     locations: Box::new([0.0]),
                     values: Box::new([*v]),
                     derivatives: Box::new([0.0]),
-                }
+                };
             }
             Spline::Curve { points } => points,
         };
@@ -144,4 +148,3 @@ impl FlatSpline {
             + (t3 - t2) * m1
     }
 }
-

@@ -5,7 +5,7 @@
 use game::Biome;
 use worldgen::forge::climate;
 use worldgen::forge::world::EDGE_NAMES;
-use worldgen::forge::{forge, ForgeParams, Forged, World};
+use worldgen::forge::{ForgeParams, Forged, World, forge};
 use worldgen::forged::{ForgedWorld, WorldArtifact};
 
 use crate::Params;
@@ -18,7 +18,12 @@ pub fn is_water(b: Biome) -> bool {
 /// Every biome with its share of all cells and, for a land biome, of land
 /// cells (what `print_biomes` prints).
 pub fn biome_shares_with_land(a: &WorldArtifact) -> Vec<(Biome, f64, Option<f64>)> {
-    let land_cells = a.biome.iter().filter(|&&b| !Biome::from_u8(b).is_some_and(is_water)).count().max(1) as f64;
+    let land_cells = a
+        .biome
+        .iter()
+        .filter(|&&b| !Biome::from_u8(b).is_some_and(is_water))
+        .count()
+        .max(1) as f64;
     let total = a.biome.len() as f64;
     worldgen::forge::regions::biome_shares(&a.biome)
         .into_iter()
@@ -29,7 +34,10 @@ pub fn biome_shares_with_land(a: &WorldArtifact) -> Vec<(Biome, f64, Option<f64>
 /// Land components (4-neighbour, `!ocean` cells) above `fraction` of ALL
 /// the world's cells.
 fn land_components_over(sizes: &[usize], cells: usize, fraction: f64) -> usize {
-    sizes.iter().filter(|&&n| n as f64 > fraction * cells as f64).count()
+    sizes
+        .iter()
+        .filter(|&&n| n as f64 > fraction * cells as f64)
+        .count()
 }
 
 /// Cell counts of the land's connected components (4-neighbour; joined
@@ -129,18 +137,37 @@ pub(crate) fn p99(mut v: Vec<f64>) -> f64 {
 /// column pair's rows is `stat`: (seam ÷ the pooled interior's statistic,
 /// the share of interior column pairs whose own statistic is at least the
 /// seam's — 1.0 = the seam is the smoothest pair, 0.0 = the roughest).
-fn seam_steps(nx: usize, nz: usize, step: impl Fn(usize, usize) -> f64, stat: fn(Vec<f64>) -> f64) -> (f64, f64) {
-    let pair = |x0: usize, x1: usize| -> Vec<f64> { (0..nz).map(|z| step(z * nx + x0, z * nx + x1)).collect() };
+fn seam_steps(
+    nx: usize,
+    nz: usize,
+    step: impl Fn(usize, usize) -> f64,
+    stat: fn(Vec<f64>) -> f64,
+) -> (f64, f64) {
+    let pair = |x0: usize, x1: usize| -> Vec<f64> {
+        (0..nz).map(|z| step(z * nx + x0, z * nx + x1)).collect()
+    };
     let seam = stat(pair(nx - 1, 0));
     let pooled = stat((0..nx - 1).flat_map(|x| pair(x, x + 1)).collect());
-    let ratio = if pooled > 0.0 { seam / pooled } else if seam > 0.0 { f64::INFINITY } else { 0.0 };
-    let rougher = (0..nx - 1).filter(|&x| stat(pair(x, x + 1)) >= seam).count();
+    let ratio = if pooled > 0.0 {
+        seam / pooled
+    } else if seam > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    let rougher = (0..nx - 1)
+        .filter(|&x| stat(pair(x, x + 1)) >= seam)
+        .count();
     (ratio, rougher as f64 / (nx - 1).max(1) as f64)
 }
 
 /// Mean of `v`; 0 when empty.
 fn mean(v: Vec<f64>) -> f64 {
-    if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 }
+    if v.is_empty() {
+        0.0
+    } else {
+        v.iter().sum::<f64>() / v.len() as f64
+    }
 }
 
 /// A seed passes a seam field when its ratio is at most this…
@@ -170,14 +197,24 @@ fn materials() -> worldgen::material::Materials {
     let manifest = include_str!("../../../../assets/blocks/blocks.ron");
     let reg = game::BlockRegistry::from_ron(manifest).expect("valid block manifest");
     game::install_block_props(reg.props());
-    worldgen::material::Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")))
+    worldgen::material::Materials::from_names(|n| {
+        reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}"))
+    })
 }
 
 /// Surface block y of region-local block column `(x, z)` of generated columns.
 fn surface(columns: &[(game::ColumnCoords, game::Column)], x: usize, z: usize) -> i32 {
     let cb = game::CHUNK_BLOCKS;
-    let (_, column) = columns.iter().find(|(c, _)| c.x == x / cb && c.z == z / cb).expect("a generated column");
-    i32::from(column.ground().expect("generated column has ground").surface[(x % cb) * cb + z % cb])
+    let (_, column) = columns
+        .iter()
+        .find(|(c, _)| c.x == x / cb && c.z == z / cb)
+        .expect("a generated column");
+    i32::from(
+        column
+            .ground()
+            .expect("generated column has ground")
+            .surface[(x % cb) * cb + z % cb],
+    )
 }
 
 /// The world-runtime seam lines (Task 12) of a world that wraps east–west:
@@ -197,19 +234,29 @@ fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
         "trees_across_seam_ok",
     ];
     if !wraps {
-        return keys.iter().map(|k| (k.to_string(), "n/a".to_string())).collect();
+        return keys
+            .iter()
+            .map(|k| (k.to_string(), "n/a".to_string()))
+            .collect();
     }
     let mats = materials();
     let map = worldgen::tile_map::build_world_map(world);
     let (o, w, h) = (map.origin, map.width as i32, map.height as i32);
     let mut rows = Vec::new();
     // A region one lap east is its canonical image, column for column.
-    let encode = |rc: game::RegionCoords| bincode::serialize(&worldgen::generate_region_forged(world, rc, mats)).expect("columns serialize");
+    let encode = |rc: game::RegionCoords| {
+        bincode::serialize(&worldgen::generate_region_forged(world, rc, mats))
+            .expect("columns serialize")
+    };
     let identical = (1..=ALIAS_ROWS).all(|k| {
         let z = o.z + k * h / (ALIAS_ROWS + 1);
-        encode(game::RegionCoords::new(o.x + w + 2, z)) == encode(game::RegionCoords::new(o.x + 2, z))
+        encode(game::RegionCoords::new(o.x + w + 2, z))
+            == encode(game::RegionCoords::new(o.x + 2, z))
     });
-    rows.push((keys[0].to_string(), (if identical { "yes" } else { "no" }).to_string()));
+    rows.push((
+        keys[0].to_string(),
+        (if identical { "yes" } else { "no" }).to_string(),
+    ));
     // The surface step from the last canonical region's east column to the
     // first's west column, over the largest step between neighbouring
     // columns inside either.
@@ -217,22 +264,33 @@ fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
     let (mut seam, mut interior) = (0i32, 0i32);
     for k in 1..=CLIFF_ROWS {
         let z = o.z + k * h / (CLIFF_ROWS + 1);
-        let east = worldgen::generate_region_forged(world, game::RegionCoords::new(o.x + w - 1, z), mats);
+        let east =
+            worldgen::generate_region_forged(world, game::RegionCoords::new(o.x + w - 1, z), mats);
         let west = worldgen::generate_region_forged(world, game::RegionCoords::new(o.x, z), mats);
         for lz in 0..n {
             seam = seam.max((surface(&east, n - 1, lz) - surface(&west, 0, lz)).abs());
             for columns in [&east, &west] {
                 for lx in 0..n - 1 {
-                    interior = interior.max((surface(columns, lx + 1, lz) - surface(columns, lx, lz)).abs());
+                    interior = interior
+                        .max((surface(columns, lx + 1, lz) - surface(columns, lx, lz)).abs());
                 }
             }
         }
     }
-    let cliff = if interior > 0 { f64::from(seam) / f64::from(interior) } else if seam > 0 { f64::INFINITY } else { 0.0 };
+    let cliff = if interior > 0 {
+        f64::from(seam) / f64::from(interior)
+    } else if seam > 0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
     rows.push((keys[1].to_string(), format!("{cliff:.3}")));
     let tile_m = game::REGION_BLOCKS as f64;
     let exact = f64::from(map.width) * tile_m == a.width_m;
-    rows.push((keys[2].to_string(), (if map.wrap_x && exact { "yes" } else { "no" }).to_string()));
+    rows.push((
+        keys[2].to_string(),
+        (if map.wrap_x && exact { "yes" } else { "no" }).to_string(),
+    ));
     // Rivers with a stored pair across the seam: along their pairs within a
     // few cells of the seam, sampled every metre, the largest gap between
     // consecutive carved water columns (in raster cells).
@@ -241,7 +299,10 @@ fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
     let near_seam = |x: f64| x < 3.0 * cell || x > width - 3.0 * cell;
     let mut gaps: Vec<f64> = Vec::new();
     for reach in &a.rivers {
-        let crosses = reach.points.windows(2).any(|q| (f64::from(q[1].x) - f64::from(q[0].x)).abs() > 0.5 * width);
+        let crosses = reach
+            .points
+            .windows(2)
+            .any(|q| (f64::from(q[1].x) - f64::from(q[0].x)).abs() > 0.5 * width);
         if !crosses {
             continue;
         }
@@ -274,9 +335,19 @@ fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
         gaps.push(gap / cell);
     }
     rows.push((keys[3].to_string(), gaps.len().to_string()));
-    rows.push((keys[4].to_string(), format!("{:.3}", gaps.iter().copied().fold(0.0, f64::max))));
+    rows.push((
+        keys[4].to_string(),
+        format!("{:.3}", gaps.iter().copied().fold(0.0, f64::max)),
+    ));
     let list: Vec<String> = gaps.iter().map(|g| format!("{g:.3}")).collect();
-    rows.push((keys[5].to_string(), if list.is_empty() { "none".to_string() } else { list.join(",") }));
+    rows.push((
+        keys[5].to_string(),
+        if list.is_empty() {
+            "none".to_string()
+        } else {
+            list.join(",")
+        },
+    ));
     // The trees of the last canonical region of a row and of the first
     // regions of that row and its two neighbours, the latter one lap east:
     // no two trunks closer than the placement's spacing rule allows (the
@@ -284,9 +355,11 @@ fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
     let lap = w * game::REGION_BLOCKS as i32;
     let spaced = (1..=CLIFF_ROWS).all(|k| {
         let z = o.z + k * h / (CLIFF_ROWS + 1);
-        let east = worldgen::region_trees_forged(world, game::RegionCoords::new(o.x + w - 1, z), mats);
+        let east =
+            worldgen::region_trees_forged(world, game::RegionCoords::new(o.x + w - 1, z), mats);
         (-1..=1).all(|dz| {
-            let west = worldgen::region_trees_forged(world, game::RegionCoords::new(o.x, z + dz), mats);
+            let west =
+                worldgen::region_trees_forged(world, game::RegionCoords::new(o.x, z + dz), mats);
             east.iter().all(|e| {
                 west.iter().all(|t| {
                     let r = worldgen::trees::SPECIES[e.species as usize]
@@ -298,7 +371,10 @@ fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
             })
         })
     });
-    rows.push((keys[6].to_string(), (if spaced { "yes" } else { "no" }).to_string()));
+    rows.push((
+        keys[6].to_string(),
+        (if spaced { "yes" } else { "no" }).to_string(),
+    ));
     rows
 }
 
@@ -309,7 +385,9 @@ fn lakes_across_seam(a: &WorldArtifact) -> usize {
         .iter()
         .filter(|l| {
             let column = |want: usize| {
-                l.cells.iter().any(|&(start, len)| (start as usize..(start + len) as usize).any(|i| i % nx == want))
+                l.cells.iter().any(|&(start, len)| {
+                    (start as usize..(start + len) as usize).any(|i| i % nx == want)
+                })
             };
             column(0) && column(nx - 1)
         })
@@ -321,16 +399,32 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     let w = &forged.world;
     let mut rows: Vec<(String, String)> = Vec::new();
     let mut row = |key: &str, value: String| rows.push((key.to_string(), value));
-    row("size", format!("{} × {} m at {} m, {} × {}", p.width_m, p.height_m, p.cell_m, w.nx, w.nz));
-    let edges: Vec<String> = EDGE_NAMES.iter().zip(w.edges).map(|(name, e)| format!("{name} {e:?}")).collect();
+    row(
+        "size",
+        format!(
+            "{} × {} m at {} m, {} × {}",
+            p.width_m, p.height_m, p.cell_m, w.nx, w.nz
+        ),
+    );
+    let edges: Vec<String> = EDGE_NAMES
+        .iter()
+        .zip(w.edges)
+        .map(|(name, e)| format!("{name} {e:?}"))
+        .collect();
     row("edges", edges.join(", "));
     let bytes: Vec<u8> = w.h.iter().flat_map(|v| v.to_le_bytes()).collect();
     row("height_crc", format!("{:08x}", crc32fast::hash(&bytes)));
     let q = worldgen::forge::quality::quality(forged);
     row("land_share", format!("{:.6}", q.land_share));
     let sizes = land_component_sizes(forged);
-    row("land_components_over_1pct", land_components_over(&sizes, w.cells(), 0.01).to_string());
-    row("land_components_over_3pct", land_components_over(&sizes, w.cells(), 0.03).to_string());
+    row(
+        "land_components_over_1pct",
+        land_components_over(&sizes, w.cells(), 0.01).to_string(),
+    );
+    row(
+        "land_components_over_3pct",
+        land_components_over(&sizes, w.cells(), 0.03).to_string(),
+    );
     row("lakes", format!("{}", q.lakes));
     row("river_mouths", format!("{}", q.river_mouths));
     row("max_peak_m", format!("{:.1}", q.max_peak_m));
@@ -339,20 +433,42 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     let artifact = forged.artifact(p);
     let shares = biome_shares_with_land(&artifact);
     for &b in Biome::ALL.iter().filter(|&&b| !is_water(b)) {
-        let land = shares.iter().find(|(s, _, _)| *s == b).and_then(|(_, _, land)| *land).unwrap_or(0.0);
-        row(&format!("biome_share.{}", b.name().replace(' ', "_")), format!("{land:.6}"));
+        let land = shares
+            .iter()
+            .find(|(s, _, _)| *s == b)
+            .and_then(|(_, _, land)| *land)
+            .unwrap_or(0.0);
+        row(
+            &format!("biome_share.{}", b.name().replace(' ', "_")),
+            format!("{land:.6}"),
+        );
     }
     // Task 10 (the Planet): polar seas, climate rows, drainage and the
     // seam.
     let polar = polar_land_cells(w);
-    row("polar_rows_all_sea", format!("{} ({polar} land cells)", if polar == 0 { "yes" } else { "no" }));
+    row(
+        "polar_rows_all_sea",
+        format!(
+            "{} ({polar} land cells)",
+            if polar == 0 { "yes" } else { "no" }
+        ),
+    );
     let lat = climate::effective_latitudes(w.nx, w.nz, w.dx, p);
     let row_temp = |z: usize| {
-        (0..w.nx).map(|x| climate::sea_level_temperature_c(lat[z * w.nx + x] as f64, p)).sum::<f64>() / w.nx as f64
+        (0..w.nx)
+            .map(|x| climate::sea_level_temperature_c(lat[z * w.nx + x] as f64, p))
+            .sum::<f64>()
+            / w.nx as f64
     };
     row("sea_level_temp_c.north", format!("{:.1}", row_temp(0)));
-    row("sea_level_temp_c.middle", format!("{:.1}", row_temp(w.nz / 2)));
-    row("sea_level_temp_c.south", format!("{:.1}", row_temp(w.nz - 1)));
+    row(
+        "sea_level_temp_c.middle",
+        format!("{:.1}", row_temp(w.nz / 2)),
+    );
+    row(
+        "sea_level_temp_c.south",
+        format!("{:.1}", row_temp(w.nz - 1)),
+    );
     row("drains_to_sea", format!("{:.3}", drains_to_sea(forged)));
     // The seam's steps (Task 11 ranks them among the interior column pairs;
     // the ratios are the same p99 numbers `seam_ok_*` judges).
@@ -362,16 +478,37 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     let precip_steps = seam_steps(nx, nz, |a, b| (precip[b] - precip[a]).abs(), p99);
     row("seam_step_ratio_height", format!("{:.3}", height.0));
     row("seam_step_ratio_precip", format!("{:.3}", precip_steps.0));
-    row("lakes_across_seam", lakes_across_seam(&artifact).to_string());
+    row(
+        "lakes_across_seam",
+        lakes_across_seam(&artifact).to_string(),
+    );
     // Task 11 (periodic noise and geometry): the biome's seam.
-    let biome = seam_steps(nx, nz, |a, b| if artifact.biome[a] != artifact.biome[b] { 1.0 } else { 0.0 }, mean);
+    let biome = seam_steps(
+        nx,
+        nz,
+        |a, b| {
+            if artifact.biome[a] != artifact.biome[b] {
+                1.0
+            } else {
+                0.0
+            }
+        },
+        mean,
+    );
     row("seam_step_ratio_biome", format!("{:.3}", biome.0));
     row("seam_step_rank_height", format!("{:.3}", height.1));
     row("seam_step_rank_precip", format!("{:.3}", precip_steps.1));
     row("seam_step_rank_biome", format!("{:.3}", biome.1));
-    for (name, (ratio, rank)) in [("height", height), ("precip", precip_steps), ("biome", biome)] {
+    for (name, (ratio, rank)) in [
+        ("height", height),
+        ("precip", precip_steps),
+        ("biome", biome),
+    ] {
         let ok = ratio <= SEAM_RATIO_OK || rank >= SEAM_RANK_OK;
-        row(&format!("seam_ok_{name}"), (if ok { "yes" } else { "no" }).to_string());
+        row(
+            &format!("seam_ok_{name}"),
+            (if ok { "yes" } else { "no" }).to_string(),
+        );
     }
     // Phase 1b: the crc of what the runtime reads from the artifact (taken
     // before the artifact moves into the sampler below; printed after it).
@@ -385,8 +522,14 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     let world_bytes = artifact.to_bytes();
     let sizes = [
         ("world_file_bytes", world_bytes.len()),
-        ("climate_bytes_raw", artifact.climate.cells() * game::CLIMATE_BYTES_PER_CELL),
-        ("climate_bytes_packed", worldgen::forged::climate_packed_len(&artifact.climate)),
+        (
+            "climate_bytes_raw",
+            artifact.climate.cells() * game::CLIMATE_BYTES_PER_CELL,
+        ),
+        (
+            "climate_bytes_packed",
+            worldgen::forged::climate_packed_len(&artifact.climate),
+        ),
         ("climate_resident_bytes", artifact.climate.resident_bytes()),
     ];
     // Task 12 (the runtime sampler wraps): regions, the world map and rivers
@@ -432,15 +575,26 @@ const MONTHLY_API_SEAM_ROWS: usize = 4;
 /// lattice of every `MONTHLY_API_FINE_STRIDE`-th column and row (a stride
 /// grown so about `MONTHLY_API_POINTS` remain), and the points 0.5 m either
 /// side of the seam in every `MONTHLY_API_SEAM_ROWS`-th climate row.
-fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Vec<(String, String)> {
-    use game::{MonthlyNormals, CLIMATE_MONTHS};
-    use worldgen::forged_tiles::{decode_meta, encode_meta, encode_tile, split, MemTiles, TILE_CACHE_BYTES, TILE_CELLS};
+fn monthly_api_lines(
+    forged: &Forged,
+    p: &ForgeParams,
+    world_bytes: &[u8],
+) -> Vec<(String, String)> {
+    use game::{CLIMATE_MONTHS, MonthlyNormals};
+    use worldgen::forged_tiles::{
+        MemTiles, TILE_CACHE_BYTES, TILE_CELLS, decode_meta, encode_meta, encode_tile, split,
+    };
     let whole = ForgedWorld::from_bytes(world_bytes).expect("the world file loads");
     let (meta, tiles) = split(&whole, TILE_CELLS).expect("the world splits");
     let map = tiles.iter().map(|t| (t.origin, encode_tile(t))).collect();
     let meta = decode_meta(&encode_meta(&meta)).expect("the meta decodes");
-    let tiled = ForgedWorld::from_tiles_with_budget(meta, std::sync::Arc::new(MemTiles(map)), 0, TILE_CACHE_BYTES)
-        .expect("the tiles load");
+    let tiled = ForgedWorld::from_tiles_with_budget(
+        meta,
+        std::sync::Arc::new(MemTiles(map)),
+        0,
+        TILE_CACHE_BYTES,
+    )
+    .expect("the tiles load");
     let g = whole.globals();
     let c = whole.monthly_climate();
     let (min, _) = whole.artifact_bounds_engine_m();
@@ -449,11 +603,17 @@ fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Ve
     let ccells = cnx * cnz;
     // Climate cell centres.
     let every = ccells.div_ceil(MONTHLY_API_POINTS).max(1);
-    let centres: Vec<(usize, usize)> = (0..ccells).step_by(every).map(|ci| (ci % cnx, ci / cnx)).collect();
-    let centre_m = |(cx, cz): (usize, usize)| engine((cx as f64 + 0.5) * c.cell_m, (cz as f64 + 0.5) * c.cell_m);
+    let centres: Vec<(usize, usize)> = (0..ccells)
+        .step_by(every)
+        .map(|ci| (ci % cnx, ci / cnx))
+        .collect();
+    let centre_m = |(cx, cz): (usize, usize)| {
+        engine((cx as f64 + 0.5) * c.cell_m, (cz as f64 + 0.5) * c.cell_m)
+    };
     // The fine lattice.
     let (nx, nz) = (g.nx as usize, g.nz as usize);
-    let stride = MONTHLY_API_FINE_STRIDE.max(((nx * nz) as f64 / MONTHLY_API_POINTS as f64).sqrt().ceil() as usize);
+    let stride = MONTHLY_API_FINE_STRIDE
+        .max(((nx * nz) as f64 / MONTHLY_API_POINTS as f64).sqrt().ceil() as usize);
     let fine: Vec<(f64, f64)> = (0..nz)
         .step_by(stride)
         .flat_map(|iz| (0..nx).step_by(stride).map(move |ix| (ix, iz)))
@@ -466,10 +626,24 @@ fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Ve
             [(min[0] - 0.5, z), (min[0] + 0.5, z)]
         })
         .collect();
-    let points: Vec<(f64, f64)> = centres.iter().map(|&k| centre_m(k)).chain(fine.iter().copied()).chain(seam).collect();
+    let points: Vec<(f64, f64)> = centres
+        .iter()
+        .map(|&k| centre_m(k))
+        .chain(fine.iter().copied())
+        .chain(seam)
+        .collect();
     let bits = |n: &MonthlyNormals| -> Vec<u32> {
         (0..CLIMATE_MONTHS)
-            .flat_map(|m| [n.temp_c[m], n.diurnal_c[m], n.precip_mm[m], n.wet_day[m], n.wind_ms[m][0], n.wind_ms[m][1]])
+            .flat_map(|m| {
+                [
+                    n.temp_c[m],
+                    n.diurnal_c[m],
+                    n.precip_mm[m],
+                    n.wet_day[m],
+                    n.wind_ms[m][0],
+                    n.wind_ms[m][1],
+                ]
+            })
             .map(f32::to_bits)
             .collect()
     };
@@ -485,8 +659,15 @@ fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Ve
         for m in 0..CLIMATE_MONTHS {
             let i = m * ccells + cz * cnx + cx;
             let d = |a: f32, b: f32| (f64::from(a) - f64::from(b)).abs();
-            let wind = d(f.wind_east_ms[i], n.wind_ms[m][0]).max(d(f.wind_south_ms[i], n.wind_ms[m][1]));
-            let e = [d(f.temp_sea_c[i], n.temp_c[m]), d(f.diurnal_c[i], n.diurnal_c[m]), d(f.precip_mm[i], n.precip_mm[m]), d(f.wet_day[i], n.wet_day[m]), wind];
+            let wind =
+                d(f.wind_east_ms[i], n.wind_ms[m][0]).max(d(f.wind_south_ms[i], n.wind_ms[m][1]));
+            let e = [
+                d(f.temp_sea_c[i], n.temp_c[m]),
+                d(f.diurnal_c[i], n.diurnal_c[m]),
+                d(f.precip_mm[i], n.precip_mm[m]),
+                d(f.wet_day[i], n.wet_day[m]),
+                wind,
+            ];
             for (worst, e) in err.iter_mut().zip(e) {
                 *worst = worst.max(e);
             }
@@ -494,7 +675,10 @@ fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Ve
     }
     row(
         "climate_roundtrip_max_err",
-        format!("temp {:.4} C, diurnal {:.3} C, precip {:.3} mm, wet {:.5}, wind {:.3} m/s", err[0], err[1], err[2], err[3], err[4]),
+        format!(
+            "temp {:.4} C, diurnal {:.3} C, precip {:.3} mm, wet {:.5}, wind {:.3} m/s",
+            err[0], err[1], err[2], err[3], err[4]
+        ),
     );
     let steps = [
         1.0 / game::CLIMATE_TEMP_PER_C,
@@ -503,21 +687,31 @@ fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Ve
         1.0 / game::CLIMATE_WET_DAY_PER_ONE,
         1.0 / game::CLIMATE_WIND_PER_MS,
     ];
-    let ok = err.iter().zip(steps).all(|(&e, step)| e <= step / 2.0 + 1e-4 * step);
-    row("climate_roundtrip_ok", (if ok { "yes" } else { "no" }).to_string());
+    let ok = err
+        .iter()
+        .zip(steps)
+        .all(|(&e, step)| e <= step / 2.0 + 1e-4 * step);
+    row(
+        "climate_roundtrip_ok",
+        (if ok { "yes" } else { "no" }).to_string(),
+    );
     // Tiles against the whole world, every sample point.
     let tiles_same = points.iter().all(|&(x, z)| {
         bits(&tiled.monthly_normals(x, z)) == bits(&whole.monthly_normals(x, z))
             && bits(&tiled.monthly_at_ground(x, z)) == bits(&whole.monthly_at_ground(x, z))
     });
-    row("climate_tiles_identical", (if tiles_same { "yes" } else { "no" }).to_string());
+    row(
+        "climate_tiles_identical",
+        (if tiles_same { "yes" } else { "no" }).to_string(),
+    );
     // A point and its image one lap east.
     let aliased = if g.edges[1] != worldgen::forge::world::EdgeKind::Wrap {
         "n/a".to_string()
     } else {
         let same = points.iter().all(|&(x, z)| {
             bits(&whole.monthly_normals(x, z)) == bits(&whole.monthly_normals(x + g.width_m, z))
-                && bits(&whole.monthly_at_ground(x, z)) == bits(&whole.monthly_at_ground(x + g.width_m, z))
+                && bits(&whole.monthly_at_ground(x, z))
+                    == bits(&whole.monthly_at_ground(x + g.width_m, z))
         });
         (if same { "yes" } else { "no" }).to_string()
     };
@@ -540,10 +734,17 @@ fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Ve
     // outermost climate row).
     let gaps: Vec<f64> = fine
         .iter()
-        .map(|&(x, z)| (f64::from(whole.monthly_at_ground(x, z).annual_mean_temp_c()) - whole.annual_climate(x, z).0).abs())
+        .map(|&(x, z)| {
+            (f64::from(whole.monthly_at_ground(x, z).annual_mean_temp_c())
+                - whole.annual_climate(x, z).0)
+                .abs()
+        })
         .collect();
     let max = gaps.iter().copied().fold(0.0f64, f64::max);
-    row("monthly_annual_temp_gap_c", format!("p99 {:.3}, max {max:.3}", p99(gaps)));
+    row(
+        "monthly_annual_temp_gap_c",
+        format!("p99 {:.3}, max {max:.3}", p99(gaps)),
+    );
     rows
 }
 
@@ -621,8 +822,15 @@ fn artifact_header_crc(a: &WorldArtifact) -> String {
 
 /// The latitude bands of the monthly lines: (name, centre deg); a band is
 /// the climate rows within `BAND_HALF_DEG` of its centre.
-const MONTHLY_BANDS: [(&str, f64); 7] =
-    [("75N", 75.0), ("45N", 45.0), ("15N", 15.0), ("0", 0.0), ("15S", -15.0), ("45S", -45.0), ("75S", -75.0)];
+const MONTHLY_BANDS: [(&str, f64); 7] = [
+    ("75N", 75.0),
+    ("45N", 45.0),
+    ("15N", 15.0),
+    ("0", 0.0),
+    ("15S", -15.0),
+    ("45S", -45.0),
+    ("75S", -75.0),
+];
 /// Half-width (deg) of a band of `MONTHLY_BANDS`.
 const BAND_HALF_DEG: f64 = 7.5;
 
@@ -639,21 +847,32 @@ fn monthly_lines(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     let height_m = w.nz as f64 * w.dx;
     let mut rows = Vec::new();
     let mut row = |key: &str, value: String| rows.push((key.to_string(), value));
-    row("climate_grid", format!("{cnx} × {cnz} cells of {} m, stride {s}", f.cell_m));
+    row(
+        "climate_grid",
+        format!("{cnx} × {cnz} cells of {} m, stride {s}", f.cell_m),
+    );
     row("climate_clamped_values", f.clamped_values().to_string());
     let at = |plane: &[f32], m: usize, ci: usize| f64::from(plane[m * cells + ci]);
     let row_lat = |cz: usize| climate::latitude_at((cz as f64 + 0.5) * f.cell_m, height_m);
     for (name, centre) in MONTHLY_BANDS {
-        let band: Vec<usize> = (0..cnz).filter(|&cz| (row_lat(cz) - centre).abs() <= BAND_HALF_DEG).collect();
+        let band: Vec<usize> = (0..cnz)
+            .filter(|&cz| (row_lat(cz) - centre).abs() <= BAND_HALF_DEG)
+            .collect();
         let n = (band.len() * cnx).max(1) as f64;
         let mean = |m: usize| {
-            band.iter().flat_map(|&cz| (0..cnx).map(move |cx| cz * cnx + cx)).map(|ci| at(&f.temp_sea_c, m, ci)).sum::<f64>()
+            band.iter()
+                .flat_map(|&cz| (0..cnx).map(move |cx| cz * cnx + cx))
+                .map(|ci| at(&f.temp_sea_c, m, ci))
+                .sum::<f64>()
                 / n
         };
         let (jan, jul) = (mean(NORTH_MIDWINTER_MONTH), mean(NORTH_MIDSUMMER_MONTH));
         row(&format!("sea_temp_jan_c.{name}"), format!("{jan:.2}"));
         row(&format!("sea_temp_jul_c.{name}"), format!("{jul:.2}"));
-        row(&format!("seasonal_swing_c.{name}"), format!("{:.2}", jul - jan));
+        row(
+            &format!("seasonal_swing_c.{name}"),
+            format!("{:.2}", jul - jan),
+        );
     }
     // The annual mean temperature and annual precipitation each cell's twelve
     // months must give back: recomputed here from the public pieces.
@@ -663,7 +882,8 @@ fn monthly_lines(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
         for cx in 0..cnx {
             let ci = cz * cnx + cx;
             let xc = (cx as f64 + 0.5) * f.cell_m;
-            let lat = (climate::latitude_at(zc, height_m) + climate::meander_deg(xc, zc, p)).clamp(-90.0, 90.0);
+            let lat = (climate::latitude_at(zc, height_m) + climate::meander_deg(xc, zc, p))
+                .clamp(-90.0, 90.0);
             let mean_c = climate::sea_level_temperature_c(lat, p);
             let mut annual = 0.0;
             for z in cz * s..(cz + 1) * s {
@@ -673,7 +893,11 @@ fn monthly_lines(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
             }
             annual /= (s * s) as f64;
             let months = 0..CLIMATE_MONTHS;
-            let temp = months.clone().map(|m| at(&f.temp_sea_c, m, ci)).sum::<f64>() / CLIMATE_MONTHS as f64;
+            let temp = months
+                .clone()
+                .map(|m| at(&f.temp_sea_c, m, ci))
+                .sum::<f64>()
+                / CLIMATE_MONTHS as f64;
             let precip = months.map(|m| at(&f.precip_mm, m, ci)).sum::<f64>();
             temp_err = temp_err.max((temp - mean_c).abs());
             precip_err = precip_err.max((precip - annual).abs());
@@ -682,13 +906,23 @@ fn monthly_lines(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     row("monthly_temp_mean_err_c", format!("{temp_err:.2e}"));
     row("monthly_precip_sum_err_mm", format!("{precip_err:.2e}"));
     let month = NORTH_MIDSUMMER_MONTH * cells;
-    for (name, plane) in [("monthly_temp", &f.temp_sea_c), ("monthly_precip", &f.precip_mm)] {
-        let (ratio, rank) =
-            seam_steps(cnx, cnz, |a, b| (f64::from(plane[month + b]) - f64::from(plane[month + a])).abs(), p99);
+    for (name, plane) in [
+        ("monthly_temp", &f.temp_sea_c),
+        ("monthly_precip", &f.precip_mm),
+    ] {
+        let (ratio, rank) = seam_steps(
+            cnx,
+            cnz,
+            |a, b| (f64::from(plane[month + b]) - f64::from(plane[month + a])).abs(),
+            p99,
+        );
         row(&format!("seam_step_ratio_{name}"), format!("{ratio:.3}"));
         row(&format!("seam_step_rank_{name}"), format!("{rank:.3}"));
         let ok = ratio <= SEAM_RATIO_OK || rank >= SEAM_RANK_OK;
-        row(&format!("seam_ok_{name}"), (if ok { "yes" } else { "no" }).to_string());
+        row(
+            &format!("seam_ok_{name}"),
+            (if ok { "yes" } else { "no" }).to_string(),
+        );
     }
     rows
 }
@@ -713,12 +947,22 @@ const NOT_NUMBERS: &[&str] = &[
 /// `p99 <a>, max <b>`). `None` = the generic line.
 fn summary_special(key: &str, values: &[&str], numbers: &[f64]) -> Option<String> {
     match key {
-        "monthly_precip_conserved_max_rel" if numbers.len() == values.len() && !numbers.is_empty() => {
+        "monthly_precip_conserved_max_rel"
+            if numbers.len() == values.len() && !numbers.is_empty() =>
+        {
             let mut v = numbers.to_vec();
             v.sort_by(f64::total_cmp);
             let n = v.len();
-            let median = if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 };
-            Some(format!("min {:.2e} median {median:.2e} max {:.2e}", v[0], v[n - 1]))
+            let median = if n % 2 == 1 {
+                v[n / 2]
+            } else {
+                (v[n / 2 - 1] + v[n / 2]) / 2.0
+            };
+            Some(format!(
+                "min {:.2e} median {median:.2e} max {:.2e}",
+                v[0],
+                v[n - 1]
+            ))
         }
         "monthly_annual_temp_gap_c" => {
             let (mut p99, mut max) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -740,7 +984,11 @@ pub fn run(base: &Params) {
     let seeds = base.seeds.max(1);
     let mut all: Vec<Vec<(String, String)>> = Vec::new();
     for k in 0..seeds {
-        let p = ForgeParams { seed: base.seed.wrapping_add(k as u64), quiet: true, ..base.forge.clone() };
+        let p = ForgeParams {
+            seed: base.seed.wrapping_add(k as u64),
+            quiet: true,
+            ..base.forge.clone()
+        };
         let forged = forge(&p);
         let rows = report(&forged, &p);
         println!("seed: {:#018X}", p.seed);
@@ -753,7 +1001,10 @@ pub fn run(base: &Params) {
             } else {
                 format!("{}-{:016X}.world", base.out.to_string_lossy(), p.seed)
             };
-            forged.artifact(&p).save(std::path::Path::new(&path)).expect("write world file");
+            forged
+                .artifact(&p)
+                .save(std::path::Path::new(&path))
+                .expect("write world file");
             println!("world_file: {path}");
         }
         println!();
@@ -777,16 +1028,36 @@ pub(crate) fn print_summary(all: &[Vec<(String, String)>], seeds: usize) {
         }
     }
     for key in keys {
-        let values: Vec<&str> =
-            all.iter().flat_map(|rows| rows.iter().filter(|(k, _)| k == key).map(|(_, v)| v.as_str())).collect();
-        let mut numbers: Vec<f64> = values.iter().filter_map(|v| v.parse::<f64>().ok()).collect();
+        let values: Vec<&str> = all
+            .iter()
+            .flat_map(|rows| {
+                rows.iter()
+                    .filter(|(k, _)| k == key)
+                    .map(|(_, v)| v.as_str())
+            })
+            .collect();
+        let mut numbers: Vec<f64> = values
+            .iter()
+            .filter_map(|v| v.parse::<f64>().ok())
+            .collect();
         if let Some(line) = summary_special(key, &values, &numbers) {
             println!("{key}: {line}");
-        } else if !NOT_NUMBERS.contains(&key) && numbers.len() == values.len() && !numbers.is_empty() {
+        } else if !NOT_NUMBERS.contains(&key)
+            && numbers.len() == values.len()
+            && !numbers.is_empty()
+        {
             numbers.sort_by(f64::total_cmp);
             let n = numbers.len();
-            let median = if n % 2 == 1 { numbers[n / 2] } else { (numbers[n / 2 - 1] + numbers[n / 2]) / 2.0 };
-            println!("{key}: min {} median {median} max {}", numbers[0], numbers[n - 1]);
+            let median = if n % 2 == 1 {
+                numbers[n / 2]
+            } else {
+                (numbers[n / 2 - 1] + numbers[n / 2]) / 2.0
+            };
+            println!(
+                "{key}: min {} median {median} max {}",
+                numbers[0],
+                numbers[n - 1]
+            );
         } else {
             let mut distinct = values.clone();
             distinct.sort();
@@ -803,18 +1074,39 @@ pub(crate) fn print_summary(all: &[Vec<(String, String)>], seeds: usize) {
     // least `SEAM_PASS_MEDIAN_RANK` (one seed: that seed's own rule; 2 or 3
     // seeds: no verdict over the set).
     let values = |key: &str| -> Vec<String> {
-        all.iter().flat_map(|rows| rows.iter().filter(|(k, _)| k == key).map(|(_, v)| v.clone())).collect()
+        all.iter()
+            .flat_map(|rows| {
+                rows.iter()
+                    .filter(|(k, _)| k == key)
+                    .map(|(_, v)| v.clone())
+            })
+            .collect()
     };
-    for field in ["height", "precip", "biome", "monthly_temp", "monthly_precip"] {
+    for field in [
+        "height",
+        "precip",
+        "biome",
+        "monthly_temp",
+        "monthly_precip",
+    ] {
         let oks = values(&format!("seam_ok_{field}"));
         if oks.is_empty() {
             continue;
         }
         let not_ok = oks.iter().filter(|v| *v == "no").count();
-        let mut ranks: Vec<f64> = values(&format!("seam_step_rank_{field}")).iter().filter_map(|v| v.parse().ok()).collect();
+        let mut ranks: Vec<f64> = values(&format!("seam_step_rank_{field}"))
+            .iter()
+            .filter_map(|v| v.parse().ok())
+            .collect();
         ranks.sort_by(f64::total_cmp);
         let n = ranks.len();
-        let median = if n == 0 { 0.0 } else if n % 2 == 1 { ranks[n / 2] } else { (ranks[n / 2 - 1] + ranks[n / 2]) / 2.0 };
+        let median = if n == 0 {
+            0.0
+        } else if n % 2 == 1 {
+            ranks[n / 2]
+        } else {
+            (ranks[n / 2 - 1] + ranks[n / 2]) / 2.0
+        };
         println!("seam_seeds_not_ok_{field}: {not_ok}");
         if seeds > 1 && seeds < SEAM_PASS_MIN_SEEDS {
             println!("seam_pass_{field}: n/a (needs ≥ {SEAM_PASS_MIN_SEEDS} seeds)");

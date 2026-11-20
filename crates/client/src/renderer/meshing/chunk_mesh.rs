@@ -35,11 +35,11 @@ use super::super::bricks::{BrickOf, ChunkBricks};
 use super::super::config::TerrainRenderConfig;
 use super::super::voxel_material::StandardVoxelMaterial;
 use super::super::voxel_pull::ChunkQuads;
-use super::binary::{cross_axes, Face};
-use super::emit::{quad_indices, MeshData, CORNERS};
+use super::binary::{Face, cross_axes};
+use super::emit::{CORNERS, MeshData, quad_indices};
 use super::queue::{FrameUploads, MeshBudgets, RemeshQueue};
 use super::records::{self, QuadRecord};
-use super::{pack, ChunkMaterial, InteriorFaces, MeshingTask, TerrainQuadCount};
+use super::{ChunkMaterial, InteriorFaces, MeshingTask, TerrainQuadCount, pack};
 
 /// A meshed brick's quads (brick-local, unplaced), kept so its chunk's merged
 /// list can be rebuilt without re-meshing (8 B/quad). Never drawn by itself.
@@ -58,7 +58,10 @@ pub fn per_chunk_backend(config: Option<&TerrainRenderConfig>) -> bool {
 /// Constant bounds of a merged sim-chunk mesh: the chunk's local cube.
 pub fn chunk_aabb() -> Aabb {
     let half = CHUNK_UNITS as f32 / 2.0;
-    Aabb { center: Vec3A::splat(half), half_extents: Vec3A::splat(half) }
+    Aabb {
+        center: Vec3A::splat(half),
+        half_extents: Vec3A::splat(half),
+    }
 }
 
 /// Expand (merged) records into one packed-vertex mesh: vertices and
@@ -100,7 +103,13 @@ type VoxelMaterial = ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>;
 pub fn rebuild_chunk_meshes(
     mut commands: Commands,
     dirty: Query<
-        (Entity, &ChunkBricks, &GlobalTransform, Option<&super::coarse::CoarseTwin>, Has<ChunkQuads>),
+        (
+            Entity,
+            &ChunkBricks,
+            &GlobalTransform,
+            Option<&super::coarse::CoarseTwin>,
+            Has<ChunkQuads>,
+        ),
         With<ChunkMeshDirty>,
     >,
     bricks: Query<(&BrickOf, Option<&BrickRecords>, Has<MeshingTask>)>,
@@ -129,7 +138,9 @@ pub fn rebuild_chunk_meshes(
         if uploads.0 >= budgets.uploads_per_frame {
             break;
         }
-        let Ok((_, list, _, twin, had_quads)) = dirty.get(chunk) else { continue };
+        let Ok((_, list, _, twin, had_quads)) = dirty.get(chunk) else {
+            continue;
+        };
         let settled = list.0.iter().all(|&b| {
             // A despawned brick counts as settled (it just draws nothing).
             !queue.dirty.contains_key(&b) && bricks.get(b).map_or(true, |(_, _, meshing)| !meshing)
@@ -149,17 +160,30 @@ pub fn rebuild_chunk_meshes(
         let mut ec = commands.entity(chunk);
         ec.remove::<ChunkMeshDirty>();
         if merged.is_empty() {
-            ec.remove::<(Mesh3d, MeshMaterial3d<VoxelMaterial>, ChunkQuads, TerrainQuadCount, InteriorFaces)>();
+            ec.remove::<(
+                Mesh3d,
+                MeshMaterial3d<VoxelMaterial>,
+                ChunkQuads,
+                TerrainQuadCount,
+                InteriorFaces,
+            )>();
             // Its twin, if any, draws at every distance until its rebuild
             // (which drops it if the chunk's blocks show nothing either).
             if let Some(twin) = twin {
-                ec.insert(super::coarse::CoarseDirty).remove::<super::coarse::BandHandover>();
-                commands.entity(twin.0).insert(super::super::voxel_pull::DetailBand::Always);
+                ec.insert(super::coarse::CoarseDirty)
+                    .remove::<super::coarse::BandHandover>();
+                commands
+                    .entity(twin.0)
+                    .insert(super::super::voxel_pull::DetailBand::Always);
             }
             continue;
         }
         uploads.0 += 1;
-        ec.insert((chunk_aabb(), NoAutoAabb, TerrainQuadCount(merged.len() as u32)));
+        ec.insert((
+            chunk_aabb(),
+            NoAutoAabb,
+            TerrainQuadCount(merged.len() as u32),
+        ));
         if per_chunk {
             let data = records_to_mesh_data(&merged).expect("non-empty records mesh");
             ec.insert(Mesh3d(meshes.add(data.into_mesh())));
@@ -189,4 +213,3 @@ pub fn rebuild_chunk_meshes(
         }
     }
 }
-

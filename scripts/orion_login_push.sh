@@ -7,7 +7,7 @@
 # update: with two replicas logins continue), then waits for the rollout. The
 # digest is what makes a moving `latest` safe: every push has its own, so it
 # always rolls out; the digest already running is "nothing to roll out".
-# The build's git revision (short sha, `-dirty` if crates/ or Cargo.lock have
+# The build's git revision (short sha, `-dirty` if the checkout has
 # uncommitted changes) is printed and kept as the image label
 # org.opencontainers.image.revision.
 # A failed rollout leaves the old pods serving and prints the way back
@@ -32,6 +32,7 @@ bin="${LOGIN_BIN:-target/release/login}"
 tofu="${TOFU:-tofu}"
 
 [ -x "$bin" ] || { echo "orion-login-push: no $bin (run just orion-login-build)" >&2; exit 1; }
+PYTHONPATH="$PWD/scripts" python3 -m deploy.images verify-dials login
 
 repo="${IMAGE_REPOSITORY:-}"
 if [ -z "$repo" ]; then
@@ -45,14 +46,15 @@ registry="${repo%%/*}"
 image="$repo:latest"
 
 rev=$(git rev-parse --short HEAD)
-if [ -n "$(git status --porcelain -- crates Cargo.lock)" ]; then
+if [ -n "$(git status --porcelain)" ]; then
     rev="$rev-dirty"
-    echo "orion-login-push: uncommitted changes under crates/ or Cargo.lock: revision $rev" >&2
+    echo "orion-login-push: uncommitted checkout changes: revision $rev" >&2
 fi
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cp "$bin" "$stage/login"
+cp target/release/login.build-dials "$stage/build-dials"
 cp deploy/images/login/Dockerfile "$stage/Dockerfile"
 # One implementation of the content hash in scripts/deploy/images.py; the
 # orchestrator computes the same hash from the same staged files.

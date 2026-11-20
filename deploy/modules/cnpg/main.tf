@@ -1,5 +1,7 @@
 # The CloudNativePG operator and its CRDs (Cluster, Database, ...). Apply this
-# BEFORE module.postgres: the pg-cluster chart creates objects of those kinds.
+# BEFORE module.postgres and module.pg-management. The chart is cluster-wide by
+# default, so its one operator reconciles `pg` and `pg-management` in their
+# separate namespaces.
 resource "helm_release" "cnpg" {
   name             = "cnpg"
   repository       = "https://cloudnative-pg.github.io/charts"

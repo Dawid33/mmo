@@ -21,8 +21,14 @@ fn lerp(t: f64, a: f64, b: f64) -> f64 {
 /// Table-dot form of the old 8-way match; multiplies by ±1.0/0.0 are exact,
 /// so results are bit-identical (sign-of-zero aside, which f64 == ignores).
 const GRAD2: [(f64, f64); 8] = [
-    (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0),
-    (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
+    (1.0, 1.0),
+    (1.0, -1.0),
+    (-1.0, 1.0),
+    (-1.0, -1.0),
+    (1.0, 0.0),
+    (-1.0, 0.0),
+    (0.0, 1.0),
+    (0.0, -1.0),
 ];
 
 fn grad2(hash: u8, x: f64, y: f64) -> f64 {
@@ -67,7 +73,11 @@ impl PerlinNoise {
         let a = p[xi] as usize + zi;
         let b = p[xi + 1] as usize + zi;
         let x1 = lerp(u, grad2(p[a], xf, zf), grad2(p[b], xf - 1.0, zf));
-        let x2 = lerp(u, grad2(p[a + 1], xf, zf - 1.0), grad2(p[b + 1], xf - 1.0, zf - 1.0));
+        let x2 = lerp(
+            u,
+            grad2(p[a + 1], xf, zf - 1.0),
+            grad2(p[b + 1], xf - 1.0, zf - 1.0),
+        );
         lerp(v, x1, x2)
     }
 }
@@ -106,17 +116,25 @@ impl OctaveNoise {
     pub fn new(seed: u64, first_octave: i32, amplitudes: Vec<f64>) -> Self {
         let n = amplitudes.len();
         let mut state = seed;
-        let first = (0..n).map(|_| PerlinNoise::new(splitmix64(&mut state))).collect();
-        let second = (0..n).map(|_| PerlinNoise::new(splitmix64(&mut state))).collect();
+        let first = (0..n)
+            .map(|_| PerlinNoise::new(splitmix64(&mut state)))
+            .collect();
+        let second = (0..n)
+            .map(|_| PerlinNoise::new(splitmix64(&mut state)))
+            .collect();
         let lowest = 2f64.powi(n as i32 - 1) / (2f64.powi(n as i32) - 1.0);
         let weights = (0..n)
             .map(|i| amplitudes[i] * lowest / 2f64.powi(i as i32))
             .collect();
-        let freqs = (0..n)
-            .map(|i| 2f64.powi(first_octave + i as i32))
-            .collect();
+        let freqs = (0..n).map(|i| 2f64.powi(first_octave + i as i32)).collect();
         let value_factor = (1.0 / 6.0) / (0.1 * (1.0 + 1.0 / n as f64));
-        Self { first, second, weights, freqs, value_factor }
+        Self {
+            first,
+            second,
+            weights,
+            freqs,
+            value_factor,
+        }
     }
 
     pub fn sample2(&self, x: f64, z: f64) -> f64 {
@@ -131,4 +149,3 @@ impl OctaveNoise {
         acc * self.value_factor
     }
 }
-

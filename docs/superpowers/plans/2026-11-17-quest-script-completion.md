@@ -2076,7 +2076,7 @@ differs from the plan, with the reason:
   (`qx1`, `d_read_your_emit`).
 - **Open for Dawid:** the Sealed Mine plays an uninterruptible scene on the elder while the elder's menu may be
   open, but the spec has one activity per NPC — which wins.
-- **Large files** (left as built): `quest-vm` `dialogue_run.rs` (~1560 lines) and its conversation module,
+- **Large files** (left as built): `quest-vm` `dialogue_run.rs` (~1100 lines) and its conversation module (~1260),
   `quest-stub` `world.rs` / `people.rs`, `quest-lang` `codegen/quest.rs`, `quest-cli` `main.rs`.
 
 ### Part 3 — Fuzzing (Tasks 53–55), written at Task 55 (2026-11-18)

@@ -43,6 +43,8 @@ if [ "${PERF_CAPTURE_DIAG:-1}" != "0" ]; then export DIAG=1; fi
 # The game-thread budget line is logged at DEBUG; PERF_LOG turns it (and only it) on
 # without drowning the log in every other crate's debug output. See `log_filter` in crates/client/src/main.rs.
 export PERF_LOG=1
+# Measuring: the player's vsync setting (on by default) must not cap the frame rate.
+export VOXEL_VSYNC="${VOXEL_VSYNC:-off}"
 export RUST_BACKTRACE=1
 
 started_epoch="$(date +%s.%N)"

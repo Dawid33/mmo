@@ -6,8 +6,8 @@
 //! Only integer math, + - * / and floor (the `noise.rs` determinism policy).
 
 use super::species::SPECIES;
-use crate::habitat::HabitatSource;
 use crate::REGION_BLOCKS;
+use crate::habitat::HabitatSource;
 use game::Biome;
 
 /// Side of one placement cell, blocks.
@@ -49,12 +49,22 @@ pub const BIOME_TREE_DENSITY: [(Biome, f32); 20] = [
 /// Biomes that grow only the species listing them (`Species::biomes`), not
 /// the any-biome ones (oak, pine, birch): deserts grow cactus, jungle and
 /// mangrove their tropical trees.
-pub const NATIVE_ONLY_BIOMES: [Biome; 5] =
-    [Biome::SandDesert, Biome::RockyWasteland, Biome::Badlands, Biome::TropicalBroadleafForest, Biome::MangroveSwamp];
+pub const NATIVE_ONLY_BIOMES: [Biome; 5] = [
+    Biome::SandDesert,
+    Biome::RockyWasteland,
+    Biome::Badlands,
+    Biome::TropicalBroadleafForest,
+    Biome::MangroveSwamp,
+];
 
 /// `BIOME_TREE_DENSITY` of `biome`; 1 with no biome (the procedural world).
 pub fn biome_tree_density(biome: Option<Biome>) -> f32 {
-    biome.map_or(1.0, |b| BIOME_TREE_DENSITY.iter().find(|(x, _)| *x == b).map_or(0.0, |&(_, d)| d))
+    biome.map_or(1.0, |b| {
+        BIOME_TREE_DENSITY
+            .iter()
+            .find(|(x, _)| *x == b)
+            .map_or(0.0, |&(_, d)| d)
+    })
 }
 
 /// Whether species `s` may grow on a column of `biome`.
@@ -100,7 +110,8 @@ pub struct TreeSeed {
 
 /// Splitmix-style mix of `(seed, a, b)`; also seeds tree shapes (`skeleton.rs`).
 pub(super) fn hash64(seed: u64, a: u64, b: u64) -> u64 {
-    let mut z = seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    let mut z =
+        seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
@@ -108,7 +119,11 @@ pub(super) fn hash64(seed: u64, a: u64, b: u64) -> u64 {
 
 /// Uniform in [0, 1) of (seed, cell, salt).
 fn hash01(seed: u64, lx: i32, lz: i32, salt: u64) -> f64 {
-    (hash64(seed, lx as i64 as u64, (lz as i64 as u64) ^ salt.wrapping_mul(0xD6E8_FEB8_6659_FD93)) >> 11) as f64
+    (hash64(
+        seed,
+        lx as i64 as u64,
+        (lz as i64 as u64) ^ salt.wrapping_mul(0xD6E8_FEB8_6659_FD93),
+    ) >> 11) as f64
         / (1u64 << 53) as f64
 }
 
@@ -118,7 +133,8 @@ fn hash01(seed: u64, lx: i32, lz: i32, salt: u64) -> f64 {
 /// cells apart, however the 512 wrap is crossed (the all-ones id would be
 /// adjacent to (0, 0) across the wrap).
 pub fn tree_id(lx: i32, lz: i32) -> u32 {
-    let id = (lx.rem_euclid(ID_CELL_SPAN) as u32) | (lz.rem_euclid(ID_CELL_SPAN) as u32) << ID_AXIS_BITS;
+    let id =
+        (lx.rem_euclid(ID_CELL_SPAN) as u32) | (lz.rem_euclid(ID_CELL_SPAN) as u32) << ID_AXIS_BITS;
     if id == 0 { ZERO_CELL_ID } else { id }
 }
 
@@ -202,7 +218,11 @@ fn candidate(
     // Leaf dither reaches one block past the crown radius (`raster.rs`).
     let radius = SPECIES[species as usize].crown_radius_blocks + LEAF_REACH_PAST_CROWN_BLOCKS;
     let (rx, rz) = (x.rem_euclid(REGION_BLOCKS), z.rem_euclid(REGION_BLOCKS));
-    if rx - radius < 0 || rx + radius >= REGION_BLOCKS || rz - radius < 0 || rz + radius >= REGION_BLOCKS {
+    if rx - radius < 0
+        || rx + radius >= REGION_BLOCKS
+        || rz - radius < 0
+        || rz + radius >= REGION_BLOCKS
+    {
         return None;
     }
     let age = ((hash01(seed, hx, lz, SALT_AGE) * (MAX_AGE as f64 + 1.0)) as u16).min(MAX_AGE);
@@ -223,12 +243,21 @@ fn candidate(
 /// The species of the tree lattice cell `(lx, lz)` would hold standing at surface block `sy`, without
 /// the spacing between neighbours `trees_in` settles: the world map's coarse levels, where a sample is
 /// as wide as a cell or wider, colour by it (`surface::surface_tile_forged`).
-pub(crate) fn cell_tree(lx: i32, lz: i32, seed: u64, wrap: Option<LatticeWrap>, habitat: &dyn HabitatSource, sy: i32) -> Option<u8> {
+pub(crate) fn cell_tree(
+    lx: i32,
+    lz: i32,
+    seed: u64,
+    wrap: Option<LatticeWrap>,
+    habitat: &dyn HabitatSource,
+    sy: i32,
+) -> Option<u8> {
     candidate(lx, lz, seed, wrap, habitat, &|_, _| Some(sy)).map(|c| c.species)
 }
 
 fn too_close(a: &Candidate, b: &Candidate) -> bool {
-    let r = SPECIES[a.species as usize].crown_radius_blocks.max(SPECIES[b.species as usize].crown_radius_blocks);
+    let r = SPECIES[a.species as usize]
+        .crown_radius_blocks
+        .max(SPECIES[b.species as usize].crown_radius_blocks);
     let (dx, dz) = (a.pos[0] - b.pos[0], a.pos[1] - b.pos[1]);
     dx * dx + dz * dz < r * r
 }
@@ -256,7 +285,9 @@ pub fn trees_in(
     let l = TREE_LATTICE_BLOCKS;
     for lz in z0.div_euclid(l)..=(z1 - 1).div_euclid(l) {
         for lx in x0.div_euclid(l)..=(x1 - 1).div_euclid(l) {
-            let Some(c) = candidate(lx, lz, seed, wrap, habitat, surface) else { continue };
+            let Some(c) = candidate(lx, lz, seed, wrap, habitat, surface) else {
+                continue;
+            };
             if c.pos[0] < x0 || c.pos[0] >= x1 || c.pos[1] < z0 || c.pos[1] >= z1 {
                 continue;
             }
@@ -275,4 +306,3 @@ pub fn trees_in(
     out.sort_by_key(|t| t.id);
     out
 }
-

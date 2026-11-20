@@ -14,7 +14,10 @@ macro_rules! size {
 }
 
 fn main() {
-    let args: Vec<i32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
+    let args: Vec<i32> = std::env::args()
+        .skip(1)
+        .filter_map(|a| a.parse().ok())
+        .collect();
     let rc = RegionCoords::new(*args.first().unwrap_or(&0), *args.get(1).unwrap_or(&0));
     let materials = worldgen::material::Materials {
         stone: BlockId(2),
@@ -31,21 +34,40 @@ fn main() {
     let region = Region::from_columns(rc, columns);
     let data = &region.data().data;
 
-    let chunks: Vec<&game::Chunk> = data.ecs.chunk.iter().filter_map(|(_, c)| c.as_ref()).collect();
+    let chunks: Vec<&game::Chunk> = data
+        .ecs
+        .chunk
+        .iter()
+        .filter_map(|(_, c)| c.as_ref())
+        .collect();
     let chiseled_blocks: usize = chunks.iter().map(|c| c.chisel.len()).sum();
     let blocks_only: f64 = chunks.iter().map(|c| size!(&c.blocks)).sum();
     let chisel_only: f64 = chunks.iter().map(|c| size!(&c.chisel)).sum();
 
-    println!("region {rc:?}: {} chunks, {chiseled_blocks} chiseled blocks of {}", chunks.len(), chunks.len() * 8);
+    println!(
+        "region {rc:?}: {} chunks, {chiseled_blocks} chiseled blocks of {}",
+        chunks.len(),
+        chunks.len() * 8
+    );
     println!("{:>9.2} MiB  whole snapshot (GameData)", size!(&**data));
     println!("{:>9.2} MiB    ecs (all components)", size!(&data.ecs));
     println!("{:>9.2} MiB      chunk blocks", blocks_only);
-    println!("{:>9.2} MiB      chunk chisel data  ({:.2} KiB per chiseled block)", chisel_only, chisel_only * 1024.0 / chiseled_blocks.max(1) as f64);
+    println!(
+        "{:>9.2} MiB      chunk chisel data  ({:.2} KiB per chiseled block)",
+        chisel_only,
+        chisel_only * 1024.0 / chiseled_blocks.max(1) as f64
+    );
     println!("{:>9.2} MiB    physics (all)", size!(&data.physics));
     println!("{:>9.2} MiB      colliders", size!(&data.physics.colliders));
     println!("{:>9.2} MiB      bodies", size!(&data.physics.bodies));
-    println!("{:>9.2} MiB      broad phase", size!(&data.physics.broad_phase));
-    println!("{:>9.2} MiB      narrow phase", size!(&data.physics.narrow_phase));
+    println!(
+        "{:>9.2} MiB      broad phase",
+        size!(&data.physics.broad_phase)
+    );
+    println!(
+        "{:>9.2} MiB      narrow phase",
+        size!(&data.physics.narrow_phase)
+    );
     println!("{:>9.2} MiB      islands", size!(&data.physics.islands));
     // The real wire path: `ServerPacket::Region` through `game::encode_packet`.
     let packet = game::ServerPacket::Region(rc, region.data().clone());

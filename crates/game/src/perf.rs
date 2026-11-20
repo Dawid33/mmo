@@ -20,10 +20,10 @@
 //! `std::time::Instant` panics on `wasm32-unknown-unknown`, so there the clock
 //! reads 0: events still appear, in order, without timings.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
@@ -265,4 +265,3 @@ macro_rules! perf_event {
         $crate::perf::emit($event, format_args!($($fields)+))
     };
 }
-

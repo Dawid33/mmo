@@ -1,7 +1,7 @@
 //! Journeys: parties walking a route over the society grid, one region leg at a time.
 
 use super::calendar::{CalendarTick, DAYS_PER_MONTH};
-use super::grid::{route, ROUTE_MAX_NODES};
+use super::grid::{ROUTE_MAX_NODES, route};
 use super::log::LogKind;
 use super::records::*;
 use super::rules::walk_ticks_per_region;
@@ -42,7 +42,11 @@ impl History {
             .into_iter()
             .filter(|p| {
                 self.people.get(p).is_some_and(|q| {
-                    q.alive() && !matches!(q.abstract_location(), Location::AtSite(_) | Location::Journey(_))
+                    q.alive()
+                        && !matches!(
+                            q.abstract_location(),
+                            Location::AtSite(_) | Location::Journey(_)
+                        )
                 })
             })
             .collect();
@@ -83,7 +87,11 @@ impl History {
             self.set_abstract_location(*p, Location::Journey(id));
         }
         if let Some(from) = from {
-            self.log_event(LogKind::Departed { people: people.clone(), from, purpose });
+            self.log_event(LogKind::Departed {
+                people: people.clone(),
+                from,
+                purpose,
+            });
             if left_site && self.sites.get(&from).is_some_and(|s| s.members.is_empty()) {
                 self.abandon_site(from);
             }
@@ -91,9 +99,25 @@ impl History {
         let first = arrivals.first().copied().unwrap_or(0);
         self.journeys.insert(
             id,
-            Journey { id, people, purpose, route: path, departed, leg_ticks, arrivals, leg: 0, held_in: None },
+            Journey {
+                id,
+                people,
+                purpose,
+                route: path,
+                departed,
+                leg_ticks,
+                arrivals,
+                leg: 0,
+                held_in: None,
+            },
         );
-        self.schedule(CalendarTick(departed.0 + first), Step::JourneyLeg { journey: id, leg: 0 });
+        self.schedule(
+            CalendarTick(departed.0 + first),
+            Step::JourneyLeg {
+                journey: id,
+                leg: 0,
+            },
+        );
         // Leaving a running region: the bodies walk out, the journey waits for them.
         if self.running.contains(&origin) {
             self.hold_and_walk_out(id, origin);
@@ -121,8 +145,17 @@ impl History {
     /// Send journey `j` on from the region it stands in to `to_region`, optionally with a
     /// new purpose. False, with no change, when there is no route. Any queued leg of the
     /// journey is cancelled.
-    pub(crate) fn reroute(&mut self, j: JourneyId, to_region: RegionCoords, purpose: Option<Purpose>) -> bool {
-        let Some(from) = self.journeys.get(&j).and_then(|jr| jr.route.get(jr.leg as usize).copied()) else {
+    pub(crate) fn reroute(
+        &mut self,
+        j: JourneyId,
+        to_region: RegionCoords,
+        purpose: Option<Purpose>,
+    ) -> bool {
+        let Some(from) = self
+            .journeys
+            .get(&j)
+            .and_then(|jr| jr.route.get(jr.leg as usize).copied())
+        else {
             return false;
         };
         self.reroute_from(j, from, to_region, purpose)
@@ -140,7 +173,9 @@ impl History {
         if !self.journeys.contains_key(&j) || !self.same_landmass(from, to_region) {
             return false;
         }
-        let Some(path) = route(self.grid(), from, to_region, ROUTE_MAX_NODES) else { return false };
+        let Some(path) = route(self.grid(), from, to_region, ROUTE_MAX_NODES) else {
+            return false;
+        };
         let (leg_ticks, arrivals) = self.leg_arrivals(&path);
         let first = arrivals.first().copied().unwrap_or(0);
         let now = self.now;
@@ -154,14 +189,18 @@ impl History {
         jr.arrivals = arrivals;
         jr.leg = 0;
         self.cancel_legs(j);
-        self.schedule(CalendarTick(now.0 + first), Step::JourneyLeg { journey: j, leg: 0 });
+        self.schedule(
+            CalendarTick(now.0 + first),
+            Step::JourneyLeg { journey: j, leg: 0 },
+        );
         true
     }
 
     /// Drop every queued leg step of `j`.
     pub(crate) fn cancel_legs(&mut self, j: JourneyId) {
         self.mark_content_dirty();
-        self.queue.retain(|_, s| !matches!(s, Step::JourneyLeg { journey, .. } if *journey == j));
+        self.queue
+            .retain(|_, s| !matches!(s, Step::JourneyLeg { journey, .. } if *journey == j));
     }
 
     /// Re-time journey `j` so the leg it is on now ends at `at` (not before now), with every
@@ -170,7 +209,9 @@ impl History {
     pub(crate) fn schedule_next_leg_from(&mut self, j: JourneyId, at: CalendarTick) {
         let now = self.now;
         let at = at.max(now);
-        let Some(jr) = self.journeys.get_mut(&j) else { return };
+        let Some(jr) = self.journeys.get_mut(&j) else {
+            return;
+        };
         let leg = jr.leg;
         let l = leg as usize;
         if l < jr.arrivals.len() {
@@ -198,21 +239,30 @@ impl History {
 
     /// Per mille through the leg being walked at `at` (0 once arrived).
     pub fn journey_progress_in_leg(&self, j: JourneyId, at: CalendarTick) -> u32 {
-        let Some(jr) = self.journeys.get(&j) else { return 0 };
+        let Some(jr) = self.journeys.get(&j) else {
+            return 0;
+        };
         let elapsed = at.0.saturating_sub(jr.departed.0);
         let i = jr.arrivals.partition_point(|&a| a <= elapsed);
-        let Some(&end) = jr.arrivals.get(i) else { return 0 };
+        let Some(&end) = jr.arrivals.get(i) else {
+            return 0;
+        };
         let start = if i == 0 { 0 } else { jr.arrivals[i - 1] };
         ((elapsed - start) * 1000 / (end - start).max(1)) as u32
     }
 
     /// Number of queued `JourneyLeg` steps (live or stale).
     pub fn pending_journey_legs(&self) -> usize {
-        self.queue.values().filter(|s| matches!(s, Step::JourneyLeg { .. })).count()
+        self.queue
+            .values()
+            .filter(|s| matches!(s, Step::JourneyLeg { .. }))
+            .count()
     }
 
     pub(crate) fn on_journey_leg(&mut self, j: JourneyId, step_leg: u32) {
-        let Some(jr) = self.journeys.get(&j) else { return };
+        let Some(jr) = self.journeys.get(&j) else {
+            return;
+        };
         // A held journey is walked by bodies, not by steps.
         if jr.leg != step_leg || jr.held_in.is_some() {
             return;
@@ -230,21 +280,35 @@ impl History {
         let jr = self.journeys.get_mut(&j).unwrap();
         jr.leg += 1;
         let (leg, last) = (jr.leg as usize, jr.route.len() - 1);
-        let next = jr.arrivals.get(leg).map(|a| CalendarTick(jr.departed.0 + a));
+        let next = jr
+            .arrivals
+            .get(leg)
+            .map(|a| CalendarTick(jr.departed.0 + a));
         if leg >= last {
             self.arrive(j);
         } else if let Some(at) = next {
-            self.schedule(at, Step::JourneyLeg { journey: j, leg: leg as u32 });
+            self.schedule(
+                at,
+                Step::JourneyLeg {
+                    journey: j,
+                    leg: leg as u32,
+                },
+            );
         }
     }
 
     pub(crate) fn arrive(&mut self, j: JourneyId) {
-        let Some(jr) = self.journeys.get(&j) else { return };
+        let Some(jr) = self.journeys.get(&j) else {
+            return;
+        };
         match jr.purpose {
             Purpose::Migrate { to } => {
                 let jr = self.journeys.remove(&j).unwrap();
-                let people: Vec<PersonId> =
-                    jr.people.into_iter().filter(|p| self.people.get(p).is_some_and(Person::alive)).collect();
+                let people: Vec<PersonId> = jr
+                    .people
+                    .into_iter()
+                    .filter(|p| self.people.get(p).is_some_and(Person::alive))
+                    .collect();
                 if !people.is_empty() {
                     self.revive_site(to);
                 }
@@ -267,7 +331,9 @@ impl History {
 
     /// Migrants reached an abandoned site: it lives again, one month on.
     fn revive_site(&mut self, sid: SiteId) {
-        let Some(s) = self.sites.get_mut(&sid) else { return };
+        let Some(s) = self.sites.get_mut(&sid) else {
+            return;
+        };
         if s.abandoned.take().is_some() && self.pending_site_months(sid) == 0 {
             self.schedule(self.now.plus_days(DAYS_PER_MONTH), Step::SiteMonth(sid));
         }
@@ -275,11 +341,19 @@ impl History {
 
     /// An embark party reached its target: found the site, or look for somewhere else.
     pub(crate) fn arrive_embark(&mut self, j: JourneyId) {
-        let Some(jr) = self.journeys.get(&j) else { return };
-        let Purpose::Embark { civ, from } = jr.purpose else { return };
+        let Some(jr) = self.journeys.get(&j) else {
+            return;
+        };
+        let Purpose::Embark { civ, from } = jr.purpose else {
+            return;
+        };
         let region = *jr.route.last().expect("a route has a region");
-        let party: Vec<PersonId> =
-            jr.people.iter().copied().filter(|p| self.people.get(p).is_some_and(Person::alive)).collect();
+        let party: Vec<PersonId> = jr
+            .people
+            .iter()
+            .copied()
+            .filter(|p| self.people.get(p).is_some_and(Person::alive))
+            .collect();
         if party.is_empty() {
             self.journeys.remove(&j);
             return;
@@ -313,7 +387,9 @@ impl History {
     /// emptied migration to a site nobody lives at any more (its last citizens were walking
     /// home to it) abandons that site.
     pub(crate) fn remove_traveller(&mut self, j: JourneyId, person: PersonId) {
-        let Some(jr) = self.journeys.get_mut(&j) else { return };
+        let Some(jr) = self.journeys.get_mut(&j) else {
+            return;
+        };
         jr.people.retain(|p| *p != person);
         if !jr.people.is_empty() {
             return;
@@ -321,10 +397,13 @@ impl History {
         let purpose = jr.purpose;
         self.journeys.remove(&j);
         if let Purpose::Migrate { to } = purpose {
-            if self.sites.get(&to).is_some_and(|s| s.abandoned.is_none() && s.members.is_empty()) {
+            if self
+                .sites
+                .get(&to)
+                .is_some_and(|s| s.abandoned.is_none() && s.members.is_empty())
+            {
                 self.abandon_site(to);
             }
         }
     }
 }
-

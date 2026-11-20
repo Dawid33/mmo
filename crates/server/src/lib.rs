@@ -1,17 +1,13 @@
 //! Server
 // #![deny(missing_docs)]
 use game::HostId;
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::{Arc, atomic::AtomicU64};
 
 use crossbeam::channel::{Receiver, Sender};
 use dashmap::DashMap;
 use game::{ClientId, ClientPacket, ServerEvent, ServerPacket};
 use log::{error, info};
-use quinn::{
-    crypto::rustls::QuicServerConfig,
-    rustls,
-    ConnectionError, Endpoint, TransportConfig,
-};
+use quinn::{ConnectionError, Endpoint, TransportConfig, crypto::rustls::QuicServerConfig, rustls};
 
 /// Set to `1` by the client that launched this server for one world: once a
 /// client has connected and the last one has left, the server exits. It also
@@ -36,9 +32,9 @@ fn bind_ip_from(value: Option<&str>) -> Result<std::net::IpAddr, String> {
     if value.is_empty() {
         return Ok(std::net::IpAddr::from([127, 0, 0, 1]));
     }
-    value
-        .parse()
-        .map_err(|_| format!("invalid {BIND_ADDR_ENV} value `{value}` (expected an IP address, e.g. 0.0.0.0)"))
+    value.parse().map_err(|_| {
+        format!("invalid {BIND_ADDR_ENV} value `{value}` (expected an IP address, e.g. 0.0.0.0)")
+    })
 }
 
 /// The dev server's QUIC port (`just run` / `just server`).
@@ -55,7 +51,9 @@ fn server_port_from(value: Option<&str>) -> Result<u16, String> {
     }
     match value.parse::<u16>() {
         Ok(port) if port != 0 => Ok(port),
-        _ => Err(format!("invalid {SERVER_PORT_ENV} value `{value}` (expected a port 1-65535)")),
+        _ => Err(format!(
+            "invalid {SERVER_PORT_ENV} value `{value}` (expected a port 1-65535)"
+        )),
     }
 }
 
@@ -72,7 +70,9 @@ fn land_idle_ms_from(value: Option<&str>) -> Result<u64, String> {
     }
     match value.parse::<u64>() {
         Ok(ms) if ms > 0 => Ok(ms),
-        _ => Err(format!("invalid {LAND_IDLE_MS_ENV} value `{value}` (expected a number of ms above 0)")),
+        _ => Err(format!(
+            "invalid {LAND_IDLE_MS_ENV} value `{value}` (expected a number of ms above 0)"
+        )),
     }
 }
 
@@ -94,12 +94,24 @@ pub fn file_word(name: &str) -> String {
     if name.is_empty() {
         return "host".to_string();
     }
-    name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect()
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// How a host is named in log lines: `h7`, and its name when it has one (`h7 "host-b"`).
 pub fn host_label(id: HostId, name: &str) -> String {
-    if name.trim().is_empty() { id.to_string() } else { format!("{id} {:?}", name.trim()) }
+    if name.trim().is_empty() {
+        id.to_string()
+    } else {
+        format!("{id} {:?}", name.trim())
+    }
 }
 
 /// The WebTransport port from the value of [`WT_PORT_ENV`].
@@ -108,7 +120,9 @@ fn wt_port_from(value: Option<&str>) -> Result<u16, String> {
         None => Ok(WEBTRANSPORT_PORT),
         Some(v) => match v.parse::<u16>() {
             Ok(port) if port != 0 => Ok(port),
-            _ => Err(format!("invalid {WT_PORT_ENV} value `{v}` (expected a port 1-65535)")),
+            _ => Err(format!(
+                "invalid {WT_PORT_ENV} value `{v}` (expected a port 1-65535)"
+            )),
         },
     }
 }
@@ -174,8 +188,8 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 }
 
 pub mod auth_edge;
-pub mod client_cert;
 pub mod claims;
+pub mod client_cert;
 pub mod coordinator_api;
 pub mod coordinator_rt;
 pub mod cuts;
@@ -226,11 +240,17 @@ struct SeatState {
 
 impl ClientSink {
     pub fn quinn(conn: quinn::Connection) -> ClientSink {
-        ClientSink { conn: SinkConnection::Quinn(conn), seat: Arc::default() }
+        ClientSink {
+            conn: SinkConnection::Quinn(conn),
+            seat: Arc::default(),
+        }
     }
 
     pub fn web(session: wtransport::Connection) -> ClientSink {
-        ClientSink { conn: SinkConnection::Web(session), seat: Arc::default() }
+        ClientSink {
+            conn: SinkConnection::Web(session),
+            seat: Arc::default(),
+        }
     }
 
     /// Whether the id's session on this connection is its home ([`SeatState::home`]).
@@ -240,7 +260,9 @@ impl ClientSink {
 
     /// The manager made this connection's session the home (or it was admitted as one).
     pub fn set_home(&self) {
-        self.seat.home.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.seat
+            .home
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Whether `packet` goes to this connection: an observer connection gets nothing
@@ -302,7 +324,9 @@ impl ClientSink {
     pub fn close_refused(&self) {
         match &self.conn {
             SinkConnection::Quinn(conn) => conn.close(1u32.into(), b"refused"),
-            SinkConnection::Web(session) => session.close(wtransport::VarInt::from_u32(1), b"refused"),
+            SinkConnection::Web(session) => {
+                session.close(wtransport::VarInt::from_u32(1), b"refused")
+            }
         }
     }
 
@@ -344,8 +368,17 @@ pub(crate) fn seat_session(
     if hello.observer.is_some() {
         // Nothing reaches it before its `Host` (what is still addressed to the id is an
         // older session's).
-        sink.seat.awaiting_host.store(true, std::sync::atomic::Ordering::SeqCst);
-        return match player_store::seat_observer(sinks, send, id, hello.player, sink, ClientSink::is_home) {
+        sink.seat
+            .awaiting_host
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        return match player_store::seat_observer(
+            sinks,
+            send,
+            id,
+            hello.player,
+            sink,
+            ClientSink::is_home,
+        ) {
             Ok(None) => Ok(()),
             Ok(Some(older)) => {
                 log::info!("[server] client {id}: a newer observer connection replaces the older");
@@ -471,7 +504,8 @@ impl WorldIngress {
     ) {
         let client_cert = match self.client_cert.take() {
             Some(cert) => cert,
-            None => client_cert::ClientCert::from_env(|name| std::env::var(name).ok()).unwrap_or_else(|e| panic!("{e}")),
+            None => client_cert::ClientCert::from_env(|name| std::env::var(name).ok())
+                .unwrap_or_else(|e| panic!("{e}")),
         };
         if client_cert.is_from_files() {
             tokio::spawn(reload_client_cert(client_cert.clone()));
@@ -479,11 +513,13 @@ impl WorldIngress {
         // The provider is named, not left to rustls's process default: the
         // workspace's unified features enable both `ring` and `aws-lc-rs`
         // (the login service's AWS SDK), and then `builder()` panics.
-        let crypto = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("ring supports the default TLS versions")
-            .with_no_client_auth()
-            .with_cert_resolver(client_cert.rustls_resolver());
+        let crypto = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
+        .with_no_client_auth()
+        .with_cert_resolver(client_cert.rustls_resolver());
 
         let mut config =
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap()));
@@ -534,7 +570,10 @@ impl WorldIngress {
                 match target {
                     // Directed packet: if the client is gone, drop it.
                     Some(id) => {
-                        let sink = writer_sinks.get(&id).map(|e| e.value().clone()).filter(|s| s.admits(&event));
+                        let sink = writer_sinks
+                            .get(&id)
+                            .map(|e| e.value().clone())
+                            .filter(|s| s.admits(&event));
                         if let Some(sink) = sink {
                             if matches!(event, ServerPacket::Refused(_)) {
                                 // The manager ended this session (its player
@@ -568,8 +607,11 @@ impl WorldIngress {
                         }
                     }
                     None => {
-                        let targets: Vec<ClientSink> =
-                            writer_sinks.iter().map(|e| e.value().clone()).filter(|s| s.admits(&event)).collect();
+                        let targets: Vec<ClientSink> = writer_sinks
+                            .iter()
+                            .map(|e| e.value().clone())
+                            .filter(|s| s.admits(&event))
+                            .collect();
                         for sink in targets {
                             send_bounded(sink, packet.clone()).await;
                         }
@@ -590,8 +632,10 @@ impl WorldIngress {
             let host_name = self.host_name.clone();
             let wt_cert = client_cert.clone();
             tokio::spawn(async move {
-                let served =
-                    crate::webtransport::serve(wt_addr, wt_cert, host_name, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await;
+                let served = crate::webtransport::serve(
+                    wt_addr, wt_cert, host_name, wt_send, wt_sinks, wt_next, wt_players, wt_auth,
+                )
+                .await;
                 if let Err(e) = served {
                     log::error!("webtransport ingress died: {e:?}");
                 }
@@ -614,11 +658,10 @@ impl WorldIngress {
                 };
                 // The handshake comes first: no session (and no sink) exists
                 // until the connection's Hello has resolved to a player.
-                let hello =
-                    match quic_hello(&connection, &players, &auth).await {
-                        Ok(resolved) => resolved,
-                        Err(why) => return refuse_quic(&connection, &why).await,
-                    };
+                let hello = match quic_hello(&connection, &players, &auth).await {
+                    Ok(resolved) => resolved,
+                    Err(why) => return refuse_quic(&connection, &why).await,
+                };
                 let (player, ticket) = (hello.player, hello.ticket.clone());
                 // The id exists only now that the session is authenticated; the sink is
                 // claimed in the same step, so a replayed ticket never replaces a live one
@@ -628,16 +671,23 @@ impl WorldIngress {
                 if let Err(why) = seat_session(&sinks, &send, id, &hello, &auth, mine.clone()) {
                     return refuse_quic(&connection, &why).await;
                 }
-                game::perf_event!("client_connected", "client={id} player={} transport=quic", player.0);
+                game::perf_event!(
+                    "client_connected",
+                    "client={id} player={} transport=quic",
+                    player.0
+                );
 
-                let fut = handle_connection(connection, send.clone(), id, sinks.clone(), mine.clone());
+                let fut =
+                    handle_connection(connection, send.clone(), id, sinks.clone(), mine.clone());
                 tokio::spawn(async move {
                     if let Err(e) = fut.await {
                         error!("connection failed: {reason}", reason = e.to_string())
                     }
                     // The world must know: unsubscribe everywhere, let the home region's
                     // grace timer start — unless a newer connection holds the id now.
-                    player_store::release_sink(&sinks, &send, id, |live| live.same_connection(&mine));
+                    player_store::release_sink(&sinks, &send, id, |live| {
+                        live.same_connection(&mine)
+                    });
                     // And the login service, for a session its spawn order admitted (role
                     // `host`: the manager tells it, once the session left the world).
                     if let Some(ticket) = &ticket {
@@ -661,12 +711,16 @@ async fn quic_hello(
     auth: &auth_edge::Authenticator,
 ) -> Result<player_store::HelloSession, String> {
     let first = tokio::time::timeout(player_store::HELLO_TIMEOUT, async {
-        let mut stream = connection.accept_uni().await.map_err(|e| format!("no first packet: {e}"))?;
+        let mut stream = connection
+            .accept_uni()
+            .await
+            .map_err(|e| format!("no first packet: {e}"))?;
         let bytes = stream
             .read_to_end(player_store::HELLO_MAX_BYTES)
             .await
             .map_err(|e| format!("first packet unreadable: {e}"))?;
-        game::decode_packet::<ClientPacket>(&bytes).map_err(|e| format!("first packet does not decode: {e}"))
+        game::decode_packet::<ClientPacket>(&bytes)
+            .map_err(|e| format!("first packet does not decode: {e}"))
     })
     .await
     .map_err(|_| format!("no Hello within {:?}", player_store::HELLO_TIMEOUT))??;
@@ -675,7 +729,10 @@ async fn quic_hello(
 
 /// Tell the client why (best effort), then close the connection.
 async fn refuse_quic(connection: &quinn::Connection, why: &str) {
-    log::warn!("[server] refusing a connection from {}: {why}", connection.remote_address());
+    log::warn!(
+        "[server] refusing a connection from {}: {why}",
+        connection.remote_address()
+    );
     if let Ok(packet) = game::encode_packet(&ServerPacket::Refused(why.to_string())) {
         if let Ok(mut stream) = connection.open_uni().await {
             if stream.write_all(&packet).await.is_ok() && stream.finish().is_ok() {
@@ -695,27 +752,14 @@ pub fn run() -> claims::ServerExit {
     game::set_hash_mode_from_env();
     game::set_state_hash_interval_from_env();
 
-    // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE
-    // to push flamegraphs to a local Pyroscope (`just profile-server`). Off
-    // unless both the feature and the env var are present, so release runs are
-    // never instrumented.
-    #[cfg(feature = "pyroscope")]
-    let agent_running = if std::env::var("PYROSCOPE").is_ok() {
-        use pyroscope::PyroscopeAgent;
-        use pyroscope_pprofrs::{pprof_backend, PprofConfig};
-        let agent = PyroscopeAgent::builder("http://localhost:4040", "server")
-            .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
-            .build()
-            .unwrap();
-        Some(agent.start().unwrap())
-    } else {
-        None
-    };
-
-    simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
     // `VOXEL_ROLE`: the whole world here (`all`), its regions only (`host`), its
     // coordinator only (`coordinator`, no client edge, no regions), or the fleet reconciler (`fleet`).
     let role = roles::Role::from_env().unwrap_or_else(|e| fatal(&e));
+    let identity =
+        observability::ProcessIdentity::from_env("errantry-world", role.telemetry_role());
+    let _telemetry = observability::TelemetryConfig::from_env(identity, role.telemetry_ratio())
+        .and_then(observability::init)
+        .unwrap_or_else(|e| fatal(&format!("telemetry: {e}")));
     if role == roles::Role::Coordinator {
         game::perf::init("coordinator");
         info!("[server] role: coordinator");
@@ -735,18 +779,23 @@ pub fn run() -> claims::ServerExit {
 
     let single_player = std::env::var(SINGLE_PLAYER_ENV).is_ok_and(|v| v == "1");
     let configured_port = std::env::var(SERVER_PORT_ENV).ok();
-    let port = server_port_from(configured_port.as_deref()).unwrap_or_else(|message| panic!("{message}"));
-    let wt_port = wt_port_from(std::env::var(WT_PORT_ENV).ok().as_deref()).unwrap_or_else(|message| panic!("{message}"));
+    let port =
+        server_port_from(configured_port.as_deref()).unwrap_or_else(|message| panic!("{message}"));
+    let wt_port = wt_port_from(std::env::var(WT_PORT_ENV).ok().as_deref())
+        .unwrap_or_else(|message| panic!("{message}"));
     let configured_bind = std::env::var(BIND_ADDR_ENV).ok();
     let ip = bind_ip_from(configured_bind.as_deref()).unwrap_or_else(|message| panic!("{message}"));
     // The world is chosen before anything calls `forged::active()` (below), and
     // before the ingress starts: its player store is the world store.
     let world_source = world_file::resolve(
-        std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref(),
+        std::env::var(worldgen::forged::WORLD_FILE_ENV)
+            .ok()
+            .as_deref(),
         std::env::var(world_file::WORLD_DB_ENV).ok().as_deref(),
     )
     .unwrap_or_else(|e| fatal(&e));
-    role.check_store(&world_source).unwrap_or_else(|e| fatal(&e));
+    role.check_store(&world_source)
+        .unwrap_or_else(|e| fatal(&e));
     let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(&e));
     // Only a process waiting for its world (`VOXEL_EMPTY_STORE=wait`, PID 1 in a pod, where an
     // unhandled SIGTERM is ignored) watches signals before the store opens; otherwise a signal
@@ -757,16 +806,21 @@ pub fn run() -> claims::ServerExit {
     // a self-signed one's hash to open a connection here (a certificate from files is a CA's:
     // no hash). Files another process has not written yet (a proxy obtaining them after this
     // start) are waited for; only the early watcher's stop (`EmptyStore::Wait`) ends the wait.
-    let Some(client_cert) = client_cert::ClientCert::wait_from_env(|name| std::env::var(name).ok(), early_stop.as_deref())
-        .unwrap_or_else(|e| fatal(&e))
-    else {
+    let Some(client_cert) = client_cert::ClientCert::wait_from_env(
+        |name| std::env::var(name).ok(),
+        early_stop.as_deref(),
+    )
+    .unwrap_or_else(|e| fatal(&e)) else {
         info!("[server] stop signal while waiting for the client certificate files: exiting");
         return claims::ServerExit::Clean;
     };
-    let Some(mut opened) =
-        world_file::open_world_with(&world_source, &worldgen::forge::ForgeParams::default(), empty, early_stop.as_deref())
-            .unwrap_or_else(|e| fatal(&e))
-    else {
+    let Some(mut opened) = world_file::open_world_with(
+        &world_source,
+        &worldgen::forge::ForgeParams::default(),
+        empty,
+        early_stop.as_deref(),
+    )
+    .unwrap_or_else(|e| fatal(&e)) else {
         info!("[server] stop signal while waiting for a world: exiting");
         return claims::ServerExit::Clean;
     };
@@ -779,13 +833,22 @@ pub fn run() -> claims::ServerExit {
     // built from the id the store issues it at registration (below): no host number and no
     // host count is read (`VOXEL_HOST_ORDINAL` / `VOXEL_HOSTS` are ignored if set).
     let ownership_word = std::env::var(game::ownership::OWNERSHIP_ENV).unwrap_or_default();
-    let crash_policy = game::crash_policy_from_value(Some(&ownership_word)).unwrap_or_else(|e| fatal(&e));
+    let crash_policy =
+        game::crash_policy_from_value(Some(&ownership_word)).unwrap_or_else(|e| fatal(&e));
     roles::check_host_ownership(role, &ownership_word).unwrap_or_else(|e| fatal(&e));
-    let super_region_regions = claims::super_region_regions_from(std::env::var(claims::SUPER_REGION_REGIONS_ENV).ok().as_deref())
-        .unwrap_or_else(|e| fatal(&e));
+    let super_region_regions = claims::super_region_regions_from(
+        std::env::var(claims::SUPER_REGION_REGIONS_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or_else(|e| fatal(&e));
     info!(
         "[server] ownership: {}, {super_region_regions} regions per super-region side",
-        if ownership_word.trim().is_empty() { "allinone" } else { ownership_word.trim() }
+        if ownership_word.trim().is_empty() {
+            "allinone"
+        } else {
+            ownership_word.trim()
+        }
     );
     // `claim` (R4): super-regions are assigned on demand by the coordinator (Elastic 3), the
     // directory read from the store — a host role only, and any number of hosts: peer links,
@@ -794,7 +857,10 @@ pub fn run() -> claims::ServerExit {
     let claim_on_demand = crash_policy == game::CrashPolicy::Succession;
     // This host's name (`VOXEL_HOST_NAME`, default empty): labels, file names, `hosts.name`.
     let host_name = match role {
-        roles::Role::Host => std::env::var(HOST_NAME_ENV).unwrap_or_default().trim().to_string(),
+        roles::Role::Host => std::env::var(HOST_NAME_ENV)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
         _ => String::new(),
     };
     let players: player_store::SharedPlayerStore = match &store {
@@ -804,12 +870,15 @@ pub fn run() -> claims::ServerExit {
     // Who may connect (`VOXEL_AUTH`): a bad setting stops the start, naming
     // the variable. A single-player server is always local (player names).
     let (auth_mode, auth_warning) =
-        auth_edge::AuthMode::resolve(single_player, |name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e));
+        auth_edge::AuthMode::resolve(single_player, |name| std::env::var(name).ok())
+            .unwrap_or_else(|e| fatal(&e));
     if let Some(warning) = auth_warning {
         log::warn!("[server] {warning}");
     }
     match &auth_mode {
-        auth_edge::AuthMode::Local => info!("auth: local player names (no login; anyone may claim any name)"),
+        auth_edge::AuthMode::Local => {
+            info!("auth: local player names (no login; anyone may claim any name)")
+        }
         auth_edge::AuthMode::Jwt { world, login_url } => {
             info!("auth: login tickets for world {world:?} from {login_url}")
         }
@@ -820,13 +889,18 @@ pub fn run() -> claims::ServerExit {
     // worlds without a `host_link`: `just dev-login`); otherwise it refuses to start.
     let spawn_orders = match &auth_mode {
         auth_edge::AuthMode::Jwt { .. } => {
-            let token =
-                login_link::service_token_if_configured(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e));
+            let token = login_link::service_token_if_configured(|name| std::env::var(name).ok())
+                .unwrap_or_else(|e| fatal(&e));
             let admission_env = std::env::var(login_link::JWT_ADMISSION_ENV).ok();
-            match login_link::jwt_admission(token.is_some(), admission_env.as_deref()).unwrap_or_else(|e| fatal(&e)) {
+            match login_link::jwt_admission(token.is_some(), admission_env.as_deref())
+                .unwrap_or_else(|e| fatal(&e))
+            {
                 login_link::JwtAdmission::SpawnOrders => {
                     let token = token.expect("spawn orders imply a configured token");
-                    Some((Arc::new(login_link::SpawnOrders::new(auth_edge::system_clock())), token))
+                    Some((
+                        Arc::new(login_link::SpawnOrders::new(auth_edge::system_clock())),
+                        token,
+                    ))
                 }
                 login_link::JwtAdmission::Newest => {
                     log::warn!(
@@ -844,8 +918,15 @@ pub fn run() -> claims::ServerExit {
     };
     // `claim` (any number of hosts): only as `host`, on Postgres, with the login link (ids and
     // placement come from it).
-    let postgres = matches!(&world_source, world_file::WorldSource::Store { url: world_store::StoreUrl::Postgres(_), .. });
-    roles::check_claim_needs(role, crash_policy, postgres, spawn_orders.is_some()).unwrap_or_else(|e| fatal(&e));
+    let postgres = matches!(
+        &world_source,
+        world_file::WorldSource::Store {
+            url: world_store::StoreUrl::Postgres(_),
+            ..
+        }
+    );
+    roles::check_claim_needs(role, crash_policy, postgres, spawn_orders.is_some())
+        .unwrap_or_else(|e| fatal(&e));
     // Role `all` claims every super-region: refused (before it resolves, aborts or fences
     // anything) on a world whose other hosts ran in a split role and did not leave cleanly.
     if let Some(store) = &store {
@@ -864,7 +945,6 @@ pub fn run() -> claims::ServerExit {
     roles::check_before_registration(
         role,
         store.as_ref(),
-        postgres,
         &ownership_word,
         claim_on_demand,
         super_region_regions,
@@ -879,7 +959,8 @@ pub fn run() -> claims::ServerExit {
         .unwrap_or_else(|message| panic!("{message}"));
     let mut notify_mode = (claim_on_demand && store.is_some())
         .then(|| world_store::NotifyMode::from_env().unwrap_or_else(|e| fatal(&e)));
-    let mut world_link_config = (role == roles::Role::Host).then(|| world_link_config().unwrap_or_else(|e| fatal(&e)));
+    let mut world_link_config =
+        (role == roles::Role::Host).then(|| world_link_config().unwrap_or_else(|e| fatal(&e)));
     // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main loop like a last
     // client leaving does, so the world is saved on the way out; a stop before a host
     // registered exits at once.
@@ -896,23 +977,32 @@ pub fn run() -> claims::ServerExit {
     let host_id = match (&store, role) {
         (Some(store), roles::Role::Host) => {
             if claim_on_demand {
-                let config = peer_link::PeerLinkConfig::from_env(&host_name).unwrap_or_else(|e| fatal(&e));
-                let token =
-                    svc_link::service_token_from_env().unwrap_or_else(|e| fatal(&format!("the service link's token: {e}")));
+                let config =
+                    peer_link::PeerLinkConfig::from_env(&host_name).unwrap_or_else(|e| fatal(&e));
+                let token = svc_link::service_token_from_env()
+                    .unwrap_or_else(|e| fatal(&format!("the service link's token: {e}")));
                 let bind = config.bind;
                 let listener = peer_link::PeerListener::bind(config, token)
                     .unwrap_or_else(|e| fatal(&format!("the peer listener on {bind}: {e}")));
                 peer_listener = Some(listener);
             }
-            let (peer_addr, peer_cert) = peer_listener.as_ref().map(peer_link::PeerListener::row_fields).unzip();
+            let (peer_addr, peer_cert) = peer_listener
+                .as_ref()
+                .map(peer_link::PeerListener::row_fields)
+                .unzip();
             let lookup = |name: &str| std::env::var(name).ok();
             let new_host = world_store::NewHost {
                 name: host_name.clone(),
                 boot,
                 peer_addr,
                 peer_cert,
-                quic: Some(peer_link::advertise_quic_from(lookup(peer_link::ADVERTISE_QUIC_ENV).as_deref(), port)),
-                webtransport: peer_link::advertise_wt_from(lookup(peer_link::ADVERTISE_WT_ENV).as_deref()),
+                quic: Some(peer_link::advertise_quic_from(
+                    lookup(peer_link::ADVERTISE_QUIC_ENV).as_deref(),
+                    port,
+                )),
+                webtransport: peer_link::advertise_wt_from(
+                    lookup(peer_link::ADVERTISE_WT_ENV).as_deref(),
+                ),
                 wt_cert_hash: client_cert.sha256_hex(),
             };
             // A `static` registration beside a live row (`NotAlone`) is refused here (exit 1): its
@@ -927,7 +1017,11 @@ pub fn run() -> claims::ServerExit {
                 "[server] registered as host {} at world generation {}{}",
                 host_label(registered.id, &host_name),
                 registered.generation,
-                if registered.bumped { " (raised: a total crash, this host took every dirty host's land)" } else { "" }
+                if registered.bumped {
+                    " (raised: a total crash, this host took every dirty host's land)"
+                } else {
+                    ""
+                }
             );
             world_generation = claims::WorldGeneration::new(registered.generation);
             health::Health::global().world_generation(registered.generation);
@@ -946,28 +1040,46 @@ pub fn run() -> claims::ServerExit {
     // for the login service itself.
     let mut login_relay = match (&spawn_orders, role) {
         (Some((orders, _)), roles::Role::Host) => {
-            info!("[server] login relay: the login service is linked to the coordinator, which relays its orders here");
-            Some(login_link::LoginRelay::new(orders.clone(), players.clone(), client_packet_send.clone()))
+            info!(
+                "[server] login relay: the login service is linked to the coordinator, which relays its orders here"
+            );
+            Some(login_link::LoginRelay::new(
+                orders.clone(),
+                players.clone(),
+                client_packet_send.clone(),
+            ))
         }
         _ => None,
     };
     // Where players reach this host (`ServerPacket::Host`, its `hosts` row).
-    let endpoint = host_endpoint(host_id, port, |name| std::env::var(name).ok(), client_cert.sha256_hex());
+    let endpoint = host_endpoint(
+        host_id,
+        port,
+        |name| std::env::var(name).ok(),
+        client_cert.sha256_hex(),
+    );
     let mut authenticator = auth_edge::Authenticator::for_mode(auth_mode);
     if let Some((orders, _)) = &spawn_orders {
         authenticator = authenticator.with_spawn_orders(orders.clone());
     }
     // Several hosts: a client another host sends here (`RegionElsewhere`) connects with the
     // ticket that host vouched for; the main loop records its orders.
-    let observer_orders = claim_on_demand.then(|| Arc::new(auth_edge::ObserverOrders::new(auth_edge::system_clock())));
+    let observer_orders = claim_on_demand
+        .then(|| Arc::new(auth_edge::ObserverOrders::new(auth_edge::system_clock())));
     if let Some(orders) = &observer_orders {
         authenticator = authenticator.with_observer_orders(orders.clone());
     }
     let auth = Arc::new(authenticator);
-    let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone())
-        .with_client_cert(client_cert)
-        .with_webtransport_port(wt_port)
-        .with_host_name(&host_name);
+    let mut rgi = WorldIngress::new(
+        ip,
+        port,
+        webtransport_enabled(single_player),
+        players.clone(),
+        auth.clone(),
+    )
+    .with_client_cert(client_cert)
+    .with_webtransport_port(wt_port)
+    .with_host_name(&host_name);
     let sinks = rgi.sinks();
     let rt = build_server_runtime(worker_threads);
     let cps = client_packet_send.clone();
@@ -1015,21 +1127,31 @@ pub fn run() -> claims::ServerExit {
         world_file::WorldSource::Store { url, .. } => {
             info!("[server] world: forged, in the world store {url} (sampled from its tiles)")
         }
-        world_file::WorldSource::Procedural => info!("[server] world: procedural (nothing is saved)"),
+        world_file::WorldSource::Procedural => {
+            info!("[server] world: procedural (nothing is saved)")
+        }
     }
     // The world map was built when the world was written and is read from
     // the store with it (procedural worlds: none).
     let world_map = world_file::install_world(&mut opened);
     // The bare dev server's world map tiles (`VOXEL_MAP_BIND`, loopback, plain HTTP; `map_api.rs`).
     if let Ok(bind) = std::env::var(map_api::MAP_BIND_ENV) {
-        let served = bind.parse::<std::net::SocketAddr>().map_err(|e| format!("{}={bind}: {e}", map_api::MAP_BIND_ENV)).and_then(|bind| {
-            let (Some(store), Some(world)) = (store.clone(), worldgen::forged::active()) else {
-                return Err("no forged world in a store (a procedural world has no map)".into());
-            };
-            let cfg = map_tiles::TileSourceConfig::SERVER;
-            map_api::install(map_tiles::TileSource::forged_installed(store, world, map_api::materials(), cfg));
-            map_api::serve_plain(bind, true)
-        });
+        let served = bind
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| format!("{}={bind}: {e}", map_api::MAP_BIND_ENV))
+            .and_then(|bind| {
+                let (Some(store), Some(world)) = (store.clone(), worldgen::forged::active()) else {
+                    return Err("no forged world in a store (a procedural world has no map)".into());
+                };
+                let cfg = map_tiles::TileSourceConfig::SERVER;
+                map_api::install(map_tiles::TileSource::forged_installed(
+                    store,
+                    world,
+                    map_api::materials(),
+                    cfg,
+                ));
+                map_api::serve_plain(bind, true)
+            });
         if let Err(e) = served {
             log::warn!("[map] no dev tile route: {e}");
         }
@@ -1038,14 +1160,23 @@ pub fn run() -> claims::ServerExit {
     // Prefabs, and (only when the environment asks) a dev structure source: before the cache key and
     // anything that can generate terrain.
     let dev_source_installed = {
-        let landings = dev_structures::requested().then(|| world_map.clone()).flatten().map(std::sync::Arc::new);
-        let landing_of: dev_structures::LandingOf = std::sync::Arc::new(move |rc: game::RegionCoords| {
-            landings.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing)
-        });
+        let landings = dev_structures::requested()
+            .then(|| world_map.clone())
+            .flatten()
+            .map(std::sync::Arc::new);
+        let landing_of: dev_structures::LandingOf =
+            std::sync::Arc::new(move |rc: game::RegionCoords| {
+                landings
+                    .as_ref()
+                    .and_then(|m| m.tile(rc))
+                    .and_then(|t| t.landing)
+            });
         match dev_structures::install_from_env(&registry, landing_of, world_seed, materials) {
             Ok(dev_structures::DevStructures::Off) => false,
             Ok(dev_structures::DevStructures::Region { x, z, placements }) => {
-                info!("[structures] {placements} placements in region {x},{z} from VOXEL_DEV_STRUCTURES");
+                info!(
+                    "[structures] {placements} placements in region {x},{z} from VOXEL_DEV_STRUCTURES"
+                );
                 true
             }
             Ok(dev_structures::DevStructures::EveryRegion { spec }) => {
@@ -1073,7 +1204,11 @@ pub fn run() -> claims::ServerExit {
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
     info!(
         "[server] lod workers: {lod_threads} ({})",
-        if configured_lod_threads.is_some() { "LOD_BUILD_THREADS" } else { "default: cores / 4, clamped 2..=6" }
+        if configured_lod_threads.is_some() {
+            "LOD_BUILD_THREADS"
+        } else {
+            "default: cores / 4, clamped 2..=6"
+        }
     );
     let lod_builder: Box<dyn game::LodBuilder> = Box::new(lod_workers::ThreadLodBuilder::new(
         world_seed,
@@ -1081,7 +1216,10 @@ pub fn run() -> claims::ServerExit {
         gen_cache.clone(),
         // Saved regions that have not run in this process: their LOD is
         // built from the store (procedural worlds: none).
-        store.clone().map(|s| std::sync::Arc::new(world_store::TerrainFromStore(s)) as std::sync::Arc<dyn game::StoredTerrain>),
+        store.clone().map(|s| {
+            std::sync::Arc::new(world_store::TerrainFromStore(s))
+                as std::sync::Arc<dyn game::StoredTerrain>
+        }),
         lod_result_send,
         lod_threads,
     ));
@@ -1094,17 +1232,16 @@ pub fn run() -> claims::ServerExit {
     let region_gen_cache = gen_cache.clone();
     // A world map is installed exactly for a forged world (from the store; procedural: none).
     let forged_world = world_map.is_some();
-    let region_generator: region_threads::SharedRegionGenerator =
-        std::sync::Arc::new(move |rc| {
-            // The first region announced is the home region of a `home=` / `town=` dev source; far-terrain
-            // and halo generation must not decide it, so only this generator announces. In a forged world
-            // the spawn region, where a fresh session waits before its adventure starts, is never announced: the
-            // home is the adventure's start region (`dev_structures::announces_region`).
-            if dev_structures::announces_region(rc, forged_world) {
-                worldgen::structures::active().region_requested(rc);
-            }
-            region_gen_cache.generate_cached(rc, world_seed, materials)
-        });
+    let region_generator: region_threads::SharedRegionGenerator = std::sync::Arc::new(move |rc| {
+        // The first region announced is the home region of a `home=` / `town=` dev source; far-terrain
+        // and halo generation must not decide it, so only this generator announces. In a forged world
+        // the spawn region, where a fresh session waits before its adventure starts, is never announced: the
+        // home is the adventure's start region (`dev_structures::announces_region`).
+        if dev_structures::announces_region(rc, forged_world) {
+            worldgen::structures::active().region_requested(rc);
+        }
+        region_gen_cache.generate_cached(rc, world_seed, materials)
+    });
     // The world clock: ms since `start` (the manager's `now_ms` base) -> world
     // tick, continuing from the last committed cut's tick (procedural worlds:
     // from 0, never saved).
@@ -1112,7 +1249,7 @@ pub fn run() -> claims::ServerExit {
     // base instant is back-dated by the clock's phase: tick edges fall at the same wall
     // instants in every process.
     let (world_clock, clock_phase) =
-        roles::start_clock(role, store.as_ref(), postgres, opened.world_tick).unwrap_or_else(|e| fatal(&e));
+        roles::start_clock(role, store.as_ref(), opened.world_tick).unwrap_or_else(|e| fatal(&e));
     let start = roles::back_dated_start(clock_phase);
     // Halo seeds of never-run neighbours: only their band columns, on the
     // starting region's thread (`game::halo`).
@@ -1120,8 +1257,9 @@ pub fn run() -> claims::ServerExit {
     // it was built (a tile that would not load stopped it), so these reads
     // never load; a failure here is a bug, never an empty seam.
     let halo_generator: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
-        let _pins = worldgen::prefetch_region(rc)
-            .unwrap_or_else(|e| panic!("halo seed of {rc:?}: its forged world tiles do not load: {e}"));
+        let _pins = worldgen::prefetch_region(rc).unwrap_or_else(|e| {
+            panic!("halo seed of {rc:?}: its forged world tiles do not load: {e}")
+        });
         worldgen::generate_columns(rc, xs, zs, world_seed, materials)
     });
     // Each region thread pins the forged tiles of its 3x3 neighbourhood
@@ -1129,10 +1267,11 @@ pub fn run() -> claims::ServerExit {
     // (`RegionOutput::LoadFailed`).
     // Every region thread notes its ticks here; each heartbeat reads the worst of its window.
     let tick_load = load::TickLoad::default();
-    let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
-        .with_tick_load(tick_load.clone())
-        .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
-        .with_clock(world_clock, start);
+    let mut spawner =
+        region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
+            .with_tick_load(tick_load.clone())
+            .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
+            .with_clock(world_clock, start);
     // Region loads and cut commits are fenced: the super-regions this process owns are
     // claimed now, once, as the id the store issued (procedural worlds keep nothing: no
     // claims). One claim is shared by the region threads and the cut writer.
@@ -1180,7 +1319,10 @@ pub fn run() -> claims::ServerExit {
         peer_link::PeerLinks::start(listener, host_id, boot, store)
             .unwrap_or_else(|e| fatal(&format!("starting the peer links: {e}")))
     });
-    let fenced = claims.as_ref().map(|c| c.fenced().clone()).unwrap_or_default();
+    let fenced = claims
+        .as_ref()
+        .map(|c| c.fenced().clone())
+        .unwrap_or_default();
     if let Some(claims) = &claims {
         spawner = spawner.with_store(claims.clone());
     }
@@ -1189,8 +1331,9 @@ pub fn run() -> claims::ServerExit {
         // Unused on the server (regions and LOD generate on their own
         // threads); pinned like them all the same.
         Box::new(move |rc| {
-            let _pins = worldgen::prefetch_region(rc)
-                .unwrap_or_else(|e| panic!("region {rc:?}: its forged world tiles do not load: {e}"));
+            let _pins = worldgen::prefetch_region(rc).unwrap_or_else(|e| {
+                panic!("region {rc:?}: its forged world tiles do not load: {e}")
+            });
             gen_cache.generate_cached(rc, world_seed, materials)
         }),
         server_send,
@@ -1199,7 +1342,8 @@ pub fn run() -> claims::ServerExit {
         lod_result_recv,
     );
     manager.set_ownership(ownership, super_region_regions);
-    let land_idle_ms = land_idle_ms_from(std::env::var(LAND_IDLE_MS_ENV).ok().as_deref()).unwrap_or_else(|message| fatal(&message));
+    let land_idle_ms = land_idle_ms_from(std::env::var(LAND_IDLE_MS_ENV).ok().as_deref())
+        .unwrap_or_else(|message| fatal(&message));
     if land_idle_ms != game::LAND_IDLE_MS {
         info!("[server] land idle for {land_idle_ms} ms is released ({LAND_IDLE_MS_ENV})");
     }
@@ -1210,7 +1354,10 @@ pub fn run() -> claims::ServerExit {
     if let Some(claims) = claims.as_ref().filter(|_| claim_on_demand) {
         let (rows, live, draining) = claims::read_directory(claims.store(), host_id)
             .unwrap_or_else(|e| fatal(&format!("reading the ownership directory: {e}")));
-        info!("[server] ownership directory: {} super-regions, live hosts {live:?}, draining {draining:?}", rows.len());
+        info!(
+            "[server] ownership directory: {} super-regions, live hosts {live:?}, draining {draining:?}",
+            rows.len()
+        );
         manager.set_draining(draining);
         manager.directory_read(rows, live);
         lease::beat_at_boot(&mut heartbeat, "reading the ownership directory");
@@ -1218,8 +1365,10 @@ pub fn run() -> claims::ServerExit {
     }
     // `claim`: an heir's adoption reads (R4, a succession) — what it
     // inherits, read on the store thread while this loop (and its heartbeat) runs on.
-    let mut adoption_reader =
-        claims.as_ref().filter(|_| claim_on_demand).map(|claims| claims::AdoptionReader::new(claims.clone()));
+    let mut adoption_reader = claims
+        .as_ref()
+        .filter(|_| claim_on_demand)
+        .map(|claims| claims::AdoptionReader::new(claims.clone()));
     manager.set_endpoints(endpoint.clone(), os_nonces());
     // The coordinator refuses an `Attach` of an older world generation than the store's.
     manager.set_host_generation(world_generation.mine());
@@ -1256,26 +1405,35 @@ pub fn run() -> claims::ServerExit {
     // The world map (stored with the forged world: per-region tile
     // summaries); procedural worlds have none.
     if let Some(map) = world_map {
-        info!("[server] world map: {}x{} tiles, from the world store", map.width, map.height);
+        info!(
+            "[server] world map: {}x{} tiles, from the world store",
+            map.width, map.height
+        );
         // Forged worlds keep their history in the store (procedural: none): the
         // world coordinator, the only writer of history state, runs on its own
         // `coordinator` thread joined by a channel link (`all`), or is its own
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
-            let config = world_link_config.take().expect("a host's world link was configured before its registration");
+            let config = world_link_config
+                .take()
+                .expect("a host's world link was configured before its registration");
             let link = host_world_link(config, host_id);
             world_wake = link.wake();
             manager.set_world_link(Box::new(link), boot, 0);
         } else if let Some(store) = &store {
             let sqlite_db = match &world_source {
-                world_file::WorldSource::Store { url: world_store::StoreUrl::Sqlite(db), .. } => Some(db.as_path()),
+                world_file::WorldSource::Store {
+                    url: world_store::StoreUrl::Sqlite(db),
+                    ..
+                } => Some(db.as_path()),
                 _ => None,
             };
-            if let Some(start) =
-                world_file::ensure_coordinator_state(store, &map, sqlite_db).unwrap_or_else(|e| fatal(&e))
+            if let Some(start) = world_file::ensure_coordinator_state(store, &map, sqlite_db)
+                .unwrap_or_else(|e| fatal(&e))
             {
                 let (link, thread) =
-                    coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap_or_else(|e| fatal(&e));
+                    coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone())
+                        .unwrap_or_else(|e| fatal(&e));
                 world_wake = link.wake();
                 coordinator = Some(thread);
                 manager.set_world_link(Box::new(link), host_boot(), 0);
@@ -1319,7 +1477,10 @@ pub fn run() -> claims::ServerExit {
     let mut terrain_watch = match (&cuts, claim_on_demand) {
         (Some(cuts), true) => {
             let mode = notify_mode.take().expect("parsed before the registration");
-            info!("[server] stored terrain of other hosts: {mode:?} (a resync every {} s)", world_store::TERRAIN_POLL_SECS);
+            info!(
+                "[server] stored terrain of other hosts: {mode:?} (a resync every {} s)",
+                world_store::TERRAIN_POLL_SECS
+            );
             Some(cuts::TerrainWatch::start(cuts.store().clone(), mode))
         }
         _ => None,
@@ -1327,7 +1488,9 @@ pub fn run() -> claims::ServerExit {
     let mut report = perf::ServerReport::new();
     let mut ever_connected = false;
     let mut last_world_save = std::time::Instant::now();
-    let save_every = std::time::Duration::from_secs(world_save_secs(std::env::var(WORLD_SAVE_SECS_ENV).ok().as_deref()));
+    let save_every = std::time::Duration::from_secs(world_save_secs(
+        std::env::var(WORLD_SAVE_SECS_ENV).ok().as_deref(),
+    ));
     if let Some(cuts) = cuts.as_mut().filter(|c| c.world_cuts()) {
         cuts.set_world_cut_period(save_every);
     }
@@ -1378,14 +1541,22 @@ pub fn run() -> claims::ServerExit {
             break 'main;
         }
         if fenced.is_set() {
-            log::error!("[server] fenced: another process claimed this server's super-regions or its coordinator; stopping");
+            log::error!(
+                "[server] fenced: another process claimed this server's super-regions or its coordinator; stopping"
+            );
             break 'main;
         }
         if world_generation.is_set() {
-            log::error!("[server] {}; stopping to restart from the same save", world_generation.why());
+            log::error!(
+                "[server] {}; stopping to restart from the same save",
+                world_generation.why()
+            );
             break 'main;
         }
-        if coordinator.as_ref().is_some_and(coordinator_rt::CoordinatorThread::is_finished) {
+        if coordinator
+            .as_ref()
+            .is_some_and(coordinator_rt::CoordinatorThread::is_finished)
+        {
             log::error!("[server] the world coordinator thread stopped; stopping");
             break 'main;
         }
@@ -1396,17 +1567,27 @@ pub fn run() -> claims::ServerExit {
         // The lease is beaten from THIS loop on purpose (R4 decision 3): a hung main loop must
         // stop beating although its sockets live, so the coordinator sees it lapse — a timer
         // thread would keep beating for a host that no longer runs.
-        if lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now(), &mut || {
-            load::host_load(&manager, &tick_load)
-        }) {
+        if lease::pump_or_fence(
+            &mut heartbeat,
+            &fenced,
+            std::time::Instant::now(),
+            &mut || load::host_load(&manager, &tick_load),
+        ) {
             break 'main;
         }
         // A drain mark (`worldctl drain`), read by that beat: the deadline its players are told
         // (`claim` hosts; a `static` host is a world's only one and is not drained).
         if claim_on_demand {
             let now_tick = world_clock.tick_at(start.elapsed().as_millis() as u64);
-            drain::note_drain(&mut manager, heartbeat.as_ref().and_then(lease::Heartbeat::drain_in_ms), now_tick);
-        } else if drain::static_mark_first_seen(&mut static_drain_warned, heartbeat.as_ref().and_then(lease::Heartbeat::drain_in_ms)) {
+            drain::note_drain(
+                &mut manager,
+                heartbeat.as_ref().and_then(lease::Heartbeat::drain_in_ms),
+                now_tick,
+            );
+        } else if drain::static_mark_first_seen(
+            &mut static_drain_warned,
+            heartbeat.as_ref().and_then(lease::Heartbeat::drain_in_ms),
+        ) {
             log::warn!("{}", drain::STATIC_HOST_IGNORES_DRAIN);
         }
         // A newer host dialed in: its session, over the link made for it.
@@ -1445,7 +1626,10 @@ pub fn run() -> claims::ServerExit {
                 // itself): an order the coordinator relayed anyway cannot be taken.
                 let dropped = manager.take_login_orders();
                 if !dropped.is_empty() {
-                    log::warn!("[server] {} login orders from the coordinator, and this host takes none (no service token): dropped", dropped.len());
+                    log::warn!(
+                        "[server] {} login orders from the coordinator, and this host takes none (no service token): dropped",
+                        dropped.len()
+                    );
                 }
             }
         }
@@ -1456,14 +1640,20 @@ pub fn run() -> claims::ServerExit {
         // Elastic 2a: state traded with a dead host no succession here accounts for: stop
         // without a save (the manager logged why); this host's lapse rolls the world back.
         if let Some(dead) = manager.take_unaccounted_dead() {
-            log::error!("[server] state exchanged with dead host {dead} is accounted for nowhere: stopping without a save");
+            log::error!(
+                "[server] state exchanged with dead host {dead} is accounted for nowhere: stopping without a save"
+            );
             world_generation.stop_for_rollback();
         }
         manager.pump_lod_results();
         if let Some(cuts) = cuts.as_mut() {
             // Backpressure: no new cut while the store still commits one. Under `claim` only
             // the coordinator starts cuts (`BeginCut`); while it is down there are none.
-            if !cuts.world_cuts() && last_world_save.elapsed() >= save_every && cuts.in_flight() == 0 && !fenced.is_set() {
+            if !cuts.world_cuts()
+                && last_world_save.elapsed() >= save_every
+                && cuts.in_flight() == 0
+                && !fenced.is_set()
+            {
                 last_world_save = std::time::Instant::now();
                 // Regions, players and what is in flight, at one
                 // world tick a lead ahead (`save_cut.rs`).
@@ -1522,13 +1712,24 @@ pub fn run() -> claims::ServerExit {
         // leaver's), and a beat finding no row must not make a clean exit a fenced one.
         |m| {
             if claim_on_demand && m.leave_outcome() != Some(true) {
-                lease::pump_or_fence(&mut heartbeat, &fenced, std::time::Instant::now(), &mut || load::host_load(m, &tick_load));
+                lease::pump_or_fence(
+                    &mut heartbeat,
+                    &fenced,
+                    std::time::Instant::now(),
+                    &mut || load::host_load(m, &tick_load),
+                );
             }
         },
     );
     // A host that left (in a committed cut or not) told its clients `LEAVING_REFUSAL`.
     let left = outcome == claims::ServerExit::Clean && manager.leave_asked();
-    if (left || matches!(outcome, claims::ServerExit::Fenced | claims::ServerExit::WorldRolledBack)) && had_sessions {
+    if (left
+        || matches!(
+            outcome,
+            claims::ServerExit::Fenced | claims::ServerExit::WorldRolledBack
+        ))
+        && had_sessions
+    {
         // The refusals are on their way out through the writer task.
         std::thread::sleep(FENCED_EXIT_FLUSH);
     }
@@ -1544,18 +1745,20 @@ pub fn run() -> claims::ServerExit {
         drop(login_relay);
         drop(manager);
         drop(peer_links);
-        drain::idle_drained(&stop_signal, &client_packet_recv, &drained_out, health::Health::global())
+        drain::idle_drained(
+            &stop_signal,
+            &client_packet_recv,
+            &drained_out,
+            health::Health::global(),
+        )
     } else {
         if drain_due && outcome == claims::ServerExit::Clean {
-            log::error!("[server] the drain's leave did not commit: exiting with this host's row dirty (a crash to the others)");
+            log::error!(
+                "[server] the drain's leave did not commit: exiting with this host's row dirty (a crash to the others)"
+            );
         }
         outcome
     };
-    #[cfg(feature = "pyroscope")]
-    if let Some(agent) = agent_running {
-        let agent_ready = agent.stop().unwrap();
-        agent_ready.shutdown();
-    }
     outcome
 }
 
@@ -1585,7 +1788,10 @@ fn host_endpoint(
 ) -> game::HostEndpoint {
     game::HostEndpoint {
         id: ordinal,
-        quic: Some(peer_link::advertise_quic_from(lookup(peer_link::ADVERTISE_QUIC_ENV).as_deref(), port)),
+        quic: Some(peer_link::advertise_quic_from(
+            lookup(peer_link::ADVERTISE_QUIC_ENV).as_deref(),
+            port,
+        )),
         webtransport: peer_link::advertise_wt_from(lookup(peer_link::ADVERTISE_WT_ENV).as_deref()),
         cert_hash,
     }
@@ -1646,7 +1852,9 @@ pub fn world_save_secs(env_value: Option<&str>) -> u64 {
         Some(v) => match v.parse::<u64>() {
             Ok(secs) if secs >= 1 => secs,
             _ => {
-                log::warn!("[server] {WORLD_SAVE_SECS_ENV}={v:?} is not a whole number of seconds >= 1; using {WORLD_SAVE_SECS}");
+                log::warn!(
+                    "[server] {WORLD_SAVE_SECS_ENV}={v:?} is not a whole number of seconds >= 1; using {WORLD_SAVE_SECS}"
+                );
                 WORLD_SAVE_SECS
             }
         },
@@ -1660,7 +1868,10 @@ pub(crate) fn watch_stop_signals_on_thread() -> std::sync::Arc<std::sync::atomic
     std::thread::Builder::new()
         .name("stop-signals".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("signal runtime");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("signal runtime");
             rt.block_on(watch_stop_signals(flag));
         })
         .expect("spawn the stop-signal thread");
@@ -1729,7 +1940,13 @@ async fn handle_connection(
                     return ();
                 }
             };
-            player_store::forward_packet(&sinks, &send, id, |live| live.same_connection(&mine), packet);
+            player_store::forward_packet(
+                &sinks,
+                &send,
+                id,
+                |live| live.same_connection(&mine),
+                packet,
+            );
         });
     }
 }
@@ -1768,8 +1985,17 @@ mod tests {
 /// else the cert-hash file — waited for if the coordinator has not written it yet). Every batch
 /// names host `ordinal`; the coordinator admits its `Attach` only while its `hosts` row is live.
 fn host_world_link(config: WorldLinkConfig, ordinal: HostId) -> world_http::HttpWorldLink {
-    let WorldLinkConfig { urls, token, cert_file, world } = config;
-    info!("[server] the world coordinator is a separate process at {} (pin from {})", urls.join(","), cert_file.display());
+    let WorldLinkConfig {
+        urls,
+        token,
+        cert_file,
+        world,
+    } = config;
+    info!(
+        "[server] the world coordinator is a separate process at {} (pin from {})",
+        urls.join(","),
+        cert_file.display()
+    );
     world_http::HttpWorldLink::connect(
         urls,
         move || svc_link::read_cert_hash(roles::COORDINATOR_CERT_SHA256_ENV, &cert_file),
@@ -1790,12 +2016,24 @@ struct WorldLinkConfig {
 }
 
 fn world_link_config() -> Result<WorldLinkConfig, String> {
-    let urls =
-        roles::coordinator_urls_from(roles::COORDINATOR_ADDR_ENV, std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref())?;
-    let token = svc_link::service_token_from_env().map_err(|e| format!("the service token: {e}"))?;
-    let cert_file = roles::cert_hash_file_from(std::env::var(roles::COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
+    let urls = roles::coordinator_urls_from(
+        roles::COORDINATOR_ADDR_ENV,
+        std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref(),
+    )?;
+    let token =
+        svc_link::service_token_from_env().map_err(|e| format!("the service token: {e}"))?;
+    let cert_file = roles::cert_hash_file_from(
+        std::env::var(roles::COORDINATOR_CERT_HASH_FILE_ENV)
+            .ok()
+            .as_deref(),
+    );
     let world = login_link::link_world_from(std::env::var(auth_edge::WORLD_ID_ENV).ok().as_deref());
-    Ok(WorldLinkConfig { urls, token, cert_file, world })
+    Ok(WorldLinkConfig {
+        urls,
+        token,
+        cert_file,
+        world,
+    })
 }
 
 /// This host's observer nonces: each one fresh from the OS's randomness (ring's
@@ -1805,7 +2043,9 @@ fn os_nonces() -> game::NonceSource {
     let random = rustls::crypto::ring::default_provider().secure_random;
     Box::new(move || {
         let mut bytes = [0u8; 8];
-        random.fill(&mut bytes).unwrap_or_else(|e| fatal(&format!("the OS's randomness failed: {e:?}")));
+        random
+            .fill(&mut bytes)
+            .unwrap_or_else(|e| fatal(&format!("the OS's randomness failed: {e:?}")));
         u64::from_le_bytes(bytes)
     })
 }

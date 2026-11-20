@@ -111,6 +111,15 @@ module "world" {
   }
   auth = { login_url = "http://login.login.svc.cluster.local" }
 
+  telemetry = {
+    environment = "production"
+    cluster     = "orion"
+  }
+
+  # The world panel (../panel) may read, start, stop and forge this world. Literal names:
+  # the binding does not need the panel root applied first.
+  panel = { namespace = "panel", service_account = "panel", cluster_role = "world-panel" }
+
   resources = {
     coordinator = { cpu = "100m", memory = "512Mi" }
     host        = { cpu = "1", memory = "2Gi" }

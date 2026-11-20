@@ -87,7 +87,8 @@ pub fn face_connectivity(p: &PaddedVoxels, cutout: &CutoutTable) -> u16 {
                 while let Some((x, y, z)) = stack.pop() {
                     faces |= touched_faces(x, y, z);
                     let mut push = |nx: usize, ny: usize, nz: usize| {
-                        if !visited[idx(nx, ny, nz)] && !p.is_opaque(nx + 1, ny + 1, nz + 1, cutout) {
+                        if !visited[idx(nx, ny, nz)] && !p.is_opaque(nx + 1, ny + 1, nz + 1, cutout)
+                        {
                             visited[idx(nx, ny, nz)] = true;
                             stack.push((nx, ny, nz));
                         }
@@ -229,7 +230,8 @@ impl GridCache {
             self.index.insert(entity, self.keys.len() as u32);
             self.keys.push(*key);
             self.entities.push(entity);
-            self.masks.push(masks.get(entity).map_or(ALL_CONNECTED, |m| m.0));
+            self.masks
+                .push(masks.get(entity).map_or(ALL_CONNECTED, |m| m.0));
         }
         self.lo = lo;
         self.hi = hi;
@@ -317,7 +319,11 @@ pub struct CullingScratch {
 /// other state can produce (a real entry implies `dirs != 0`).
 fn state_bit(dirs: u8, entry: u8) -> u128 {
     let code = (dirs & 3) as u32 + 3 * ((dirs >> 2) & 3) as u32 + 9 * ((dirs >> 4) & 3) as u32;
-    let axis = if entry == NO_ENTRY { 0 } else { (entry / 2) as u32 };
+    let axis = if entry == NO_ENTRY {
+        0
+    } else {
+        (entry / 2) as u32
+    };
     1u128 << (code * 3 + axis)
 }
 
@@ -493,8 +499,19 @@ impl CullingScratch {
         ];
         self.touch(start);
         self.visited[start] |= state_bit(0, NO_ENTRY);
-        self.queue.push_back(Node { index: start as u32, pos: start_pos, dirs: 0, entry: NO_ENTRY });
-        while let Some(Node { index, pos, dirs, entry }) = self.queue.pop_front() {
+        self.queue.push_back(Node {
+            index: start as u32,
+            pos: start_pos,
+            dirs: 0,
+            entry: NO_ENTRY,
+        });
+        while let Some(Node {
+            index,
+            pos,
+            dirs,
+            entry,
+        }) = self.queue.pop_front()
+        {
             let mask = self.masks[index as usize];
             for d in 0..6u8 {
                 // No-backtrack: never step opposite to a direction already used.
@@ -544,8 +561,11 @@ impl CullingScratch {
                             center: center.into(),
                             radius: 16.0 * 3f32.sqrt(),
                         };
-                        self.in_frustum[next_index] =
-                            if frustum.intersects_sphere(&sphere, false) { 1 } else { 2 };
+                        self.in_frustum[next_index] = if frustum.intersects_sphere(&sphere, false) {
+                            1
+                        } else {
+                            2
+                        };
                     }
                     if self.in_frustum[next_index] == 2 {
                         continue;
@@ -661,7 +681,10 @@ pub fn cull_chunks(
     ];
     // Change gate. A NaN plane never compares equal, which errs toward
     // recomputing.
-    let inputs = CullInputs { raw_cell, frustum: frustum.map(frustum_planes) };
+    let inputs = CullInputs {
+        raw_cell,
+        frustum: frustum.map(frustum_planes),
+    };
     let world_unchanged = !grid.is_changed() && !config.is_changed() && !masks_changed;
     if world_unchanged && scratch.last == Some(inputs) {
         if let Some(stats) = stats.as_deref_mut() {
@@ -747,7 +770,12 @@ pub fn cull_chunks(
     // Apply only what flipped since the last applied run (see
     // `GridCache::applied`), and write only on change (like `dedupe_halo_entities`)
     // to avoid change-detection churn.
-    let GridCache { keys, entities, applied, .. } = &mut *cache;
+    let GridCache {
+        keys,
+        entities,
+        applied,
+        ..
+    } = &mut *cache;
     for ((key, entity), applied) in keys.iter().zip(entities.iter()).zip(applied.iter_mut()) {
         let reached = scratch.is_reached(*key);
         let state = if reached { 1 } else { 2 };
@@ -757,7 +785,11 @@ pub fn cull_chunks(
         let Ok(mut vis) = chunks.get_mut(*entity) else {
             continue;
         };
-        let want = if reached { Visibility::Inherited } else { Visibility::Hidden };
+        let want = if reached {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         if *vis != want {
             *vis = want;
         }
@@ -779,8 +811,8 @@ fn frustum_planes(frustum: &Frustum) -> [[f32; 4]; 6] {
 /// frame's propagation. Shared by production (`renderer/mod.rs`) and the
 /// headless pipeline tests so the schedules cannot drift apart.
 pub fn cull_plugin(app: &mut App) {
+    use crate::session::{SessionResetExt, world_systems_enabled};
     use bevy::camera::visibility::VisibilitySystems;
-    use crate::session::{world_systems_enabled, SessionResetExt};
     app.add_systems(
         Update,
         super::queue::requeue_for_culling
@@ -852,10 +884,10 @@ fn occlusion_from_env(value: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    
+
     use super::*;
-    
-    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
+
+    use game::{BRICK_VOXEL_COUNT, BlockId, Voxel};
 
     // --- Camera BFS culling (headless pipeline scenes) -------------------
     //
@@ -867,11 +899,10 @@ mod tests {
     // transient scheduling intermediates — the mesher can spawn, complete,
     // and apply within a single update.
 
+    use super::super::queue::MeshBudgets;
     use super::super::queue::tests::{
         pipeline_app, spawn_chunk, voxels_with, wait_until, wait_until_settled,
     };
-    use super::super::queue::MeshBudgets;
-    
 
     /// Test-only switch: flood without dominance pruning (exact-state dedupe
     /// only), for the timing comparison below.

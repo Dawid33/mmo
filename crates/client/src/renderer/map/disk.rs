@@ -31,13 +31,20 @@ impl DiskCache {
     pub fn open(root: &Path, world: &str, cap: u64) -> std::io::Result<DiskCache> {
         let dir = root.join(world);
         fs::create_dir_all(&dir)?;
-        let cache = DiskCache { dir, root: root.to_path_buf(), cap, writes: 0 };
+        let cache = DiskCache {
+            dir,
+            root: root.to_path_buf(),
+            cap,
+            writes: 0,
+        };
         cache.evict()?;
         Ok(cache)
     }
 
     fn path(&self, (level, x, z): (u8, i32, i32)) -> PathBuf {
-        self.dir.join(level.to_string()).join(format!("{x}_{z}.tile"))
+        self.dir
+            .join(level.to_string())
+            .join(format!("{x}_{z}.tile"))
     }
 
     /// The cached etag and bytes of `key`; touches its time so eviction keeps it.
@@ -49,7 +56,10 @@ impl DiskCache {
         }
         let etag = u64::from_le_bytes(data[..8].try_into().expect("8 bytes"));
         // Recently used = recently modified: a hit renews the file's time.
-        let _ = fs::File::options().append(true).open(&path).and_then(|f| f.set_modified(SystemTime::now()));
+        let _ = fs::File::options()
+            .append(true)
+            .open(&path)
+            .and_then(|f| f.set_modified(SystemTime::now()));
         Some((etag, data[8..].to_vec()))
     }
 
@@ -58,7 +68,11 @@ impl DiskCache {
         let path = self.path(key);
         let parent = path.parent().expect("a tile file has a level directory");
         fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(".{}.{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("tile"), std::process::id()));
+        let tmp = parent.join(format!(
+            ".{}.{}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("tile"),
+            std::process::id()
+        ));
         {
             let mut f = fs::File::create(&tmp)?;
             f.write_all(&etag.to_le_bytes())?;
@@ -96,14 +110,20 @@ impl DiskCache {
 
 /// Every `.tile` file under `dir`: (path, length, modified).
 fn collect(dir: &Path, out: &mut Vec<(PathBuf, u64, SystemTime)>) -> std::io::Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else { return Ok(()) };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
     for entry in entries.flatten() {
         let meta = entry.metadata()?;
         let path = entry.path();
         if meta.is_dir() {
             collect(&path, out)?;
         } else if path.extension().is_some_and(|e| e == "tile") {
-            out.push((path, meta.len(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+            out.push((
+                path,
+                meta.len(),
+                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            ));
         }
     }
     Ok(())

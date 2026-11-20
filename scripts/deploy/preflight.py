@@ -14,6 +14,8 @@ REPO = Path(__file__).resolve().parents[2]
 def check(r: Runner, target: Target, roots: list[Root]) -> list[str]:
     """Return problems; an empty list means go ahead."""
     problems: list[str] = []
+    scope = ", ".join(root.name for root in roots) if roots else "game dependencies"
+    print(f"deploy: preflight: checking target {target.name} ({scope})", flush=True)
 
     tools = {"tofu", "kubectl", "docker", "just", "flock"}
     if target.state == "s3" or target.registry == "ecr":
@@ -21,6 +23,7 @@ def check(r: Runner, target: Target, roots: list[Root]) -> list[str]:
     for tool in sorted(tools):
         if shutil.which(tool) is None:
             problems.append(f"missing tool: {tool}")
+    print("deploy: preflight: tool checks complete", flush=True)
 
     # A new root directory must be placed in the graph before --infra runs.
     env_dir = REPO / target.env_dir
@@ -33,6 +36,7 @@ def check(r: Runner, target: Target, roots: list[Root]) -> list[str]:
             )
 
     if target.state == "s3":
+        print("deploy: preflight: checking AWS identity", flush=True)
         identity = r.run(["aws", "sts", "get-caller-identity"], check=False, capture=True)
         if identity.rc != 0:
             detail = (identity.err or identity.out).strip().splitlines()
@@ -40,6 +44,7 @@ def check(r: Runner, target: Target, roots: list[Root]) -> list[str]:
                 "AWS identity failed (expired SSO credentials?): " + (detail[0] if detail else f"exit {identity.rc}")
             )
 
+    print(f"deploy: preflight: checking Kubernetes API {target.kube_context}", flush=True)
     live = r.run(
         ["kubectl", "--context", target.kube_context, "get", "--raw", "/livez"],
         check=False,
@@ -49,6 +54,7 @@ def check(r: Runner, target: Target, roots: list[Root]) -> list[str]:
         problems.append(f"kube API {target.kube_context} is unreachable: {live.err.strip() or f'exit {live.rc}'}")
 
     if any(root.needs_vpn for root in roots):
+        print("deploy: preflight: checking operator VPN DNS", flush=True)
         vpn = r.run(
             ["getent", "hosts", "kube-dns.kube-system.svc.cluster.local"],
             check=False,
@@ -61,4 +67,8 @@ def check(r: Runner, target: Target, roots: list[Root]) -> list[str]:
         if root.needs_tfvars and not (env_dir / root.name / "terraform.tfvars").is_file():
             problems.append(f"missing {target.env_dir}/{root.name}/terraform.tfvars (a secret, never in git)")
 
+    print(
+        f"deploy: preflight: {'ready' if not problems else f'{len(problems)} problem(s) found'}",
+        flush=True,
+    )
     return problems

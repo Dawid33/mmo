@@ -8,14 +8,15 @@
 //! Separate binaries:
 //! - `state_hash_wasm`: also built for wasm32 (just determinism-wasm).
 
-mod common;
 mod arena_revert;
+mod common;
 mod continuous_surfaces;
 mod fixed_mass_props;
 mod journal_fuzz;
 mod journal_parallel;
 mod kinematic_sleep;
 mod pipeline_memo;
+mod stair_mounting;
 mod state_hash_parity;
 mod step_journal;
 mod upstream_movement_probe;

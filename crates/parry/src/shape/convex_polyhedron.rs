@@ -14,8 +14,7 @@ use core::f64; // for .abs(), .sqrt(), and .sin_cos()
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(PartialEq, Debug, Copy, Clone, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Vertex {
     pub first_adj_face_or_edge: u32,
     pub num_adj_faces_or_edge: u32,
@@ -26,8 +25,7 @@ pub struct Vertex {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(PartialEq, Debug, Copy, Clone, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Edge {
     pub vertices: [u32; 2],
     pub faces: [u32; 2],
@@ -50,8 +48,7 @@ impl Edge {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(PartialEq, Debug, Copy, Clone, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Face {
     pub first_vertex_or_edge: u32,
     pub num_vertices_or_edges: u32,

@@ -15,7 +15,10 @@ impl LinkTarget {
     /// `127.0.0.1:6480,127.0.0.1:6481`), each a non-empty host and a `u16` port, split at
     /// the last `:`.
     pub fn parse(value: &str) -> Result<Self, String> {
-        let parts = value.split(',').map(|p| Self::parse_part(p.trim())).collect::<Result<Vec<_>, _>>()?;
+        let parts = value
+            .split(',')
+            .map(|p| Self::parse_part(p.trim()))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self(parts.join(",")))
     }
 
@@ -23,11 +26,15 @@ impl LinkTarget {
         if value.parse::<SocketAddr>().is_ok() {
             return Ok(value.to_string());
         }
-        let (host, port) = value.rsplit_once(':').ok_or_else(|| format!("{value:?}: expected host:port"))?;
+        let (host, port) = value
+            .rsplit_once(':')
+            .ok_or_else(|| format!("{value:?}: expected host:port"))?;
         if host.is_empty() {
             return Err(format!("{value:?}: the host is empty (expected host:port)"));
         }
-        port.parse::<u16>().map_err(|_| format!("{value:?}: the port is not a number up to 65535 (expected host:port)"))?;
+        port.parse::<u16>().map_err(|_| {
+            format!("{value:?}: the port is not a number up to 65535 (expected host:port)")
+        })?;
         Ok(value.to_string())
     }
 
@@ -48,7 +55,10 @@ impl LinkTarget {
                     all.extend(answers);
                     if all.len() == before {
                         first_error.get_or_insert_with(|| {
-                            io::Error::new(io::ErrorKind::NotFound, format!("{part} resolved to no address"))
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                format!("{part} resolved to no address"),
+                            )
                         });
                     }
                 }
@@ -65,11 +75,12 @@ impl LinkTarget {
 
     /// The first address of [`Self::resolve_all`].
     pub async fn resolve(&self) -> io::Result<SocketAddr> {
-        self.resolve_all()
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} resolved to no address", self.0)))
+        self.resolve_all().await?.into_iter().next().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} resolved to no address", self.0),
+            )
+        })
     }
 }
 
@@ -84,4 +95,3 @@ impl fmt::Display for LinkTarget {
         f.write_str(&self.0)
     }
 }
-

@@ -7,17 +7,23 @@ use std::collections::BTreeMap;
 
 use game::{ClientUpdateEvent, Region, RegionId, Rollback};
 
-use super::runner::{handle, RegionCmd, RegionReport, RunnerCtx, RunnerState};
+use super::runner::{RegionCmd, RegionReport, RunnerCtx, RunnerState, handle};
 
 /// Build a client region from its snapshot: the render bridge gets its copy
 /// (`NewRegion`, sent before any update this region emits), the snapshot
 /// itself becomes the region.
-pub(crate) fn build_region(ctx: &RunnerCtx, snapshot: Rollback, route: Option<std::sync::Arc<game::RouteMap>>) -> Region {
+pub(crate) fn build_region(
+    ctx: &RunnerCtx,
+    snapshot: Rollback,
+    route: Option<std::sync::Arc<game::RouteMap>>,
+) -> Region {
     let (send, recv) = crossbeam::channel::unbounded();
     // The render copy answers the seam helpers (`GameData::map`) as the region will.
     let mut render = (*snapshot.data).clone();
     render.set_map(route.as_ref().map(|r| r.extent()));
-    let _ = ctx.client_event_send.send(ClientUpdateEvent::NewRegion(ctx.id, render, recv));
+    let _ = ctx
+        .client_event_send
+        .send(ClientUpdateEvent::NewRegion(ctx.id, render, recv));
     let mut region = Region::new(snapshot, Some(send), ctx.id, Some(ctx.client_id));
     region.set_route_map(route);
     region
@@ -39,7 +45,9 @@ pub struct InlineHost {
 
 impl InlineHost {
     fn send(&mut self, id: RegionId, cmd: RegionCmd) -> bool {
-        let (Some(region), Some((st, ctx))) = (self.world.regions.get_mut(&id), self.states.get_mut(&id)) else {
+        let (Some(region), Some((st, ctx))) =
+            (self.world.regions.get_mut(&id), self.states.get_mut(&id))
+        else {
             return false;
         };
         let mut out = Vec::new();
@@ -60,8 +68,8 @@ pub use threaded::ThreadedHost;
 mod threaded {
     use super::*;
     use crossbeam::channel::{Receiver, Sender};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::JoinHandle;
     use std::time::Duration;
 
@@ -118,13 +126,19 @@ mod threaded {
             }
         }
 
-        pub(super) fn spawn(&mut self, ctx: RunnerCtx, snapshot: Rollback, route: Option<std::sync::Arc<game::RouteMap>>) {
+        pub(super) fn spawn(
+            &mut self,
+            ctx: RunnerCtx,
+            snapshot: Rollback,
+            route: Option<std::sync::Arc<game::RouteMap>>,
+        ) {
             let id = ctx.id;
             self.stop(id);
             // Earlier threads of this id finish first (on the new thread, so
             // the caller never waits): their `RemoveRegion` reaches the
             // bridge before this one's `NewRegion`.
-            let (previous, others): (Vec<_>, Vec<_>) = self.retired.drain(..).partition(|(r, _)| *r == id);
+            let (previous, others): (Vec<_>, Vec<_>) =
+                self.retired.drain(..).partition(|(r, _)| *r == id);
             self.retired = others;
             let previous: Vec<_> = previous.into_iter().map(|(_, h)| h).collect();
             let generation = self.next_generation;
@@ -144,7 +158,14 @@ mod threaded {
                     region
                 })
                 .expect("spawn region thread");
-            self.regions.insert(id, Live { send, generation, handle });
+            self.regions.insert(
+                id,
+                Live {
+                    send,
+                    generation,
+                    handle,
+                },
+            );
         }
 
         pub(super) fn send(&mut self, id: RegionId, cmd: RegionCmd) -> bool {
@@ -189,13 +210,21 @@ mod threaded {
             all.extend(self.report_recv.try_iter());
             let mut out: Vec<(RegionId, RegionReport)> = all
                 .into_iter()
-                .filter(|(id, generation, _)| self.regions.get(id).is_some_and(|l| l.generation == *generation))
+                .filter(|(id, generation, _)| {
+                    self.regions
+                        .get(id)
+                        .is_some_and(|l| l.generation == *generation)
+                })
                 .map(|(id, _, report)| (id, report))
                 .collect();
             // A region thread that ended without being stopped panicked:
             // report it, so the session ends instead of waiting on it.
-            let dead: Vec<RegionId> =
-                self.regions.iter().filter(|(_, l)| l.handle.is_finished()).map(|(id, _)| *id).collect();
+            let dead: Vec<RegionId> = self
+                .regions
+                .iter()
+                .filter(|(_, l)| l.handle.is_finished())
+                .map(|(id, _)| *id)
+                .collect();
             for id in dead {
                 let live = self.regions.remove(&id).expect("listed above");
                 let why = match live.handle.join() {
@@ -212,7 +241,8 @@ mod threaded {
         pub(super) fn settle(&mut self) {
             let ping = self.next_ping;
             self.next_ping += 1;
-            let mut waiting: std::collections::BTreeSet<RegionId> = BTreeMap::keys(&self.regions).copied().collect();
+            let mut waiting: std::collections::BTreeSet<RegionId> =
+                BTreeMap::keys(&self.regions).copied().collect();
             for id in waiting.clone() {
                 if !self.send(id, RegionCmd::Ping(ping)) {
                     waiting.remove(&id);
@@ -221,7 +251,10 @@ mod threaded {
             while !waiting.is_empty() {
                 match self.report_recv.recv_timeout(SETTLE_POLL) {
                     Ok((id, generation, report)) => {
-                        let current = self.regions.get(&id).is_some_and(|l| l.generation == generation);
+                        let current = self
+                            .regions
+                            .get(&id)
+                            .is_some_and(|l| l.generation == generation);
                         if current && matches!(report, RegionReport::Pong(p) if p == ping) {
                             waiting.remove(&id);
                         }
@@ -229,7 +262,11 @@ mod threaded {
                     }
                     Err(_) => {
                         // A dead thread never pongs; `drain` reports it.
-                        waiting.retain(|id| self.regions.get(id).is_some_and(|l| !l.handle.is_finished()));
+                        waiting.retain(|id| {
+                            self.regions
+                                .get(id)
+                                .is_some_and(|l| !l.handle.is_finished())
+                        });
                     }
                 }
             }
@@ -237,7 +274,8 @@ mod threaded {
 
         /// Join the stopped threads that have finished.
         fn reap(&mut self) {
-            let (done, running): (Vec<_>, Vec<_>) = self.retired.drain(..).partition(|(_, h)| h.is_finished());
+            let (done, running): (Vec<_>, Vec<_>) =
+                self.retired.drain(..).partition(|(_, h)| h.is_finished());
             self.retired = running;
             for (_, handle) in done {
                 let _ = handle.join();
@@ -278,7 +316,9 @@ mod threaded {
             if !running {
                 // Stopped: off the bridge, after everything it sent there.
                 drop(region);
-                let _ = ctx.client_event_send.send(ClientUpdateEvent::RemoveRegion(ctx.id));
+                let _ = ctx
+                    .client_event_send
+                    .send(ClientUpdateEvent::RemoveRegion(ctx.id));
                 return None;
             }
         }
@@ -288,7 +328,11 @@ mod threaded {
 
 impl RegionHost {
     pub fn inline() -> Self {
-        RegionHost::Inline(InlineHost { world: game::World::new(), states: BTreeMap::new(), queue: Vec::new() })
+        RegionHost::Inline(InlineHost {
+            world: game::World::new(),
+            states: BTreeMap::new(),
+            queue: Vec::new(),
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -301,7 +345,12 @@ impl RegionHost {
     }
 
     /// Start region `ctx.id` from `snapshot`, replacing one already held.
-    pub fn spawn(&mut self, ctx: RunnerCtx, snapshot: Rollback, route: Option<std::sync::Arc<game::RouteMap>>) {
+    pub fn spawn(
+        &mut self,
+        ctx: RunnerCtx,
+        snapshot: Rollback,
+        route: Option<std::sync::Arc<game::RouteMap>>,
+    ) {
         match self {
             RegionHost::Inline(h) => {
                 let id = ctx.id;
@@ -339,7 +388,9 @@ impl RegionHost {
                 let state = h.states.remove(&id);
                 let held = h.world.remove_region(&id).is_some();
                 if let (true, Some((_, ctx))) = (held, state) {
-                    let _ = ctx.client_event_send.send(ClientUpdateEvent::RemoveRegion(id));
+                    let _ = ctx
+                        .client_event_send
+                        .send(ClientUpdateEvent::RemoveRegion(id));
                 }
                 held
             }
@@ -417,4 +468,3 @@ impl RegionHost {
         }
     }
 }
-

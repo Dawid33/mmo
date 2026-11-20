@@ -31,6 +31,7 @@ class Target:
     registry: Literal["ecr", "k3d"]
     roots: list[Root] = field(default_factory=list)
     world_ns: str = ""
+    min_world_hosts: int = 1
 
     @property
     def world_namespace(self) -> str:
@@ -55,14 +56,15 @@ ORION = Target(
         Root("registry"),
         Root("garage", fresh_vars={"metrics": "false", "until_state_of": "monitoring"}),
         Root("garage-buckets", reads=("garage",), needs_vpn=True),
-        Root("keycloak"),
-        Root("vpn-names"),
+        Root("pg-management", reads=("garage-buckets",), wait=True),
+        Root("keycloak", reads=("pg-management",)),
+        Root("vpn-names", reads=("keycloak",)),
         Root("keycloak-realm", reads=("keycloak",), needs_vpn=True, needs_tfvars=True),
         Root("monitoring", reads=("garage-buckets", "keycloak-realm"), needs_tfvars=True),
         Root("picoshare"),
         Root("zulip", reads=("garage-buckets", "keycloak-realm"), needs_tfvars=True),
         Root("postgres", reads=("garage-buckets",), wait=True),
-        Root("login", reads=("keycloak-realm", "registry"), images=("login",)),
+        Root("login", reads=("keycloak-realm", "pg-management", "registry"), images=("login",)),
         Root("site", reads=("keycloak-realm",)),
         Root("world", reads=("login", "postgres", "registry"), images=("server", "web"), guard=True),
         Root("panel", reads=("registry",), images=("panel",)),
@@ -75,10 +77,12 @@ TWIN = Target(
     state="local",
     registry="k3d",
     world_ns="world-twin",
+    min_world_hosts=2,
     roots=[
         Root("platform"),
         Root("postgres", wait=True),
-        Root("login", images=("login",)),
+        Root("pg-management", wait=True),
+        Root("login", reads=("pg-management",), images=("login",)),
         Root("world", images=("server", "web"), guard=True),
         Root("panel", images=("panel",)),
     ],

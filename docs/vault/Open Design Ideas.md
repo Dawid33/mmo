@@ -1,0 +1,4 @@
+- How do we do rarity? I don't want to get the same issue as Factorio where crafting produced different rarities and makes a mess of storage, player interaction and understanding
+	- Reforging? makes rarity intentional and luck based.
+- Push / pull skill tree design. Going into surival gives you buffs to survive but requires not taking buffs for general living. e.g
+	- Combat debuff in return for low regeneration that never wears off

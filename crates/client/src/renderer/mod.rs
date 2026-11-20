@@ -8,59 +8,61 @@ use bevy::render::render_resource::{
 use crossbeam::channel::{Receiver, Sender};
 use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
-use crate::session::{world_systems_enabled, SessionResetExt};
+use crate::session::{SessionResetExt, world_systems_enabled};
 
 pub mod atmosphere;
 #[cfg(not(target_arch = "wasm32"))]
 mod autopilot;
 mod avatar;
+pub mod block_damage;
 mod block_textures;
+pub(crate) mod boundaries;
 pub mod bricks;
 pub mod bridge;
+pub mod character_preview; // the player's model in the inventory's character frame
 pub mod chat;
 pub(crate) mod collider_debug;
 pub mod commander;
-pub(crate) mod cursor;
-#[cfg(feature = "dev_ui")]
-pub mod dev_ui;
-pub(crate) mod boundaries;
-pub mod fortress_panel;
-pub mod fortress_view;
-pub(crate) mod slice_plane;
 pub mod compute; // off-main-thread jobs: Bevy's pool natively, Web Workers on wasm
 pub mod config;
 pub mod convert;
+pub mod crossing_timeline;
+pub(crate) mod cursor;
+#[cfg(feature = "dev_ui")]
+pub mod dev_ui;
 pub(crate) mod diag;
 pub mod drain_notice;
+pub mod fortress_view;
 pub(crate) mod grid_debug;
 pub mod hud;
 pub(crate) mod input;
 mod interpolate;
-mod look;
-mod motion_probe;
-pub mod crossing_timeline;
-pub mod join_timeline;
-pub mod item_icons;
 pub mod item_flights;
+pub mod item_icons;
 pub mod item_piles;
+pub mod join_timeline;
 pub mod lod_rings;
+mod look;
+pub mod look_target; // the block under the crosshair: its outline and the HUD pane
 pub mod map; // the world map's tiles: one pyramid behind the minimap, the full map and the site choice
 pub mod meshing;
 pub mod model;
+mod motion_probe;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render_bench;
 pub mod rigs;
 mod skybox;
+pub(crate) mod slice_plane;
 pub mod slint_composite;
 pub mod slint_overlay;
 pub mod text_entry;
 pub use slint_composite::UiCamera;
+pub mod arrival_tabs;
+pub mod history_view;
 pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
 pub mod water;
-pub mod arrival_tabs;
-pub mod history_view;
 pub mod world_map;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
@@ -88,7 +90,7 @@ pub struct ClientUpdates(pub Receiver<ClientUpdateEvent>);
 #[derive(Resource)]
 pub struct GameEvents(pub Sender<GameEventKind>);
 
-/// UI → game thread: requests for the server (`ClientRequest::PlayRegion`).
+/// UI → game thread: requests for the server (`ClientRequest`).
 #[derive(Resource)]
 pub struct ClientRequests(pub Sender<crate::instance::ClientRequest>);
 
@@ -115,6 +117,8 @@ impl Plugin for SimBridgePlugin {
             voxel_pull::VoxelPullPlugin,
             fortress_view::FortressOverlayPlugin,
             model::BbModelPlugin,
+            character_preview::CharacterPreviewPlugin,
+            look_target::LookTargetPlugin,
             item_piles::ItemPilesPlugin,
             map::MapPlugin,
         ))
@@ -125,7 +129,6 @@ impl Plugin for SimBridgePlugin {
         // (`add_session_reset`); preferences, startup assets and render
         // config are plain `init_resource` and survive it.
         .add_session_reset::<world_map::WorldMapState>()
-        .add_session_reset::<world_map::PendingPlay>()
         .add_message::<world_map::WorldMapMsg>()
         .add_session_message_clear::<world_map::WorldMapMsg>()
         .add_session_reset::<history_view::HistoryView>()
@@ -133,6 +136,10 @@ impl Plugin for SimBridgePlugin {
         // The unwrapped frame the bridge keeps (`ClientUpdateEvent::WrapFrame`):
         // a new session starts at the canonical frame.
         .add_session_reset::<crate::wrap_frame::WrapFrame>()
+        .add_session_reset::<block_damage::BlockDamage>()
+        .init_resource::<block_damage::PieceMeshes>()
+        .add_message::<block_damage::TreeFelledMsg>()
+        .add_session_message_clear::<block_damage::TreeFelledMsg>()
         .add_message::<history_view::HistoryMsg>()
         .add_session_message_clear::<history_view::HistoryMsg>()
         .add_session_reset::<LocalPlayer>()
@@ -169,7 +176,9 @@ impl Plugin for SimBridgePlugin {
         // Cave culling starts OFF: the world has no caves yet, and the flood
         // cost 5-8.5 ms per turning frame at the 5x5 window (2026-09-23
         // bench) for nothing to hide. F4 / the F3 dev panel turn it on.
-        .insert_resource(meshing::visibility::CullingConfig { graph_enabled: false })
+        .insert_resource(meshing::visibility::CullingConfig {
+            graph_enabled: false,
+        })
         .init_resource::<config::TerrainRenderConfig>()
         .init_resource::<input::MouseCoalesceWindow>()
         .add_session_reset::<look::LocalLook>()
@@ -189,6 +198,8 @@ impl Plugin for SimBridgePlugin {
                     .run_if(world_systems_enabled()),
                 look::integrate_local_look
                     .after(bevy::input::InputSystems)
+                    // Reads the cursor gate `forward_input` may set this frame.
+                    .after(input::forward_input)
                     .run_if(world_systems_enabled()),
                 (
                     (
@@ -237,16 +248,26 @@ impl Plugin for SimBridgePlugin {
                 // LOD rings run in Update but outside the meshing chain:
                 // they only spawn/despawn LOD roots and children, which
                 // the LOD mesh systems pick up on later frames.
+                (lod_rings::apply_lod_events, lod_rings::retire_lod_roots).chain(),
+                interpolate::interpolate_transforms,
                 (
-                    lod_rings::apply_lod_events,
-                    lod_rings::retire_lod_roots,
+                    voxel_bodies::spawn_voxel_body_meshes,
+                    voxel_bodies::apply_voxel_body_meshes,
                 )
                     .chain(),
-                interpolate::interpolate_transforms,
-                (voxel_bodies::spawn_voxel_body_meshes, voxel_bodies::apply_voxel_body_meshes).chain(),
+                (
+                    block_damage::sync_block_damage,
+                    block_damage::start_tree_vanish,
+                    block_damage::animate_block_damage,
+                )
+                    .chain(),
                 // Coarse twins of sim chunks (distance LOD in the simulated
                 // neighbourhood): dirtied by `rebuild_chunk_meshes`.
-                (meshing::coarse::finish_band_handovers, meshing::coarse::apply_coarse_tasks, meshing::coarse::spawn_coarse_tasks)
+                (
+                    meshing::coarse::finish_band_handovers,
+                    meshing::coarse::apply_coarse_tasks,
+                    meshing::coarse::spawn_coarse_tasks,
+                )
                     .chain()
                     .after(meshing::chunk_mesh::rebuild_chunk_meshes),
                 world_map::apply_world_map_msgs,
@@ -264,17 +285,28 @@ impl Plugin for SimBridgePlugin {
                 avatar::squish_slimes.after(interpolate::interpolate_transforms),
                 meshing::visibility::toggle_culling,
                 collider_debug::draw_collider_wireframes,
-                (boundaries::toggle_boundary_overlay, boundaries::update_boundary_uniform).chain(),
+                (
+                    boundaries::toggle_boundary_overlay,
+                    boundaries::update_boundary_uniform,
+                )
+                    .chain(),
                 grid_debug::toggle_grid_debug,
                 grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
-                (grid_debug::toggle_terrain_debug, grid_debug::apply_terrain_debug).chain(),
+                (
+                    grid_debug::toggle_terrain_debug,
+                    grid_debug::apply_terrain_debug,
+                )
+                    .chain(),
             )
                 .run_if(world_systems_enabled()),
         );
         // Every camera, the frontend's included (which brings its own).
         app.add_systems(Update, (skybox::attach_skybox, atmosphere::attach_fog));
         // Far planes follow the fog's end (`ViewDistance`), before the frusta.
-        app.add_systems(PostUpdate, atmosphere::sync_far_plane.before(bevy::camera::CameraUpdateSystems));
+        app.add_systems(
+            PostUpdate,
+            atmosphere::sync_far_plane.before(bevy::camera::CameraUpdateSystems),
+        );
         app.add_systems(
             Update,
             motion_probe::probe_region_crossing
@@ -282,7 +314,10 @@ impl Plugin for SimBridgePlugin {
                 .run_if(world_systems_enabled()),
         );
         // One timeline per region crossing (`[perf] event=crossing_*`).
-        app.add_systems(Update, crossing_timeline::track_crossing_timeline.run_if(world_systems_enabled()));
+        app.add_systems(
+            Update,
+            crossing_timeline::track_crossing_timeline.run_if(world_systems_enabled()),
+        );
         // Sim-animated entities (`game::anim`): model child, then the pose
         // from the sim state over the interpolated body.
         app.add_systems(
@@ -1118,12 +1153,21 @@ fn setup_scene(
     // Loader: native reads PNGs from assets/blocks/; wasm resolves from the
     // embedded texture map. Returns None on any failure (build_layers then
     // falls the block back to the layer-0 missing texture).
-    let (rgba_layers, block_layers) = build_layers(&registry, load_block_texture);
+    let (mut rgba_layers, block_layers) = build_layers(&registry, load_block_texture);
     // The map's block colours: each block's top layer, before the crack layers join the array.
     let map_rgb = map::palette::block_colours(&registry, &rgba_layers, &block_layers);
     commands.insert_resource(map::palette::make_palette(&mut images, map_rgb));
 
     let (w, h) = (rgba_layers[0].width(), rgba_layers[0].height());
+    // The crack pictures of damaged blocks ride in the same array, after
+    // every block's layers (`block_damage`).
+    commands.insert_resource(block_damage::CrackLayers {
+        first: rgba_layers.len() as u32,
+    });
+    rgba_layers.extend(block_damage::crack_images(w));
+    // Side → top layer, identity for the crack layers past the blocks'.
+    let mut top_layers = block_layers.side_to_top();
+    top_layers.extend(top_layers.len() as u32..rgba_layers.len() as u32);
     // Every layer carries its full mip chain (see `block_textures::mip_chain`),
     // laid out layer-major — each layer's levels back to back — which is the
     // order `Image::data_order`'s default uploads.
@@ -1177,7 +1221,7 @@ fn setup_scene(
     // The pulled render path binds the same array texture directly (no material).
     commands.insert_resource(voxel_pull::BlockArrayTexture(handle.clone()));
     commands.insert_resource(voxel_pull::BlockTopLayers(std::sync::Arc::new(
-        block_layers.side_to_top(),
+        top_layers.clone(),
     )));
     commands.insert_resource(meshing::ChunkMaterial(voxel_materials.add(
         ExtendedMaterial {
@@ -1193,7 +1237,7 @@ fn setup_scene(
             extension: StandardVoxelMaterial {
                 voxels_texture: handle,
                 fortress: Default::default(),
-                top_layers: images.add(voxel_material::top_layers_image(&block_layers.side_to_top())),
+                top_layers: images.add(voxel_material::top_layers_image(&top_layers)),
             },
         },
     )));
@@ -1234,4 +1278,3 @@ fn load_block_texture(path: &str) -> Option<image::RgbaImage> {
         }
     }
 }
-

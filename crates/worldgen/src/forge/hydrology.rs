@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use crate::forge::erosion::{discharge, route, Routing, FLOOD_EPSILON};
+use crate::forge::erosion::{FLOOD_EPSILON, Routing, discharge, route};
 use crate::forge::geology::{Geology, ROCKS};
 use crate::forge::knobs::Knobs;
 use crate::forge::world::World;
@@ -98,7 +98,9 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 /// Least-squares slope of y on x.
 fn regress(points: &[(f64, f64)]) -> f64 {
     let n = points.len() as f64;
-    let (sx, sy) = points.iter().fold((0.0, 0.0), |acc, p| (acc.0 + p.0, acc.1 + p.1));
+    let (sx, sy) = points
+        .iter()
+        .fold((0.0, 0.0), |acc, p| (acc.0 + p.0, acc.1 + p.1));
     let (mx, my) = (sx / n, sy / n);
     let (mut sxy, mut sxx) = (0.0, 0.0);
     for &(x, y) in points {
@@ -108,7 +110,13 @@ fn regress(points: &[(f64, f64)]) -> f64 {
     sxy / sxx
 }
 
-fn find_lakes(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], level: &[f64]) -> Vec<Lake> {
+fn find_lakes(
+    w: &World,
+    routing: &Routing,
+    q: &[f64],
+    lake_depth: &[f64],
+    level: &[f64],
+) -> Vec<Lake> {
     let is_lake = |i: usize| !w.ocean[i] && lake_depth[i] >= LAKE_MIN_DEPTH_M;
     let mut body = vec![u32::MAX; w.cells()];
     let mut lakes = Vec::new();
@@ -219,12 +227,19 @@ pub fn seam_dx(dx: f64, width: f64) -> f64 {
 }
 
 /// Reaches between network nodes, with Strahler order. Returns (rivers, max order).
-fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &Knobs) -> (Vec<River>, u32) {
+fn find_rivers(
+    w: &World,
+    routing: &Routing,
+    q: &[f64],
+    lake_depth: &[f64],
+    k: &Knobs,
+) -> (Vec<River>, u32) {
     let cells = w.cells();
     // Outlets (the sea) end a river: they have no receiver.
     let channel = |i: usize| !w.outlet[i] && q[i] >= k.river_min_discharge_m2;
     let mut donors = vec![0u8; cells];
-    let (mut order, mut max_in, mut max_count) = (vec![0u32; cells], vec![0u32; cells], vec![0u8; cells]);
+    let (mut order, mut max_in, mut max_count) =
+        (vec![0u32; cells], vec![0u32; cells], vec![0u8; cells]);
     // Upstream-first: every donor of a cell is handled before the cell itself.
     for &i in routing.order.iter().rev() {
         let i = i as usize;
@@ -251,7 +266,13 @@ fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &
     let point = |i: usize| {
         let (x, z) = w.center(i);
         let lake = lake_depth[i] >= LAKE_MIN_DEPTH_M;
-        RiverPoint { x, z, bed: w.h[i], water: routing.filled[i], in_lake: lake as u8 as f64 }
+        RiverPoint {
+            x,
+            z,
+            bed: w.h[i],
+            water: routing.filled[i],
+            in_lake: lake as u8 as f64,
+        }
     };
     let mut rivers = Vec::new();
     let mut max_order = 0;
@@ -274,10 +295,22 @@ fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &
             points.push(point(cur));
         } else if w.ocean[cur] {
             let (x, z) = w.center(cur);
-            points.push(RiverPoint { x, z, bed: 0.0, water: 0.0, in_lake: 0.0 });
+            points.push(RiverPoint {
+                x,
+                z,
+                bed: 0.0,
+                water: 0.0,
+                in_lake: 0.0,
+            });
         } else if w.outlet[cur] {
             let (x, z) = w.center(cur);
-            points.push(RiverPoint { x, z, bed: w.h[cur], water: w.h[cur], in_lake: 0.0 });
+            points.push(RiverPoint {
+                x,
+                z,
+                bed: w.h[cur],
+                water: w.h[cur],
+                in_lake: 0.0,
+            });
         }
         // On a wrapping world a reach may step across the seam (x = width
         // beside x = 0): smooth it unwrapped, then fold every point back, so
@@ -315,8 +348,15 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
     let level = route(w, 0.0).filled;
     let lake_depth: Vec<f64> = (0..w.cells()).map(|i| level[i] - w.h[i]).collect();
     let land: Vec<usize> = routing.order.iter().map(|&i| i as usize).collect();
-    let surface_rock: Vec<u8> =
-        (0..w.cells()).map(|i| if w.ocean[i] { 0 } else { geo.surface_rock(w, i) }).collect();
+    let surface_rock: Vec<u8> = (0..w.cells())
+        .map(|i| {
+            if w.ocean[i] {
+                0
+            } else {
+                geo.surface_rock(w, i)
+            }
+        })
+        .collect();
 
     let slope_of = |i: usize| {
         let rc = routing.receiver[i] as usize;
@@ -345,10 +385,21 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
         }
     }
     let width = w.nx as f64 * w.dx;
-    let along_x = |a: f64, b: f64| if w.wrap_x { seam_dx(b - a, width) } else { b - a };
+    let along_x = |a: f64, b: f64| {
+        if w.wrap_x {
+            seam_dx(b - a, width)
+        } else {
+            b - a
+        }
+    };
     let channel_m: f64 = rivers
         .iter()
-        .map(|r| r.points.windows(2).map(|p| (along_x(p[0].x, p[1].x).powi(2) + (p[1].z - p[0].z).powi(2)).sqrt()).sum::<f64>())
+        .map(|r| {
+            r.points
+                .windows(2)
+                .map(|p| (along_x(p[0].x, p[1].x).powi(2) + (p[1].z - p[0].z).powi(2)).sqrt())
+                .sum::<f64>()
+        })
         .sum();
 
     // Flint's law S ~ Q^-theta (theta = m/n = 0.5 at steady state in uniform
@@ -365,8 +416,11 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
             (s > 1.0e-6).then(|| (q[i].ln(), s.ln()))
         })
         .collect();
-    let hack: Vec<(f64, f64)> =
-        fluvial.iter().filter(|&&i| length[i] > 0.0).map(|&i| (q[i].ln(), length[i].ln())).collect();
+    let hack: Vec<(f64, f64)> = fluvial
+        .iter()
+        .filter(|&&i| length[i] > 0.0)
+        .map(|&i| (q[i].ln(), length[i].ln()))
+        .collect();
     let fits = slope_area.len() > 100 && hack.len() > 100;
 
     let cell_km2 = w.dx * w.dx / 1.0e6;
@@ -393,20 +447,36 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
         slopes: [0.5, 0.9, 0.99, 1.0].map(|p| percentile(&slopes, p)),
         lake_count: lakes.len(),
         largest_lake_km2: lakes.iter().map(|l| l.area_m2).fold(0.0, f64::max) / 1.0e6,
-        depression_km3: land.iter().map(|&i| lake_depth[i].max(0.0) * w.dx * w.dx).sum::<f64>() / 1.0e9,
+        depression_km3: land
+            .iter()
+            .map(|&i| lake_depth[i].max(0.0) * w.dx * w.dx)
+            .sum::<f64>()
+            / 1.0e9,
         mouths,
         channel_km: channel_m / 1000.0,
         longest_river_km: longest / 1000.0,
         biggest_basin_km2: biggest / 1.0e6,
         max_order,
-        theta: if fits { -regress(&slope_area) } else { f64::NAN },
+        theta: if fits {
+            -regress(&slope_area)
+        } else {
+            f64::NAN
+        },
         hack: if fits { regress(&hack) } else { f64::NAN },
         buildable_km2: buildable as f64 * cell_km2,
         rock_shares,
         margin_drowned: w.margin_drowned,
         river_min_discharge_m2: k.river_min_discharge_m2,
     };
-    Analysis { routing, q, lake_depth, surface_rock, lakes, rivers, stats }
+    Analysis {
+        routing,
+        q,
+        lake_depth,
+        surface_rock,
+        lakes,
+        rivers,
+        stats,
+    }
 }
 
 pub fn print_report(label: &str, dx: f64, s: &Stats) {
@@ -471,7 +541,11 @@ pub fn objects_json(w: &World, a: &Analysis) -> String {
             s,
             "{}\n    {{\"level\": {:.2}, \"area_m2\": {:.0}, \"max_depth\": {:.2}, \"outlet\": [{:.1}, {:.1}]}}",
             if k == 0 { "" } else { "," },
-            l.level, l.area_m2, l.max_depth, l.outlet.0, l.outlet.1
+            l.level,
+            l.area_m2,
+            l.max_depth,
+            l.outlet.0,
+            l.outlet.1
         );
     }
     s.push_str("\n  ],\n  \"rivers\": [");
@@ -480,14 +554,19 @@ pub fn objects_json(w: &World, a: &Analysis) -> String {
             s,
             "{}\n    {{\"order\": {}, \"discharge_m2\": {:.0}, \"width_m\": {:.1}, \"points\": [",
             if k == 0 { "" } else { "," },
-            r.order, r.discharge_m2, r.width_m
+            r.order,
+            r.discharge_m2,
+            r.width_m
         );
         for (j, p) in r.points.iter().enumerate() {
             let _ = write!(
                 s,
                 "{}[{:.1}, {:.1}, {:.2}, {:.2}]",
                 if j == 0 { "" } else { ", " },
-                p.x, p.z, p.bed, p.water
+                p.x,
+                p.z,
+                p.bed,
+                p.water
             );
         }
         s.push_str("]}");

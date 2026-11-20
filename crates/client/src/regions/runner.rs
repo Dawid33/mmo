@@ -8,10 +8,10 @@ use game::{
     HaloEntityMsg, ReconcileStats, Region, RegionCoords, RegionId, SlotInbox,
 };
 use log::info;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::clock::ticks_due;
+use crate::perf_clock::MonotonicInstant;
 
 /// One instruction for one region.
 #[derive(Debug)]
@@ -79,8 +79,7 @@ pub enum RegionReport {
         #[cfg(not(target_arch = "wasm32"))]
         perf: game::RegionTickPerf,
         /// Wall time of this one forward tick (zero when sat out; replays
-        /// are not in it). The F3 Debug tab's per-region tick times.
-        #[cfg(not(target_arch = "wasm32"))]
+        /// are not in it). The F3 debug pane's per-region tick times.
         took: Duration,
     },
     Reconciled {
@@ -99,7 +98,10 @@ pub enum RegionReport {
     /// back as `RegionOutput::Forward`: inputs follow the body.
     Forward(GameEventKind),
     Pong(u64),
-    StateHash { tick: game::Tick, hash: u32 },
+    StateHash {
+        tick: game::Tick,
+        hash: u32,
+    },
     Failed(GameError),
 }
 
@@ -114,6 +116,13 @@ pub struct HomeView {
     /// The block the local player is mining and how far along (Adventure;
     /// drawn on the crosshair).
     pub mining: Option<game::MiningView>,
+    /// Every block a client of this region is mining or left damaged (the
+    /// renderer's cracks and wobble).
+    pub damage: Vec<game::BlockDamageView>,
+    /// Per damaged tree block (the lead): the blocks a chop there brings
+    /// down (`Rollback::shake_blocks`), shaken with it. Shared with
+    /// [`RunnerState`]'s cache, so comparing two views is a pointer check.
+    pub shake: Vec<(game::edit::BlockPos, ShakeSet)>,
     pub mode: game::PlayMode,
     pub inventory_open: bool,
     /// The local player's 36 slots and the stack on its cursor (the
@@ -125,6 +134,9 @@ pub struct HomeView {
     /// Unconfirmed predictions (the death-spiral signal).
     pub log_len: usize,
 }
+
+/// The blocks that shake with one chopped block.
+pub type ShakeSet = std::sync::Arc<Vec<(game::edit::BlockPos, game::Block)>>;
 
 /// A region's fixed context: who it runs for and where it reports to.
 #[derive(Clone)]
@@ -159,6 +171,11 @@ pub struct RunnerState {
     inbox: SlotInbox,
     collider_debug: game::ColliderDebug,
     last_view: Option<HomeView>,
+    /// The shake set of each damaged tree block, by (lead, its block): a
+    /// whole-tree flood, so computed once per lead and kept while it is
+    /// listed. A tree that changes meanwhile shakes by the old set (what
+    /// goes when it is felled is the sim's `TreeFelled`, not this).
+    shake_cache: Vec<((game::edit::BlockPos, game::Block), ShakeSet)>,
 }
 
 /// Run `cmd` on `region`, appending its reports to `out`. Returns false after
@@ -186,7 +203,7 @@ pub fn handle(
         }
         RegionCmd::ServerEvent(event, hash) => {
             #[cfg(not(target_arch = "wasm32"))]
-            let start = Instant::now();
+            let start = std::time::Instant::now();
             if let Some((tick, hash)) = hash {
                 region.expect_state_hash(event.id, tick, hash);
             }
@@ -209,7 +226,11 @@ pub fn handle(
         }
         RegionCmd::Predict(kind) => {
             let has_body = region.data().player_entites.contains_key(&ctx.client_id);
-            let arrives = if has_body { None } else { local_arrival_held(st, ctx.client_id) };
+            let arrives = if has_body {
+                None
+            } else {
+                local_arrival_held(st, ctx.client_id)
+            };
             if let Some((stamp, id)) = arrives {
                 st.inbox.push_after_arrival(kind, stamp, id);
             } else if st.player_departed && !has_body {
@@ -240,8 +261,14 @@ pub fn handle(
                     at[2] + dz as f32 * game::REGION_SIZE,
                 ];
                 let data = region.data();
-                let lines = st.collider_debug.collect(&*data.physics.bodies, &*data.physics.colliders, viewer_local);
-                let _ = ctx.client_event_send.send(ClientUpdateEvent::DebugLines(ctx.id, lines));
+                let lines = st.collider_debug.collect(
+                    &*data.physics.bodies,
+                    &*data.physics.colliders,
+                    viewer_local,
+                );
+                let _ = ctx
+                    .client_event_send
+                    .send(ClientUpdateEvent::DebugLines(ctx.id, lines));
             }
         }
         RegionCmd::Ping(n) => out.push(RegionReport::Pong(n)),
@@ -250,7 +277,7 @@ pub fn handle(
             hash: game::state_hash(region.data()),
         }),
     }
-    let view = home_view(region, ctx.client_id);
+    let view = home_view(region, ctx.client_id, &mut st.shake_cache);
     if view != st.last_view {
         st.last_view = view.clone();
         out.push(RegionReport::View(view));
@@ -270,7 +297,6 @@ fn sat_out(region: &Region, out: &mut Vec<RegionReport>) {
         stamp: region.current_tick(),
         #[cfg(not(target_arch = "wasm32"))]
         perf: game::RegionTickPerf::default(),
-        #[cfg(not(target_arch = "wasm32"))]
         took: Duration::ZERO,
     });
 }
@@ -284,18 +310,19 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     let now = region.current_tick();
     for kind in st.inbox.drain_due(now) {
         if let Some(client) = kind.input_client() {
-            debug_assert_eq!(client, ctx.client_id, "only the local client's inputs are queued here");
+            debug_assert_eq!(
+                client, ctx.client_id,
+                "only the local client's inputs are queued here"
+            );
             predict(region, ctx, kind, out);
         } else {
             apply_transfer(region, kind);
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    let start = Instant::now();
+    let start = MonotonicInstant::now();
     if let Err(e) = region.handle_event(GameEventKind::Tick) {
         log::warn!("region {:?} tick failed: {e:?}", ctx.id);
     }
-    #[cfg(not(target_arch = "wasm32"))]
     let took = start.elapsed();
     // Read right after the tick: the buffers hold this tick's scan only
     // (a reconcile replay overwrites them with stale scans, never read).
@@ -315,7 +342,6 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
         stamp,
         #[cfg(not(target_arch = "wasm32"))]
         perf: region.take_tick_perf(),
-        #[cfg(not(target_arch = "wasm32"))]
         took,
     });
 }
@@ -336,10 +362,15 @@ fn predict(region: &mut Region, ctx: &RunnerCtx, kind: GameEventKind, out: &mut 
     match region.handle_event(kind) {
         Ok(event) => {
             if is_input {
-                info!("[client] predicted PlayerInput id={} in home {:?}; sending to server", event.id, ctx.id);
+                info!(
+                    "[client] predicted PlayerInput id={} in home {:?}; sending to server",
+                    event.id, ctx.id
+                );
             }
             let packet = ClientPacket::GameEventAfterTick(event, after_tick);
-            let _ = ctx.server_send.send(crate::connections::Outgoing::Home(packet));
+            let _ = ctx
+                .server_send
+                .send(crate::connections::Outgoing::Home(packet));
         }
         Err(e) => out.push(RegionReport::Failed(e)),
     }
@@ -366,7 +397,10 @@ fn apply_transfer(region: &mut Region, kind: GameEventKind) {
     let resident = matches!(&kind, GameEventKind::EntityArrived(b) if region.data().entity_by_id(b.id).is_some());
     if resident {
         if let GameEventKind::EntityArrived(bundle) = &kind {
-            log::debug!("[client] predicted arrival of {:?} dropped: already here", bundle.id);
+            log::debug!(
+                "[client] predicted arrival of {:?} dropped: already here",
+                bundle.id
+            );
         }
     } else {
         let _ = region.handle_event(kind);
@@ -378,9 +412,15 @@ fn take_transfers(
     region: &mut Region,
     st: &mut RunnerState,
     ctx: &RunnerCtx,
-) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(HaloEntityMsg, RegionCoords)>) {
+) -> (
+    Vec<(EntityBundle, RegionCoords)>,
+    Vec<(HaloEntityMsg, RegionCoords)>,
+) {
     let (departures, halo_entities) = region.take_transfers();
-    if departures.iter().any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(ctx.client_id)) {
+    if departures
+        .iter()
+        .any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(ctx.client_id))
+    {
         st.player_departed = true;
     }
     (departures, halo_entities)
@@ -395,15 +435,38 @@ fn body_translation(region: &Region, client: ClientId) -> Option<[f32; 3]> {
 }
 
 /// The view of `client` this region holds (`None`: no `Client` entry here).
-fn home_view(region: &Region, client: ClientId) -> Option<HomeView> {
+fn home_view(
+    region: &Region,
+    client: ClientId,
+    shake_cache: &mut Vec<((game::edit::BlockPos, game::Block), ShakeSet)>,
+) -> Option<HomeView> {
     let data = region.data();
     let c = data.clients.get(&client)?;
+    let damage = data.block_damage_views(region.current_tick() as u64);
+    shake_cache.retain(|(k, _)| damage.iter().any(|v| (v.target, v.block) == *k));
+    let mut shake = Vec::new();
+    for v in damage.iter().filter(|v| v.block.tree_id() != 0) {
+        let key = (v.target, v.block);
+        let set = match shake_cache.iter().find(|(k, _)| *k == key) {
+            Some((_, set)) => set.clone(),
+            None => {
+                let set: ShakeSet = std::sync::Arc::new(data.shake_blocks(v.target));
+                shake_cache.push((key, set.clone()));
+                set
+            }
+        };
+        if !set.is_empty() {
+            shake.push((v.target, set));
+        }
+    }
     Some(HomeView {
         tick: region.current_tick(),
         translation: body_translation(region, client),
         fps_cam_mode: c.fps_cam_mode,
         hotbar: game::build_hotbar(data, client),
         mining: game::mining_view(c, region.current_tick() as u64),
+        damage,
+        shake,
         mode: c.mode,
         inventory_open: c.inventory_open,
         inventory: c.inventory.clone(),
@@ -412,4 +475,3 @@ fn home_view(region: &Region, client: ClientId) -> Option<HomeView> {
         log_len: region.pending_event_ids().len(),
     })
 }
-

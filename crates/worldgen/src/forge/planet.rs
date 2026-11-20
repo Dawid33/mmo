@@ -12,7 +12,7 @@ use std::time::Instant;
 use crate::forge::belts::{self, Belt, Continent, PlanetScore};
 use crate::forge::periodic::PeriodicX;
 use crate::forge::plate_sim::{self, Counters};
-use crate::forge::world::{smoothstep, ForgeParams};
+use crate::forge::world::{ForgeParams, smoothstep};
 use crate::noise::OctaveNoise;
 
 /// Young vs middle belt boundary, My.
@@ -55,7 +55,10 @@ pub fn planet_lat_deg(cz: usize) -> f64 {
 /// Degrees east of the west edge / south of the north edge of a cell's centre: ((cx + 0.5) * DEG, (cz + 0.5) * DEG).
 pub fn planet_deg(c: usize) -> (f64, f64) {
     let (cx, cz) = (c % PLANET_NX, c / PLANET_NX);
-    ((cx as f64 + 0.5) * PLANET_DEG_PER_CELL, (cz as f64 + 0.5) * PLANET_DEG_PER_CELL)
+    (
+        (cx as f64 + 0.5) * PLANET_DEG_PER_CELL,
+        (cz as f64 + 0.5) * PLANET_DEG_PER_CELL,
+    )
 }
 
 /// The kind of crust of a planet cell (stored bytes: append only).
@@ -91,13 +94,13 @@ pub struct PlanetKey {
     pub ocean_margin_start: f64,
 }
 
-/// The five plate numbers until they are knobs (Task 7): land_fraction 0.32, plate_duration_my 450.0,
-/// rift_rate 1.0, microcontinents 4.0, belt_decay_my 120.0.
+/// The five plate numbers until they are knobs (Task 7): land_fraction 0.29, plate_duration_my 450.0,
+/// rift_rate 1.0, microcontinents 3.0, belt_decay_my 120.0.
 pub const KEY_DEFAULTS: [(&str, f64); 5] = [
-    ("land_fraction", 0.32),
+    ("land_fraction", 0.29),
     ("plate_duration_my", 450.0),
     ("rift_rate", 1.0),
-    ("microcontinents", 4.0),
+    ("microcontinents", 3.0),
     ("belt_decay_my", 120.0),
 ];
 
@@ -105,7 +108,11 @@ impl PlanetKey {
     /// The seed and `ocean_margin_start` from `p`; the rest `KEY_DEFAULTS` until Task 7.
     pub fn of(p: &ForgeParams) -> PlanetKey {
         let default = |name: &str| {
-            KEY_DEFAULTS.iter().find(|(k, _)| *k == name).map(|&(_, v)| v).expect("a KEY_DEFAULTS name")
+            KEY_DEFAULTS
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|&(_, v)| v)
+                .expect("a KEY_DEFAULTS name")
         };
         PlanetKey {
             seed: p.seed,
@@ -139,14 +146,17 @@ impl PlanetNoise {
     }
 
     pub fn at(&self, lon_deg: f64, lat_deg: f64) -> f64 {
-        self.wrap.sample(lon_deg, lat_deg, |x, z| self.noise.sample2(x * self.scale, z * self.scale))
+        self.wrap.sample(lon_deg, lat_deg, |x, z| {
+            self.noise.sample2(x * self.scale, z * self.scale)
+        })
     }
 }
 
 /// The 64-bit finaliser `world::hash01` uses, without its last shift: z = seed ^ a*0x9E3779B97F4A7C15 ^
 /// b*0xC2B2AE3D27D4EB4F; z = (z ^ z>>30)*0xBF58476D1CE4E5B9; z = (z ^ z>>27)*0x94D049BB133111EB; z ^ z>>31.
 pub fn mix64(seed: u64, a: u64, b: u64) -> u64 {
-    let mut z = seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    let mut z =
+        seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
@@ -170,7 +180,11 @@ pub fn age_weight(age_my: f64) -> f64 {
     if !age_my.is_finite() {
         1.0
     } else {
-        smoothstep(YOUNG_MAX_MY, OLD_MIN_MY, age_my.clamp(YOUNG_MAX_MY, OLD_MIN_MY))
+        smoothstep(
+            YOUNG_MAX_MY,
+            OLD_MIN_MY,
+            age_my.clamp(YOUNG_MAX_MY, OLD_MIN_MY),
+        )
     }
 }
 
@@ -208,7 +222,11 @@ fn solve_sea_level_m(elev_abs: &[f64], key: &PlanetKey) -> f64 {
     if hi > lo {
         lo + 0.5 * (hi - lo)
     } else {
-        let prev = inside_vals[..n - target].iter().rev().copied().find(|&v| v < hi);
+        let prev = inside_vals[..n - target]
+            .iter()
+            .rev()
+            .copied()
+            .find(|&v| v < hi);
         let eps = prev.map_or(1e-5, |p| 0.5 * (hi - p).min(1e-5));
         hi - eps
     }
@@ -310,7 +328,10 @@ impl Planet {
     /// One attempt: simulate with `plate_seed(key.seed, attempt)`, derive every field, label and score.
     pub fn build(key: &PlanetKey, attempt: u8) -> Planet {
         let t0 = Instant::now();
-        let sim_key = PlanetKey { seed: plate_seed(key.seed, attempt), ..*key };
+        let sim_key = PlanetKey {
+            seed: plate_seed(key.seed, attempt),
+            ..*key
+        };
         let state = plate_sim::simulate(&sim_key, 0, &mut |_| {});
         let t_end = state.time_my();
 
@@ -351,8 +372,13 @@ impl Planet {
             let k = state.kind[c];
             let k_idx = usize::from(k);
             let age = f64::from(orogeny_age_my[c]);
-            let decay = if k == OrogenyKind::Hotspot as u8 { HOTSPOT_DECAY_MY } else { key.belt_decay_my };
-            uplift_raw[c] = (KIND_UPLIFT[k_idx] * f64::from(state.strength[c]) * activity(age, decay)) as f32;
+            let decay = if k == OrogenyKind::Hotspot as u8 {
+                HOTSPOT_DECAY_MY
+            } else {
+                key.belt_decay_my
+            };
+            uplift_raw[c] =
+                (KIND_UPLIFT[k_idx] * f64::from(state.strength[c]) * activity(age, decay)) as f32;
             root_raw[c] = ((thickness_km[c] - 35.0) / 33.0).clamp(0.0, 1.0);
             if k == OrogenyKind::Arc as u8
                 || k == OrogenyKind::Andean as u8

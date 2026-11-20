@@ -6,9 +6,9 @@ use bevy::math::Vec3A;
 use bevy::mesh::Mesh;
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, Task};
-pub use game::lod::{build_far_lod_cells, downsample2, LodCell};
+use bevy::tasks::{Task, block_on, futures_lite::future};
 use game::Voxel;
+pub use game::lod::{LodCell, build_far_lod_cells, downsample2};
 
 use super::super::block_textures::BlockTextureLayers;
 use super::super::voxel_material::StandardVoxelMaterial;
@@ -64,7 +64,10 @@ pub(crate) fn lod_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>
 /// [`lod_quads`] for a streamed LOD cell (a key's grid, wired to the other
 /// grids of its key): the same mesh without the underside of the terrain's
 /// crust (`neighbors::fill_under_crust`).
-pub(crate) fn lod_cell_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>) -> Vec<Quad> {
+pub(crate) fn lod_cell_quads(
+    grid: &[Voxel],
+    neighbors: &BTreeMap<[i32; 3], &[Voxel]>,
+) -> Vec<Quad> {
     let mut padded = gather_padded(grid, neighbors);
     super::neighbors::fill_under_crust(&mut padded, neighbors);
     padded_lod_quads(&padded)
@@ -95,7 +98,11 @@ fn wall_below(p: &super::binary::PaddedVoxels, q: &Quad) -> bool {
     };
     // Padded coords: grid + 1. The row below the quad's bottom is min.y - 1.
     let y = q.min[1] as usize; // (min.y - 1) + 1
-    let (lo, len) = if axis == 0 { (q.min[2], q.h) } else { (q.min[0], q.w) };
+    let (lo, len) = if axis == 0 {
+        (q.min[2], q.h)
+    } else {
+        (q.min[0], q.w)
+    };
     (lo..lo + len).any(|t| {
         let mut c = [q.min[0] as usize + 1, y, q.min[2] as usize + 1];
         c[if axis == 0 { 2 } else { 0 }] = t as usize + 1;
@@ -135,9 +142,13 @@ impl super::super::compute::ComputeJob for LodMeshJob {
 
     fn run(self) -> MeshWire {
         let grid = decode_lod_grid(&self.packed);
-        let neigh: BTreeMap<[i32; 3], Vec<Voxel>> =
-            self.neighbors.iter().map(|(&off, packed)| (off, decode_lod_grid(packed))).collect();
-        let neighbor_refs: BTreeMap<[i32; 3], &[Voxel]> = neigh.iter().map(|(&k, v)| (k, v.as_slice())).collect();
+        let neigh: BTreeMap<[i32; 3], Vec<Voxel>> = self
+            .neighbors
+            .iter()
+            .map(|(&off, packed)| (off, decode_lod_grid(packed)))
+            .collect();
+        let neighbor_refs: BTreeMap<[i32; 3], &[Voxel]> =
+            neigh.iter().map(|(&k, v)| (k, v.as_slice())).collect();
         mesh_lod_output(&grid, &neighbor_refs, &self.layers, self.pull)
     }
 }
@@ -319,7 +330,12 @@ pub fn spawn_lod_mesh_tasks(
                 }
             }
         }
-        let job = LodMeshJob { packed: voxels.0.clone(), neighbors: packed_neigh, layers: layers.clone(), pull };
+        let job = LodMeshJob {
+            packed: voxels.0.clone(),
+            neighbors: packed_neigh,
+            layers: layers.clone(),
+            pull,
+        };
         let task = super::super::compute::spawn(job, MeshWire::into_output);
         commands.entity(e).insert(LodMeshTask(task));
     }
@@ -369,7 +385,10 @@ pub fn apply_lod_meshes(
             ec.insert(super::lod_tiles::LodTileDirty);
             match records {
                 Some(records) => {
-                    ec.insert((super::chunk_mesh::BrickRecords(std::sync::Arc::new(records)), TerrainQuadCount(quad_count)));
+                    ec.insert((
+                        super::chunk_mesh::BrickRecords(std::sync::Arc::new(records)),
+                        TerrainQuadCount(quad_count),
+                    ));
                 }
                 None => {
                     ec.remove::<(super::chunk_mesh::BrickRecords, TerrainQuadCount)>();
@@ -380,9 +399,10 @@ pub fn apply_lod_meshes(
         ec.insert(LodRasterReady);
         let (records, mesh) = match (per_chunk, records) {
             // No tile to join: draws its own records.
-            (true, Some(records)) => {
-                (None, super::chunk_mesh::records_to_mesh_data(&records).map(emit::MeshData::into_mesh))
-            }
+            (true, Some(records)) => (
+                None,
+                super::chunk_mesh::records_to_mesh_data(&records).map(emit::MeshData::into_mesh),
+            ),
             (_, records) => (records, mesh),
         };
         if let Some(records) = records {
@@ -433,8 +453,8 @@ pub fn apply_lod_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    use game::{BlockId, BRICK_VOXEL_COUNT};
+
+    use game::{BRICK_VOXEL_COUNT, BlockId};
 
     /// Two side quads on the same plane, facing the same way, whose rects
     /// overlap: coplanar duplicates that z-fight (flicker) under any camera
@@ -478,7 +498,10 @@ mod tests {
         }
         let quads = lod_quads(&grid, &BTreeMap::new());
         let overlaps = overlapping_side_quads(&quads);
-        assert!(overlaps.is_empty(), "coplanar overlapping side quads: {overlaps:?}");
+        assert!(
+            overlaps.is_empty(),
+            "coplanar overlapping side quads: {overlaps:?}"
+        );
         // The floor seam is still covered: border walls reach biased y=0.
         for face in [Face::PosX, Face::NegX, Face::PosZ, Face::NegZ] {
             assert!(
@@ -496,9 +519,8 @@ mod tests {
     // `Transform { translation: local_origin - Y*factor, scale: splat(factor) }`
     // plus `(LodChunk, LodVoxelData, Visibility::default())`.
 
-    use super::super::queue::tests::{pipeline_app, wait_until};
     use super::super::queue::MeshBudgets;
-    
+    use super::super::queue::tests::{pipeline_app, wait_until};
 
     /// A solid floor at y=0 across the whole 32³ grid: enough content for
     /// `mesh_lod_grid` to produce a mesh, simple enough to reason about.
@@ -554,7 +576,15 @@ mod tests {
         });
         let budget = app.world().resource::<MeshBudgets>().max_in_flight;
         let cells: Vec<Entity> = (0..budget * 3)
-            .map(|i| spawn_lod_chunk(&mut app, Vec3::ZERO, Vec3::X * 64.0 * i as f32, 2, floor_grid()))
+            .map(|i| {
+                spawn_lod_chunk(
+                    &mut app,
+                    Vec3::ZERO,
+                    Vec3::X * 64.0 * i as f32,
+                    2,
+                    floor_grid(),
+                )
+            })
             .collect();
 
         let all_ready = |app: &mut App| {

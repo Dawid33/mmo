@@ -12,12 +12,24 @@ pub const DAYS_PER_YEAR: u64 = DAYS_PER_MONTH * MONTHS_PER_YEAR;
 
 /// Dwarf Fortress's month names.
 pub const MONTH_NAMES: [&str; MONTHS_PER_YEAR as usize] = [
-    "Granite", "Slate", "Felsite", "Hematite", "Malachite", "Galena", "Limestone", "Sandstone",
-    "Timber", "Moonstone", "Opal", "Obsidian",
+    "Granite",
+    "Slate",
+    "Felsite",
+    "Hematite",
+    "Malachite",
+    "Galena",
+    "Limestone",
+    "Sandstone",
+    "Timber",
+    "Moonstone",
+    "Opal",
+    "Obsidian",
 ];
 
 /// A point on the world calendar, in sim ticks since year 0.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
 pub struct CalendarTick(pub u64);
 
 /// A calendar date.
@@ -32,7 +44,13 @@ pub struct Date {
 
 impl std::fmt::Display for Date {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {} {}", self.day, MONTH_NAMES[(self.month - 1) as usize], self.year)
+        write!(
+            f,
+            "{} {} {}",
+            self.day,
+            MONTH_NAMES[(self.month - 1) as usize],
+            self.year
+        )
     }
 }
 

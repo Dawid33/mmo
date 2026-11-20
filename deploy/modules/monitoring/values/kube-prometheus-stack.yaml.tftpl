@@ -396,20 +396,20 @@ additionalPrometheusRulesMap:
               summary: "{{ $labels.pod }} restarts repeatedly"
               description: "Container {{ $labels.container }} of {{ $labels.namespace }}/{{ $labels.pod }} restarted more than 3 times in 15 minutes."
 
-          - alert: WorldBackupFailed
+          - alert: PostgresBackupFailed
             # Only Jobs started in the last day: a failed Job is retained (history limit) after a later
             # success, and must not keep the alert firing; the next nightly run decides again.
             expr: |
-              kube_job_status_failed{namespace="postgres", job_name=~"pg-dump.*"} > 0
+              kube_job_status_failed{namespace=~"postgres|pg-management", job_name=~"pg-dump.*"} > 0
               and on (namespace, job_name)
-              (time() - kube_job_status_start_time{namespace="postgres", job_name=~"pg-dump.*"} < 86400)
+              (time() - kube_job_status_start_time{namespace=~"postgres|pg-management", job_name=~"pg-dump.*"} < 86400)
             for: 0m
             labels:
               severity: warning
               cluster: ${cluster}
             annotations:
               summary: "A Postgres backup job failed"
-              description: "Job {{ $labels.job_name }} in namespace postgres, started in the last day, has failed pods."
+              description: "Job {{ $labels.job_name }} in namespace {{ $labels.namespace }}, started in the last day, has failed pods."
 
 prometheusOperator:
   resources:
@@ -448,6 +448,9 @@ prometheus:
           path: /metrics
           interval: 30s
   prometheusSpec:
+    enableRemoteWriteReceiver: true
+    enableFeatures:
+      - remote-write-receiver
     retention: ${retention}
     retentionSize: ${retention_size}
     externalLabels:
@@ -513,7 +516,7 @@ grafana:
   grafana.ini:
     server:
       domain: ${grafana_host}
-      root_url: https://${grafana_host}
+      root_url: ${grafana_url}
     auth.anonymous:
       enabled: false
 %{ if !grafana_password_login ~}
@@ -554,6 +557,7 @@ grafana:
       interval_hour: DD/MM HH:mm
       interval_day: DD/MM
       interval_month: MM/YYYY
+%{ if grafana_public ~}
   ingress:
     enabled: true
     ingressClassName: ${ingress_class}
@@ -565,6 +569,12 @@ grafana:
       - secretName: grafana-tls
         hosts:
           - ${grafana_host}
+%{ else ~}
+  # Not public: no Ingress. The operator VPN reaches the Service by the vpn-names
+  # name grafana_host (CoreDNS rewrite), over plain HTTP inside the tunnel.
+  ingress:
+    enabled: false
+%{ endif ~}
   sidecar:
     datasources:
       # The chart's own Prometheus datasource stays (direct, last ${retention}),
@@ -603,9 +613,25 @@ grafana:
           spanStartTimeShift: -5m
           spanEndTimeShift: 5m
           filterByTraceID: true
+          tags:
+            - key: namespace
+              value: k8s.namespace.name
+            - key: pod
+              value: k8s.pod.name
         tracesToProfiles:
           datasourceUid: pyroscope
           profileTypeId: process_cpu:cpu:nanoseconds:cpu:nanoseconds
+          # Trace resource attributes are the source of truth. Pyroscope uses
+          # Prometheus-compatible label names for the matching profile tags.
+          tags:
+            - key: service_name
+              value: service.name
+            - key: role
+              value: mmo.role
+            - key: world_id
+              value: mmo.world_id
+            - key: pod
+              value: k8s.pod.name
         serviceMap:
           datasourceUid: thanos
         nodeGraph:

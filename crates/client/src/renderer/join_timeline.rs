@@ -94,7 +94,11 @@ pub fn track_join_timeline(
     // Per session: a second world gets its own join timeline.
     mut state: crate::session::SessionLocal<JoinTimelineState>,
     // Paired: the function is at Bevy's 16-parameter limit.
-    (time, mut world_ready, frame): (Res<Time<Real>>, ResMut<WorldReady>, Option<Res<crate::wrap_frame::WrapFrame>>),
+    (time, mut world_ready, frame): (
+        Res<Time<Real>>,
+        ResMut<WorldReady>,
+        Option<Res<crate::wrap_frame::WrapFrame>>,
+    ),
     scale: Option<Res<WorldScale>>,
     hud: Res<HudStatus>,
     roots: Res<RegionRoots>,
@@ -132,12 +136,16 @@ pub fn track_join_timeline(
 
     let scale = scale.map(|s| *s).unwrap_or_default();
     if roots.0.len() >= scale.near_region_count() {
-        if let Some(viewer) = hud.viewer_region.filter(|v| state.expected_for != Some((*v, roots.0.len()))) {
+        if let Some(viewer) = hud
+            .viewer_region
+            .filter(|v| state.expected_for != Some((*v, roots.0.len())))
+        {
             state.expected_for = Some((viewer, roots.0.len()));
             // In the frame the instance asks LOD keys in: the viewer's copy
             // and the near regions where they are drawn.
             let frame = frame.as_deref().copied().unwrap_or_default();
-            let near: BTreeSet<game::RegionCoords> = roots.0.keys().filter_map(|rc| roots.alias(*rc)).collect();
+            let near: BTreeSet<game::RegionCoords> =
+                roots.0.keys().filter_map(|rc| roots.alias(*rc)).collect();
             let (_, keys) = crate::instance::desired_lod(
                 frame.alias(viewer),
                 &near,
@@ -219,7 +227,9 @@ pub fn track_join_timeline(
             depths.near_regions,
             depths.required_near_regions,
             depths.lod_roots,
-            depths.expected_lod_keys.map_or("?".to_string(), |n| n.to_string()),
+            depths
+                .expected_lod_keys
+                .map_or("?".to_string(), |n| n.to_string()),
             depths.remesh_queue,
             depths.lod_build_queue,
             depths.pending_lod_events,
@@ -276,14 +286,17 @@ fn log_lod_render_state(
         *slot = (*slot).max(quads);
     }
     for (entity, root) in &roots {
-        let name = names.get(*entity).map_or("?".to_string(), |n| n.as_str().replace(' ', "_"));
+        let name = names
+            .get(*entity)
+            .map_or("?".to_string(), |n| n.as_str().replace(' ', "_"));
         info!(
             "[perf-lod] root={name} cells={} raster_ready={} with_quads={} view_visible={} quads={}",
             root.cells, root.ready, root.with_quads, root.visible, root.quads
         );
-        let (Some(min_x), Some(max_x)) =
-            (root.map.keys().map(|k| k.0).min(), root.map.keys().map(|k| k.0).max())
-        else {
+        let (Some(min_x), Some(max_x)) = (
+            root.map.keys().map(|k| k.0).min(),
+            root.map.keys().map(|k| k.0).max(),
+        ) else {
             continue;
         };
         let (min_z, max_z) = (
@@ -302,4 +315,3 @@ fn log_lod_render_state(
         }
     }
 }
-

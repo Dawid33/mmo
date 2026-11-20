@@ -78,7 +78,11 @@ pub fn without_internal_edges(
                     if !leaning(j) {
                         continue;
                     }
-                    let outward = if normal1.vget(j) > 0.0 { probe.reach } else { -probe.reach };
+                    let outward = if normal1.vget(j) > 0.0 {
+                        probe.reach
+                    } else {
+                        -probe.reach
+                    };
                     p.vset(j, p.vget(j) + if j == i { outward } else { -outward });
                 }
                 (probe.is_solid)(p)
@@ -114,7 +118,12 @@ pub fn without_internal_edges(
 /// their gap along the line between their centres. Two support evaluations,
 /// against the GJK run it spares the many voxels under a shape's AABB that
 /// are nowhere near the shape itself.
-fn separation_bound(center: Vector, half_extents: Vector, pos12: &Pose, g2: &dyn SupportMap) -> Real {
+fn separation_bound(
+    center: Vector,
+    half_extents: Vector,
+    pos12: &Pose,
+    g2: &dyn SupportMap,
+) -> Real {
     let Some(dir) = (pos12.translation - center).try_normalize() else {
         return 0.0;
     };
@@ -249,8 +258,12 @@ where
                 // shape's frame translated by `center`: shift `witness1` back
                 // (#373). The normals and `witness2` are unaffected.
                 let witness1 = new_hit.witness1 + center;
-                let normal1 =
-                    without_internal_edges(new_hit.normal1, witness1, vox.state.free_faces(), probe);
+                let normal1 = without_internal_edges(
+                    new_hit.normal1,
+                    witness1,
+                    vox.state.free_faces(),
+                    probe,
+                );
                 if normal1 != new_hit.normal1 {
                     new_hit.normal1 = normal1;
                     new_hit.normal2 = pos12.rotation.inverse() * -normal1;

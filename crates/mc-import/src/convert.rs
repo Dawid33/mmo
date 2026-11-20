@@ -4,12 +4,12 @@
 //! Per-cell work is array lookups: each palette entry is classified once into small tables, flood fill
 //! and merge use bitsets and an explicit queue, nothing is allocated or looked up in a map per cell.
 
-use crate::classify::{classify, Class};
+use crate::classify::{Class, classify};
 use crate::report::Report;
-use crate::{BlockEntity, BlockVolume, ImportError, Table, Tag, MAPPING_VERSION};
+use crate::{BlockEntity, BlockVolume, ImportError, MAPPING_VERSION, Table, Tag};
 use game::prefab::{
-    FileBox, FileCarve, FileShape, FileShaped, GroundFit, ImportInfo, Marker, PrefabFile, PrefabMeta, Shape,
-    PREFAB_FORMAT,
+    FileBox, FileCarve, FileShape, FileShaped, GroundFit, ImportInfo, Marker, PREFAB_FORMAT,
+    PrefabFile, PrefabMeta, Shape,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -122,7 +122,9 @@ impl Grid<'_> {
     #[inline]
     fn flows(&self, x: usize, y: usize, z: usize) -> bool {
         let p = self.pid(x, y, z);
-        self.passable[p] && !self.door[p] && !(self.air[p] && y > 0 && self.door[self.pid(x, y - 1, z)])
+        self.passable[p]
+            && !self.door[p]
+            && !(self.air[p] && y > 0 && self.door[self.pid(x, y - 1, z)])
     }
     #[inline]
     fn tidx(&self, x: usize, y: usize, z: usize) -> usize {
@@ -135,7 +137,10 @@ impl Grid<'_> {
         if c != 0 {
             return c;
         }
-        if self.carve && self.carvable[p] && !self.reached.is_some_and(|r| r.get(self.tidx(x, y, z))) {
+        if self.carve
+            && self.carvable[p]
+            && !self.reached.is_some_and(|r| r.get(self.tidx(x, y, z)))
+        {
             return CARVE_CODE;
         }
         0
@@ -164,7 +169,10 @@ pub fn convert(
         )));
     }
     let (rmin, rmax) = match opts.region {
-        Some((a, b)) => (a.map(|v| v as usize), [0, 1, 2].map(|i| (b[i] as usize).min(size[i]))),
+        Some((a, b)) => (
+            a.map(|v| v as usize),
+            [0, 1, 2].map(|i| (b[i] as usize).min(size[i])),
+        ),
         None => ([0; 3], size),
     };
     if (0..3).any(|i| rmin[i] >= rmax[i]) {
@@ -192,14 +200,18 @@ pub fn convert(
             Class::Marker { kind, turn, solid } => {
                 let mut props = state.props.clone();
                 props.insert("mc".into(), state.name.clone());
-                markers_list.push(MarkerInfo { kind, turn, props, solid: solid.map(|s| intern(&mut names, &s)) });
+                markers_list.push(MarkerInfo {
+                    kind,
+                    turn,
+                    props,
+                    solid: solid.map(|s| intern(&mut names, &s)),
+                });
                 Kind::Marker((markers_list.len() - 1) as u32)
             }
         };
     }
-    let solid_of = |k: Kind| -> bool {
-        matches!(k, Kind::Block(_) | Kind::Shaped(_) | Kind::Marker(_))
-    };
+    let solid_of =
+        |k: Kind| -> bool { matches!(k, Kind::Block(_) | Kind::Shaped(_) | Kind::Marker(_)) };
     let mat_of = |k: Kind| -> u32 {
         match k {
             Kind::Block(m) => m,
@@ -262,7 +274,10 @@ pub fn convert(
     }
     let t = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let tcells = t[0] * t[1] * t[2];
-    debug_assert!(tcells <= u32::MAX as usize, "cell indices are narrowed to u32 for the flood fill queue");
+    debug_assert!(
+        tcells <= u32::MAX as usize,
+        "cell indices are narrowed to u32 for the flood fill queue"
+    );
 
     // Our palette, in order of first use; the merge code per palette entry.
     let mut palette: Vec<String> = Vec::new();
@@ -319,13 +334,14 @@ pub fn convert(
     if opts.air == AirMode::Auto {
         let mut bits = Bits::new(tcells);
         let mut queue: VecDeque<u32> = VecDeque::new();
-        let push = |bits: &mut Bits, q: &mut VecDeque<u32>, g: &Grid, x: usize, y: usize, z: usize| {
-            let i = g.tidx(x, y, z);
-            if !bits.get(i) && g.flows(x, y, z) {
-                bits.set(i);
-                q.push_back(i as u32);
-            }
-        };
+        let push =
+            |bits: &mut Bits, q: &mut VecDeque<u32>, g: &Grid, x: usize, y: usize, z: usize| {
+                let i = g.tidx(x, y, z);
+                if !bits.get(i) && g.flows(x, y, z) {
+                    bits.set(i);
+                    q.push_back(i as u32);
+                }
+            };
         for y in 0..t[1] {
             for z in 0..t[2] {
                 if y == 0 || y == t[1] - 1 || z == 0 || z == t[2] - 1 {
@@ -366,7 +382,8 @@ pub fn convert(
     }
 
     // Block entities by cell (volume coordinates): tens of thousands at most.
-    let entities: BTreeMap<[i32; 3], &BlockEntity> = volume.block_entities.iter().map(|e| (e.pos, e)).collect();
+    let entities: BTreeMap<[i32; 3], &BlockEntity> =
+        volume.block_entities.iter().map(|e| (e.pos, e)).collect();
 
     // Pass 2: merge boxes and carve boxes, emit shaped cells and markers, all in scan order.
     let mut claimed = Bits::new(tcells);
@@ -374,7 +391,10 @@ pub fn convert(
     let mut carve = Vec::new();
     let mut shaped = Vec::new();
     let mut markers = Vec::new();
-    let mut report = Report { cells: tcells as u64, ..Report::default() };
+    let mut report = Report {
+        cells: tcells as u64,
+        ..Report::default()
+    };
     for y in 0..t[1] {
         for z in 0..t[2] {
             for x in 0..t[0] {
@@ -385,7 +405,10 @@ pub fn convert(
                         let (shape, m) = &shaped_list[s as usize];
                         shaped.push(FileShaped {
                             at,
-                            shape: FileShape::Named { shape: *shape, mat: final_of[*m as usize] as u16 },
+                            shape: FileShape::Named {
+                                shape: *shape,
+                                mat: final_of[*m as usize] as u16,
+                            },
                         });
                     }
                     Kind::Marker(m) => {
@@ -402,7 +425,12 @@ pub fn convert(
                             }
                         }
                         *report.markers.entry(info.kind.clone()).or_insert(0) += 1;
-                        markers.push(Marker { at, kind: info.kind.clone(), turn: info.turn, props });
+                        markers.push(Marker {
+                            at,
+                            kind: info.kind.clone(),
+                            turn: info.turn,
+                            props,
+                        });
                     }
                     _ => {}
                 }
@@ -410,7 +438,9 @@ pub fn convert(
                 if c == 0 || claimed.get(grid.tidx(x, y, z)) {
                     continue;
                 }
-                let free = |x: usize, y: usize, z: usize| !claimed.get(grid.tidx(x, y, z)) && grid.merge_code(x, y, z) == c;
+                let free = |x: usize, y: usize, z: usize| {
+                    !claimed.get(grid.tidx(x, y, z)) && grid.merge_code(x, y, z) == c
+                };
                 let mut w = 1;
                 while x + w < t[0] && free(x + w, y, z) {
                     w += 1;
@@ -420,7 +450,8 @@ pub fn convert(
                     d += 1;
                 }
                 let mut h = 1;
-                while y + h < t[1] && (z..z + d).all(|zz| (x..x + w).all(|xx| free(xx, y + h, zz))) {
+                while y + h < t[1] && (z..z + d).all(|zz| (x..x + w).all(|xx| free(xx, y + h, zz)))
+                {
                     h += 1;
                 }
                 for yy in y..y + h {
@@ -436,7 +467,11 @@ pub fn convert(
                     carve.push(FileCarve { min: at, size: sz });
                     report.carved += vol;
                 } else {
-                    boxes.push(FileBox { min: at, size: sz, mat: (c - 1) as u16 });
+                    boxes.push(FileBox {
+                        min: at,
+                        size: sz,
+                        mat: (c - 1) as u16,
+                    });
                     report.blocks += vol;
                 }
             }
@@ -452,7 +487,10 @@ pub fn convert(
         match kinds[p] {
             Kind::Drop(why) => *report.dropped.entry(why.to_string()).or_insert(0) += n,
             Kind::Block(_) | Kind::Shaped(_) if !mapped[p] => {
-                *report.unmapped.entry(volume.palette[p].name.clone()).or_insert(0) += n;
+                *report
+                    .unmapped
+                    .entry(volume.palette[p].name.clone())
+                    .or_insert(0) += n;
             }
             _ => {}
         }
@@ -497,9 +535,16 @@ const PLAIN_SIGN_TEXT_FROM: i32 = 4325;
 /// The sign's text, and how many of its lines were non-empty yet unreadable. Lines are trimmed and
 /// whitespace-only ones dropped.
 fn sign_lines(nbt: &Tag, data_version: i32) -> (Option<String>, u64) {
-    let raw: Vec<&Tag> = match nbt.get("front_text").and_then(|f| f.get("messages")).and_then(Tag::as_list) {
+    let raw: Vec<&Tag> = match nbt
+        .get("front_text")
+        .and_then(|f| f.get("messages"))
+        .and_then(Tag::as_list)
+    {
         Some(msgs) => msgs.iter().take(4).collect(),
-        None => ["Text1", "Text2", "Text3", "Text4"].iter().filter_map(|k| nbt.get(k)).collect(),
+        None => ["Text1", "Text2", "Text3", "Text4"]
+            .iter()
+            .filter_map(|k| nbt.get(k))
+            .collect(),
     };
     let (mut lines, mut unparsed) = (Vec::new(), 0);
     for tag in raw {
@@ -528,7 +573,10 @@ fn sign_lines(nbt: &Tag, data_version: i32) -> (Option<String>, u64) {
 /// The plain text of a JSON text component: a string; an object's `text` followed by the text of each
 /// `extra` element; an array's elements concatenated. Anything else (garbage included) yields `None`.
 pub fn json_text(src: &str) -> Option<String> {
-    let mut p = Json { b: src.as_bytes(), i: 0 };
+    let mut p = Json {
+        b: src.as_bytes(),
+        i: 0,
+    };
     let out = p.component(0)?;
     p.ws();
     (p.i == p.b.len()).then_some(out)
@@ -586,14 +634,18 @@ impl Json<'_> {
                         b'u' => {
                             let hi = self.hex4()?;
                             let mut ch = char::from_u32(hi).unwrap_or('\u{fffd}');
-                            if (0xD800..0xDC00).contains(&hi) && self.b.get(self.i..self.i + 2) == Some(b"\\u") {
+                            if (0xD800..0xDC00).contains(&hi)
+                                && self.b.get(self.i..self.i + 2) == Some(b"\\u")
+                            {
                                 // Combine only with a following low surrogate; else the high one stays lone.
                                 let save = self.i;
                                 self.i += 2;
                                 match self.hex4() {
                                     Some(lo) if (0xDC00..0xE000).contains(&lo) => {
-                                        ch = char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))
-                                            .unwrap_or('\u{fffd}');
+                                        ch = char::from_u32(
+                                            0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00),
+                                        )
+                                        .unwrap_or('\u{fffd}');
                                     }
                                     _ => self.i = save,
                                 }
@@ -724,7 +776,8 @@ impl Json<'_> {
             _ => {
                 // number, true, false, null
                 let start = self.i;
-                while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'+' | b'.')) {
+                while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'+' | b'.'))
+                {
                     self.i += 1;
                 }
                 (self.i > start).then_some(())
@@ -732,4 +785,3 @@ impl Json<'_> {
         }
     }
 }
-

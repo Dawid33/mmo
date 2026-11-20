@@ -17,6 +17,8 @@ label="${1:?usage: fps_steady.sh <label> [KEY=VALUE ...]}"; shift
 mkdir -p target/fps-steady
 log="target/fps-steady/$label.log"
 export VOXEL_SKIP_MENU=1 DIAG=1 DIAG_INTERVAL=1
+# Measuring: the player's vsync setting (on by default) must not cap the frame rate.
+export VOXEL_VSYNC="${VOXEL_VSYNC:-off}"
 : "${WGPU_ADAPTER_NAME:=Intel}"; export WGPU_ADAPTER_NAME
 ./target/release/server > "target/fps-steady/$label.server.log" 2>&1 &
 server_pid=$!

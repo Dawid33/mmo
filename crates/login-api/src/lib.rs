@@ -184,13 +184,20 @@ pub const SPAWN_PENDING_TTL_SECS: u64 = 120;
 pub enum LoginToHost {
     /// A join was granted: the host admits exactly this epoch's ticket for the player (and
     /// parks any session of the player it has, newest-wins), then acks.
-    SpawnPlayer { player_token: String, session_epoch: u64 },
+    SpawnPlayer {
+        player_token: String,
+        session_epoch: u64,
+    },
     /// Revocation (logout everywhere, password reset): every session and spawn order of the
     /// player up to `session_epoch` (the newest join when it was revoked) is revoked — the host
     /// parks such a session, refusing it with `reason`, and drops such an order; a newer login
     /// is untouched. Durable: resent until [`HostToLogin::KickAck`]; applying it twice is the
     /// same as once.
-    Kick { player_token: String, session_epoch: u64, reason: String },
+    Kick {
+        player_token: String,
+        session_epoch: u64,
+        reason: String,
+    },
 }
 
 /// A world host to the login service: a row of the coordinator's `login_outbox`, read with `GET`
@@ -211,15 +218,27 @@ pub enum HostToLogin {
     },
     /// The session admitted with this epoch's ticket disconnected (durable in `login_outbox`
     /// until pruned).
-    SessionEnded { player_token: String, session_epoch: u64 },
+    SessionEnded {
+        player_token: String,
+        session_epoch: u64,
+    },
     /// The host applied the [`LoginToHost::Kick`] up to this epoch (sent for every copy).
-    KickAck { player_token: String, session_epoch: u64 },
+    KickAck {
+        player_token: String,
+        session_epoch: u64,
+    },
     /// Unsent since link protocol 12 (append-only enum): an order no host takes is answered 503
     /// [`COORD_REFUSED_NO_GATE`] by the coordinator's API.
-    NoGate { player_token: String, session_epoch: u64 },
+    NoGate {
+        player_token: String,
+        session_epoch: u64,
+    },
     /// Unsent since link protocol 12 (append-only enum): a spawn order while the world starts a
     /// host is answered 503 [`COORD_REFUSED_STARTING`] by the coordinator's API.
-    Starting { player_token: String, session_epoch: u64 },
+    Starting {
+        player_token: String,
+        session_epoch: u64,
+    },
 }
 
 /// One page of the coordinator's login answers (`GET` [`PATH_COORD_LOGIN_ANSWERS`]): `(seq,
@@ -237,12 +256,19 @@ impl std::fmt::Debug for LoginToHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let hidden = format_args!("{REDACTED}");
         match self {
-            LoginToHost::SpawnPlayer { player_token: _, session_epoch } => f
+            LoginToHost::SpawnPlayer {
+                player_token: _,
+                session_epoch,
+            } => f
                 .debug_struct("SpawnPlayer")
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
                 .finish(),
-            LoginToHost::Kick { player_token: _, session_epoch, reason } => f
+            LoginToHost::Kick {
+                player_token: _,
+                session_epoch,
+                reason,
+            } => f
                 .debug_struct("Kick")
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
@@ -256,7 +282,14 @@ impl std::fmt::Debug for HostToLogin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let hidden = format_args!("{REDACTED}");
         match self {
-            HostToLogin::SpawnAck { player_token: _, session_epoch, ok, quic, webtransport, cert_hash } => f
+            HostToLogin::SpawnAck {
+                player_token: _,
+                session_epoch,
+                ok,
+                quic,
+                webtransport,
+                cert_hash,
+            } => f
                 .debug_struct("SpawnAck")
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
@@ -265,22 +298,34 @@ impl std::fmt::Debug for HostToLogin {
                 .field("webtransport", webtransport)
                 .field("cert_hash", cert_hash)
                 .finish(),
-            HostToLogin::SessionEnded { player_token: _, session_epoch } => f
+            HostToLogin::SessionEnded {
+                player_token: _,
+                session_epoch,
+            } => f
                 .debug_struct("SessionEnded")
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
                 .finish(),
-            HostToLogin::KickAck { player_token: _, session_epoch } => f
+            HostToLogin::KickAck {
+                player_token: _,
+                session_epoch,
+            } => f
                 .debug_struct("KickAck")
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
                 .finish(),
-            HostToLogin::NoGate { player_token: _, session_epoch } => f
+            HostToLogin::NoGate {
+                player_token: _,
+                session_epoch,
+            } => f
                 .debug_struct("NoGate")
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
                 .finish(),
-            HostToLogin::Starting { player_token: _, session_epoch } => f
+            HostToLogin::Starting {
+                player_token: _,
+                session_epoch,
+            } => f
                 .debug_struct("Starting")
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
@@ -288,4 +333,3 @@ impl std::fmt::Debug for HostToLogin {
         }
     }
 }
-

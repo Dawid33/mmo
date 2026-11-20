@@ -1,9 +1,14 @@
-# Keycloak's own PostgreSQL: one pod, one volume. Deliberately NOT the CNPG
-# operator planned in envs/orion/platform, which is for the game world only.
-# Nothing backs it up yet.
+# Keycloak's old PostgreSQL and retained password. A verified move keeps the
+# volume and renames its password Secret while the live Keycloak Secret points
+# at the separate pg-management cluster.
 
 locals {
-  pg_labels = { "app.kubernetes.io/name" = "keycloak-postgres" }
+  pg_labels   = { "app.kubernetes.io/name" = "keycloak-postgres" }
+  db_host     = var.database == null ? kubernetes_service_v1.postgres[0].metadata[0].name : var.database.host
+  db_port     = var.database == null ? 5432 : var.database.port
+  db_name     = var.database == null ? "keycloak" : var.database.database
+  db_user     = var.database == null ? "keycloak" : var.database.user
+  db_password = var.database == null ? random_password.db.result : var.database.password
 }
 
 # Changing this does NOT change the password inside an existing volume.
@@ -18,11 +23,23 @@ resource "kubernetes_secret_v1" "db" {
     namespace = local.ns
   }
   data = {
+    password = local.db_password
+  }
+}
+
+resource "kubernetes_secret_v1" "db_old" {
+  count = var.own_postgres == "stopped" ? 1 : 0
+  metadata {
+    name      = "keycloak-db-old"
+    namespace = local.ns
+  }
+  data = {
     password = random_password.db.result
   }
 }
 
 resource "kubernetes_service_v1" "postgres" {
+  count = var.own_postgres == "absent" ? 0 : 1
   metadata {
     name      = "keycloak-postgres"
     namespace = local.ns
@@ -40,14 +57,15 @@ resource "kubernetes_service_v1" "postgres" {
 }
 
 resource "kubernetes_stateful_set_v1" "postgres" {
+  count = var.own_postgres == "absent" ? 0 : 1
   metadata {
     name      = "keycloak-postgres"
     namespace = local.ns
     labels    = local.pg_labels
   }
   spec {
-    service_name = kubernetes_service_v1.postgres.metadata[0].name
-    replicas     = 1
+    service_name = kubernetes_service_v1.postgres[0].metadata[0].name
+    replicas     = var.own_postgres == "running" ? 1 : 0
     selector {
       match_labels = local.pg_labels
     }
@@ -73,7 +91,7 @@ resource "kubernetes_stateful_set_v1" "postgres" {
             name = "POSTGRES_PASSWORD"
             value_from {
               secret_key_ref {
-                name = kubernetes_secret_v1.db.metadata[0].name
+                name = var.own_postgres == "running" ? kubernetes_secret_v1.db.metadata[0].name : kubernetes_secret_v1.db_old[0].metadata[0].name
                 key  = "password"
               }
             }
@@ -118,5 +136,5 @@ resource "kubernetes_stateful_set_v1" "postgres" {
     }
   }
   # local-path binds on first consumer; the Deployment's own rollout is the wait.
-  wait_for_rollout = true
+  wait_for_rollout = var.own_postgres == "running"
 }

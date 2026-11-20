@@ -2,7 +2,9 @@
 # (github.com/zulip/docker-zulip, helm/zulip): one `zulip-0` pod plus the
 # chart's bundled PostgreSQL, RabbitMQ, Redis and memcached. The PostgreSQL is
 # deliberately the chart's own (Zulip's image, with its full-text search
-# dictionaries) and NOT the CNPG operator, which is for the game world only.
+# dictionaries) and NOT CloudNativePG. Orion has two CNPG clusters — pg for
+# region/world databases and pg-management for login and Keycloak — while
+# chat deliberately keeps Zulip's bundled PostgreSQL.
 # Uploads, avatars and exports live in Garage, over S3 (s3.tf); the database and the data
 # volume (settings) are local PVs. NOTHING is backed up yet (var.auto_backup).
 #

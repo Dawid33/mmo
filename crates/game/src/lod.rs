@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    brick_coords, BlockId, BrickView, Chunk, ChunkCoords, RegionCoords, Voxel, BLOCK_VOXELS, BRICK_BLOCKS,
-    BRICK_VOXELS, BRICK_VOXEL_COUNT, REGION_SIZE,
+    BLOCK_VOXELS, BRICK_BLOCKS, BRICK_VOXEL_COUNT, BRICK_VOXELS, BlockId, BrickView, Chunk,
+    ChunkCoords, REGION_SIZE, RegionCoords, Voxel, brick_coords,
 };
 
 /// Merge up to 2×2×2 source 32³ grids (index `sx + 2*sy + 4*sz`; `None` = all-air) into one 32³ coarse grid at 2× the cell size.
@@ -50,7 +50,11 @@ pub fn downsample2(sources: &[Option<&[Voxel]>; 8]) -> Vec<Voxel> {
 /// from the recipe, so the grids show the seabed and lake beds.
 #[inline]
 pub fn terrain_id(id: BlockId) -> BlockId {
-    if id != BlockId::AIR && crate::block_props().is_liquid(id) { BlockId::AIR } else { id }
+    if id != BlockId::AIR && crate::block_props().is_liquid(id) {
+        BlockId::AIR
+    } else {
+        id
+    }
 }
 
 /// The coarse cell for one 2×2×2 source group (index `dx + 2*dy + 4*dz`,
@@ -72,7 +76,11 @@ pub fn merge_group(group: &[BlockId; 8]) -> Voxel {
     for dz in 0..2 {
         for dx in 0..2 {
             let upper = group[dx + 2 + 4 * dz];
-            let top = if upper != BlockId::AIR { upper } else { group[dx + 4 * dz] };
+            let top = if upper != BlockId::AIR {
+                upper
+            } else {
+                group[dx + 4 * dz]
+            };
             if top != BlockId::AIR {
                 tops[n] = top;
                 n += 1;
@@ -113,8 +121,13 @@ pub fn downsample_blocks(bricks: &[Option<BrickView<'_>>; 8]) -> Vec<Voxel> {
                 for bx in 0..BRICK_BLOCKS {
                     let id = terrain_id(brick.block_at(bx, by, bz).id);
                     if id != BlockId::AIR {
-                        let [x, y, z] = [s[0] * BRICK_BLOCKS + bx, s[1] * BRICK_BLOCKS + by, s[2] * BRICK_BLOCKS + bz];
-                        output[x + BRICK_VOXELS * y + BRICK_VOXELS * BRICK_VOXELS * z] = Voxel::new(id);
+                        let [x, y, z] = [
+                            s[0] * BRICK_BLOCKS + bx,
+                            s[1] * BRICK_BLOCKS + by,
+                            s[2] * BRICK_BLOCKS + bz,
+                        ];
+                        output[x + BRICK_VOXELS * y + BRICK_VOXELS * BRICK_VOXELS * z] =
+                            Voxel::new(id);
                     }
                 }
             }
@@ -176,7 +189,8 @@ pub fn build_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
 fn write_brick_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], brick: &BrickView<'_>) {
     const HALF_GRID: usize = BRICK_VOXELS / 2; // an octant's edge in coarse cells (16)
     let half = BLOCK_VOXELS / 2; // coarse cells per block axis (8)
-    let row_at = |x: usize, y: usize, z: usize| x + y * BRICK_VOXELS + z * BRICK_VOXELS * BRICK_VOXELS;
+    let row_at =
+        |x: usize, y: usize, z: usize| x + y * BRICK_VOXELS + z * BRICK_VOXELS * BRICK_VOXELS;
     let origin = octant.map(|o| o * HALF_GRID);
     if let Some(block) = brick.uniform() {
         for z in 0..HALF_GRID {
@@ -191,7 +205,11 @@ fn write_brick_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], brick: &Bri
         for by in 0..BRICK_BLOCKS {
             for bx in 0..BRICK_BLOCKS {
                 let id = terrain_id(brick.block_at(bx, by, bz).id);
-                let base = [origin[0] + bx * half, origin[1] + by * half, origin[2] + bz * half];
+                let base = [
+                    origin[0] + bx * half,
+                    origin[1] + by * half,
+                    origin[2] + bz * half,
+                ];
                 // Decoded once per chiseled block: grid order, x fastest.
                 let chisel = brick.chisel(bx, by, bz).map(crate::ChiselData::materials);
                 for z in 0..half {
@@ -205,9 +223,11 @@ fn write_brick_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], brick: &Bri
                                     for dz in 0..2 {
                                         for dy in 0..2 {
                                             for dx in 0..2 {
-                                                let (vx, vy, vz) = (2 * x + dx, 2 * y + dy, 2 * z + dz);
-                                                group[dx + 2 * dy + 4 * dz] = materials
-                                                    [vx + vy * BLOCK_VOXELS + vz * BLOCK_VOXELS * BLOCK_VOXELS];
+                                                let (vx, vy, vz) =
+                                                    (2 * x + dx, 2 * y + dy, 2 * z + dz);
+                                                group[dx + 2 * dy + 4 * dz] = materials[vx
+                                                    + vy * BLOCK_VOXELS
+                                                    + vz * BLOCK_VOXELS * BLOCK_VOXELS];
                                             }
                                         }
                                     }
@@ -229,18 +249,27 @@ fn write_brick_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], brick: &Bri
 pub fn downsample_cells(cells: Vec<LodCell>) -> Vec<LodCell> {
     let mut groups: BTreeMap<[i32; 3], [Option<Vec<Voxel>>; 8]> = BTreeMap::new();
     for LodCell { group, grid } in cells {
-        let parent = [group[0].div_euclid(2), group[1].div_euclid(2), group[2].div_euclid(2)];
+        let parent = [
+            group[0].div_euclid(2),
+            group[1].div_euclid(2),
+            group[2].div_euclid(2),
+        ];
         let octant = (group[0].rem_euclid(2)
             + 2 * group[1].rem_euclid(2)
             + 4 * group[2].rem_euclid(2)) as usize;
-        let entry = groups.entry(parent).or_insert_with(|| std::array::from_fn(|_| None));
+        let entry = groups
+            .entry(parent)
+            .or_insert_with(|| std::array::from_fn(|_| None));
         entry[octant] = Some(grid);
     }
     groups
         .into_iter()
         .map(|(group, grids)| {
             let sources: [Option<&[Voxel]>; 8] = std::array::from_fn(|i| grids[i].as_deref());
-            LodCell { group, grid: downsample2(&sources) }
+            LodCell {
+                group,
+                grid: downsample2(&sources),
+            }
         })
         .collect()
 }
@@ -266,8 +295,9 @@ pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
         for (b, brick) in chunk.bricks() {
             let w = brick_coords(coords, b);
             let group = w.map(|v| v.div_euclid(BRICKS_PER_GRID) as i32);
-            let band =
-                bands.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
+            let band = bands
+                .entry(group)
+                .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
             let l = w.map(|v| v.rem_euclid(BRICKS_PER_GRID) as usize * BRICK_BLOCKS);
             let uniform = brick.uniform().map(|u| terrain_id(u.id));
             if uniform == Some(BlockId::AIR) {
@@ -276,7 +306,8 @@ pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
             for bz in 0..BRICK_BLOCKS {
                 for by in 0..BRICK_BLOCKS {
                     for bx in 0..BRICK_BLOCKS {
-                        let id = uniform.unwrap_or_else(|| terrain_id(brick.block_at(bx, by, bz).id));
+                        let id =
+                            uniform.unwrap_or_else(|| terrain_id(brick.block_at(bx, by, bz).id));
                         if id != BlockId::AIR {
                             let idx = (l[0] + bx)
                                 + BRICK_VOXELS * (l[1] + by)
@@ -288,7 +319,10 @@ pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
             }
         }
     }
-    bands.into_iter().map(|(group, grid)| LodCell { group, grid }).collect()
+    bands
+        .into_iter()
+        .map(|(group, grid)| LodCell { group, grid })
+        .collect()
 }
 
 /// Every streamable LOD factor. The server validates request factors
@@ -326,7 +360,11 @@ pub const LOD_REFERENCE_FOCAL_PX: f32 = 935.0;
 /// regions in full to downsample it. The pixel budget therefore does not bind
 /// the first ring there (`ring_table_keeps_cells_within_the_pixel_budget`).
 /// The 1 km test sizes keep their sub-block rings.
-pub const LOD_MIN_RING_FACTOR: u32 = if crate::REGION_BLOCKS >= 256 { COARSE_MIN_FACTOR } else { LOD_FACTORS[0] };
+pub const LOD_MIN_RING_FACTOR: u32 = if crate::REGION_BLOCKS >= 256 {
+    COARSE_MIN_FACTOR
+} else {
+    LOD_FACTORS[0]
+};
 
 /// Ring table: `(chebyshev_bound, lod_factor)` with ascending bounds. A
 /// region at Chebyshev distance `d` from the viewer region renders at the
@@ -373,12 +411,18 @@ pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_BLOCKS {
 /// the NEAREST the horizon edge can be (the viewer may stand on their
 /// region's edge), which is where the client's fog goes opaque by default.
 /// 1 km (16 384 units) at 64 / 128 m regions, 3,072 m at the play sizes.
-pub const LOD_HORIZON_UNITS: f32 = if crate::REGION_BLOCKS >= 256 { 49_152.0 } else { 16_384.0 };
+pub const LOD_HORIZON_UNITS: f32 = if crate::REGION_BLOCKS >= 256 {
+    49_152.0
+} else {
+    16_384.0
+};
 
 /// Reach of a ring table in world units: its last bound × `REGION_SIZE`
 /// (0 for an empty table).
 pub fn ring_table_reach_units(table: &[(i32, u32)]) -> f32 {
-    table.last().map_or(0.0, |&(bound, _)| bound as f32 * REGION_SIZE)
+    table
+        .last()
+        .map_or(0.0, |&(bound, _)| bound as f32 * REGION_SIZE)
 }
 
 /// The ring table that reaches `horizon_regions` regions while keeping every
@@ -398,13 +442,18 @@ pub fn ring_table_for(horizon_regions: i32) -> Vec<(i32, u32)> {
     };
     let mut table = Vec::new();
     let mut prev = 0;
-    let mut i = LOD_FACTORS.iter().position(|&f| f == LOD_MIN_RING_FACTOR).expect("the floor is a LOD factor");
+    let mut i = LOD_FACTORS
+        .iter()
+        .position(|&f| f == LOD_MIN_RING_FACTOR)
+        .expect("the floor is a LOD factor");
     while prev < horizon_regions {
         let start = prev.max(1);
         while i + 1 < LOD_FACTORS.len() && fits_from(LOD_FACTORS[i + 1]) <= start {
             i += 1;
         }
-        let next = LOD_FACTORS.get(i + 1).map_or(horizon_regions, |&f| fits_from(f));
+        let next = LOD_FACTORS
+            .get(i + 1)
+            .map_or(horizon_regions, |&f| fits_from(f));
         let bound = next.min(horizon_regions).max(prev + 1);
         table.push((bound, LOD_FACTORS[i]));
         prev = bound;
@@ -439,8 +488,17 @@ pub fn tile_regions(factor: u32) -> i32 {
 /// divided (euclid) by the tile span, so they're plain region coords for
 /// the small factors.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, state_hash::StateHash,
-    serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    state_hash::StateHash,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct LodKey {
     pub factor: u32,
@@ -450,7 +508,10 @@ pub struct LodKey {
 impl LodKey {
     pub fn for_region(factor: u32, rc: RegionCoords) -> Self {
         let span = tile_regions(factor);
-        Self { factor, coords: [rc.x.div_euclid(span), rc.z.div_euclid(span)] }
+        Self {
+            factor,
+            coords: [rc.x.div_euclid(span), rc.z.div_euclid(span)],
+        }
     }
 
     /// Tile edge in regions (1 for factors <= 16).
@@ -574,7 +635,10 @@ impl LodWater {
     /// with no water recipe).
     pub fn dry(key: &LodKey) -> Self {
         let side = Self::side_for(key);
-        Self::encode(&vec![(crate::NO_WATER, 0); usize::from(side) * usize::from(side)], side)
+        Self::encode(
+            &vec![(crate::NO_WATER, 0); usize::from(side) * usize::from(side)],
+            side,
+        )
     }
 
     /// Whether the runs cover exactly `side²` columns with no empty run,
@@ -583,12 +647,19 @@ impl LodWater {
     pub fn is_well_formed(&self) -> bool {
         let side = usize::from(self.side);
         self.runs.iter().all(|&(n, _, _)| n > 0)
-            && self.runs.iter().map(|&(n, _, _)| usize::from(n)).sum::<usize>() == side * side
+            && self
+                .runs
+                .iter()
+                .map(|&(n, _, _)| usize::from(n))
+                .sum::<usize>()
+                == side * side
     }
 
     /// Whether any column holds water.
     pub fn has_water(&self) -> bool {
-        self.runs.iter().any(|&(n, top, _)| n > 0 && top != crate::NO_WATER)
+        self.runs
+            .iter()
+            .any(|&(n, top, _)| n > 0 && top != crate::NO_WATER)
     }
 
     /// The `side²` `(water_top, depth)` entries, row major; `None` when
@@ -622,13 +693,20 @@ pub fn ring_factor_in(
 ) -> Option<u32> {
     if let Some(cur) = current {
         if let Some(i) = table.iter().position(|&(_, f)| f == cur) {
-            let held_from = if i == 0 { i32::MIN } else { table[i - 1].0 + 1 - band };
+            let held_from = if i == 0 {
+                i32::MIN
+            } else {
+                table[i - 1].0 + 1 - band
+            };
             if dist >= held_from && dist <= table[i].0 + band {
                 return Some(cur);
             }
         }
     }
-    table.iter().find(|&&(bound, _)| dist <= bound).map(|&(_, f)| f)
+    table
+        .iter()
+        .find(|&&(bound, _)| dist <= bound)
+        .map(|&(_, f)| f)
 }
 
 /// x/z cells one region occupies in a grid at `factor` (16 at 64, 4 at 256;
@@ -648,7 +726,9 @@ pub fn downsample_chunks(chunks: Vec<(ChunkCoords, Chunk)>, factor: u32) -> Vec<
         16 => block_scale_cells(chunks),
         32 => downsample_cells(block_scale_cells(chunks)),
         64 => downsample_cells(downsample_cells(block_scale_cells(chunks))),
-        128 => downsample_cells(downsample_cells(downsample_cells(block_scale_cells(chunks)))),
+        128 => downsample_cells(downsample_cells(downsample_cells(block_scale_cells(
+            chunks,
+        )))),
         256 => downsample_cells(downsample_cells(downsample_cells(downsample_cells(
             block_scale_cells(chunks),
         )))),
@@ -710,7 +790,10 @@ pub fn copy_region_cells_into_tile(
     let origin = key.origin_region();
     let x_off = ((region.x - origin.x) as usize) * per;
     let z_off = ((region.z - origin.z) as usize) * per;
-    debug_assert!(x_off + per <= 32 && z_off + per <= 32, "region outside tile");
+    debug_assert!(
+        x_off + per <= 32 && z_off + per <= 32,
+        "region outside tile"
+    );
 
     for grid in tile.values_mut() {
         for lz in 0..per {
@@ -722,7 +805,11 @@ pub fn copy_region_cells_into_tile(
         }
     }
     for cell in region_cells {
-        debug_assert_eq!((cell.group[0], cell.group[2]), (0, 0), "region cells are low-corner");
+        debug_assert_eq!(
+            (cell.group[0], cell.group[2]),
+            (0, 0),
+            "region cells are low-corner"
+        );
         let grid = tile
             .entry([0, cell.group[1], 0])
             .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
@@ -736,4 +823,3 @@ pub fn copy_region_cells_into_tile(
         }
     }
 }
-

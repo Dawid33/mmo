@@ -1,10 +1,10 @@
 //! Chunk/region debug wireframe view (F10): draws the chunk grid around the
 //! camera and region boundary walls as gizmo lines. Client-only debug aid —
 //! see docs/superpowers/specs/2026-07-10-chunk-region-debug-wireframe-design.md.
+use super::UiCamera;
 use bevy::color::palettes::css::{AQUA, PURPLE, RED, YELLOW};
 use bevy::prelude::*;
-use super::UiCamera;
-use game::{RegionCoords, REGION_SIZE};
+use game::{REGION_SIZE, RegionCoords};
 
 use super::bridge::RegionRoots;
 use super::lod_rings::LodRings;
@@ -42,11 +42,17 @@ pub struct TerrainDebug {
 pub fn toggle_terrain_debug(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<TerrainDebug>) {
     if keys.just_pressed(KeyCode::F6) {
         state.hide_lod = !state.hide_lod;
-        info!("terrain debug: LOD {}", if state.hide_lod { "hidden" } else { "shown" });
+        info!(
+            "terrain debug: LOD {}",
+            if state.hide_lod { "hidden" } else { "shown" }
+        );
     }
     if keys.just_pressed(KeyCode::F7) {
         state.hide_near = !state.hide_near;
-        info!("terrain debug: near {}", if state.hide_near { "hidden" } else { "shown" });
+        info!(
+            "terrain debug: near {}",
+            if state.hide_near { "hidden" } else { "shown" }
+        );
     }
 }
 
@@ -58,7 +64,13 @@ pub fn apply_terrain_debug(
     near: Res<super::bridge::RegionRoots>,
     mut vis: Query<&mut Visibility>,
 ) {
-    let want = |hide: bool| if hide { Visibility::Hidden } else { Visibility::Inherited };
+    let want = |hide: bool| {
+        if hide {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        }
+    };
     let lod = rings
         .roots
         .values()
@@ -125,11 +137,23 @@ pub fn chunk_cube_lines(cell: IVec3) -> Vec<(Vec3, Vec3)> {
         Vec3::new(min.x, max.y, max.z),
     ];
     const EDGES: [(usize, usize); 12] = [
-        (0, 1), (1, 2), (2, 3), (3, 0), // bottom face
-        (4, 5), (5, 6), (6, 7), (7, 4), // top face
-        (0, 4), (1, 5), (2, 6), (3, 7), // verticals
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0), // bottom face
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4), // top face
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7), // verticals
     ];
-    EDGES.iter().map(|&(a, b)| (corners[a], corners[b])).collect()
+    EDGES
+        .iter()
+        .map(|&(a, b)| (corners[a], corners[b]))
+        .collect()
 }
 
 /// Boundary "wall band" lines for one region, centered on the camera's
@@ -139,13 +163,16 @@ pub fn chunk_cube_lines(cell: IVec3) -> Vec<(Vec3, Vec3)> {
 pub fn region_wall_lines(coords: RegionCoords, camera_y: f32) -> Vec<(Vec3, Vec3)> {
     let off = coords.world_offset();
     let (x0, z0) = (off[0], off[2]);
-    let (y0, y1) = (camera_y - REGION_WALL_HALF_HEIGHT, camera_y + REGION_WALL_HALF_HEIGHT);
+    let (y0, y1) = (
+        camera_y - REGION_WALL_HALF_HEIGHT,
+        camera_y + REGION_WALL_HALF_HEIGHT,
+    );
     // The four boundary edges as (start corner, direction along the edge).
     let edges = [
-        (Vec3::new(x0, 0.0, z0), Vec3::X),                       // z = z0 edge
-        (Vec3::new(x0, 0.0, z0 + REGION_SIZE), Vec3::X),          // z = z1 edge
-        (Vec3::new(x0, 0.0, z0), Vec3::Z),                       // x = x0 edge
-        (Vec3::new(x0 + REGION_SIZE, 0.0, z0), Vec3::Z),          // x = x1 edge
+        (Vec3::new(x0, 0.0, z0), Vec3::X),               // z = z0 edge
+        (Vec3::new(x0, 0.0, z0 + REGION_SIZE), Vec3::X), // z = z1 edge
+        (Vec3::new(x0, 0.0, z0), Vec3::Z),               // x = x0 edge
+        (Vec3::new(x0 + REGION_SIZE, 0.0, z0), Vec3::Z), // x = x1 edge
     ];
     let steps = (REGION_SIZE / REGION_WALL_INTERVAL) as i32; // 32 at defaults
     let mut out = Vec::with_capacity(edges.len() * (steps as usize + 1 + 3));
@@ -200,7 +227,11 @@ pub fn draw_grid_debug(
         for dy in -CHUNK_GRID_RADIUS_Y..=CHUNK_GRID_RADIUS_Y {
             for dz in -CHUNK_GRID_RADIUS_XZ..=CHUNK_GRID_RADIUS_XZ {
                 let cell = center + IVec3::new(dx, dy, dz);
-                let color = if cell == center { CHUNK_CURRENT_COLOR } else { CHUNK_GRID_COLOR };
+                let color = if cell == center {
+                    CHUNK_CURRENT_COLOR
+                } else {
+                    CHUNK_GRID_COLOR
+                };
                 for (a, b) in chunk_cube_lines(cell) {
                     gizmos.line(a, b, color);
                 }
@@ -209,16 +240,20 @@ pub fn draw_grid_debug(
     }
 
     // Near regions where their trees are drawn; LOD keys are already in the frame.
-    let regions = near.0.keys().filter(|c| near.drawn(**c)).filter_map(|c| Some((near.alias(*c)?, REGION_NEAR_COLOR))).chain(
-        lod.roots
-            .keys()
-            .filter(|k| k.region_span() == 1)
-            .map(|k| (k.origin_region(), REGION_LOD_COLOR)),
-    );
+    let regions = near
+        .0
+        .keys()
+        .filter(|c| near.drawn(**c))
+        .filter_map(|c| Some((near.alias(*c)?, REGION_NEAR_COLOR)))
+        .chain(
+            lod.roots
+                .keys()
+                .filter(|k| k.region_span() == 1)
+                .map(|k| (k.origin_region(), REGION_LOD_COLOR)),
+        );
     for (coords, color) in regions {
         for (a, b) in region_wall_lines(coords, cam.y) {
             gizmos.line(a, b, color);
         }
     }
 }
-

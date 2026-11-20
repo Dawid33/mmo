@@ -10,12 +10,12 @@ use std::time::Duration;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, Window};
-use crossbeam::channel::{unbounded, Receiver};
+use crossbeam::channel::{Receiver, unbounded};
 use game::{ClientId, ClientUpdateEvent, GameEventKind, InputEvent, Key, ServerPacket};
 
 use crate::renderer::bridge::{
-    apply_snapshot_voxels, despawn_retired_regions, drain_client_updates, drain_region_updates,
     RegionRoots, Regions, RetiredRegionRoots, SimEntityMap, SnapshotVoxelQueue,
+    apply_snapshot_voxels, despawn_retired_regions, drain_client_updates, drain_region_updates,
 };
 use crate::renderer::hud::HudStatus;
 use crate::renderer::input::forward_input;

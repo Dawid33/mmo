@@ -31,10 +31,8 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{
-    ReadableStreamDefaultReader, WebTransport, WebTransportHash, WebTransportOptions,
-};
+use wasm_bindgen_futures::{JsFuture, spawn_local};
+use web_sys::{ReadableStreamDefaultReader, WebTransport, WebTransportHash, WebTransportOptions};
 
 use crate::web_endpoint::WebServer;
 
@@ -64,7 +62,14 @@ pub fn connect(
             let _ = events.send((key, ConnEvent::Closed(reason)));
         })
     };
-    start(key, server, Incoming::Packets(events, key), Outgoing::new(Source::Packets(outgoing)), on_closed, credential);
+    start(
+        key,
+        server,
+        Incoming::Packets(events, key),
+        Outgoing::new(Source::Packets(outgoing)),
+        on_closed,
+        credential,
+    );
 }
 
 /// [`connect`] at the frame level: each server packet's frame (as
@@ -80,7 +85,14 @@ pub fn connect_frames(
     credential: Option<game::Credential>,
 ) {
     let incoming = Incoming::Frames(Box::new(on_frame));
-    start(key, server, incoming, Outgoing::new(Source::Frames(outgoing)), Rc::new(on_closed), credential);
+    start(
+        key,
+        server,
+        incoming,
+        Outgoing::new(Source::Frames(outgoing)),
+        Rc::new(on_closed),
+        credential,
+    );
 }
 
 fn start(
@@ -92,7 +104,16 @@ fn start(
     credential: Option<game::Credential>,
 ) {
     spawn_local(async move {
-        if let Err(e) = run(key, server, incoming, outgoing, on_closed.clone(), credential).await {
+        if let Err(e) = run(
+            key,
+            server,
+            incoming,
+            outgoing,
+            on_closed.clone(),
+            credential,
+        )
+        .await
+        {
             connection_lost(key, &on_closed, &js_error_text(&e));
         }
     });
@@ -113,11 +134,19 @@ impl PageOpener {
 }
 
 impl ConnOpener for PageOpener {
-    fn open(&mut self, key: u32, endpoint: &game::HostEndpoint, credential: game::Credential) -> ConnHandle {
+    fn open(
+        &mut self,
+        key: u32,
+        endpoint: &game::HostEndpoint,
+        credential: game::Credential,
+    ) -> ConnHandle {
         let (send, outgoing) = crossbeam::channel::unbounded();
         match crate::web_endpoint::web_server_for_host(endpoint) {
             Ok(server) => {
-                info!("[client] connection {key}: to host {} ({server:?})", endpoint.id);
+                info!(
+                    "[client] connection {key}: to host {} ({server:?})",
+                    endpoint.id
+                );
                 connect(server, key, self.events.clone(), outgoing, Some(credential));
             }
             Err(why) => {
@@ -163,7 +192,10 @@ struct Outgoing {
 
 impl Outgoing {
     fn new(source: Source) -> Self {
-        Self { source, held: VecDeque::new() }
+        Self {
+            source,
+            held: VecDeque::new(),
+        }
     }
 
     /// The next frame from the channel; `Err` once the session dropped its sender.
@@ -174,7 +206,9 @@ impl Outgoing {
             Err(TryRecvError::Disconnected) => Err(()),
         };
         match &self.source {
-            Source::Packets(recv) => take(recv.try_recv().map(|p| game::encode_packet(&p).unwrap())),
+            Source::Packets(recv) => {
+                take(recv.try_recv().map(|p| game::encode_packet(&p).unwrap()))
+            }
             Source::Frames(recv) => take(recv.try_recv()),
         }
     }
@@ -293,7 +327,11 @@ async fn run(
                     if read_dead.replace(true) {
                         return; // closed by the write loop: the session was left
                     }
-                    return connection_lost(key, &read_lost, &format!("Lost the server: {}", js_error_text(&e)));
+                    return connection_lost(
+                        key,
+                        &read_lost,
+                        &format!("Lost the server: {}", js_error_text(&e)),
+                    );
                 }
             };
             if Reflect::get(&next, &"done".into())
@@ -327,7 +365,8 @@ async fn run(
     // `Hello` resolves, and refuses a connection that sends anything else.
     // `credential` is a join JWT from the login service; `None` = this
     // browser's local player name (`player_name`).
-    let credential = credential.unwrap_or_else(|| game::Credential::Local(crate::player_name::player_name()));
+    let credential =
+        credential.unwrap_or_else(|| game::Credential::Local(crate::player_name::player_name()));
     let mut hello = Some(
         game::encode_packet(&ClientPacket::Hello { credential })
             .map_err(|e| JsValue::from_str(&format!("cannot encode Hello: {e}")))?,
@@ -390,7 +429,11 @@ async fn run(
                         if dead.replace(true) {
                             return;
                         }
-                        return connection_lost(key, &lost, &format!("Lost the server: {}", js_error_text(&e)));
+                        return connection_lost(
+                            key,
+                            &lost,
+                            &format!("Lost the server: {}", js_error_text(&e)),
+                        );
                     }
                 }
             }

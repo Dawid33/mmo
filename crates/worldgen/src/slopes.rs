@@ -7,13 +7,17 @@
 //! every window and across region seams.
 use game::{Side, SlopeShape};
 
-use crate::{has_ground, ColSample};
+use crate::{ColSample, has_ground};
 
 /// Cardinal sides, in the order the table checks them.
 const CARDINALS: [Side; 4] = [Side::PosX, Side::NegX, Side::PosZ, Side::NegZ];
 /// Diagonals as (x side, z side).
-const DIAGONALS: [(Side, Side); 4] =
-    [(Side::PosX, Side::PosZ), (Side::PosX, Side::NegZ), (Side::NegX, Side::PosZ), (Side::NegX, Side::NegZ)];
+const DIAGONALS: [(Side, Side); 4] = [
+    (Side::PosX, Side::PosZ),
+    (Side::PosX, Side::NegZ),
+    (Side::NegX, Side::PosZ),
+    (Side::NegX, Side::NegZ),
+];
 
 fn is_x(s: Side) -> bool {
     matches!(s, Side::PosX | Side::NegX)
@@ -51,4 +55,3 @@ pub(crate) fn slope_for(c: &ColSample, n: impl Fn(i32, i32) -> ColSample) -> Opt
         _ => None,
     }
 }
-

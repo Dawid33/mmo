@@ -1354,7 +1354,7 @@ impl<K: Key, V> ExactSizeIterator for IntoIter<K, V> {}
 // Serialization with serde.
 #[cfg(feature = "serde")]
 mod serialize {
-    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
     use super::*;
 
@@ -1495,15 +1495,6 @@ mod tests {
     use quickcheck::quickcheck;
 
     use super::*;
-
-    #[derive(Clone)]
-    struct CountDrop<'a>(&'a std::cell::RefCell<usize>);
-
-    impl<'a> Drop for CountDrop<'a> {
-        fn drop(&mut self) {
-            *self.0.borrow_mut() += 1;
-        }
-    }
 
     #[cfg(all(nightly, feature = "unstable"))]
     #[test]

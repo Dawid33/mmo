@@ -34,9 +34,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossbeam::channel::{Receiver, RecvTimeoutError, Sender};
-use game::{ClientId, RegionSpawner, ServerEvent, ServerPacket, Tick, WorldManager, TICK_RATE};
+use game::{ClientId, RegionSpawner, ServerEvent, ServerPacket, TICK_RATE, Tick, WorldManager};
 
-use crate::claims::{ServerExit, LEAVING_REFUSAL};
+use crate::claims::{LEAVING_REFUSAL, ServerExit};
 use crate::health::Health;
 
 /// How long the drained idle loop waits for a connection event before it looks at the stop
@@ -52,7 +52,11 @@ pub fn drain_deadline(now_tick: Tick, drain_in_ms: i64) -> Tick {
 /// The main loop's drain step, after the lease step: the last beat's mark (`None`: not
 /// draining, or no beat answered yet) becomes the manager's deadline. Idempotent every pass:
 /// the manager keeps the earliest deadline (a stale mark only ever computes a later one).
-pub fn note_drain<S: RegionSpawner>(manager: &mut WorldManager<S>, drain_in_ms: Option<i64>, now_tick: Tick) {
+pub fn note_drain<S: RegionSpawner>(
+    manager: &mut WorldManager<S>,
+    drain_in_ms: Option<i64>,
+    now_tick: Tick,
+) {
     if let Some(d) = drain_in_ms {
         manager.drain_at(drain_deadline(now_tick, d));
     }
@@ -75,7 +79,11 @@ pub const STATIC_HOST_IGNORES_DRAIN: &str = "[server] this host is marked draini
 /// Whether the process stays up drained after its exit: the loop ended for the drain's
 /// deadline (not a stop signal, a fence or a rollback), the exit was clean and the leave cut
 /// committed (`WorldManager::leave_outcome`). Otherwise the process ends with `outcome`.
-pub fn stays_drained(for_the_drain: bool, outcome: ServerExit, leave_outcome: Option<bool>) -> bool {
+pub fn stays_drained(
+    for_the_drain: bool,
+    outcome: ServerExit,
+    leave_outcome: Option<bool>,
+) -> bool {
     for_the_drain && outcome == ServerExit::Clean && leave_outcome == Some(true)
 }
 
@@ -102,7 +110,10 @@ pub fn idle_drained(
         match events.recv_timeout(DRAINED_POLL) {
             Ok(ev) => {
                 if let Some(client) = connecting(&ev) {
-                    let _ = out.send((Some(client), ServerPacket::Refused(LEAVING_REFUSAL.to_string())));
+                    let _ = out.send((
+                        Some(client),
+                        ServerPacket::Refused(LEAVING_REFUSAL.to_string()),
+                    ));
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -121,4 +132,3 @@ fn connecting(ev: &ServerEvent) -> Option<ClientId> {
         _ => None,
     }
 }
-

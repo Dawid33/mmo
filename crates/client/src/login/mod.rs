@@ -8,4 +8,4 @@ pub mod flow;
 pub mod oidc;
 pub mod store;
 
-pub use api::{login_url, LoginApi, LoginFailure};
+pub use api::{LoginApi, LoginFailure, login_url};

@@ -64,6 +64,24 @@ module "world" {
   metrics   = false
   save_secs = 10
 
+  # k3d resolves the published local-stack ports through its built-in
+  # host.k3d.internal gateway. The local profile compose stack is external to
+  # the cluster; these endpoints do not couple either root to its state.
+  telemetry = {
+    otlp_endpoint             = "http://host.k3d.internal:4318"
+    coordinator_sampler_ratio = 1
+    fleet_sampler_ratio       = 1
+    host_sampler_ratio        = 1
+    profile_enabled           = true
+    profile_endpoint          = "http://host.k3d.internal:4040"
+    environment               = "twin"
+    cluster                   = "k3d-mmo"
+  }
+
+  # The world panel (../panel) may read, start, stop and forge this world. Literal names:
+  # the binding does not need the panel root applied first.
+  panel = { namespace = "panel", service_account = "panel", cluster_role = "world-panel" }
+
   resources = {
     coordinator = { cpu = "50m", memory = "512Mi" }
     host        = { cpu = "100m", memory = "1Gi" }

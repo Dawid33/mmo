@@ -1,0 +1,13 @@
+{{- range .Values.services }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ . }}
+spec:
+  name: {{ . }}
+  owner: {{ . }}
+  cluster:
+    name: pg-management
+  databaseReclaimPolicy: retain
+{{- end }}

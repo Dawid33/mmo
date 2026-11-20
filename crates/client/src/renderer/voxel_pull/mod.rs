@@ -9,18 +9,18 @@ use std::sync::Arc;
 use bevy::{
     camera::primitives::Aabb,
     core_pipeline::{
-        core_3d::{AlphaMask3d, Opaque3d},
         Core3d,
+        core_3d::{AlphaMask3d, Opaque3d},
         prepass::{AlphaMask3dPrepass, Opaque3dPrepass},
     },
-    pbr::{init_prepass_pipeline, Shadow},
+    pbr::{Shadow, init_prepass_pipeline},
     prelude::*,
     render::{
+        Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_phase::AddRenderCommand,
         render_resource::SpecializedRenderPipelines,
         sync_world::{MainEntity, RenderEntity, SyncToRenderWorld},
-        Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
 
@@ -33,11 +33,11 @@ pub mod prepare;
 pub mod queue;
 pub mod xray;
 
-use pipeline::{init_voxel_pull_depth_pipeline, VoxelPullDepthPipeline, VoxelPullPipeline};
+use pipeline::{VoxelPullDepthPipeline, VoxelPullPipeline, init_voxel_pull_depth_pipeline};
 use prepare::{prepare_chunk_quads, prepare_view_chunk_draws};
 use queue::{
-    queue_voxel_pull, queue_voxel_pull_prepass, queue_voxel_pull_shadows, DrawVoxelPull,
-    DrawVoxelPullCutout, DrawVoxelPullDepth, DrawVoxelPullDepthCutout,
+    DrawVoxelPull, DrawVoxelPullCutout, DrawVoxelPullDepth, DrawVoxelPullDepthCutout,
+    queue_voxel_pull, queue_voxel_pull_prepass, queue_voxel_pull_shadows,
 };
 
 /// The pull-path replacement for `Mesh3d`: every visible greedy quad of one
@@ -77,19 +77,39 @@ impl DetailBand {
 }
 
 /// Default switch distance from full-detail sim chunks to their coarse
-/// (block-scale) twins, metres of horizontal distance from the camera. At
-/// 96 m a block is ~10 px and a leaf texel ~0.6 px on the reference 935 px
-/// focal length, so the twin's whole blocks and solid foliage do not read as
-/// a change; chiselled detail (branches, half blocks) is already sub-pixel.
-pub const NEAR_DETAIL_DISTANCE_M: f32 = 96.0;
+/// (block-scale) twins, metres of horizontal distance from the camera. It was
+/// 96 m (a block ~10 px there on the reference 935 px focal length), where the
+/// switch still read as a change in play; 256 m (2026-11-19) keeps a 256 m
+/// region's worth of full detail around the player, at the cost of more near
+/// quads. The player moves it with the Settings window's "Full detail
+/// distance" (`graphics_settings`).
+pub const NEAR_DETAIL_DISTANCE_M: f32 = 256.0;
+
+/// Whether `VOXEL_NEAR_DETAIL_M` is set, so the saved full-detail distance
+/// (`graphics_settings`) does not apply at start.
+pub fn near_detail_pinned_by_env() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("VOXEL_NEAR_DETAIL_M").is_ok_and(|v| !v.trim().is_empty())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
 
 /// `VOXEL_NEAR_DETAIL_M=M` (native) moves the switch; `0` turns coarse twins
-/// off (every sim chunk at full detail, as before). Read once.
+/// off (every sim chunk at full detail, as before). Read once; the default of
+/// `graphics_settings::GraphicsSettings::detail_distance_m`, which the
+/// switch follows from then on.
 pub fn near_detail_distance_m() -> f32 {
     static VALUE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(m) = std::env::var("VOXEL_NEAR_DETAIL_M").ok().and_then(|v| v.trim().parse::<f32>().ok()) {
+        if let Some(m) = std::env::var("VOXEL_NEAR_DETAIL_M")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
             return m.max(0.0);
         }
         NEAR_DETAIL_DISTANCE_M
@@ -126,10 +146,27 @@ impl NearDetail {
 /// `clip_from_world` (Gribb–Hartmann; reverse-Z, so near is `w - z >= 0`),
 /// and a far plane `reach` in front of `eye` (the projection's own far plane
 /// is at infinity). `None` if the matrix yields a degenerate plane.
-pub fn shadow_receiver_planes(clip_from_world: Mat4, eye: Vec3, forward: Vec3, reach: f32) -> Option<[Vec4; RECEIVER_PLANES]> {
-    let (r0, r1, r2, r3) = (clip_from_world.row(0), clip_from_world.row(1), clip_from_world.row(2), clip_from_world.row(3));
+pub fn shadow_receiver_planes(
+    clip_from_world: Mat4,
+    eye: Vec3,
+    forward: Vec3,
+    reach: f32,
+) -> Option<[Vec4; RECEIVER_PLANES]> {
+    let (r0, r1, r2, r3) = (
+        clip_from_world.row(0),
+        clip_from_world.row(1),
+        clip_from_world.row(2),
+        clip_from_world.row(3),
+    );
     let far_point = eye + forward * reach;
-    let raw = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 - r2, (-forward).extend(forward.dot(far_point))];
+    let raw = [
+        r3 + r0,
+        r3 - r0,
+        r3 + r1,
+        r3 - r1,
+        r3 - r2,
+        (-forward).extend(forward.dot(far_point)),
+    ];
     let mut planes = [Vec4::ZERO; RECEIVER_PLANES];
     for (plane, raw) in planes.iter_mut().zip(raw) {
         let length = raw.truncate().length();
@@ -144,25 +181,50 @@ pub fn shadow_receiver_planes(clip_from_world: Mat4, eye: Vec3, forward: Vec3, r
 /// The active world camera's eye and lit view volume into [`NearDetail`].
 pub fn track_near_detail(
     mut detail: ResMut<NearDetail>,
-    cameras: Query<(&GlobalTransform, &Camera), (With<Camera3d>, Without<crate::session::FrontendCamera>)>,
+    cameras: Query<
+        (&GlobalTransform, &Camera),
+        (With<Camera3d>, Without<crate::session::FrontendCamera>),
+    >,
     suns: Query<&bevy::light::CascadeShadowConfig, With<DirectionalLight>>,
+    settings: Option<Res<crate::graphics_settings::GraphicsSettings>>,
 ) {
-    let distance = near_detail_distance_m() * game::movement::UNITS_PER_METER;
+    // Twins off (`VOXEL_NEAR_DETAIL_M=0`): no switch, whatever the setting.
+    let metres = match settings {
+        Some(settings) if super::meshing::coarse::coarse_twins_enabled() => {
+            settings.detail_distance_m
+        }
+        _ => near_detail_distance_m(),
+    };
+    let distance = metres * game::movement::UNITS_PER_METER;
     let camera = cameras.iter().find(|(_, c)| c.is_active);
     let next = match camera {
         Some((transform, camera)) => {
             let eye = transform.translation();
             // One sun; its last cascade bound is how far shadows are drawn.
-            let reach = suns.iter().filter_map(|config| config.bounds.last().copied()).fold(0.0f32, f32::max);
+            let reach = suns
+                .iter()
+                .filter_map(|config| config.bounds.last().copied())
+                .fold(0.0f32, f32::max);
             let clip_from_world = camera.clip_from_view() * transform.to_matrix().inverse();
             let planes = (reach > 0.0)
-                .then(|| shadow_receiver_planes(clip_from_world, eye, transform.forward().as_vec3(), reach))
+                .then(|| {
+                    shadow_receiver_planes(
+                        clip_from_world,
+                        eye,
+                        transform.forward().as_vec3(),
+                        reach,
+                    )
+                })
                 .flatten();
             NearDetail {
                 eye,
                 distance,
                 receivers: planes.unwrap_or_default(),
-                receiver_count: if planes.is_some() { RECEIVER_PLANES as u32 } else { 0 },
+                receiver_count: if planes.is_some() {
+                    RECEIVER_PLANES as u32
+                } else {
+                    0
+                },
             }
         }
         None => NearDetail::default(),
@@ -387,9 +449,11 @@ fn webgl_own_index_buffers(app: &mut App) {
 /// quad record layout (`meshing/records.rs`), which changes with the Rust that
 /// packs it, and a browser (a WebGPU build) would otherwise pair a cached old
 /// `.wgsl` with new records.
-pub const VOXEL_PULL_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("a3c51e07-9b4d-4e2f-8d61-5f2e0b7c4d19");
+pub const VOXEL_PULL_SHADER: Handle<Shader> =
+    bevy::asset::uuid_handle!("a3c51e07-9b4d-4e2f-8d61-5f2e0b7c4d19");
 /// See [`VOXEL_PULL_SHADER`].
-pub const VOXEL_PULL_DEPTH_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("c84f2d6a-1e93-4b07-a5c2-7d9e3f60b1a8");
+pub const VOXEL_PULL_DEPTH_SHADER: Handle<Shader> =
+    bevy::asset::uuid_handle!("c84f2d6a-1e93-4b07-a5c2-7d9e3f60b1a8");
 
 pub struct VoxelPullPlugin;
 

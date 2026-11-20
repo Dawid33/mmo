@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 
 use crate::forge::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
-use crate::forge::world::{hash01, smoothstep, World};
+use crate::forge::world::{World, hash01, smoothstep};
 
 /// Height band for a spawn site (m above sea): the coastal lowlands below
 /// kilometre-plus ranges reach a hundred metres and more.
@@ -66,7 +66,11 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
     let (width, height) = (w.nx as f64 * w.dx, w.nz as f64 * w.dx);
     // A wrapping world has no east or west edge: every column is a candidate
     // and the flat window runs across the seam.
-    let columns = if w.wrap_x { 0..nx } else { FLAT_RADIUS_CELLS..nx - FLAT_RADIUS_CELLS };
+    let columns = if w.wrap_x {
+        0..nx
+    } else {
+        FLAT_RADIUS_CELLS..nx - FLAT_RADIUS_CELLS
+    };
     for z in FLAT_RADIUS_CELLS..nz - FLAT_RADIUS_CELLS {
         for x in columns.clone() {
             let i = (z * nx + x) as usize;
@@ -76,11 +80,17 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
             let (mut lo, mut hi, mut dry) = (f64::MAX, f64::MIN, true);
             for oz in -FLAT_RADIUS_CELLS..=FLAT_RADIUS_CELLS {
                 for ox in -FLAT_RADIUS_CELLS..=FLAT_RADIUS_CELLS {
-                    let jx = if w.wrap_x { (x + ox).rem_euclid(nx) } else { x + ox };
+                    let jx = if w.wrap_x {
+                        (x + ox).rem_euclid(nx)
+                    } else {
+                        x + ox
+                    };
                     let j = ((z + oz) * nx + jx) as usize;
                     lo = lo.min(w.h[j]);
                     hi = hi.max(w.h[j]);
-                    dry &= !w.ocean[j] && a.lake_depth[j] < LAKE_MIN_DEPTH_M && a.q[j] < RIVER_DISCHARGE_M2;
+                    dry &= !w.ocean[j]
+                        && a.lake_depth[j] < LAKE_MIN_DEPTH_M
+                        && a.q[j] < RIVER_DISCHARGE_M2;
                 }
             }
             if !dry {
@@ -106,10 +116,11 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
             }
             // Near, not in: a river 60-300 m away, the sea within ~1.5 km,
             // a mountain within ~2.5 km.
-            let score = smoothstep(40.0, 80.0, to_river[i]) * (1.0 - smoothstep(250.0, 600.0, to_river[i]))
+            let score = smoothstep(40.0, 80.0, to_river[i])
+                * (1.0 - smoothstep(250.0, 600.0, to_river[i]))
                 + 0.7 * (1.0 - smoothstep(800.0, 2_500.0, to_sea[i]))
                 + (1.0 - smoothstep(1_500.0, 4_000.0, to_mountain[i]))
-                + 0.05 * hash01(seed, i as u64, 0x5A) ;
+                + 0.05 * hash01(seed, i as u64, 0x5A);
             if score > best.0 {
                 best = (score, i);
             }
@@ -118,5 +129,10 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
     if best.0 > f64::MIN {
         return w.center(best.1);
     }
-    w.center(flattest_clear.1.or(flattest.1).expect("no dry land for a spawn site"))
+    w.center(
+        flattest_clear
+            .1
+            .or(flattest.1)
+            .expect("no dry land for a spawn site"),
+    )
 }

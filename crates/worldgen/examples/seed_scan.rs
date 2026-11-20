@@ -5,7 +5,7 @@
 //! Check the winner with `just world-map --span 4096`.
 //! Run: cargo run -p worldgen --example seed_scan --release
 
-use worldgen::pipeline::{TerrainPipeline, SEA_LEVEL};
+use worldgen::pipeline::{SEA_LEVEL, TerrainPipeline};
 
 /// Scenery search window around spawn: ±(VIEW_STEPS * VIEW_STEP_M) meters.
 const VIEW_STEPS: i32 = 15;
@@ -80,7 +80,11 @@ fn main() {
         let (mut peak, mut lowest) = (i32::MIN, i32::MAX);
         for gx in -VIEW_STEPS..=VIEW_STEPS {
             for gz in -VIEW_STEPS..=VIEW_STEPS {
-                let h = surface_y(&p, 8.5 + gx as f64 * VIEW_STEP_M, 8.5 + gz as f64 * VIEW_STEP_M);
+                let h = surface_y(
+                    &p,
+                    8.5 + gx as f64 * VIEW_STEP_M,
+                    8.5 + gz as f64 * VIEW_STEP_M,
+                );
                 peak = peak.max(h);
                 lowest = lowest.min(h);
             }

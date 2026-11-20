@@ -112,12 +112,12 @@ resource "kubernetes_secret_v1" "grafana_admin" {
 }
 
 data "aws_route53_zone" "site" {
-  count = var.manage_dns_record ? 1 : 0
+  count = var.manage_dns_record && var.grafana_public ? 1 : 0
   name  = var.dns_zone
 }
 
 resource "aws_route53_record" "grafana" {
-  count   = var.manage_dns_record ? 1 : 0
+  count   = var.manage_dns_record && var.grafana_public ? 1 : 0
   zone_id = data.aws_route53_zone.site[0].zone_id
   name    = var.grafana_host
   type    = "A"

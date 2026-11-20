@@ -22,3 +22,8 @@ indexmap = ["dep:indexmap"]
 hashbrown = ["dep:hashbrown"]
 # nalgebra matrices (rapier stores a few: multibodies, contact tangent impulses).
 nalgebra = ["dep:nalgebra"]
+
+# Its own table (it is in the root workspace, which has no `[workspace.lints]`); the quest
+# workspace, which depends on it by path, wants one and forbids unsafe code.
+[lints.rust]
+unsafe_code = "forbid"

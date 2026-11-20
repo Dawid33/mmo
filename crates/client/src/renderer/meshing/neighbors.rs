@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use game::Voxel;
 
 use super::super::bridge::VoxelData;
-use super::binary::{PaddedVoxels, PADDED};
+use super::binary::{PADDED, PaddedVoxels};
 
 /// The 26 neighbor offsets in fixed enumeration order (z-outer, x-inner).
 pub fn zone_offsets() -> impl Iterator<Item = [i32; 3]> {
@@ -206,4 +206,3 @@ pub fn gather_padded_rle(
     }
     padded
 }
-

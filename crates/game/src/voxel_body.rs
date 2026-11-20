@@ -55,8 +55,9 @@ use state_hash::StateHash;
 use crate::edit::BlockPos;
 use crate::movement::UNITS_PER_METER;
 use crate::{
-    block_collider_cells, block_props, Block, BlockId, ChiselData, ColliderScale, EntityKey, GameDataTransactionKind,
-    GameDataUpdate, GameDataUpdateKind, Rollback, BLOCK_VOXELS, HALF_BLOCK_VOXELS, TICK_RATE,
+    BLOCK_VOXELS, Block, BlockId, ChiselData, ColliderScale, EntityKey, GameDataTransactionKind,
+    GameDataUpdate, GameDataUpdateKind, HALF_BLOCK_VOXELS, Rollback, TICK_RATE,
+    block_collider_cells, block_props,
 };
 
 /// Density of tree wood (logs and branches: `ColliderScale::Half` blocks),
@@ -142,7 +143,9 @@ pub struct VoxelModel {
 }
 
 /// What happens to a body once it is settled.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub enum SettlePolicy {
     /// Removed, leaving nothing behind (a fortress chop order: no items).
     #[default]
@@ -306,7 +309,10 @@ pub fn model_collider_boxes(model: &VoxelModel) -> Vec<([i32; 3], [i32; 3])> {
             // box. Other non-solid blocks still contribute nothing.
             if let Some((lo, hi)) = chisel.as_ref().and_then(|c| solid_voxel_bounds(*block, c)) {
                 let base = o.map(|v| i32::from(v) * BLOCK_VOXELS as i32);
-                out.push(([0, 1, 2].map(|a| base[a] + lo[a]), [0, 1, 2].map(|a| base[a] + hi[a])));
+                out.push((
+                    [0, 1, 2].map(|a| base[a] + lo[a]),
+                    [0, 1, 2].map(|a| base[a] + hi[a]),
+                ));
             }
             continue;
         }
@@ -327,7 +333,10 @@ pub fn model_collider_boxes(model: &VoxelModel) -> Vec<([i32; 3], [i32; 3])> {
                 }
             }
             let base = o.map(|v| i32::from(v) * BLOCK_VOXELS as i32);
-            out.push(([0, 1, 2].map(|a| base[a] + lo[a]), [0, 1, 2].map(|a| base[a] + hi[a] + 1)));
+            out.push((
+                [0, 1, 2].map(|a| base[a] + lo[a]),
+                [0, 1, 2].map(|a| base[a] + hi[a] + 1),
+            ));
         }
     }
     // Greedy merge from the lowest remaining cell: along x, then whole rows
@@ -337,7 +346,9 @@ pub fn model_collider_boxes(model: &VoxelModel) -> Vec<([i32; 3], [i32; 3])> {
         while halves.contains(&[s[0] + e[0], s[1], s[2]]) {
             e[0] += 1;
         }
-        let row = |y: i32, z: i32, e0: i32, set: &BTreeSet<[i32; 3]>| (0..e0).all(|x| set.contains(&[s[0] + x, y, z]));
+        let row = |y: i32, z: i32, e0: i32, set: &BTreeSet<[i32; 3]>| {
+            (0..e0).all(|x| set.contains(&[s[0] + x, y, z]))
+        };
         while row(s[1] + e[1], s[2], e[0], &halves) {
             e[1] += 1;
         }
@@ -373,7 +384,10 @@ fn solid_voxel_bounds(block: Block, chisel: &ChiselData) -> Option<([i32; 3], [i
         let (min, max) = (min.map(|v| v as i32), max.map(|v| v as i32));
         bounds = Some(match bounds {
             None => (min, max),
-            Some((lo, hi)) => ([0, 1, 2].map(|a| lo[a].min(min[a])), [0, 1, 2].map(|a| hi[a].max(max[a]))),
+            Some((lo, hi)) => (
+                [0, 1, 2].map(|a| lo[a].min(min[a])),
+                [0, 1, 2].map(|a| hi[a].max(max[a])),
+            ),
         });
     }
     bounds
@@ -393,7 +407,10 @@ pub fn collision_model(model: &VoxelModel, toppling: bool) -> VoxelModel {
     }
     let props = block_props();
     let crown = |b: &Block| b.tree_id() != 0 && (is_foliage(b.id) || b.limb() != 0);
-    let has_trunk = model.blocks.values().any(|(b, _)| b.tree_id() != 0 && b.limb() == 0 && props.is_solid(b.id));
+    let has_trunk = model
+        .blocks
+        .values()
+        .any(|(b, _)| b.tree_id() != 0 && b.limb() == 0 && props.is_solid(b.id));
     if !has_trunk || !is_tall(model) {
         return model.clone();
     }
@@ -409,7 +426,12 @@ pub fn collision_model(model: &VoxelModel, toppling: bool) -> VoxelModel {
 
 /// Whether the model spans at least [`TALL_PART_BLOCKS`] block layers.
 fn is_tall(model: &VoxelModel) -> bool {
-    let (lo, hi) = model.blocks.keys().fold((i16::MAX, i16::MIN), |(lo, hi), o| (lo.min(o[1]), hi.max(o[1])));
+    let (lo, hi) = model
+        .blocks
+        .keys()
+        .fold((i16::MAX, i16::MIN), |(lo, hi), o| {
+            (lo.min(o[1]), hi.max(o[1]))
+        });
     hi >= lo && hi - lo + 1 >= TALL_PART_BLOCKS
 }
 
@@ -442,17 +464,29 @@ fn topple_angvel(
     // Spinning about `axis` moves a point above the pivot along `axis × Y`.
     let d = axis.cross(Vector::Y);
     let b = BLOCK_VOXELS as f32;
-    let (floor, top) = model.blocks.keys().fold((i16::MAX, i16::MIN), |(lo, hi), o| (lo.min(o[1]), hi.max(o[1])));
+    let (floor, top) = model
+        .blocks
+        .keys()
+        .fold((i16::MAX, i16::MIN), |(lo, hi), o| {
+            (lo.min(o[1]), hi.max(o[1]))
+        });
     let third = floor + (top - floor + 1) / 3;
     let reach = b * 0.5 * (d.x.abs() + d.z.abs());
     let com = origin_units + mprops.local_com;
     let inv = mprops.inv_principal_inertia;
     let inertia = |i: f32| if i > 0.0 { 1.0 / i } else { 0.0 };
-    let i_axis = axis.x * axis.x * inertia(inv.x) + axis.y * axis.y * inertia(inv.y) + axis.z * axis.z * inertia(inv.z);
+    let i_axis = axis.x * axis.x * inertia(inv.x)
+        + axis.y * axis.y * inertia(inv.y)
+        + axis.z * axis.z * inertia(inv.z);
     let g = VOXEL_BODY_GRAVITY * UNITS_PER_METER;
     let mut needed = 0.0f32;
     for o in colliding.blocks.keys().filter(|o| o[1] <= third) {
-        let bottom = origin_units + Vector::new(f32::from(o[0]) + 0.5, f32::from(o[1]), f32::from(o[2]) + 0.5) * b;
+        let bottom = origin_units
+            + Vector::new(
+                f32::from(o[0]) + 0.5,
+                f32::from(o[1]),
+                f32::from(o[2]) + 0.5,
+            ) * b;
         let (e, h) = ((bottom - com).dot(d) + reach, com.y - bottom.y);
         if e <= 0.0 || h <= 0.0 {
             continue;
@@ -473,12 +507,20 @@ pub fn drop_totals(blocks: impl IntoIterator<Item = Block>) -> Vec<crate::ItemSt
             *totals.entry(stack.item).or_default() += stack.count;
         }
     }
-    totals.into_iter().map(|(item, count)| crate::ItemStack { item, count }).collect()
+    totals
+        .into_iter()
+        .map(|(item, count)| crate::ItemStack { item, count })
+        .collect()
 }
 
 impl Rollback {
     /// Deposits the drops of `blocks` ([`drop_totals`]) at `cell`.
-    pub(crate) fn drop_blocks_at_safe(&mut self, cell: BlockPos, blocks: impl IntoIterator<Item = Block>, tick: u64) {
+    pub(crate) fn drop_blocks_at_safe(
+        &mut self,
+        cell: BlockPos,
+        blocks: impl IntoIterator<Item = Block>,
+        tick: u64,
+    ) {
         self.deposit_drops_safe(cell, &drop_totals(blocks), tick);
     }
 
@@ -486,7 +528,12 @@ impl Rollback {
     /// free-cell rule spills what one pile cannot hold to the cells around
     /// it. Pickable after `PICKUP_DELAY_TICKS`. Losses to the pile caps are
     /// counted by the deposit.
-    pub(crate) fn deposit_drops_safe(&mut self, cell: BlockPos, drops: &[crate::ItemStack], tick: u64) {
+    pub(crate) fn deposit_drops_safe(
+        &mut self,
+        cell: BlockPos,
+        drops: &[crate::ItemStack],
+        tick: u64,
+    ) {
         for stack in drops {
             let _destroyed = self.deposit_items_safe(cell, *stack, tick, crate::PICKUP_DELAY_TICKS);
         }
@@ -495,8 +542,13 @@ impl Rollback {
     /// A voxel body's collider material (not part of its `ColliderSpec`):
     /// set on every collider of `handle`'s body, undo-safely — on a body
     /// rebuilt from a crossing's bundle.
-    pub(crate) fn set_voxel_body_material_safe(&mut self, handle: rapier3d::prelude::RigidBodyHandle) {
-        let Some(body) = self.data.physics.bodies.get(handle) else { return };
+    pub(crate) fn set_voxel_body_material_safe(
+        &mut self,
+        handle: rapier3d::prelude::RigidBodyHandle,
+    ) {
+        let Some(body) = self.data.physics.bodies.get(handle) else {
+            return;
+        };
         for ch in body.colliders().to_vec() {
             self.data.physics.colliders.mutate_collider_safe(ch, |c| {
                 c.set_friction(VOXEL_BODY_FRICTION);
@@ -516,7 +568,12 @@ impl Rollback {
     /// water only) is cleared but spawns no body (it would fall through the
     /// ground until the timeout; `None` too). A leaves-only set falls like
     /// any other.
-    pub fn detach_blocks_safe(&mut self, positions: &[BlockPos], policy: SettlePolicy, angvel: Vector) -> Option<EntityKey> {
+    pub fn detach_blocks_safe(
+        &mut self,
+        positions: &[BlockPos],
+        policy: SettlePolicy,
+        angvel: Vector,
+    ) -> Option<EntityKey> {
         self.detach_blocks_pivoting_safe(positions, policy, angvel, None)
     }
 
@@ -551,7 +608,9 @@ impl Rollback {
         }
         let mut model = VoxelModel::default();
         for (pos, state) in taken {
-            let o = [0, 1, 2].map(|a| i16::try_from(pos[a] - origin[a]).expect("a voxel body spans < 32768 blocks"));
+            let o = [0, 1, 2].map(|a| {
+                i16::try_from(pos[a] - origin[a]).expect("a voxel body spans < 32768 blocks")
+            });
             model.blocks.insert(o, state);
         }
         let positions: Vec<BlockPos> = model
@@ -603,7 +662,10 @@ impl Rollback {
         self.assign_entity_id_safe(e);
         let user_data = e.data().as_ffi() as u128;
         // The body frame is the COM frame: same mass and inertia, COM at 0.
-        let body_mprops = MassProperties { local_com: Vector::ZERO, ..mprops };
+        let body_mprops = MassProperties {
+            local_com: Vector::ZERO,
+            ..mprops
+        };
         let mut body = RigidBodyBuilder::dynamic()
             .pose(pose)
             .angvel(angvel)
@@ -623,8 +685,15 @@ impl Rollback {
             .into_iter()
             .map(|(lo, hi)| {
                 let half = [0, 1, 2].map(|a| (hi[a] - lo[a]) as f32 * 0.5);
-                let centre = Vector::new(lo[0] as f32 + half[0], lo[1] as f32 + half[1], lo[2] as f32 + half[2]);
-                (Pose::from_translation(centre - com), SharedShape::cuboid(half[0], half[1], half[2]))
+                let centre = Vector::new(
+                    lo[0] as f32 + half[0],
+                    lo[1] as f32 + half[1],
+                    lo[2] as f32 + half[2],
+                );
+                (
+                    Pose::from_translation(centre - com),
+                    SharedShape::cuboid(half[0], half[1], half[2]),
+                )
             })
             .collect();
         let collider = ColliderBuilder::new(SharedShape::compound(parts))
@@ -639,8 +708,16 @@ impl Rollback {
         // zero `MassProperties` returns the other side untouched — and the
         // compound sits at the identity offset, so rapier never transforms
         // or re-diagonalises a collider's inertia into the body frame.
-        debug_assert_eq!(collider.mass_properties(), MassProperties::default(), "a voxel body collider adds no mass");
-        debug_assert_eq!(*collider.position(), Pose::IDENTITY, "a voxel body's compound sits at the identity offset");
+        debug_assert_eq!(
+            collider.mass_properties(),
+            MassProperties::default(),
+            "a voxel body collider adds no mass"
+        );
+        debug_assert_eq!(
+            *collider.position(),
+            Pose::IDENTITY,
+            "a voxel body's compound sits at the identity offset"
+        );
         self.attach_collider_safe(handle, collider);
 
         let spawned_tick = *self.data.tick;
@@ -657,7 +734,16 @@ impl Rollback {
         };
         self.data.ecs.voxel_body.set_safe(
             e,
-            Some(VoxelBody { model, origin, policy, spawned_tick, still_ticks: 0, landed: false, fall_speed: 0.0, drops }),
+            Some(VoxelBody {
+                model,
+                origin,
+                policy,
+                spawned_tick,
+                still_ticks: 0,
+                landed: false,
+                fall_speed: 0.0,
+                drops,
+            }),
         );
         Some(e)
     }
@@ -679,20 +765,34 @@ impl Rollback {
             .filter_map(|(k, v)| v.as_ref().map(|_| k))
             .collect();
         for e in keys {
-            let Some(vb) = self.data.ecs.voxel_body.try_get(e).clone() else { continue };
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let Some(vb) = self.data.ecs.voxel_body.try_get(e).clone() else {
+                continue;
+            };
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else {
+                continue;
+            };
+            let Some(body) = self.data.physics.bodies.get(handle) else {
+                continue;
+            };
             let (v, w) = (body.linvel(), body.angvel());
             // Bodies start upright (identity rotation): the tilt of the up
             // axis is `(rotation · Y).y`, a quaternion rotation (+ - *).
             let fall_speed = -v.y;
             let impact = vb.fall_speed - fall_speed
-                > LANDING_IMPACT_TICKS * VOXEL_BODY_GRAVITY * UNITS_PER_METER * crate::movement::TICK_DT;
+                > LANDING_IMPACT_TICKS
+                    * VOXEL_BODY_GRAVITY
+                    * UNITS_PER_METER
+                    * crate::movement::TICK_DT;
             let land = !vb.landed && (body.rotation() * Vector::Y).y < LANDED_TILT_COS && impact;
             let still = body.is_sleeping()
                 || (v.dot(v) < REST_LINVEL * REST_LINVEL && w.dot(w) < REST_ANGVEL * REST_ANGVEL);
-            let still_ticks = if still { vb.still_ticks.saturating_add(1) } else { 0 };
-            let settle = still_ticks >= REST_TICKS || tick.saturating_sub(vb.spawned_tick) >= SETTLE_TIMEOUT_TICKS;
+            let still_ticks = if still {
+                vb.still_ticks.saturating_add(1)
+            } else {
+                0
+            };
+            let settle = still_ticks >= REST_TICKS
+                || tick.saturating_sub(vb.spawned_tick) >= SETTLE_TIMEOUT_TICKS;
             if settle {
                 match vb.policy {
                     SettlePolicy::Despawn => self.remove_entity_safe(e, None),
@@ -711,14 +811,24 @@ impl Rollback {
                 continue;
             }
             if land {
-                self.data
-                    .physics
-                    .bodies
-                    .mutate_body_safe(handle, |b| b.set_angular_damping(VOXEL_BODY_LANDED_ANGULAR_DAMPING));
+                self.data.physics.bodies.mutate_body_safe(handle, |b| {
+                    b.set_angular_damping(VOXEL_BODY_LANDED_ANGULAR_DAMPING)
+                });
             }
-            if still_ticks != vb.still_ticks || land || fall_speed.to_bits() != vb.fall_speed.to_bits() {
+            if still_ticks != vb.still_ticks
+                || land
+                || fall_speed.to_bits() != vb.fall_speed.to_bits()
+            {
                 let landed = vb.landed || land;
-                self.data.ecs.voxel_body.set_safe(e, Some(VoxelBody { still_ticks, landed, fall_speed, ..vb }));
+                self.data.ecs.voxel_body.set_safe(
+                    e,
+                    Some(VoxelBody {
+                        still_ticks,
+                        landed,
+                        fall_speed,
+                        ..vb
+                    }),
+                );
             }
         }
     }

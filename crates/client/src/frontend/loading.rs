@@ -14,9 +14,9 @@ use bevy::prelude::*;
 use crate::renderer::bridge::{PendingSnapshotVoxels, RegionRoots, SnapshotVoxelTask};
 use crate::renderer::commander::{CameraMode, CommanderCamera};
 use crate::renderer::hud::HudStatus;
+use crate::renderer::meshing::MeshingTask;
 use crate::renderer::meshing::chunk_mesh::ChunkMeshDirty;
 use crate::renderer::meshing::queue::RemeshQueue;
-use crate::renderer::meshing::MeshingTask;
 use crate::session::{AppState, InPlay};
 
 /// Consecutive frames the home region must have no meshing work left (with
@@ -106,9 +106,13 @@ impl LoadingCover {
             return None;
         }
         // A camera that is not (or no longer) over the body means a load is on:
-        // the first placement, or a Play into another region.
+        // the first placement, or an adventure in another region.
         if !s.camera_placed && !matches!(self.phase, CoverPhase::Covering { .. }) {
-            *self = Self { phase: CoverPhase::Covering { since: now }, step: STEP_JOINING, ..Self::default() };
+            *self = Self {
+                phase: CoverPhase::Covering { since: now },
+                step: STEP_JOINING,
+                ..Self::default()
+            };
         }
         match self.phase {
             CoverPhase::Clear => None,
@@ -126,7 +130,10 @@ impl LoadingCover {
                     (STEP_RECEIVING, LOADING_TERRAIN_ARRIVED * 0.5)
                 } else if s.outstanding > 0 {
                     let done = 1.0 - s.outstanding as f32 / self.peak_outstanding as f32;
-                    (STEP_BUILDING, LOADING_TERRAIN_ARRIVED + (0.98 - LOADING_TERRAIN_ARRIVED) * done)
+                    (
+                        STEP_BUILDING,
+                        LOADING_TERRAIN_ARRIVED + (0.98 - LOADING_TERRAIN_ARRIVED) * done,
+                    )
                 } else if !s.camera_placed {
                     (STEP_PLACING, 0.98)
                 } else {
@@ -185,7 +192,8 @@ pub fn update_loading_cover(
     let home = status.and_then(|s| s.home_region);
     let root = home.and_then(|rc| roots.as_ref().and_then(|r| r.0.get(&rc).copied()));
     // Counted only while a load is on: steady play pays nothing here.
-    let loading = matches!(cover.phase, CoverPhase::Covering { .. }) || cam.as_ref().is_some_and(|c| !c.placed);
+    let loading = matches!(cover.phase, CoverPhase::Covering { .. })
+        || cam.as_ref().is_some_and(|c| !c.placed);
     let now = time.elapsed_secs();
     let outstanding = match root {
         Some(root) if eligible && loading => {
@@ -196,9 +204,15 @@ pub fn update_loading_cover(
             // waits on) it is exact every frame. A stale nonzero count can only
             // delay the lift, never hasten it.
             let (counted_at, last) = *recount;
-            if last < OUTSTANDING_EXACT_BELOW || now - counted_at >= OUTSTANDING_RECOUNT_SECS || now < counted_at {
+            if last < OUTSTANDING_EXACT_BELOW
+                || now - counted_at >= OUTSTANDING_RECOUNT_SECS
+                || now < counted_at
+            {
                 let queued = queue.as_ref().map_or(0, |q| {
-                    q.dirty.keys().filter(|e| parents.get(**e).is_ok_and(|p| p.parent() == root)).count()
+                    q.dirty
+                        .keys()
+                        .filter(|e| parents.get(**e).is_ok_and(|p| p.parent() == root))
+                        .count()
                 });
                 let count = queued + in_flight.iter().filter(|p| p.parent() == root).count();
                 *recount = (now, count);
@@ -227,9 +241,14 @@ pub fn update_loading_cover(
     if let Some(timed_out) = cover.step(signals, now) {
         let secs = since.map_or(0.0, |s| now - s);
         if timed_out {
-            warn!("[loading] the world did not settle in {LOADING_TIMEOUT_SECS} s; lifting the loading screen anyway");
+            warn!(
+                "[loading] the world did not settle in {LOADING_TIMEOUT_SECS} s; lifting the loading screen anyway"
+            );
         }
-        game::perf_event!("loading_screen_lifted", "secs={secs:.2} timed_out={timed_out}");
+        game::perf_event!(
+            "loading_screen_lifted",
+            "secs={secs:.2} timed_out={timed_out}"
+        );
     }
     // Until the cover is gone (faded out too) the player's input goes nowhere
     // and the pointer stays free (`CursorPolicy::loading`).
@@ -240,4 +259,3 @@ pub fn update_loading_cover(
         }
     }
 }
-

@@ -38,7 +38,8 @@ pub const DEFAULT_COORDINATOR_CERT_HASH_FILE: &str = "target/dev-r2/coordinator.
 /// Environment: the coordinator's pin itself, for a host — overrides the file.
 pub const COORDINATOR_CERT_SHA256_ENV: &str = "VOXEL_COORDINATOR_CERT_SHA256";
 /// Why a split role refuses a store that is not Postgres.
-pub const SPLIT_ROLES_NEED_POSTGRES: &str = "split roles need a Postgres world (VOXEL_WORLD_DB=postgres://…)";
+pub const SPLIT_ROLES_NEED_POSTGRES: &str =
+    "split roles need a Postgres world (VOXEL_WORLD_DB=postgres://…)";
 /// How often the coordinator process checks for a stop signal or a stopped thread.
 const COORDINATOR_PROCESS_POLL: Duration = Duration::from_millis(100);
 
@@ -70,6 +71,25 @@ pub enum Role {
 }
 
 impl Role {
+    /// The bounded, low-cardinality telemetry role. A single-process `all`
+    /// server is the host/client edge for the development world.
+    pub fn telemetry_role(self) -> &'static str {
+        match self {
+            Role::All | Role::Host => "host",
+            Role::Coordinator => "coordinator",
+            Role::Fleet => "fleet",
+        }
+    }
+
+    /// Head sampling defaults: coordinator and fleet operations are coarse and
+    /// comparatively rare; hosts carry the high-volume game workload.
+    pub fn telemetry_ratio(self) -> f64 {
+        match self {
+            Role::Coordinator | Role::Fleet => 1.0,
+            Role::All | Role::Host => 0.10,
+        }
+    }
+
     /// The role from the value of [`ROLE_ENV`]; unset or empty is [`Role::All`].
     pub fn from_value(value: Option<&str>) -> Result<Role, String> {
         match value.map(str::trim).unwrap_or("") {
@@ -77,7 +97,9 @@ impl Role {
             "host" => Ok(Role::Host),
             "coordinator" => Ok(Role::Coordinator),
             "fleet" => Ok(Role::Fleet),
-            other => Err(format!("{ROLE_ENV}={other:?} is not a role (all, host, coordinator or fleet)")),
+            other => Err(format!(
+                "{ROLE_ENV}={other:?} is not a role (all, host, coordinator or fleet)"
+            )),
         }
     }
 
@@ -89,19 +111,24 @@ impl Role {
     /// Postgres store ([`SPLIT_ROLES_NEED_POSTGRES`]).
     pub fn check_store(self, source: &WorldSource) -> Result<(), String> {
         match (self, source) {
-            (Role::All, _) | (_, WorldSource::Store { url: StoreUrl::Postgres(_), .. }) => Ok(()),
+            (Role::All, _)
+            | (
+                _,
+                WorldSource::Store {
+                    url: StoreUrl::Postgres(_),
+                    ..
+                },
+            ) => Ok(()),
             _ => Err(SPLIT_ROLES_NEED_POSTGRES.to_string()),
         }
     }
 }
 
 /// Why a `claim` host refuses to start without the login link.
-pub const CLAIM_NEEDS_LOGIN: &str =
-    "VOXEL_OWNERSHIP=claim (any number of hosts) needs the login link (VOXEL_AUTH=jwt with a service token): ids and placement come from it";
+pub const CLAIM_NEEDS_LOGIN: &str = "VOXEL_OWNERSHIP=claim (any number of hosts) needs the login link (VOXEL_AUTH=jwt with a service token): ids and placement come from it";
 
 /// What `VOXEL_OWNERSHIP=claim` refuses outside a host role.
-pub const CLAIM_NEEDS_ROLE_HOST: &str =
-    "VOXEL_OWNERSHIP=claim claims super-regions on demand and registers a lease: it needs VOXEL_ROLE=host";
+pub const CLAIM_NEEDS_ROLE_HOST: &str = "VOXEL_OWNERSHIP=claim claims super-regions on demand and registers a lease: it needs VOXEL_ROLE=host";
 
 /// What a host refuses without an ownership of its own.
 pub const HOST_NEEDS_OWNERSHIP: &str =
@@ -113,7 +140,12 @@ pub const HOST_NEEDS_OWNERSHIP: &str =
 /// login service's push), since player ids and placement come from the login service. `static`
 /// and `allinone` (`Rollback`) need nothing here (a second `static` host is refused by the store
 /// at its registration).
-pub fn check_claim_needs(role: Role, policy: game::CrashPolicy, postgres: bool, login_link: bool) -> Result<(), String> {
+pub fn check_claim_needs(
+    role: Role,
+    policy: game::CrashPolicy,
+    postgres: bool,
+    login_link: bool,
+) -> Result<(), String> {
     if policy != game::CrashPolicy::Succession {
         return Ok(());
     }
@@ -174,7 +206,6 @@ pub fn unix_ms_now() -> u64 {
 pub fn start_clock(
     role: Role,
     store: Option<&world_store::StoreHandle>,
-    postgres: bool,
     world_tick: game::Tick,
 ) -> Result<(game::WorldClock, u64), String> {
     match (role, store) {
@@ -182,7 +213,10 @@ pub fn start_clock(
         (_, Some(store)) => {
             let now = unix_ms_now();
             let anchor = store
-                .ensure_clock_anchor(game::ClockAnchor { unix_ms: now, tick: world_tick })
+                .ensure_clock_anchor(game::ClockAnchor {
+                    unix_ms: now,
+                    tick: world_tick,
+                })
                 .map_err(|e| format!("the world clock anchor: {e}"))?;
             clock_from_anchor(anchor, now, world_tick)
         }
@@ -204,7 +238,6 @@ pub fn start_clock(
 pub fn check_before_registration(
     role: Role,
     store: Option<&world_store::StoreHandle>,
-    postgres: bool,
     ownership_word: &str,
     claim_on_demand: bool,
     super_region_regions: u32,
@@ -215,7 +248,7 @@ pub fn check_before_registration(
         crate::claims::HostClaims::check_side(store, super_region_regions)?;
     }
     if role == Role::Host {
-        start_clock(role, store, postgres, world_tick)?;
+        start_clock(role, store, world_tick)?;
     }
     Ok(())
 }
@@ -231,7 +264,9 @@ pub fn clear_anchor_after_claim(
     postgres: bool,
 ) -> Result<(), String> {
     if let (Role::All, Some(store), true) = (role, store, postgres) {
-        store.clear_clock_anchor().map_err(|e| format!("clearing the world clock anchor: {e}"))?;
+        store
+            .clear_clock_anchor()
+            .map_err(|e| format!("clearing the world clock anchor: {e}"))?;
     }
     Ok(())
 }
@@ -240,7 +275,8 @@ pub fn clear_anchor_after_claim(
 /// earlier by the phase so tick edges fall at the same wall instants in every process.
 pub fn back_dated_start(phase_ms: u64) -> std::time::Instant {
     let now = std::time::Instant::now();
-    now.checked_sub(Duration::from_millis(phase_ms)).unwrap_or(now)
+    now.checked_sub(Duration::from_millis(phase_ms))
+        .unwrap_or(now)
 }
 
 /// The coordinator process's view of the world tick: the anchored clock and its base.
@@ -251,20 +287,29 @@ pub struct CoordinatorClock {
 
 impl CoordinatorClock {
     pub fn new(clock: game::WorldClock, phase_ms: u64) -> Self {
-        Self { clock, started: back_dated_start(phase_ms) }
+        Self {
+            clock,
+            started: back_dated_start(phase_ms),
+        }
     }
 
     /// The world tick in progress now; agrees with every host's to within one tick.
     pub fn world_tick_now(&self) -> game::Tick {
-        self.clock.tick_at(self.started.elapsed().as_millis() as u64)
+        self.clock
+            .tick_at(self.started.elapsed().as_millis() as u64)
     }
 }
 
 /// The coordinator's API bind from an env value (`ip:port`); unset or empty is
 /// [`DEFAULT_COORDINATOR_ADDR`].
 pub fn coordinator_addr_from(var: &str, value: Option<&str>) -> Result<SocketAddr, String> {
-    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_COORDINATOR_ADDR);
-    value.parse().map_err(|_| format!("{var}={value:?} is not an address (ip:port)"))
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_COORDINATOR_ADDR);
+    value
+        .parse()
+        .map_err(|_| format!("{var}={value:?} is not an address (ip:port)"))
 }
 
 /// The coordinator's URLs as a host reaches them: a URL or a comma list of URLs, each
@@ -272,16 +317,23 @@ pub fn coordinator_addr_from(var: &str, value: Option<&str>) -> Result<SocketAdd
 /// empty is [`DEFAULT_COORDINATOR_URL`]. A bare `host:port` (the service link's form before the
 /// coordinator's HTTP API) is refused, naming the variable and the form expected.
 pub fn coordinator_urls_from(var: &str, value: Option<&str>) -> Result<Vec<String>, String> {
-    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_COORDINATOR_URL);
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_COORDINATOR_URL);
     let mut urls = Vec::new();
     for item in value.split(',').map(str::trim).filter(|i| !i.is_empty()) {
         let rest = item.strip_prefix("https://").ok_or_else(|| {
             format!("{var}={value:?}: {item:?} is not a URL — the coordinator is an HTTPS service: https://host:port (a comma list for several replicas)")
         })?;
         let authority = rest.trim_end_matches('/');
-        let port_ok = authority.rsplit_once(':').is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+        let port_ok = authority
+            .rsplit_once(':')
+            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
         if !port_ok || authority.contains('/') {
-            return Err(format!("{var}={value:?}: {item:?} is not https://host:port"));
+            return Err(format!(
+                "{var}={value:?}: {item:?} is not https://host:port"
+            ));
         }
         urls.push(format!("https://{authority}"));
     }
@@ -294,13 +346,17 @@ pub fn coordinator_urls_from(var: &str, value: Option<&str>) -> Result<Vec<Strin
 /// The coordinator's cert-hash file from an env value; unset or empty is
 /// [`DEFAULT_COORDINATOR_CERT_HASH_FILE`].
 pub fn cert_hash_file_from(value: Option<&str>) -> PathBuf {
-    PathBuf::from(value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_COORDINATOR_CERT_HASH_FILE))
+    PathBuf::from(
+        value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(DEFAULT_COORDINATOR_CERT_HASH_FILE),
+    )
 }
 
 /// Why a `claim` host refuses a Postgres without two-phase commit (however many hosts run:
 /// its saves are world cuts).
-pub const CLAIM_NEEDS_TWO_PHASE: &str =
-    "a claim host (VOXEL_OWNERSHIP=claim, on the hosts and on their coordinator; any number of hosts) needs Postgres with max_prepared_transactions > 0 (its world cuts are staged in two phases)";
+pub const CLAIM_NEEDS_TWO_PHASE: &str = "a claim host (VOXEL_OWNERSHIP=claim, on the hosts and on their coordinator; any number of hosts) needs Postgres with max_prepared_transactions > 0 (its world cuts are staged in two phases)";
 
 /// A coordinator's start-up on Postgres, before it claims its row: EVERY world cut part a
 /// crash left staged is finished ([`crate::cuts::resolve_staged_cuts`]) — the cuts of a
@@ -314,7 +370,11 @@ pub fn recover_staged_cuts(store: &world_store::StoreHandle) -> Result<(), Strin
         Ok(staged) => staged,
         // A store with no prepared transactions at all (SQLite) has none staged.
         Err(world_store::StoreError::Unsupported(_)) => return Ok(()),
-        Err(e) => return Err(format!("the world cut parts left staged could not be read: {e}")),
+        Err(e) => {
+            return Err(format!(
+                "the world cut parts left staged could not be read: {e}"
+            ));
+        }
     };
     if staged.is_empty() {
         return Ok(());
@@ -340,15 +400,23 @@ pub fn recover_staged_cuts(store: &world_store::StoreHandle) -> Result<(), Strin
 /// the host lease ([`game::HOST_LEASE_MS`]) by the database clock — a row of this process's own `name` (its
 /// earlier process, which the registration lapses) never counts. With nobody alive (a total
 /// crash) every staged part is finished, as before.
-pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, name: &str) -> Result<(), String> {
+pub fn resolve_before_claim(
+    postgres: bool,
+    store: &world_store::StoreHandle,
+    name: &str,
+) -> Result<(), String> {
     if !postgres {
         return Ok(());
     }
-    let staged = store.staged_cut_parts().map_err(|e| format!("the world cut parts left staged could not be read: {e}"))?;
+    let staged = store
+        .staged_cut_parts()
+        .map_err(|e| format!("the world cut parts left staged could not be read: {e}"))?;
     if staged.is_empty() {
         return Ok(());
     }
-    let read = |e: world_store::StoreError| format!("the hosts beside the staged world cut parts could not be read: {e}");
+    let read = |e: world_store::StoreError| {
+        format!("the hosts beside the staged world cut parts could not be read: {e}")
+    };
     let rows = store.hosts().map_err(read)?;
     let now = store.db_now_ms().map_err(read)?;
     let generation = store.world_generation().map_err(read)?;
@@ -356,10 +424,13 @@ pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, na
     let alive: std::collections::BTreeSet<game::HostId> = rows
         .iter()
         .filter(|r| r.generation == generation && (name.is_empty() || r.name != name))
-        .filter(|r| r.state == game::HOST_LIVE && !r.clean && now.saturating_sub(r.seen_ms) <= lease_ms)
+        .filter(|r| {
+            r.state == game::HOST_LIVE && !r.clean && now.saturating_sub(r.seen_ms) <= lease_ms
+        })
         .map(|r| r.id)
         .collect();
-    let mut cuts: std::collections::BTreeMap<game::CutId, Vec<game::HostId>> = std::collections::BTreeMap::new();
+    let mut cuts: std::collections::BTreeMap<game::CutId, Vec<game::HostId>> =
+        std::collections::BTreeMap::new();
     for (cut, host) in staged {
         cuts.entry(cut).or_default().push(host);
     }
@@ -371,17 +442,27 @@ pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, na
             );
             continue;
         }
-        log::warn!("[server] world cut {} part(s) left staged by a crash (hosts {hosts:?}): finishing them", cut.0);
-        store.abort_cut(cut, world_store::SWEEP_ABORT_TICK).map_err(|e| format!("the world cut parts left staged could not be resolved: {e}"))?;
+        log::warn!(
+            "[server] world cut {} part(s) left staged by a crash (hosts {hosts:?}): finishing them",
+            cut.0
+        );
+        store
+            .abort_cut(cut, world_store::SWEEP_ABORT_TICK)
+            .map_err(|e| format!("the world cut parts left staged could not be resolved: {e}"))?;
     }
     Ok(())
 }
 
 /// A `claim` host (`policy` `Succession`: any number of hosts, its saves world cuts in two
 /// phases) needs two-phase commit ([`CLAIM_NEEDS_TWO_PHASE`]); any other: nothing.
-pub fn check_two_phase(policy: game::CrashPolicy, store: &world_store::StoreHandle) -> Result<(), String> {
+pub fn check_two_phase(
+    policy: game::CrashPolicy,
+    store: &world_store::StoreHandle,
+) -> Result<(), String> {
     if policy == game::CrashPolicy::Succession {
-        store.two_phase_ready().map_err(|e| format!("{CLAIM_NEEDS_TWO_PHASE}: {e}"))?;
+        store
+            .two_phase_ready()
+            .map_err(|e| format!("{CLAIM_NEEDS_TWO_PHASE}: {e}"))?;
     }
     Ok(())
 }
@@ -397,14 +478,25 @@ pub const ALL_ROLE_BESIDE_HOSTS: &str = "VOXEL_ROLE=all (one process running eve
 /// fence them. Refused ([`ALL_ROLE_BESIDE_HOSTS`]), naming the rows and the remedies. A row of
 /// an older generation (the world rolled back since: it holds nothing of this world) or a
 /// clean one is no obstacle. A store whose rows cannot be read is refused too.
-pub fn check_all_role_beside_hosts(role: Role, store: &world_store::StoreHandle, me: HostId) -> Result<(), String> {
+pub fn check_all_role_beside_hosts(
+    role: Role,
+    store: &world_store::StoreHandle,
+    me: HostId,
+) -> Result<(), String> {
     if role != Role::All {
         return Ok(());
     }
-    let rows = store.hosts().map_err(|e| format!("{ALL_ROLE_BESIDE_HOSTS}: the hosts rows could not be read ({e})"))?;
-    let generation = store.world_generation().map_err(|e| format!("{ALL_ROLE_BESIDE_HOSTS}: the world generation could not be read ({e})"))?;
-    let others: Vec<u64> =
-        rows.iter().filter(|r| r.id != me && !r.clean && r.generation == generation).map(|r| r.id.0).collect();
+    let rows = store
+        .hosts()
+        .map_err(|e| format!("{ALL_ROLE_BESIDE_HOSTS}: the hosts rows could not be read ({e})"))?;
+    let generation = store.world_generation().map_err(|e| {
+        format!("{ALL_ROLE_BESIDE_HOSTS}: the world generation could not be read ({e})")
+    })?;
+    let others: Vec<u64> = rows
+        .iter()
+        .filter(|r| r.id != me && !r.clean && r.generation == generation)
+        .map(|r| r.id.0)
+        .collect();
     if others.is_empty() {
         return Ok(());
     }
@@ -425,17 +517,26 @@ pub fn run_coordinator() -> ServerExit {
     let fatal = |e: String| -> ! { crate::fatal(&e) };
     crate::health::start_from_env("coordinator").unwrap_or_else(|e| fatal(e));
     let source = world_file::resolve(
-        std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref(),
+        std::env::var(worldgen::forged::WORLD_FILE_ENV)
+            .ok()
+            .as_deref(),
         std::env::var(world_file::WORLD_DB_ENV).ok().as_deref(),
     )
     .unwrap_or_else(|e| fatal(e));
-    Role::Coordinator.check_store(&source).unwrap_or_else(|e| fatal(e));
+    Role::Coordinator
+        .check_store(&source)
+        .unwrap_or_else(|e| fatal(e));
     let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(e));
     // Watched before the store opens only when waiting for a world; otherwise where it always was.
-    let early_stop = (empty == world_file::EmptyStore::Wait).then(crate::watch_stop_signals_on_thread);
-    let Some(mut opened) = world_file::open_world_with(&source, &worldgen::forge::ForgeParams::default(), empty, early_stop.as_deref())
-        .unwrap_or_else(|e| fatal(e))
-    else {
+    let early_stop =
+        (empty == world_file::EmptyStore::Wait).then(crate::watch_stop_signals_on_thread);
+    let Some(mut opened) = world_file::open_world_with(
+        &source,
+        &worldgen::forge::ForgeParams::default(),
+        empty,
+        early_stop.as_deref(),
+    )
+    .unwrap_or_else(|e| fatal(e)) else {
         log::info!("[coordinator] stop signal while waiting for a world: exiting");
         return ServerExit::Clean;
     };
@@ -448,7 +549,12 @@ pub fn run_coordinator() -> ServerExit {
     // forged world (the coordinator never installs one), its store read like any reader's.
     if let Some(world) = opened.world.take() {
         let cfg = map_tiles::TileSourceConfig::SERVER;
-        crate::map_api::install(map_tiles::TileSource::forged(store.clone(), std::sync::Arc::new(world), crate::map_api::materials(), cfg));
+        crate::map_api::install(map_tiles::TileSource::forged(
+            store.clone(),
+            std::sync::Arc::new(world),
+            crate::map_api::materials(),
+            cfg,
+        ));
         // The `web` proxy's upstream (nginx speaks HTTP/1.1, the API HTTP/2 only).
         if let Ok(bind) = std::env::var(crate::map_api::MAP_BIND_ENV) {
             let served = bind
@@ -464,21 +570,38 @@ pub fn run_coordinator() -> ServerExit {
     // runs the successions. `static` (or unset): one host alone, which saves on its own; a
     // crash rolls the world back, never declared. The coordinator has no id of its own: the
     // policy from `VOXEL_OWNERSHIP` alone. A `VOXEL_HOSTS` left in its environment is ignored.
-    let policy = coordinator_crash_policy(std::env::var(game::ownership::OWNERSHIP_ENV).ok().as_deref())
-        .unwrap_or_else(|e| fatal(e));
+    let policy = coordinator_crash_policy(
+        std::env::var(game::ownership::OWNERSHIP_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or_else(|e| fatal(e));
     check_two_phase(policy, &store).unwrap_or_else(|e| fatal(e));
     // Before it claims the coordinator row: the world cut parts a crash left staged.
     recover_staged_cuts(&store).unwrap_or_else(|e| fatal(e));
-    let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
-    let clock = CoordinatorClock::new(clock, phase);
-    log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
-    let bind = coordinator_addr_from(COORDINATOR_BIND_ENV, std::env::var(COORDINATOR_BIND_ENV).ok().as_deref())
+    let (clock, phase) = start_clock(Role::Coordinator, Some(&store), opened.world_tick)
         .unwrap_or_else(|e| fatal(e));
+    let clock = CoordinatorClock::new(clock, phase);
+    log::info!(
+        "[coordinator] world clock anchored: world tick {}",
+        clock.world_tick_now()
+    );
+    let bind = coordinator_addr_from(
+        COORDINATOR_BIND_ENV,
+        std::env::var(COORDINATOR_BIND_ENV).ok().as_deref(),
+    )
+    .unwrap_or_else(|e| fatal(e));
     // Registered as a replica first (Elastic 2b Task 4: an id issued by the store), then the row.
-    let mut start = match world_file::ensure_coordinator_state_at(&store, &map, None, &bind.to_string()).unwrap_or_else(|e| fatal(e)) {
-        Some(start) => start,
-        None => fatal("this world has no history (nobody can live in it): there is nothing to coordinate".into()),
-    };
+    let mut start =
+        match world_file::ensure_coordinator_state_at(&store, &map, None, &bind.to_string())
+            .unwrap_or_else(|e| fatal(e))
+        {
+            Some(start) => start,
+            None => fatal(
+                "this world has no history (nobody can live in it): there is nothing to coordinate"
+                    .into(),
+            ),
+        };
     // Elastic 4: how many hosts the world wants (`VOXEL_FLEET_MAX` unset: no fleet decision).
     let fleet = fleet_dials_from(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(e));
     match fleet {
@@ -490,30 +613,48 @@ pub fn run_coordinator() -> ServerExit {
             d.down_after_ms,
             d.min_lifetime_ms
         ),
-        None => log::info!("[coordinator] fleet: {FLEET_MAX_ENV} is unset: the coordinator adds, drains and removes no host"),
+        None => log::info!(
+            "[coordinator] fleet: {FLEET_MAX_ENV} is unset: the coordinator adds, drains and removes no host"
+        ),
     }
     // Elastic 5: the move warning and the dev / twin probe (refused beside the fleet's dials).
-    let moves = move_dials_from(|name| std::env::var(name).ok(), fleet.is_some()).unwrap_or_else(|e| fatal(e));
+    let moves = move_dials_from(|name| std::env::var(name).ok(), fleet.is_some())
+        .unwrap_or_else(|e| fatal(e));
     if let Some(every) = moves.probe_ms {
-        log::warn!("[coordinator] move probe: every {every} ms the busiest occupied super-region moves (dev / twin only)");
+        log::warn!(
+            "[coordinator] move probe: every {every} ms the busiest occupied super-region moves (dev / twin only)"
+        );
     }
     start.coordinator.set_fleet(fleet);
     start.coordinator.set_move_dials(moves);
-    let token = svc_link::service_token_from_env().unwrap_or_else(|e| fatal(format!("the service token: {e}")));
-    let cert_file = cert_hash_file_from(std::env::var(COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
+    let token = svc_link::service_token_from_env()
+        .unwrap_or_else(|e| fatal(format!("the service token: {e}")));
+    let cert_file = cert_hash_file_from(
+        std::env::var(COORDINATOR_CERT_HASH_FILE_ENV)
+            .ok()
+            .as_deref(),
+    );
     let fenced = Fenced::default();
     let claim_world = policy == game::CrashPolicy::Succession;
     let cuts = claim_world.then(|| crate::coordinator_rt::WorldCuts {
-        every: Duration::from_secs(crate::world_save_secs(std::env::var(crate::WORLD_SAVE_SECS_ENV).ok().as_deref())),
+        every: Duration::from_secs(crate::world_save_secs(
+            std::env::var(crate::WORLD_SAVE_SECS_ENV).ok().as_deref(),
+        )),
         tick: Box::new(move || clock.world_tick_now()),
     });
     if claim_world {
-        log::info!("[coordinator] ownership `claim`: world cuts of any number of hosts; a crashed host's land goes to an heir (successions)");
+        log::info!(
+            "[coordinator] ownership `claim`: world cuts of any number of hosts; a crashed host's land goes to an heir (successions)"
+        );
     }
     // Its API names the world (`VOXEL_WORLD_ID`, empty when unset: then only callers that name
     // none are served — hosts and the login service must agree). The login service calls the same
     // API (its orders relayed to the gate host, the answers read from `login_outbox`).
-    let world = crate::login_link::link_world_from(std::env::var(crate::auth_edge::WORLD_ID_ENV).ok().as_deref());
+    let world = crate::login_link::link_world_from(
+        std::env::var(crate::auth_edge::WORLD_ID_ENV)
+            .ok()
+            .as_deref(),
+    );
     let coordinator = crate::coordinator_rt::start_listening_as(
         store.clone(),
         start,
@@ -555,15 +696,26 @@ pub fn run_fleet() -> ServerExit {
     let fatal = |e: String| -> ! { crate::fatal(&e) };
     crate::health::start_from_env("fleet").unwrap_or_else(|e| fatal(e));
     let source = world_file::resolve(
-        std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref(),
+        std::env::var(worldgen::forged::WORLD_FILE_ENV)
+            .ok()
+            .as_deref(),
         std::env::var(world_file::WORLD_DB_ENV).ok().as_deref(),
     )
     .unwrap_or_else(|e| fatal(e));
-    Role::Fleet.check_store(&source).unwrap_or_else(|e| fatal(e));
-    let WorldSource::Store { url, .. } = &source else { fatal(SPLIT_ROLES_NEED_POSTGRES.to_string()) };
-    let config = crate::fleet::FleetConfig::from_env(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(e));
-    let kube = kube_api::Kube::from_env(crate::fleet::FLEET_KUBE_API_ENV)
-        .unwrap_or_else(|e| fatal(format!("the Kubernetes API ({}): {e}", crate::fleet::FLEET_KUBE_API_ENV)));
+    Role::Fleet
+        .check_store(&source)
+        .unwrap_or_else(|e| fatal(e));
+    let WorldSource::Store { url, .. } = &source else {
+        fatal(SPLIT_ROLES_NEED_POSTGRES.to_string())
+    };
+    let config = crate::fleet::FleetConfig::from_env(|name| std::env::var(name).ok())
+        .unwrap_or_else(|e| fatal(e));
+    let kube = kube_api::Kube::from_env(crate::fleet::FLEET_KUBE_API_ENV).unwrap_or_else(|e| {
+        fatal(format!(
+            "the Kubernetes API ({}): {e}",
+            crate::fleet::FLEET_KUBE_API_ENV
+        ))
+    });
     let stop = crate::watch_stop_signals_on_thread();
     crate::fleet::run(url, config, kube, &stop)
 }
@@ -578,12 +730,21 @@ pub const MOVE_PROBE_MS_ENV: &str = "VOXEL_MOVE_PROBE_MS";
 
 /// The move dials from the environment (`var` reads one variable; `fleet`: the fleet's dials are
 /// set). A value that is not a number above 0, or the probe beside the fleet, refuses the start.
-pub fn move_dials_from(var: impl Fn(&str) -> Option<String>, fleet: bool) -> Result<game::coordinator::MoveDials, String> {
-    let read = |name: &str| var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+pub fn move_dials_from(
+    var: impl Fn(&str) -> Option<String>,
+    fleet: bool,
+) -> Result<game::coordinator::MoveDials, String> {
+    let read = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
     let number = |name: &str, value: &str| -> Result<u64, String> {
         match value.parse::<u64>() {
             Ok(n) if n > 0 => Ok(n),
-            _ => Err(format!("invalid {name} value `{value}` (expected a number above 0)")),
+            _ => Err(format!(
+                "invalid {name} value `{value}` (expected a number above 0)"
+            )),
         }
     };
     let mut dials = game::coordinator::MoveDials::default();
@@ -592,7 +753,9 @@ pub fn move_dials_from(var: impl Fn(&str) -> Option<String>, fleet: bool) -> Res
     }
     if let Some(v) = read(MOVE_PROBE_MS_ENV) {
         if fleet {
-            return Err(format!("{MOVE_PROBE_MS_ENV} is a dev / twin trigger: it is refused beside {FLEET_MAX_ENV}"));
+            return Err(format!(
+                "{MOVE_PROBE_MS_ENV} is a dev / twin trigger: it is refused beside {FLEET_MAX_ENV}"
+            ));
         }
         dials.probe_ms = Some(number(MOVE_PROBE_MS_ENV, &v)?);
     }
@@ -618,8 +781,14 @@ pub const HOST_MIN_LIFETIME_MS_ENV: &str = "VOXEL_HOST_MIN_LIFETIME_MS";
 /// slot free until that host's row is removed (rule 3 frees it once the host no longer runs, land
 /// kept or not — final review A-I1). The pace dials are read (and refused) only with a maximum
 /// set.
-pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<game::coordinator::FleetDials>, String> {
-    let read = |name: &str| var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+pub fn fleet_dials_from(
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<Option<game::coordinator::FleetDials>, String> {
+    let read = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
     let number = |name: &str, value: &str, zero_ok: bool| -> Result<u64, String> {
         match value.parse::<u64>() {
             Ok(n) if n > 0 || zero_ok => Ok(n),
@@ -629,7 +798,9 @@ pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<g
             )),
         }
     };
-    let Some(max) = read(FLEET_MAX_ENV) else { return Ok(None) };
+    let Some(max) = read(FLEET_MAX_ENV) else {
+        return Ok(None);
+    };
     let count = |name: &str, value: &str, zero_ok: bool| -> Result<u32, String> {
         let n = number(name, value, zero_ok)?;
         u32::try_from(n).map_err(|_| format!("invalid {name} value `{value}` (too large)"))
@@ -640,7 +811,9 @@ pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<g
         None => 1,
     };
     if min > max {
-        return Err(format!("{FLEET_MIN_ENV} ({min}) is above {FLEET_MAX_ENV} ({max})"));
+        return Err(format!(
+            "{FLEET_MIN_ENV} ({min}) is above {FLEET_MAX_ENV} ({max})"
+        ));
     }
     if min == 0 && max < 2 {
         return Err(format!(
@@ -658,8 +831,14 @@ pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<g
         min,
         max,
         up_after_ms: pace(SCALE_UP_AFTER_MS_ENV, game::coordinator::SCALE_UP_AFTER_MS)?,
-        down_after_ms: pace(SCALE_DOWN_AFTER_MS_ENV, game::coordinator::SCALE_DOWN_AFTER_MS)?,
-        min_lifetime_ms: pace(HOST_MIN_LIFETIME_MS_ENV, game::coordinator::HOST_MIN_LIFETIME_MS)?,
+        down_after_ms: pace(
+            SCALE_DOWN_AFTER_MS_ENV,
+            game::coordinator::SCALE_DOWN_AFTER_MS,
+        )?,
+        min_lifetime_ms: pace(
+            HOST_MIN_LIFETIME_MS_ENV,
+            game::coordinator::HOST_MIN_LIFETIME_MS,
+        )?,
     }))
 }
 
@@ -672,4 +851,3 @@ pub fn fleet_dials_from(var: impl Fn(&str) -> Option<String>) -> Result<Option<g
 pub fn coordinator_crash_policy(ownership: Option<&str>) -> Result<game::CrashPolicy, String> {
     game::crash_policy_from_value(ownership)
 }
-

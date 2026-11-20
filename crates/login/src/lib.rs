@@ -15,8 +15,8 @@ use std::sync::Arc;
 pub use api::{AppState, router, system_clock};
 pub use config::{LoginConfig, OidcConfig};
 pub use store::{
-    AccountId, AccountRow, DISPLAY_NAME_MAX_CHARS, LoginError, LoginStore, OidcUpsert, OpenSession, PendingKick, RefreshOutcome,
-    WorldRow, normalize_email,
+    AccountId, AccountRow, DISPLAY_NAME_MAX_CHARS, LoginError, LoginStore, OidcUpsert, OpenSession,
+    PendingKick, RefreshOutcome, WorldRow, normalize_email,
 };
 
 /// Connections per pool (Postgres / file SQLite).
@@ -31,7 +31,10 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
     let signer = auth::Signer::load_dir(&config.keys_dir).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("signing keys in {}: {e} (run `login keygen` to make one)", config.keys_dir.display()),
+            format!(
+                "signing keys in {}: {e} (run `login keygen` to make one)",
+                config.keys_dir.display()
+            ),
         )
     })?;
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
@@ -45,7 +48,9 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
     let service_token = match svc_link::service_token_from_env() {
         Ok(token) => Some(token),
         Err(why) => {
-            log::info!("[login] no service token ({why}): worlds with a host link cannot be joined");
+            log::info!(
+                "[login] no service token ({why}): worlds with a host link cannot be joined"
+            );
             None
         }
     };
@@ -55,18 +60,17 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
             let verifier = oidc::OidcVerifier::discover(&oidc.issuer, &oidc.audience)
                 .await
                 .map_err(|e| io::Error::other(format!("identity provider {}: {e}", oidc.issuer)))?;
-            log::info!("[login] identity-provider login on: issuer {}, audience {}", oidc.issuer, oidc.audience);
+            log::info!(
+                "[login] identity-provider login on: issuer {}, audience {}",
+                oidc.issuer,
+                oidc.audience
+            );
             Some(verifier)
         }
         None => None,
     };
-    let mut state = AppState::new(
-        store,
-        Arc::new(signer),
-        Arc::new(config),
-        system_clock(),
-    )
-    .with_service_token(service_token);
+    let mut state = AppState::new(store, Arc::new(signer), Arc::new(config), system_clock())
+        .with_service_token(service_token);
     if let Some(verifier) = verifier {
         state = state.with_oidc(Arc::new(verifier));
     }

@@ -49,13 +49,16 @@ pub fn interpolate_transforms(
             next.translation = goal;
             next.rotation = target.rot;
         } else {
-            next.translation = tf.translation.lerp(goal, smoothing_for(target.pos_smoothing, frames));
-            next.rotation = tf.rotation.slerp(target.rot, smoothing_for(target.rot_smoothing, frames));
+            next.translation = tf
+                .translation
+                .lerp(goal, smoothing_for(target.pos_smoothing, frames));
+            next.rotation = tf
+                .rotation
+                .slerp(target.rot, smoothing_for(target.rot_smoothing, frames));
         }
         tf.set_if_neq(next);
     }
 }
-
 
 /// The frame rate the `SimTarget` smoothing factors are written for.
 pub const SMOOTHING_REFERENCE_HZ: f32 = 60.0;

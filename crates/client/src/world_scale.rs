@@ -9,13 +9,18 @@
 use std::fmt;
 
 /// Production near-window radius: 2 = the 5x5 block of simulated regions at
-/// 64 m regions; 0 = one region from 256 m regions up (the play recipes build
-/// 256 m regions), which is already 16x (64x at 512) the area.
+/// 64 m regions; 1 = the 3x3 at 256 m regions (the play recipes' size: full
+/// detail terrain at least a region out in every direction, where the home
+/// region alone put the block-scale LOD ring right at its edge, 2026-11-19);
+/// 0 = one region at 512 m.
 /// The LOD ring table is NOT widened with it: `desired_lod` subtracts the
-/// near window, so the factor-2 ring (bound 2) is simply absorbed into
-/// simulated terrain and the rings from factor 4 out — and the horizon —
-/// stay where they were.
-pub const DEFAULT_NEAR_RADIUS: i32 = if game::REGION_BLOCKS >= 256 { 0 } else { 2 };
+/// near window, so the inner ring is simply absorbed into simulated terrain
+/// and the rings further out — and the horizon — stay where they were.
+pub const DEFAULT_NEAR_RADIUS: i32 = match game::REGION_BLOCKS {
+    512.. => 0,
+    256.. => 1,
+    _ => 2,
+};
 /// Upper bound on `VOXEL_NEAR_RADIUS`. Every near region is a full sim +
 /// collider genesis on the server and a predicted copy on the client, so a
 /// typo like `10` (441 regions) should fail loudly instead of thrashing.
@@ -91,17 +96,14 @@ impl WorldScale {
     }
 
     /// The ring table reaching `value` metres (`VOXEL_VIEW_DISTANCE_M`),
-    /// rounded up to whole regions, built by the pixel-budget rule
-    /// (`game::lod::ring_table_for`). The table is leaked, like an explicit
-    /// `VOXEL_LOD_RINGS` one: this runs once per process.
+    /// [`ring_table_for_distance_m`].
     pub fn with_view_distance_m(mut self, value: &str) -> Result<Self, WorldScaleError> {
         let invalid = || WorldScaleError::InvalidViewDistance(value.to_owned());
         let metres = value.trim().parse::<f32>().map_err(|_| invalid())?;
         if !(metres > 0.0 && metres <= MAX_VIEW_DISTANCE_M) {
             return Err(invalid());
         }
-        let regions = (metres * game::movement::UNITS_PER_METER / game::REGION_SIZE).ceil() as i32;
-        self.lod_table = Box::leak(game::lod::ring_table_for(regions).into_boxed_slice());
+        self.lod_table = ring_table_for_distance_m(metres);
         Ok(self)
     }
 
@@ -133,7 +135,11 @@ impl WorldScale {
             let preset = var("VOXEL_WORLD");
             let near_radius = var("VOXEL_NEAR_RADIUS");
             let lod_rings = var("VOXEL_LOD_RINGS");
-            let scale = Self::resolve(preset.as_deref(), near_radius.as_deref(), lod_rings.as_deref())?;
+            let scale = Self::resolve(
+                preset.as_deref(),
+                near_radius.as_deref(),
+                lod_rings.as_deref(),
+            )?;
             // An explicit `VOXEL_LOD_RINGS` table wins over the distance.
             match var("VOXEL_VIEW_DISTANCE_M") {
                 Some(view) if lod_rings.is_none() => scale.with_view_distance_m(&view),
@@ -158,6 +164,56 @@ impl fmt::Display for WorldScale {
             self.near_region_count(),
             self.lod_table
         )
+    }
+}
+
+/// Whole regions a ring table needs to reach `metres` (at least one).
+pub fn regions_for_distance_m(metres: f32) -> i32 {
+    ((metres * game::movement::UNITS_PER_METER / game::REGION_SIZE).ceil() as i32).max(1)
+}
+
+/// The ring table reaching `metres`, rounded up to whole regions, built by
+/// the pixel-budget rule ([`ring_table_leaked`]).
+pub fn ring_table_for_distance_m(metres: f32) -> &'static [(i32, u32)] {
+    ring_table_leaked(regions_for_distance_m(metres))
+}
+
+/// `game::lod::ring_table_for(regions)` as the `&'static` table everything
+/// downstream holds. Each horizon's table is leaked once per process and
+/// reused: the render distance slider (`graphics_settings`) asks again on
+/// every change.
+pub fn ring_table_leaked(regions: i32) -> &'static [(i32, u32)] {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    static TABLES: Mutex<BTreeMap<i32, &'static [(i32, u32)]>> = Mutex::new(BTreeMap::new());
+    let mut tables = TABLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tables
+        .entry(regions)
+        .or_insert_with(|| Box::leak(game::lod::ring_table_for(regions).into_boxed_slice()))
+}
+
+/// Whether the environment sets the view itself — a world preset other than
+/// `full`, an explicit ring table or view distance (`?world=` / `?view=` in
+/// the browser) — so the saved render distance (`graphics_settings`) does not
+/// apply at start.
+pub fn view_pinned_by_env() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let search = web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .unwrap_or_default();
+        query_param(&search, "view").is_some()
+            || query_param(&search, "world").is_some_and(|w| w != "full")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        var("VOXEL_VIEW_DISTANCE_M").is_some()
+            || var("VOXEL_LOD_RINGS").is_some()
+            || var("VOXEL_FOG_VISIBILITY_M").is_some()
+            || var("VOXEL_WORLD").is_some_and(|w| w != "full")
     }
 }
 
@@ -231,4 +287,3 @@ impl fmt::Display for WorldScaleError {
 }
 
 impl std::error::Error for WorldScaleError {}
-

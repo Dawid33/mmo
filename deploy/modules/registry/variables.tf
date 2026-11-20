@@ -1,7 +1,7 @@
 variable "repositories" {
   description = "ECR repository names. A new image (the game server, later) is a new entry; the pull user may pull from every one of them."
   type        = list(string)
-  default     = ["mmo/login", "mmo/server", "mmo/web"]
+  default     = ["mmo/login", "mmo/server", "mmo/web", "mmo/panel"]
 }
 
 variable "untagged_expiry_days" {

@@ -48,7 +48,9 @@
 //! the parked players (`WorldManager`'s `parked_players`).
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{HostId, EntityBundle, IntentMsg, PlayerId, PlayerRecord, PortableRegion, RegionCoords, Tick};
+use crate::{
+    EntityBundle, HostId, IntentMsg, PlayerId, PlayerRecord, PortableRegion, RegionCoords, Tick,
+};
 
 /// How far ahead of the world tick a cut is placed: every region reaches it
 /// on its own clock (one second at 50 ms ticks).
@@ -62,7 +64,9 @@ pub const SAVE_CUT_LEAD_MAX_TICKS: Tick = 640;
 pub const CUT_DEADLINE_LEADS: Tick = 10;
 
 /// One save cut's id, fresh per [`crate::WorldManager::begin_cut`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct CutId(pub u64);
 
 /// Something on its way between regions at the cut tick, in no region's
@@ -72,9 +76,16 @@ pub struct CutId(pub u64);
 pub enum InFlightRow {
     /// A crossing (never a player's or a person's): the bundle in `target`'s
     /// frame and its stamp.
-    Transfer { target: RegionCoords, bundle: EntityBundle, stamp: Tick },
+    Transfer {
+        target: RegionCoords,
+        bundle: EntityBundle,
+        stamp: Tick,
+    },
     /// An intent or a reply for `target`.
-    Intent { target: RegionCoords, msg: IntentMsg },
+    Intent {
+        target: RegionCoords,
+        msg: IntentMsg,
+    },
 }
 
 /// The world at one tick, for the store: every region snapshot not committed

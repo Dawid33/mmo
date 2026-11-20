@@ -559,7 +559,11 @@ pub use game::{Declared, LandlessEnd, Succession, SuccessionId, SuccessionKind};
 
 /// `successions.survivors`: ordinals, comma-separated.
 pub(crate) fn encode_survivors(survivors: &[HostId]) -> String {
-    survivors.iter().map(|h| h.0.to_string()).collect::<Vec<_>>().join(",")
+    survivors
+        .iter()
+        .map(|h| h.0.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 pub(crate) fn decode_survivors(id: u64, s: &str) -> Result<Vec<HostId>, StoreError> {
@@ -567,13 +571,21 @@ pub(crate) fn decode_survivors(id: u64, s: &str) -> Result<Vec<HostId>, StoreErr
         return Ok(Vec::new());
     }
     s.split(',')
-        .map(|o| o.parse().map(HostId).map_err(|_| StoreError::Corrupt(format!("successions {id}: survivors {s:?}"))))
+        .map(|o| {
+            o.parse()
+                .map(HostId)
+                .map_err(|_| StoreError::Corrupt(format!("successions {id}: survivors {s:?}")))
+        })
         .collect()
 }
 
 /// `successions.moved`: `sx:sz:epoch`, comma-separated.
 pub(crate) fn encode_moved(moved: &[(SuperRegion, u64)]) -> String {
-    moved.iter().map(|((sx, sz), e)| format!("{sx}:{sz}:{e}")).collect::<Vec<_>>().join(",")
+    moved
+        .iter()
+        .map(|((sx, sz), e)| format!("{sx}:{sz}:{e}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 pub(crate) fn decode_moved(id: u64, s: &str) -> Result<Vec<(SuperRegion, u64)>, StoreError> {
@@ -586,7 +598,10 @@ pub(crate) fn decode_moved(id: u64, s: &str) -> Result<Vec<(SuperRegion, u64)>, 
             let mut p = m.split(':');
             match (p.next(), p.next(), p.next(), p.next()) {
                 (Some(sx), Some(sz), Some(e), None) => Ok((
-                    (sx.parse().map_err(|_| bad())?, sz.parse().map_err(|_| bad())?),
+                    (
+                        sx.parse().map_err(|_| bad())?,
+                        sz.parse().map_err(|_| bad())?,
+                    ),
                     e.parse().map_err(|_| bad())?,
                 )),
                 _ => Err(bad()),
@@ -596,7 +611,8 @@ pub(crate) fn decode_moved(id: u64, s: &str) -> Result<Vec<(SuperRegion, u64)>, 
 }
 
 /// What every store that cannot declare a succession answers.
-pub(crate) const SUCCESSION_UNSUPPORTED: &str = "successions need several hosts, which need Postgres";
+pub(crate) const SUCCESSION_UNSUPPORTED: &str =
+    "successions need several hosts, which need Postgres";
 
 /// The `lock_timeout` of a declaration ran out: a staged cut part (or another transaction)
 /// holds a predecessor's row. Nothing was written; the caller declares again later.
@@ -617,14 +633,22 @@ pub(crate) fn declare_error(what: &str, e: sqlx::Error, lock_timeout_ms: u64) ->
 /// in a coordinator transition whose compare-and-set already holds the `coordinator` row
 /// (Elastic 2b Task 3: the row's version is the fence, no epoch is compared). Returns the
 /// stored generation.
-async fn lock_world_at(tx: &mut sqlx::PgConnection, generation: Option<u64>) -> Result<u64, DeclareError> {
-    let stored: i64 = sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR NO KEY UPDATE")
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
+async fn lock_world_at(
+    tx: &mut sqlx::PgConnection,
+    generation: Option<u64>,
+) -> Result<u64, DeclareError> {
+    let stored: i64 =
+        sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR NO KEY UPDATE")
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
     if let Some(mine) = generation {
         if stored as u64 != mine {
-            return Err(StoreError::StaleGeneration { stored: stored as u64, mine }.into());
+            return Err(StoreError::StaleGeneration {
+                stored: stored as u64,
+                mine,
+            }
+            .into());
         }
     }
     Ok(stored as u64)
@@ -641,7 +665,10 @@ pub(crate) const ROLLING_BACK: &str = "a world rollback";
 
 /// A declaration's arguments, checked before any statement: one heir per predecessor, each
 /// predecessor once, no heir among them.
-pub(crate) fn check_declare(dead: &[(HostId, u64)], heirs: &[HostId]) -> Result<BTreeSet<HostId>, StoreError> {
+pub(crate) fn check_declare(
+    dead: &[(HostId, u64)],
+    heirs: &[HostId],
+) -> Result<BTreeSet<HostId>, StoreError> {
     let predecessors: BTreeSet<HostId> = dead.iter().map(|(o, _)| *o).collect();
     if dead.is_empty() || heirs.len() != dead.len() || predecessors.len() != dead.len() {
         return Err(StoreError::Unsupported(format!(
@@ -649,7 +676,9 @@ pub(crate) fn check_declare(dead: &[(HostId, u64)], heirs: &[HostId]) -> Result<
         )));
     }
     if let Some(h) = heirs.iter().find(|h| predecessors.contains(h)) {
-        return Err(StoreError::Unsupported(format!("host {h} cannot inherit while it is declared dead itself")));
+        return Err(StoreError::Unsupported(format!(
+            "host {h} cannot inherit while it is declared dead itself"
+        )));
     }
     Ok(predecessors)
 }
@@ -713,9 +742,11 @@ pub(crate) async fn declare_in(
 ) -> Result<Declared, DeclareError> {
     lock_world_at(&mut *tx, Some(generation)).await?;
     wait_for_committed_parts(&mut *tx).await?;
-    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM successions WHERE settled_cut IS NULL AND abandoned = 0")
-        .fetch_one(&mut *tx)
-        .await?;
+    let open: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM successions WHERE settled_cut IS NULL AND abandoned = 0",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
     if open > 0 {
         return Ok(Declared::SuccessionOpen);
     }
@@ -737,8 +768,13 @@ pub(crate) async fn declare_in(
             gone.push(*ordinal);
             continue;
         };
-        let (stored_boot, clean, state, lapsed, succeeded): (i64, i64, i64, bool, bool) =
-            (row.try_get(0)?, row.try_get(1)?, row.try_get(2)?, row.try_get(3)?, row.try_get(4)?);
+        let (stored_boot, clean, state, lapsed, succeeded): (i64, i64, i64, bool, bool) = (
+            row.try_get(0)?,
+            row.try_get(1)?,
+            row.try_get(2)?,
+            row.try_get(3)?,
+            row.try_get(4)?,
+        );
         if stored_boot as u64 != *boot || state != HOST_LIVE || succeeded {
             gone.push(*ordinal);
             continue;
@@ -790,28 +826,36 @@ pub(crate) async fn declare_in(
     .await?;
     let mut survivors = Vec::with_capacity(live.len());
     for o in live {
-        let o = u64::try_from(o).map(HostId).map_err(|_| StoreError::Corrupt(format!("hosts.id {o}")))?;
+        let o = u64::try_from(o)
+            .map(HostId)
+            .map_err(|_| StoreError::Corrupt(format!("hosts.id {o}")))?;
         if !predecessors.contains(&o) {
             survivors.push(o);
         }
     }
-    let base_cut: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(cut_id), 0) FROM cut_decisions WHERE committed = 1")
-        .fetch_one(&mut *tx)
-        .await?;
+    let base_cut: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(cut_id), 0) FROM cut_decisions WHERE committed = 1",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
     let mut out = Vec::with_capacity(dead.len());
     for ((predecessor, boot), heir) in dead.iter().zip(heirs) {
         if kind == SuccessionKind::Crash {
-            sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE id = $1 AND boot = $2"))
-                .bind(i(predecessor.0))
-                .bind(i(*boot))
-                .execute(&mut *tx)
-                .await?;
-        }
-        // Key order first (a claim upserts in key order too), then the claim itself.
-        sqlx::query("SELECT 1 FROM super_regions WHERE owner = $1 ORDER BY sx, sz FOR NO KEY UPDATE")
+            sqlx::query(&format!(
+                "UPDATE hosts SET state = {HOST_DEAD} WHERE id = $1 AND boot = $2"
+            ))
             .bind(i(predecessor.0))
+            .bind(i(*boot))
             .execute(&mut *tx)
             .await?;
+        }
+        // Key order first (a claim upserts in key order too), then the claim itself.
+        sqlx::query(
+            "SELECT 1 FROM super_regions WHERE owner = $1 ORDER BY sx, sz FOR NO KEY UPDATE",
+        )
+        .bind(i(predecessor.0))
+        .execute(&mut *tx)
+        .await?;
         let rows = sqlx::query(
             "UPDATE super_regions SET owner = $1, epoch = epoch + 1 WHERE owner = $2 RETURNING sx, sz, epoch",
         )
@@ -823,8 +867,10 @@ pub(crate) async fn declare_in(
         for r in rows {
             let (sx, sz, epoch): (i64, i64, i64) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);
             let sr = (
-                i32::try_from(sx).map_err(|_| StoreError::Corrupt(format!("super_regions.sx {sx}")))?,
-                i32::try_from(sz).map_err(|_| StoreError::Corrupt(format!("super_regions.sz {sz}")))?,
+                i32::try_from(sx)
+                    .map_err(|_| StoreError::Corrupt(format!("super_regions.sx {sx}")))?,
+                i32::try_from(sz)
+                    .map_err(|_| StoreError::Corrupt(format!("super_regions.sz {sz}")))?,
             );
             moved.push((sr, epoch as u64));
         }
@@ -837,12 +883,15 @@ pub(crate) async fn declare_in(
             // landless leaver's rows move by this succession's adopting part. A plain read (no
             // lock): rows of a part still staged are not visible yet — refused now, declared
             // once a later `hosts` read shows them (`owns_land`).
-            let rows: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM in_flight WHERE host = $1)")
-                .bind(i(predecessor.0))
-                .fetch_one(&mut *tx)
-                .await?;
+            let rows: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM in_flight WHERE host = $1)")
+                    .bind(i(predecessor.0))
+                    .fetch_one(&mut *tx)
+                    .await?;
             if !rows {
-                log::info!("[world-store] host {predecessor} left owning no land and no in-flight row: no Leave succession");
+                log::info!(
+                    "[world-store] host {predecessor} left owning no land and no in-flight row: no Leave succession"
+                );
                 return Ok(Declared::Gone(vec![*predecessor]));
             }
         }
@@ -910,9 +959,15 @@ pub(crate) async fn end_landless_in(
     .bind(i(lease_ms))
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(row) = row else { return Ok(LandlessEnd::Gone) };
-    let (stored_boot, clean, state, lapsed): (i64, i64, i64, bool) =
-        (row.try_get(0)?, row.try_get(1)?, row.try_get(2)?, row.try_get(3)?);
+    let Some(row) = row else {
+        return Ok(LandlessEnd::Gone);
+    };
+    let (stored_boot, clean, state, lapsed): (i64, i64, i64, bool) = (
+        row.try_get(0)?,
+        row.try_get(1)?,
+        row.try_get(2)?,
+        row.try_get(3)?,
+    );
     if stored_boot as u64 != boot || state != HOST_LIVE || clean != 0 {
         return Ok(LandlessEnd::Gone);
     }
@@ -941,11 +996,13 @@ pub(crate) async fn end_landless_in(
     if named {
         return Ok(LandlessEnd::Recipient);
     }
-    sqlx::query(&format!("UPDATE hosts SET state = {HOST_DEAD} WHERE id = $1 AND boot = $2"))
-        .bind(i(host.0))
-        .bind(i(boot))
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE hosts SET state = {HOST_DEAD} WHERE id = $1 AND boot = $2"
+    ))
+    .bind(i(host.0))
+    .bind(i(boot))
+    .execute(&mut *tx)
+    .await?;
     Ok(LandlessEnd::Ended)
 }
 
@@ -956,24 +1013,32 @@ pub(crate) async fn end_landless_in(
 /// back already (this rollback committed before its coordinator could record it, or the
 /// operator's), nothing is written (`None`) and its generation is the answer. Idempotent.
 /// Returns the world's generation after it, and the successions it abandoned when it wrote.
-pub(crate) async fn rollback_world_in(tx: &mut sqlx::PgConnection, from: u64) -> Result<(u64, Option<u64>), DeclareError> {
+pub(crate) async fn rollback_world_in(
+    tx: &mut sqlx::PgConnection,
+    from: u64,
+) -> Result<(u64, Option<u64>), DeclareError> {
     let stored = lock_world_at(&mut *tx, None).await?;
     if stored != from {
-        log::warn!("[world-store] the world is at generation {stored}, not {from}: rolled back already, nothing written");
+        log::warn!(
+            "[world-store] the world is at generation {stored}, not {from}: rolled back already, nothing written"
+        );
         return Ok((stored, None));
     }
     let (generation, abandoned) = rollback_in(&mut *tx, stored).await?;
-    log::warn!("[world-store] world rolled back to generation {generation} (with its coordinator's transition); {abandoned} open successions abandoned");
+    log::warn!(
+        "[world-store] world rolled back to generation {generation} (with its coordinator's transition); {abandoned} open successions abandoned"
+    );
     Ok((generation, Some(abandoned)))
 }
 
 /// The world row `FOR NO KEY UPDATE` (the lock every declaration, rollback, registration and
 /// decision takes); its generation.
 pub(crate) async fn lock_world(tx: &mut sqlx::PgConnection) -> Result<u64, DeclareError> {
-    let stored: i64 = sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR NO KEY UPDATE")
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
+    let stored: i64 =
+        sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR NO KEY UPDATE")
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
     Ok(stored as u64)
 }
 
@@ -982,9 +1047,15 @@ pub(crate) async fn lock_world(tx: &mut sqlx::PgConnection) -> Result<u64, Decla
 /// re-keyed to its heir — the land stays with the heir, which restarts from the last
 /// committed cut owning it, so the rows of that cut go with it (the module docs). Returns
 /// `(generation, successions abandoned)`.
-pub(crate) async fn rollback_in(tx: &mut sqlx::PgConnection, stored: u64) -> Result<(u64, u64), DeclareError> {
+pub(crate) async fn rollback_in(
+    tx: &mut sqlx::PgConnection,
+    stored: u64,
+) -> Result<(u64, u64), DeclareError> {
     let generation = stored + 1;
-    sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(i(generation)).execute(&mut *tx).await?;
+    sqlx::query("UPDATE world SET generation = $1 WHERE id = 1")
+        .bind(i(generation))
+        .execute(&mut *tx)
+        .await?;
     // Ordered by id: a predecessor's rows end with the heir of its LAST open succession (one
     // predecessor has at most one open succession: its row is dead, or clean, after it).
     let abandoned: Vec<(i64, i64, i64)> = sqlx::query_as(
@@ -1016,15 +1087,21 @@ pub(crate) async fn rollback_in(tx: &mut sqlx::PgConnection, stored: u64) -> Res
 /// The ids of the open successions, in `tx` (no lock: `decide_in` reads them under the
 /// world row's lock, which every declaration and rollback takes first).
 pub(crate) async fn open_ids(tx: &mut sqlx::PgConnection) -> Result<BTreeSet<u64>, StoreError> {
-    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM successions WHERE settled_cut IS NULL AND abandoned = 0")
-        .fetch_all(&mut *tx)
-        .await?;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM successions WHERE settled_cut IS NULL AND abandoned = 0",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     Ok(ids.into_iter().map(|i| i as u64).collect())
 }
 
 /// Settles `settles` with `cut` (inside the committing decision's transaction): each
 /// gets `settled_cut`, and each predecessor's row — of the boot that died — turns clean.
-pub(crate) async fn settle(tx: &mut sqlx::PgConnection, cut: CutId, settles: &[SuccessionId]) -> Result<(), StoreError> {
+pub(crate) async fn settle(
+    tx: &mut sqlx::PgConnection,
+    cut: CutId,
+    settles: &[SuccessionId],
+) -> Result<(), StoreError> {
     if settles.is_empty() {
         return Ok(());
     }
@@ -1043,4 +1120,3 @@ pub(crate) async fn settle(tx: &mut sqlx::PgConnection, cut: CutId, settles: &[S
     .await?;
     Ok(())
 }
-

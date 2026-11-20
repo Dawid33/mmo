@@ -1,0 +1,32 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg-management
+spec:
+  instances: 1
+  enableSuperuserAccess: false
+  imageName: {{ .Values.image | quote }}
+  postgresql:
+    parameters:
+      max_connections: {{ .Values.maxConnections | quote }}
+  storage:
+    size: {{ .Values.storageSize | quote }}
+    {{- if .Values.storageClass }}
+    storageClass: {{ .Values.storageClass | quote }}
+    {{- end }}
+  {{- with .Values.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  managed:
+    roles:
+      {{- range .Values.services }}
+      - name: {{ . }}
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        passwordSecret:
+          name: pg-{{ . }}
+      {{- end }}

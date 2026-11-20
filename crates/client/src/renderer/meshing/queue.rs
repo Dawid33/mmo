@@ -10,9 +10,9 @@ use bevy::prelude::*;
 use super::super::block_textures::BlockTextureLayers;
 use super::super::bridge::VoxelData;
 use super::binary::CutoutTable;
-use super::neighbors::{gather_padded_rle, zone_index, zone_indices, zone_offsets};
 use super::interior::InteriorGround;
-use super::{mesh_chunk_classified_wire, MeshWire, MeshingTask};
+use super::neighbors::{gather_padded_rle, zone_index, zone_indices, zone_offsets};
+use super::{MeshWire, MeshingTask, mesh_chunk_classified_wire};
 
 /// World-space brick grid: key = world position / `BRICK_VOXELS`. Render-side
 /// spatial index for neighbor lookups; rebuilt from entities, never persisted.
@@ -218,8 +218,11 @@ fn pick_nearest(
     if queue.dirty.len() <= RANK_CACHE_MIN_QUEUE {
         cache.clear();
         queue.dirty.retain(|e, _| alive(*e));
-        let mut ranked: Vec<(u64, Entity, Option<[i32; 3]>)> =
-            queue.dirty.iter().map(|(&e, &key)| (rank_of(key), e, key)).collect();
+        let mut ranked: Vec<(u64, Entity, Option<[i32; 3]>)> = queue
+            .dirty
+            .iter()
+            .map(|(&e, &key)| (rank_of(key), e, key))
+            .collect();
         if ranked.len() > capacity {
             ranked.select_nth_unstable_by_key(capacity, |(r, e, _)| (*r, *e));
             ranked.truncate(capacity);
@@ -229,8 +232,15 @@ fn pick_nearest(
     }
     if cache.frames_left == 0 || cache.next >= cache.order.len() {
         queue.dirty.retain(|e, _| alive(*e));
-        let keep = lane.max(capacity).saturating_mul(RANK_CACHE_FRAMES as usize * 2).max(1);
-        let mut ranked: Vec<(u64, Entity)> = queue.dirty.iter().map(|(&e, &key)| (rank_of(key), e)).collect();
+        let keep = lane
+            .max(capacity)
+            .saturating_mul(RANK_CACHE_FRAMES as usize * 2)
+            .max(1);
+        let mut ranked: Vec<(u64, Entity)> = queue
+            .dirty
+            .iter()
+            .map(|(&e, &key)| (rank_of(key), e))
+            .collect();
         if ranked.len() > keep {
             ranked.select_nth_unstable(keep);
             ranked.truncate(keep);
@@ -295,9 +305,14 @@ pub fn spawn_mesh_tasks(
         return;
     }
     let cam = camera.iter().next();
-    let picked = pick_nearest(&mut queue, rank_cache, capacity, budgets.max_in_flight, |e| chunks.contains(e), |key| {
-        chunk_rank(key, cam)
-    });
+    let picked = pick_nearest(
+        &mut queue,
+        rank_cache,
+        capacity,
+        budgets.max_in_flight,
+        |e| chunks.contains(e),
+        |key| chunk_rank(key, cam),
+    );
 
     for (e, key) in picked {
         queue.dirty.remove(&e);
@@ -317,7 +332,8 @@ pub fn spawn_mesh_tasks(
                 } else if let Some((_, nv)) = skipped.as_ref().and_then(|s| s.0.get(&nk)) {
                     // A buried brick its chunk never spawned: solid, not air.
                     owned_neighbors.push((off, nv.clone()));
-                } else if let Some(id) = implied_neighbor(nk, loaded.as_deref(), ground.as_deref()) {
+                } else if let Some(id) = implied_neighbor(nk, loaded.as_deref(), ground.as_deref())
+                {
                     // Unmaterialised ground under the column's band: solid
                     // rock, so a dug space shows no wall where its chunk
                     // meets it (and a camera inside the rock sees through).
@@ -336,8 +352,14 @@ pub fn spawn_mesh_tasks(
                 commands.entity(e).insert(AwaitingGround(k));
             }
         }
-        let job =
-            NearMeshJob { center, neighbors: owned_neighbors, layers: layers.clone(), pull, interior, connectivity };
+        let job = NearMeshJob {
+            center,
+            neighbors: owned_neighbors,
+            layers: layers.clone(),
+            pull,
+            interior,
+            connectivity,
+        };
         let task = super::super::compute::spawn(job, MeshWire::into_output);
         commands.entity(e).insert(MeshingTask(task));
     }
@@ -364,9 +386,19 @@ impl super::super::compute::ComputeJob for NearMeshJob {
         if is_buried(&self.center, &self.neighbors, &CutoutTable::installed()) {
             return MeshWire::EMPTY;
         }
-        let neighbors = self.neighbors.iter().map(|(off, data)| (*off, data)).collect();
+        let neighbors = self
+            .neighbors
+            .iter()
+            .map(|(off, data)| (*off, data))
+            .collect();
         let padded = gather_padded_rle(&self.center, &neighbors);
-        mesh_chunk_classified_wire(&padded, &self.layers, self.pull, self.interior.as_ref(), self.connectivity)
+        mesh_chunk_classified_wire(
+            &padded,
+            &self.layers,
+            self.pull,
+            self.interior.as_ref(),
+            self.connectivity,
+        )
     }
 }
 
@@ -445,8 +477,14 @@ pub fn implied_chunk_key(brick: [i32; 3]) -> [i32; 3] {
 /// mesher and connectivity flood saves ~160 µs of worker time each. Edges and
 /// corners are irrelevant: they only feed AO, which needs a face. Checked in
 /// the task, not the main thread: the plane scans are ~6k voxel visits.
-pub fn is_buried(center: &VoxelData, neighbors: &[([i32; 3], VoxelData)], cutout: &CutoutTable) -> bool {
-    is_buried_by(center, cutout, |off| neighbors.iter().find(|(o, _)| *o == off).map(|(_, v)| v))
+pub fn is_buried(
+    center: &VoxelData,
+    neighbors: &[([i32; 3], VoxelData)],
+    cutout: &CutoutTable,
+) -> bool {
+    is_buried_by(center, cutout, |off| {
+        neighbors.iter().find(|(o, _)| *o == off).map(|(_, v)| v)
+    })
 }
 
 /// [`is_buried`] over any neighbour lookup (`off` is the face offset; `None`
@@ -459,10 +497,17 @@ pub fn is_buried_by<'a>(
     if !center.is_opaque_throughout(cutout) {
         return false;
     }
-    let faces = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-    faces
-        .into_iter()
-        .all(|off| neighbor(off).is_some_and(|neighbor| presents_opaque_face(neighbor, off, cutout)))
+    let faces = [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ];
+    faces.into_iter().all(|off| {
+        neighbor(off).is_some_and(|neighbor| presents_opaque_face(neighbor, off, cutout))
+    })
 }
 
 /// Whether `neighbor`, the brick at face offset `off` from some brick,
@@ -480,7 +525,13 @@ pub fn presents_opaque_face(neighbor: &VoxelData, off: [i32; 3], cutout: &Cutout
 
 /// What `mesh_chunk` returns for a buried chunk, in either render mode.
 pub fn buried_mesh_output() -> super::MeshOutput {
-    super::MeshOutput { mesh: None, records: None, connectivity: 0, quad_count: 0, has_interior: false }
+    super::MeshOutput {
+        mesh: None,
+        records: None,
+        connectivity: 0,
+        quad_count: 0,
+        has_interior: false,
+    }
 }
 
 /// Hash the 26 boundary zones of a 32³ chunk. Zones overlap on purpose: a
@@ -536,7 +587,11 @@ pub fn mark_remesh_dirty(
             let (tf, parent) = (tf?, parent?);
             let root = roots.get(parent.parent()).ok()?;
             let world = (root.translation + tf.translation) / game::BRICK_VOXELS as f32;
-            let k = [world.x.round() as i32, world.y.round() as i32, world.z.round() as i32];
+            let k = [
+                world.x.round() as i32,
+                world.y.round() as i32,
+                world.z.round() as i32,
+            ];
             commands.entity(e).insert(ChunkKey(k));
             Some(k)
         });
@@ -616,7 +671,7 @@ pub fn prune_chunk_grid(
 pub(crate) mod tests {
     use super::*;
 
-    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
+    use game::{BRICK_VOXEL_COUNT, BlockId, Voxel};
 
     pub(crate) fn voxels_with(cells: &[[usize; 3]]) -> Vec<Voxel> {
         let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
@@ -648,11 +703,8 @@ pub(crate) mod tests {
     }
 
     use super::super::super::block_textures::BlockTextureLayers;
-    
-    
-    
-    use super::super::{apply_meshed_chunks, MeshingTask};
-    
+
+    use super::super::{MeshingTask, apply_meshed_chunks};
 
     /// Full pipeline as production registers it in `renderer/mod.rs`,
     /// including the LOD mesh path chained after `apply_meshed_chunks` and

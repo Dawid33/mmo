@@ -7,12 +7,12 @@
 use bevy::prelude::*;
 use game::RegionCoords;
 
-use super::command::{Command, Submitted, HELP};
-use super::ui::ChatSubmitted;
 use super::ChatLog;
+use super::command::{Command, HELP, Submitted};
+use super::ui::ChatSubmitted;
+use crate::renderer::bridge::{LocalBody, SimEntity, SimTarget};
 #[cfg(feature = "dev_ui")]
 use crate::renderer::dev_ui::{self, DevAction, DevToggle};
-use crate::renderer::bridge::{LocalBody, SimEntity, SimTarget};
 use crate::renderer::history_view::HistoryView;
 use crate::renderer::hud::HudStatus;
 use crate::renderer::slint_overlay;
@@ -57,16 +57,28 @@ pub fn effects(command: Command, ctx: &RunContext) -> Vec<Effect> {
         Command::Clear => vec![Effect::ClearLog],
         Command::Where => match (ctx.home, ctx.body_block) {
             (Some(home), Some([x, y, z])) => {
-                vec![Effect::Info(format!("Region ({}, {}), block {x} {y} {z}", home.x, home.z))]
+                vec![Effect::Info(format!(
+                    "Region ({}, {}), block {x} {y} {z}",
+                    home.x, home.z
+                ))]
             }
-            (Some(home), None) => vec![Effect::Info(format!("Region ({}, {}), no body here", home.x, home.z))],
+            (Some(home), None) => vec![Effect::Info(format!(
+                "Region ({}, {}), no body here",
+                home.x, home.z
+            ))],
             (None, _) => vec![error("Not in a region yet")],
         },
-        Command::Adventure if ctx.adventure_pending => vec![error("An adventure is already starting or ending")],
+        Command::Adventure if ctx.adventure_pending => {
+            vec![error("An adventure is already starting or ending")]
+        }
         Command::Adventure if ctx.adventuring => vec![error("Already on an adventure")],
-        Command::Adventure if !ctx.site_picked => vec![error("Pick a site on the Adventure tab first")],
+        Command::Adventure if !ctx.site_picked => {
+            vec![error("Pick a site on the Adventure tab first")]
+        }
         Command::Adventure => vec![Effect::StartAdventure, info("Starting the adventure")],
-        Command::Leave if ctx.adventure_pending => vec![error("An adventure is already starting or ending")],
+        Command::Leave if ctx.adventure_pending => {
+            vec![error("An adventure is already starting or ending")]
+        }
         Command::Leave if !ctx.adventuring => vec![error("Not on an adventure")],
         Command::Leave => vec![Effect::EndAdventure, info("Ending the adventure")],
         #[cfg(feature = "dev_ui")]
@@ -81,13 +93,22 @@ pub fn effects(command: Command, ctx: &RunContext) -> Vec<Effect> {
 /// The block (1 m) a region-local sim position is in.
 pub fn block_of(pos: Vec3) -> [i32; 3] {
     let size = game::BLOCK_VOXELS as f32;
-    [(pos.x / size).floor() as i32, (pos.y / size).floor() as i32, (pos.z / size).floor() as i32]
+    [
+        (pos.x / size).floor() as i32,
+        (pos.y / size).floor() as i32,
+        (pos.z / size).floor() as i32,
+    ]
 }
 
 fn context(world: &mut World) -> RunContext {
-    let home = world.get_resource::<HudStatus>().and_then(|s| s.home_region);
+    let home = world
+        .get_resource::<HudStatus>()
+        .and_then(|s| s.home_region);
     let mut bodies = world.query_filtered::<(&SimEntity, &SimTarget), With<LocalBody>>();
-    let body_block = bodies.iter(world).find(|(sim, _)| Some(sim.region) == home).map(|(_, target)| block_of(target.pos));
+    let body_block = bodies
+        .iter(world)
+        .find(|(sim, _)| Some(sim.region) == home)
+        .map(|(_, target)| block_of(target.pos));
     let history = world.get_resource::<HistoryView>();
     RunContext {
         home,
@@ -141,7 +162,9 @@ fn apply(effect: Effect, world: &mut World, now: f64) {
             let on = !dev_ui::toggle_checked(toggle, world);
             dev_ui::apply_dev_action(DevAction::Toggle(toggle, on), world);
             let state = if on { "on" } else { "off" };
-            world.resource_mut::<ChatLog>().info(format!("{}: {state}", toggle.label()), now);
+            world
+                .resource_mut::<ChatLog>()
+                .info(format!("{}: {state}", toggle.label()), now);
         }
     }
 }
@@ -150,7 +173,8 @@ fn apply(effect: Effect, world: &mut World, now: f64) {
 /// to press it on.
 fn press(world: &mut World, action: slint_overlay::UiAction, now: f64) {
     if !slint_overlay::queue_ui_action(world, action) {
-        world.resource_mut::<ChatLog>().error("The game UI is not up", now);
+        world
+            .resource_mut::<ChatLog>()
+            .error("The game UI is not up", now);
     }
 }
-

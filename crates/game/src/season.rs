@@ -10,10 +10,10 @@
 //! `TICKS_PER_DAY` (= `DAY_MS / TICK_RATE`, the owner's to change), never
 //! from a fixed tick count. Fixed point: `_q16` = 1/65536 of the unit named.
 
-use crate::history::calendar::{
-    DAYS_PER_MONTH, DAYS_PER_YEAR, MONTHS_PER_YEAR, MONTH_NAMES, TICKS_PER_DAY,
-};
 use crate::Tick;
+use crate::history::calendar::{
+    DAYS_PER_MONTH, DAYS_PER_YEAR, MONTH_NAMES, MONTHS_PER_YEAR, TICKS_PER_DAY,
+};
 
 const _: () = assert!(TICKS_PER_DAY >= 1);
 
@@ -155,7 +155,14 @@ pub fn season_at(
     const MONTHS_PER_QUARTER: u64 = MONTHS_PER_YEAR / 4;
     let shift = if lat_q16 < 0 { 2 } else { 0 };
     let quarter = (month as u64 / MONTHS_PER_QUARTER + shift) % 4;
-    Some([Season::Spring, Season::Summer, Season::Autumn, Season::Winter][quarter as usize])
+    Some(
+        [
+            Season::Spring,
+            Season::Summer,
+            Season::Autumn,
+            Season::Winter,
+        ][quarter as usize],
+    )
 }
 
 /// "12 Granite": day + 1 and the month's name, no year (the HUD's date).

@@ -2,7 +2,7 @@
 //! store holds after committing a sequence of save cuts
 //! ([`game::WorldCut`]), and the places an entity is saved in.
 use game::{
-    ChunkCoords, Chunk, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, WorldCut,
+    Chunk, ChunkCoords, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, WorldCut,
 };
 use std::collections::BTreeMap;
 
@@ -24,7 +24,8 @@ impl CutStore {
         for (rc, p) in &cut.regions {
             let stored = self.regions.entry(*rc).or_default();
             stored.meta = p.meta.clone();
-            let mut chunks: BTreeMap<ChunkCoords, Chunk> = std::mem::take(&mut stored.chunks).into_iter().collect();
+            let mut chunks: BTreeMap<ChunkCoords, Chunk> =
+                std::mem::take(&mut stored.chunks).into_iter().collect();
             chunks.extend(p.chunks.iter().map(|(c, k)| (*c, k.clone())));
             stored.chunks = chunks.into_iter().collect();
             if let Some(ground) = &p.ground {

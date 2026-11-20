@@ -1,4 +1,4 @@
-use super::fortress_view::{cutaway_active, FortressViewUniform};
+use super::fortress_view::{FortressViewUniform, cutaway_active};
 use super::meshing::ChunkMaterial;
 use bevy::{
     mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeDescriptor},
@@ -30,7 +30,8 @@ pub fn vertex_layout() -> Vec<VertexAttributeDescriptor> {
 /// deployed file server send no cache headers, so Firefox reuses an old copy
 /// heuristically) — an old decoder on new vertices scatters the terrain into
 /// thin striped panels. Embedded, the decoder always matches its encoder.
-pub const VOXEL_TEXTURE_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("5f0d8a3e-6c2b-4f71-9a4e-2b7d1c9e3a60");
+pub const VOXEL_TEXTURE_SHADER: Handle<Shader> =
+    bevy::asset::uuid_handle!("5f0d8a3e-6c2b-4f71-9a4e-2b7d1c9e3a60");
 
 /// Register [`VOXEL_TEXTURE_SHADER`] (call before the material is used).
 pub fn embed_voxel_texture_shader(app: &mut App) {
@@ -70,7 +71,9 @@ pub struct StandardVoxelMaterialKey {
 
 impl From<&StandardVoxelMaterial> for StandardVoxelMaterialKey {
     fn from(m: &StandardVoxelMaterial) -> Self {
-        Self { cutaway: cutaway_active(&m.fortress) }
+        Self {
+            cutaway: cutaway_active(&m.fortress),
+        }
     }
 }
 
@@ -80,7 +83,11 @@ pub fn top_layers_image(lut: &[u32]) -> Image {
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
     let lut = if lut.is_empty() { &[0u32][..] } else { lut };
     Image::new(
-        Extent3d { width: lut.len() as u32, height: 1, depth_or_array_layers: 1 },
+        Extent3d {
+            width: lut.len() as u32,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         bytemuck::cast_slice(lut).to_vec(),
         TextureFormat::R32Uint,
@@ -97,7 +104,9 @@ pub fn sync_chunk_material_cut(
     mut materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>,
 ) {
     let Some(material) = material else { return };
-    let stale = materials.get(&material.0).is_some_and(|m| m.extension.fortress != *uniform);
+    let stale = materials
+        .get(&material.0)
+        .is_some_and(|m| m.extension.fortress != *uniform);
     if stale {
         if let Some(mut m) = materials.get_mut(&material.0) {
             m.extension.fortress = *uniform;

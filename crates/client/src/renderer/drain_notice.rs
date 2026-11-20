@@ -32,7 +32,11 @@ pub fn move_line(remaining_secs: u64) -> String {
     if remaining_secs == 0 {
         return "Moving this area to another server\u{2026}".to_string();
     }
-    format!("This area moves to another server in {}:{:02}.", remaining_secs / 60, remaining_secs % 60)
+    format!(
+        "This area moves to another server in {}:{:02}.",
+        remaining_secs / 60,
+        remaining_secs % 60
+    )
 }
 
 /// The game thread's side: the deadline (a world tick) the home host leaves at, and what the
@@ -88,4 +92,3 @@ pub fn drain_line(remaining_secs: u64) -> String {
         remaining_secs % 60
     )
 }
-

@@ -6,7 +6,7 @@ use std::collections::BinaryHeap;
 use crate::forge::geology::Geology;
 use crate::forge::par;
 use crate::forge::routing_fast::route_fast;
-use crate::forge::world::{ForgeParams, World, LAND_FLOOR_M};
+use crate::forge::world::{ForgeParams, LAND_FLOOR_M, World};
 
 /// Priority-Flood epsilon (m per meter of travel): the routing surface falls
 /// at least this much toward the sea, so flats and filled lakes still drain.
@@ -86,7 +86,15 @@ pub fn route(w: &World, epsilon: f64) -> Routing {
 /// seas and east–west it wraps round).
 pub fn route_into(w: &World, epsilon: f64, out: &mut Routing) {
     let cells = w.cells();
-    let Routing { filled, receiver, receiver_dist, order, tree_starts, closed, heap } = out;
+    let Routing {
+        filled,
+        receiver,
+        receiver_dist,
+        order,
+        tree_starts,
+        closed,
+        heap,
+    } = out;
     tree_starts.clear();
     filled.clear();
     filled.extend_from_slice(&w.h);
@@ -171,7 +179,13 @@ pub fn discharge_into(w: &World, r: &Routing, rain: &[f64], q: &mut Vec<f64>) {
 /// depressions, then hillslope diffusion. Returns the cells under depressions.
 /// Routing is the Priority-Flood on the first step with a scratch and
 /// `route_fast` on every later one.
-pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch: &mut StepScratch) -> usize {
+pub fn step(
+    w: &mut World,
+    p: &ForgeParams,
+    geo: &Geology,
+    rain: &[f64],
+    scratch: &mut StepScratch,
+) -> usize {
     // The first iteration floods the initial condition with the full
     // Priority-Flood; after that the depression-graph routing is linear time.
     let mut routing = std::mem::take(&mut scratch.routing);
@@ -191,8 +205,17 @@ pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch
 /// Discharge and incision run in parallel over groups of whole outlet trees
 /// (each tree owns its cells and its sums run in the same order as a serial
 /// pass), diffusion over rows: the result is the same for any thread count.
-fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: &Routing, scratch: &mut StepScratch) -> usize {
-    let StepScratch { q, diffuse, groups, .. } = scratch;
+fn evolve(
+    w: &mut World,
+    p: &ForgeParams,
+    geo: &Geology,
+    rain: &[f64],
+    routing: &Routing,
+    scratch: &mut StepScratch,
+) -> usize {
+    let StepScratch {
+        q, diffuse, groups, ..
+    } = scratch;
     let (k, dt) = (&p.knobs, p.knobs.dt_years);
     let (nx, nz, cell_area) = (w.nx, w.nz, w.dx * w.dx);
     if routing.tree_starts.is_empty() {
@@ -231,7 +254,13 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
 
     // Implicit incision downstream-first, silting under lakes.
     let drowned: usize = {
-        let World { h, uplifted, ocean, uplift, .. } = w;
+        let World {
+            h,
+            uplifted,
+            ocean,
+            uplift,
+            ..
+        } = w;
         let (q, ocean, uplift) = (&*q, &*ocean, &*uplift);
         let (h, uplifted) = (par::Disjoint::new(h), par::Disjoint::new(uplifted));
         par::map(groups, |range| {
@@ -257,7 +286,8 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
                     // already updated: downstream-first.
                     let base = if ocean[rc] { 0.0 } else { h.get(rc) };
                     let erodibility = k.erodibility * geo.erodibility_at(i, hi, before);
-                    let f = dt * erodibility * q[i].max(k.hillslope_area_m2 * rain[i]).sqrt() / routing.receiver_dist[i];
+                    let f = dt * erodibility * q[i].max(k.hillslope_area_m2 * rain[i]).sqrt()
+                        / routing.receiver_dist[i];
                     h.set(i, ((hi + lift + f * base) / (1.0 + f)).max(LAND_FLOOR_M));
                 }
             }
@@ -271,7 +301,9 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
     let coeff = k.diffusivity * dt / (w.dx * w.dx);
     let substeps = (coeff / 0.2).ceil().max(1.0) as usize;
     let c = coeff / substeps as f64;
-    let World { h, ocean, wrap_x, .. } = w;
+    let World {
+        h, ocean, wrap_x, ..
+    } = w;
     let (ocean, wrap_x) = (&*ocean, *wrap_x);
     for _ in 0..substeps {
         diffuse.clone_from(h);
@@ -310,4 +342,3 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
     }
     drowned
 }
-

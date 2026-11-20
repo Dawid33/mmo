@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use bevy::prelude::*;
-use game::{BlockId, BlockIndex, Chunk, BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_UNITS};
+use game::{BLOCK_VOXELS, BlockId, BlockIndex, CHUNK_BLOCKS, CHUNK_UNITS, Chunk};
 
 use crate::renderer::bricks::SimChunk;
 use crate::renderer::bridge::SimEntity;
@@ -38,7 +38,11 @@ pub struct ChunkTops {
 
 impl Default for ChunkTops {
     fn default() -> Self {
-        Self { surface: [0; COLUMNS], ground: [0; COLUMNS], surface_block: [BlockId::AIR; COLUMNS] }
+        Self {
+            surface: [0; COLUMNS],
+            ground: [0; COLUMNS],
+            surface_block: [BlockId::AIR; COLUMNS],
+        }
     }
 }
 
@@ -68,7 +72,10 @@ fn top_not(chunk: &Chunk, vx: usize, vz: usize) -> Option<usize> {
                 }
             }
             Some(chisel) => {
-                if let Some(ly) = (0..BLOCK_VOXELS).rev().find(|&ly| shown(chisel.material_at(lx, ly, lz))) {
+                if let Some(ly) = (0..BLOCK_VOXELS)
+                    .rev()
+                    .find(|&ly| shown(chisel.material_at(lx, ly, lz)))
+                {
                     return Some(base + ly);
                 }
             }
@@ -165,7 +172,10 @@ impl HeightGrid {
     /// Surface height (world y, sim units) of the column containing world
     /// (x, z); `None` where nothing is loaded.
     pub fn surface_at(&self, x: f32, z: f32) -> Option<f32> {
-        self.columns.get(&block_of(x, z)).map(|c| c.0).filter(|h| !h.is_nan())
+        self.columns
+            .get(&block_of(x, z))
+            .map(|c| c.0)
+            .filter(|h| !h.is_nan())
     }
 
     /// Surface and solid-ground heights of the column containing world
@@ -191,23 +201,34 @@ impl HeightGrid {
             .values()
             .map(|c| c.1)
             .filter(|h| !h.is_nan())
-            .fold(None, |r, h| Some(r.map_or((h, h), |(lo, hi)| (lo.min(h), hi.max(h)))))
+            .fold(None, |r, h| {
+                Some(r.map_or((h, h), |(lo, hi)| (lo.min(h), hi.max(h))))
+            })
     }
 
     /// Take `region`'s recipe water (its `Reset`'s ground recipes): a column's
     /// surface then reaches the water's top (`water_top + 1`), its ground
     /// does not. Replaces the region's earlier recipe water. `region` is the
     /// copy its tree is drawn at (`RegionRoots::alias`), where its chunks are keyed.
-    pub fn set_recipe_water(&mut self, region: game::RegionId, ground: &std::collections::BTreeMap<game::ColumnCoords, game::ColumnGround>) {
+    pub fn set_recipe_water(
+        &mut self,
+        region: game::RegionId,
+        ground: &std::collections::BTreeMap<game::ColumnCoords, game::ColumnGround>,
+    ) {
         let n = game::REGION_BLOCKS as i32;
         let (x0, z0) = (region.x * n, region.z * n);
-        self.water_tops.retain(|&(x, z), _| !(x0..x0 + n).contains(&x) || !(z0..z0 + n).contains(&z));
+        self.water_tops
+            .retain(|&(x, z), _| !(x0..x0 + n).contains(&x) || !(z0..z0 + n).contains(&z));
         for (coords, g) in ground {
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
                     if g.recipe_water(lx, lz).is_some() {
-                        let key = (x0 + (coords.x * CHUNK_BLOCKS + lx) as i32, z0 + (coords.z * CHUNK_BLOCKS + lz) as i32);
-                        self.water_tops.insert(key, g.water_top[lx * CHUNK_BLOCKS + lz]);
+                        let key = (
+                            x0 + (coords.x * CHUNK_BLOCKS + lx) as i32,
+                            z0 + (coords.z * CHUNK_BLOCKS + lz) as i32,
+                        );
+                        self.water_tops
+                            .insert(key, g.water_top[lx * CHUNK_BLOCKS + lz]);
                     }
                 }
             }
@@ -227,7 +248,9 @@ impl HeightGrid {
     /// Whether the sim chunk at world chunk `key` is loaded (materialised),
     /// all-air chunks included.
     pub fn has_chunk(&self, key: [i32; 3]) -> bool {
-        self.stacks.get(&(key[0], key[2])).is_some_and(|s| s.contains_key(&key[1]))
+        self.stacks
+            .get(&(key[0], key[2]))
+            .is_some_and(|s| s.contains_key(&key[1]))
     }
 
     pub fn insert_chunk(&mut self, entity: Entity, key: [i32; 3], tops: ChunkTops) {
@@ -236,7 +259,10 @@ impl HeightGrid {
                 self.remove_key(old);
             }
         }
-        self.stacks.entry((key[0], key[2])).or_default().insert(key[1], tops);
+        self.stacks
+            .entry((key[0], key[2]))
+            .or_default()
+            .insert(key[1], tops);
         self.recompute(key[0], key[2]);
     }
 
@@ -278,19 +304,25 @@ impl HeightGrid {
                         .iter()
                         .rev()
                         .find(|(_, t)| pick(t)[column] > 0)
-                        .map_or(f32::NAN, |(cy, t)| *cy as f32 * chunk + pick(t)[column] as f32)
+                        .map_or(f32::NAN, |(cy, t)| {
+                            *cy as f32 * chunk + pick(t)[column] as f32
+                        })
                 };
                 let (mut surface, ground) = (top(|t| &t.surface), top(|t| &t.ground));
                 // The map's column: the highest chunk's top block, in whole metres.
-                let map = stack.iter().rev().find(|(_, t)| t.surface[column] > 0).map(|(cy, t)| {
-                    let voxels = *cy as i64 * CHUNK_EDGE as i64 + i64::from(t.surface[column]);
-                    let m = (voxels + BLOCK_VOXELS as i64 - 1).div_euclid(BLOCK_VOXELS as i64);
-                    MapColumn {
-                        height_m: m.clamp(i16::MIN as i64, i16::MAX as i64) as i16,
-                        block: t.surface_block[column],
-                        water_top: self.water_tops.get(&block).copied(),
-                    }
-                });
+                let map = stack
+                    .iter()
+                    .rev()
+                    .find(|(_, t)| t.surface[column] > 0)
+                    .map(|(cy, t)| {
+                        let voxels = *cy as i64 * CHUNK_EDGE as i64 + i64::from(t.surface[column]);
+                        let m = (voxels + BLOCK_VOXELS as i64 - 1).div_euclid(BLOCK_VOXELS as i64);
+                        MapColumn {
+                            height_m: m.clamp(i16::MIN as i64, i16::MAX as i64) as i16,
+                            block: t.surface_block[column],
+                            water_top: self.water_tops.get(&block).copied(),
+                        }
+                    });
                 match map {
                     Some(c) => self.map_columns.insert(block, c),
                     None => self.map_columns.remove(&block),
@@ -318,7 +350,11 @@ impl HeightGrid {
 fn world_chunk_key(tf: &Transform, alias: game::RegionId) -> [i32; 3] {
     let offset = Vec3::from_array(alias.world_offset());
     let world = (tf.translation + offset) / CHUNK_EDGE as f32;
-    [world.x.round() as i32, world.y.round() as i32, world.z.round() as i32]
+    [
+        world.x.round() as i32,
+        world.y.round() as i32,
+        world.z.round() as i32,
+    ]
 }
 
 /// Keep the grid in step with the sim chunks' blocks.
@@ -346,4 +382,3 @@ pub fn update_height_grid(
         }
     }
 }
-

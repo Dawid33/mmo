@@ -2,7 +2,9 @@
 //! blocks a chop at one log or branch block cuts and brings down, and the
 //! spin that tips them over. Pure functions over a [`TileSource`], so the sim
 //! and the client's previews agree; the `Chop` order (`orders.rs`) carries
-//! them out with `clear_blocks_safe` + `detach_blocks_safe`.
+//! them out with `clear_blocks_safe` + `detach_blocks_safe` — or, under
+//! [`TreeFelling::Instant`] (the default, [`TREE_FELLING`]), clears every
+//! block [`fell`] names at once (`Rollback::fell_instant_safe`).
 //!
 //! A tree is its blocks with one tree id (`Block::tree_id`, 0 = not a tree);
 //! each block also carries the limb it grows on (`Block::limb`, 0 = the
@@ -15,7 +17,7 @@ use rapier3d::math::Vector;
 
 use crate::orders::{TilePos, TileSource};
 use crate::slime::roll;
-use crate::{block_props, BLOCK_VOXELS};
+use crate::{BLOCK_VOXELS, block_props};
 
 /// Most blocks one tree flood visits. The biggest species box (jungle: crown
 /// radius 8 blocks + 1 block of leaf reach, 32 blocks tall) is 19 × 32 × 19 =
@@ -36,14 +38,82 @@ pub const TIP_SALT: u64 = 0x7119_FE11;
 /// counts as none: the direction is rolled.
 pub const TIP_MIN_LEAN_BLOCKS: f32 = 0.5;
 
+/// How a chop brings a tree down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeFelling {
+    /// Every block [`fell`] names (the cut and the falling part) vanishes at
+    /// once in the sim (the renderer is told, [`TreeFelledView`], and takes
+    /// them away top to bottom); a player's chop drops their items where they stood, one
+    /// deposit per column that settles to the ground.
+    Instant,
+    /// The cut is cleared and the falling part topples as a voxel body
+    /// (`detach_blocks_pivoting_safe`), settling by its `SettlePolicy`.
+    Physics,
+}
+
+/// The felling mode — a BUILD-time dial (`VOXEL_TREE_FELLING=instant|physics`,
+/// set in `.cargo/config.toml [env]`, `just tree_felling=physics …`) because
+/// a chop is predicted: client, server and the wasm LocalServer must agree on
+/// it, or every chop rolls the client back. Unset or empty = `instant`;
+/// anything else fails the BUILD.
+pub const TREE_FELLING: TreeFelling = parse_tree_felling(option_env!("VOXEL_TREE_FELLING"));
+
+/// `option_env!` hands over a string; unset or empty means the default.
+const fn parse_tree_felling(var: Option<&str>) -> TreeFelling {
+    const fn eq(a: &[u8], b: &[u8]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+    let Some(text) = var else {
+        return TreeFelling::Instant;
+    };
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || eq(bytes, b"instant") {
+        TreeFelling::Instant
+    } else if eq(bytes, b"physics") {
+        TreeFelling::Physics
+    } else {
+        panic!("VOXEL_TREE_FELLING must be `instant` or `physics`")
+    }
+}
+
+/// A tree felled at once, for the renderer
+/// (`GameDataUpdateKind::TreeFelled`): the blocks the chop cleared as they
+/// were (region-local, sorted) and the tick.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TreeFelledView {
+    pub blocks: Vec<(TilePos, crate::Block)>,
+    pub tick: u64,
+}
+
 /// The eight horizontal tip directions `[x, z]`, in order of angle.
-const DIRECTIONS: [[i32; 2]; 8] = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+const DIRECTIONS: [[i32; 2]; 8] = [
+    [1, 0],
+    [1, 1],
+    [0, 1],
+    [-1, 1],
+    [-1, 0],
+    [-1, -1],
+    [0, -1],
+    [1, -1],
+];
 
 /// The 26 neighbours, in a fixed order.
 fn neighbours(p: TilePos) -> impl Iterator<Item = TilePos> {
     (-1..=1).flat_map(move |dy| {
         (-1..=1).flat_map(move |dz| {
-            (-1..=1).filter(move |&dx| (dx, dy, dz) != (0, 0, 0)).map(move |dx| [p[0] + dx, p[1] + dy, p[2] + dz])
+            (-1..=1)
+                .filter(move |&dx| (dx, dy, dz) != (0, 0, 0))
+                .map(move |dx| [p[0] + dx, p[1] + dy, p[2] + dz])
         })
     })
 }
@@ -137,14 +207,23 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
         if y == floor {
             blocks.iter().copied().collect()
         } else {
-            let mut v: Vec<TilePos> = limbs.iter().filter(|&(p, &l)| l == 0 && p[1] > y).map(|(p, _)| *p).collect();
+            let mut v: Vec<TilePos> = limbs
+                .iter()
+                .filter(|&(p, &l)| l == 0 && p[1] > y)
+                .map(|(p, _)| *p)
+                .collect();
             // Pieces of what is left once the cut is out: a limb rooted below
             // the cut whose wood crosses the cut layer splits there.
             let mut left = limbs.clone();
             left.retain(|p, _| !cuts.contains(p));
             for piece in limb_components(&left) {
                 // Lowest wood, or lowest leaf for a piece with no wood.
-                let root = piece.iter().map(|p| (!wood(p), p[1])).min().expect("non-empty").1;
+                let root = piece
+                    .iter()
+                    .map(|p| (!wood(p), p[1]))
+                    .min()
+                    .expect("non-empty")
+                    .1;
                 if root >= y {
                     v.extend(piece);
                 }
@@ -152,7 +231,10 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
             v
         }
     } else if limb != 0 {
-        let piece = limb_components(&limbs).into_iter().find(|c| c.contains(&cut)).expect("the cut is in a piece");
+        let piece = limb_components(&limbs)
+            .into_iter()
+            .find(|c| c.contains(&cut))
+            .expect("the cut is in a piece");
         piece.into_iter().filter(|&p| p != cut).collect()
     } else {
         Vec::new()
@@ -166,8 +248,16 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
         // felled limb.
         let floor = floor.expect("the cut is wood");
         let gone: BTreeSet<TilePos> = falls.iter().chain(&cuts).copied().collect();
-        let standing: BTreeSet<TilePos> = blocks.iter().copied().filter(|p| !gone.contains(p)).collect();
-        let mut held: BTreeSet<TilePos> = standing.iter().copied().filter(|p| p[1] == floor && wood(p)).collect();
+        let standing: BTreeSet<TilePos> = blocks
+            .iter()
+            .copied()
+            .filter(|p| !gone.contains(p))
+            .collect();
+        let mut held: BTreeSet<TilePos> = standing
+            .iter()
+            .copied()
+            .filter(|p| p[1] == floor && wood(p))
+            .collect();
         let mut stack: Vec<TilePos> = held.iter().copied().collect();
         while let Some(p) = stack.pop() {
             for q in neighbours(p) {
@@ -179,7 +269,11 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
         falls.extend(standing.into_iter().filter(|p| !held.contains(p)));
         falls.sort_unstable();
     }
-    let falling = if falls.is_empty() { Vec::new() } else { vec![falls] };
+    let falling = if falls.is_empty() {
+        Vec::new()
+    } else {
+        vec![falls]
+    };
     Some(Felling { cut: cuts, falling })
 }
 
@@ -260,5 +354,9 @@ pub fn tip_angvel(tree: u32, cut: TilePos, set: &[TilePos], tick: u64) -> Vector
 /// rather than spinning about its centre of mass with the butt swinging up.
 pub fn tip_pivot(cut: TilePos) -> Vector {
     let b = BLOCK_VOXELS as f32;
-    Vector::new((cut[0] as f32 + 0.5) * b, (cut[1] + 1) as f32 * b, (cut[2] as f32 + 0.5) * b)
+    Vector::new(
+        (cut[0] as f32 + 0.5) * b,
+        (cut[1] + 1) as f32 * b,
+        (cut[2] as f32 + 0.5) * b,
+    )
 }

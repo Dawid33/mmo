@@ -17,11 +17,11 @@
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
-use game::{RegionId, TilePos, TileSource, BLOCK_VOXELS};
+use game::{BLOCK_VOXELS, RegionId, TilePos, TileSource};
 
 use super::height::HeightGrid;
-use super::level::{cut_plane_world_y, WorkingLevel};
-use super::selection::{march_height, PICK_STEP_M};
+use super::level::{WorkingLevel, cut_plane_world_y};
+use super::selection::{PICK_STEP_M, march_height};
 use super::tiles::TileMirror;
 use game::movement::UNITS_PER_METER;
 
@@ -38,7 +38,11 @@ pub struct Cut {
 impl Cut {
     pub fn of(level: &WorkingLevel, home: Option<RegionId>) -> Option<Self> {
         let (at, region) = (level.level?, home?);
-        level.cut.then(|| Cut { level: at, region, plane_y: cut_plane_world_y(at, region) })
+        level.cut.then(|| Cut {
+            level: at,
+            region,
+            plane_y: cut_plane_world_y(at, region),
+        })
     }
 }
 
@@ -87,14 +91,24 @@ pub fn visible_ground_with(
             let start = origin - offset;
             let v = |p: Vec3| Vector::new(p.x, p.y, p.z);
             let hit = game::xray_through(v(start), v(dir), max / size, &solid, &x.dug)?;
-            let min = Vec3::new(hit.block[0] as f32, hit.block[1] as f32, hit.block[2] as f32) * size;
+            let min = Vec3::new(
+                hit.block[0] as f32,
+                hit.block[1] as f32,
+                hit.block[2] as f32,
+            ) * size;
             Some(box_entry(start, dir, min, min + Vec3::splat(size)) + offset)
         });
         return through.or_else(|| march_height(origin, dir, surface, step, max));
     };
     // Outside the home region nothing is cut: the top surface stands, so
     // the march skips home columns (the block walk answers those).
-    let outside = march_height(origin, dir, |x, z| (!in_home(x, z)).then(|| surface(x, z)).flatten(), step, max);
+    let outside = march_height(
+        origin,
+        dir,
+        |x, z| (!in_home(x, z)).then(|| surface(x, z)).flatten(),
+        step,
+        max,
+    );
     // Inside: walk the blocks from where the ray comes down through the cut.
     let t0 = if origin.y > cut.plane_y {
         if dir.y >= 0.0 {
@@ -116,11 +130,19 @@ pub fn visible_ground_with(
         |p| p[1] <= level && solid(p),
     )
     .map(|hit| {
-        let min = Vec3::new(hit.block[0] as f32, hit.block[1] as f32, hit.block[2] as f32) * size;
+        let min = Vec3::new(
+            hit.block[0] as f32,
+            hit.block[1] as f32,
+            hit.block[2] as f32,
+        ) * size;
         box_entry(start, dir, min, min + Vec3::splat(size)) + offset
     });
     match (inside, outside) {
-        (Some(a), Some(b)) => Some(if a.distance(origin) <= b.distance(origin) { a } else { b }),
+        (Some(a), Some(b)) => Some(if a.distance(origin) <= b.distance(origin) {
+            a
+        } else {
+            b
+        }),
         (a, b) => a.or(b),
     }
 }
@@ -142,9 +164,10 @@ pub fn visible_ground(
     let home = mirror.region().map(|home| frame.alias(home));
     let rect = home.map(|home| super::cut_entities::home_rect(&frame, home));
     let cut = Cut::of(level, home);
-    let xray = home
-        .filter(|_| xray && cut.is_none())
-        .map(|region| Xray { region, dug: |p: TilePos| mirror.is_dug(p) });
+    let xray = home.filter(|_| xray && cut.is_none()).map(|region| Xray {
+        region,
+        dug: |p: TilePos| mirror.is_dug(p),
+    });
     visible_ground_with(
         origin,
         dir,
@@ -156,4 +179,3 @@ pub fn visible_ground(
         xray,
     )
 }
-

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use game::map_tile::{MapTile, MapTileKey};
 
 use super::store::Answer;
@@ -29,30 +29,34 @@ impl LocalFetcher {
         let (reply, replies) = unbounded();
         for i in 0..MAP_LOCAL_WORKERS {
             let (rx, reply, source) = (rx.clone(), reply.clone(), source.clone());
-            let spawned = std::thread::Builder::new().name(format!("map-local-{i}")).spawn(move || {
-                for job in rx {
-                    match job {
-                        Job::Tile(key, have) => {
-                            let answer = match source.tile(key, have) {
-                                Ok(map_tiles::Fetched::Unchanged) => Answer::Unchanged,
-                                Ok(map_tiles::Fetched::Tile { etag, bytes }) => match MapTile::decode(&bytes) {
-                                    Ok(tile) => Answer::Tile { etag, tile },
+            let spawned = std::thread::Builder::new()
+                .name(format!("map-local-{i}"))
+                .spawn(move || {
+                    for job in rx {
+                        match job {
+                            Job::Tile(key, have) => {
+                                let answer = match source.tile(key, have) {
+                                    Ok(map_tiles::Fetched::Unchanged) => Answer::Unchanged,
+                                    Ok(map_tiles::Fetched::Tile { etag, bytes }) => {
+                                        match MapTile::decode(&bytes) {
+                                            Ok(tile) => Answer::Tile { etag, tile },
+                                            Err(e) => Answer::Failed(e.to_string()),
+                                        }
+                                    }
                                     Err(e) => Answer::Failed(e.to_string()),
-                                },
-                                Err(e) => Answer::Failed(e.to_string()),
-                            };
-                            if reply.send((key, answer)).is_err() {
-                                return;
+                                };
+                                if reply.send((key, answer)).is_err() {
+                                    return;
+                                }
                             }
-                        }
-                        Job::Refresh => {
-                            if let Err(e) = source.refresh_versions() {
-                                bevy::log::warn!("[map] re-reading terrain versions: {e}");
+                            Job::Refresh => {
+                                if let Err(e) = source.refresh_versions() {
+                                    bevy::log::warn!("[map] re-reading terrain versions: {e}");
+                                }
                             }
                         }
                     }
-                }
-            });
+                });
             if let Err(e) = spawned {
                 bevy::log::error!("[map] map-local-{i}: {e}");
             }

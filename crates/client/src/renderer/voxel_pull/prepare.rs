@@ -13,16 +13,16 @@ use bevy::{
     },
 };
 
-use super::super::meshing::records::face_ends;
-use super::arena::{quad_index_capacity, quad_index_data, GpuQuadArena};
-use super::gpu::{
-    exact_indirect_draw_count, synchronize_near_metric_mode, ActiveNearMode, ForwardCullSource,
-    NearRendererMetrics,
-};
 use super::super::boundaries::BoundaryUniform;
 use super::super::fortress_view::{FortressViewUniform, OverlayTexture};
+use super::super::meshing::records::face_ends;
+use super::arena::{GpuQuadArena, quad_index_capacity, quad_index_data};
+use super::gpu::{
+    ActiveNearMode, ForwardCullSource, NearRendererMetrics, exact_indirect_draw_count,
+    synchronize_near_metric_mode,
+};
 use super::pipeline::VoxelPullPipeline;
-use super::queue::{grouped_draw_list, ViewChunkDrawList};
+use super::queue::{ViewChunkDrawList, grouped_draw_list};
 use super::{BlockArrayTexture, BlockTopLayers, ExtractedChunkQuads, RemovedChunkQuads};
 
 /// Per-entity draw metadata into the shared arena. The chunk's records are
@@ -150,7 +150,9 @@ pub fn prepare_view_chunk_draws(
     if matches!(*mode, ActiveNearMode::GpuDriven { .. }) && !frustum_metric_wanted() {
         for (view_entity, _, _, has_list, _) in &views {
             if !has_list {
-                commands.entity(view_entity).insert(ViewChunkDrawList::default());
+                commands
+                    .entity(view_entity)
+                    .insert(ViewChunkDrawList::default());
             }
         }
         update_near_metrics_for_prepare(
@@ -178,7 +180,9 @@ pub fn prepare_view_chunk_draws(
         .filter_map(|(main_entity, chunk)| {
             // CPU-culled paths have no distance bands: full detail always,
             // coarse twins never.
-            if !chunk.cave_active || chunk.band == super::DetailBand::code(Some(&super::DetailBand::Coarse)) {
+            if !chunk.cave_active
+                || chunk.band == super::DetailBand::code(Some(&super::DetailBand::Coarse))
+            {
                 return None;
             }
             let allocation = arena.allocations.get(&main_entity.id())?;
@@ -201,7 +205,9 @@ pub fn prepare_view_chunk_draws(
         .collect();
     for (view_entity, frustum, is_shadow_view, _, frontend) in &views {
         if !crate::session::view_draws_world(frontend) {
-            commands.entity(view_entity).insert(ViewChunkDrawList::default());
+            commands
+                .entity(view_entity)
+                .insert(ViewChunkDrawList::default());
             continue;
         }
         let list = grouped_draw_list(frustum, resolved.iter().copied());
@@ -268,8 +274,14 @@ pub fn prepare_chunk_quads(
     let mut rebuild_bind_group = arena.bind_group.is_none();
     // Static after startup: uploaded once (again only if a stand-in was
     // uploaded before the resource existed).
-    if arena.top_layers.as_ref().is_none_or(|(_, real)| !real && top_layers.is_some()) {
-        let lut = top_layers.as_ref().map_or_else(|| vec![0], |l| l.0.to_vec());
+    if arena
+        .top_layers
+        .as_ref()
+        .is_none_or(|(_, real)| !real && top_layers.is_some())
+    {
+        let lut = top_layers
+            .as_ref()
+            .map_or_else(|| vec![0], |l| l.0.to_vec());
         let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_pull_top_layers"),
             contents: bytemuck::cast_slice(&lut),
@@ -316,7 +328,11 @@ pub fn prepare_chunk_quads(
         .map(|(_, _, extracted)| extracted.records.len() as u32)
         .max()
         .unwrap_or(0);
-    if arena.quad_indices.as_ref().is_none_or(|(_, covered)| *covered < largest) {
+    if arena
+        .quad_indices
+        .as_ref()
+        .is_none_or(|(_, covered)| *covered < largest)
+    {
         let quads = quad_index_capacity(largest);
         let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_pull_quad_indices"),
@@ -364,12 +380,13 @@ pub fn prepare_chunk_quads(
         arena.transforms.reserve(transform_capacity, &device);
         // Counted for the crossing timeline (`crossing_timeline::GPU`).
         {
-            use super::super::crossing_timeline::{GpuCounters, GPU};
+            use super::super::crossing_timeline::{GPU, GpuCounters};
             GpuCounters::add(&GPU.pull_uploads, 1);
             GpuCounters::add(&GPU.pull_upload_quads, u64::from(quad_count));
             if records_grew {
                 GpuCounters::add(&GPU.pull_regrows, 1);
-                let bytes = arena.records.values().len() * std::mem::size_of::<super::super::meshing::records::QuadRecord>();
+                let bytes = arena.records.values().len()
+                    * std::mem::size_of::<super::super::meshing::records::QuadRecord>();
                 GpuCounters::add(&GPU.pull_regrow_bytes, bytes as u64);
             }
         }
@@ -418,7 +435,10 @@ pub fn prepare_chunk_quads(
     arena.metadata_dirty.clear();
 
     if rebuild_bind_group {
-        super::super::crossing_timeline::GpuCounters::add(&super::super::crossing_timeline::GPU.pull_bind_groups, 1);
+        super::super::crossing_timeline::GpuCounters::add(
+            &super::super::crossing_timeline::GPU.pull_bind_groups,
+            1,
+        );
         // The designation overlay texture: written in place by
         // `fortress_view::upload_overlay` (the dirty sub-box), so the bind
         // group only needs its view.
@@ -438,7 +458,8 @@ pub fn prepare_chunk_quads(
             arena.top_layers.as_ref(),
             arena.boundaries.as_ref(),
             arena.fortress_view.as_ref(),
-        ) else {
+        )
+        else {
             return;
         };
         arena.bind_group = Some(device.create_bind_group(
@@ -467,7 +488,10 @@ pub fn prepare_chunk_quads(
 /// for a rotated chunk — a falling voxel body's brick, whose local −Y faces
 /// may point up — it would drop faces that face the camera. Entry 7 (where
 /// the cutout range starts) is kept, so the cutout pass still draws.
-pub(crate) fn chunk_face_ends(records: &[super::super::meshing::records::QuadRecord], world_from_local: &Mat4) -> [u32; 8] {
+pub(crate) fn chunk_face_ends(
+    records: &[super::super::meshing::records::QuadRecord],
+    world_from_local: &Mat4,
+) -> [u32; 8] {
     let mut ends = face_ends(records);
     if !keeps_face_axes(world_from_local) {
         ends[6] = 1;
@@ -481,7 +505,13 @@ fn keeps_face_axes(m: &Mat4) -> bool {
     let cols = [m.x_axis, m.y_axis, m.z_axis];
     let scale = (0..3).map(|i| cols[i][i].abs()).fold(0.0f32, f32::max);
     (0..3).all(|c| {
-        (0..3).all(|r| if r == c { cols[c][r] > 0.0 } else { cols[c][r].abs() <= AXIS_ALIGNED_EPSILON * scale })
+        (0..3).all(|r| {
+            if r == c {
+                cols[c][r] > 0.0
+            } else {
+                cols[c][r].abs() <= AXIS_ALIGNED_EPSILON * scale
+            }
+        })
     })
 }
 
@@ -513,11 +543,27 @@ mod tests {
     fn sorted_records() -> Vec<super::super::super::meshing::records::QuadRecord> {
         use super::super::super::meshing::binary::{Face, Quad};
         use super::super::super::meshing::records::quads_to_records;
-        let quad = |face, cutout| Quad { min: [1, 2, 3], w: 1, h: 1, face, block: game::BlockId(1), ao: [3; 4], cutout, interior: false };
-        let mut quads: Vec<Quad> = [Face::PosX, Face::NegX, Face::PosY, Face::NegY, Face::PosZ, Face::NegZ]
-            .into_iter()
-            .map(|f| quad(f, false))
-            .collect();
+        let quad = |face, cutout| Quad {
+            min: [1, 2, 3],
+            w: 1,
+            h: 1,
+            face,
+            block: game::BlockId(1),
+            ao: [3; 4],
+            cutout,
+            interior: false,
+        };
+        let mut quads: Vec<Quad> = [
+            Face::PosX,
+            Face::NegX,
+            Face::PosY,
+            Face::NegY,
+            Face::PosZ,
+            Face::NegZ,
+        ]
+        .into_iter()
+        .map(|f| quad(f, false))
+        .collect();
         quads.push(quad(Face::PosY, true));
         quads_to_records(&quads, &Default::default())
     }
@@ -539,7 +585,10 @@ mod tests {
         ] {
             let ends = chunk_face_ends(&records, &m);
             assert_ne!(ends[6], 0, "unsorted flag for {m:?}");
-            assert_eq!(ends[7], cutout, "the cutout range still starts after the opaque one");
+            assert_eq!(
+                ends[7], cutout,
+                "the cutout range still starts after the opaque one"
+            );
         }
     }
 }

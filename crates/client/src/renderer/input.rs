@@ -79,7 +79,10 @@ impl Default for MouseCoalescer {
     fn default() -> Self {
         // Saturated: the first delta of the session emits immediately, exactly
         // like any other delta arriving after an idle period.
-        Self { pending: Vec2::ZERO, since_send: Duration::MAX }
+        Self {
+            pending: Vec2::ZERO,
+            since_send: Duration::MAX,
+        }
     }
 }
 
@@ -110,26 +113,63 @@ impl MouseCoalescer {
     }
 }
 
+/// Per-session keyboard state of the body's input that is not a key's own:
+/// one `SessionLocal` (the system is at Bevy's 16-parameter limit).
+#[derive(Default)]
+pub(crate) struct BodyKeys {
+    /// Touchpad scroll not yet worth a hotbar step.
+    wheel_acc: f32,
+    sprint: SprintLatch,
+}
+
+/// The Minecraft-style double-tap-W sprint, reduced to the virtual
+/// [`game::Key::Sprint`] the sim reads (as it reads a held Ctrl): pressed when
+/// the latch closes, released when W lets go.
+#[derive(Default)]
+pub(crate) struct SprintLatch {
+    latch: super::commander::Sprint,
+    /// What the sim was last told.
+    sent: bool,
+}
+
+impl SprintLatch {
+    /// This frame's change to send, if any.
+    fn update(&mut self, keys: &ButtonInput<KeyCode>, now: f32) -> Option<bool> {
+        let w = KeyCode::KeyW;
+        self.latch = self
+            .latch
+            .update(keys.just_pressed(w), keys.pressed(w), now);
+        (self.latch.latched != self.sent).then(|| {
+            self.sent = self.latch.latched;
+            self.sent
+        })
+    }
+}
+
 pub fn forward_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
-    time: Res<Time>,
-    coalesce_window: Res<MouseCoalesceWindow>,
+    // One parameter: the system is at Bevy's 16-parameter limit.
+    (time, coalesce_window, mut sprint_input): (
+        Res<Time>,
+        Res<MouseCoalesceWindow>,
+        Option<ResMut<super::commander::view_feel::SprintInput>>,
+    ),
     mut coalescer: crate::session::SessionLocal<MouseCoalescer>,
     window: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     // Per session: a new world's sim has not been told the window size.
     mut last_size: crate::session::SessionLocal<Option<(u32, u32)>>,
     player: Res<LocalPlayer>,
     game: Res<GameEvents>,
-    cursor: Option<Res<super::cursor::CursorPolicy>>,
+    mut cursor: Option<ResMut<super::cursor::CursorPolicy>>,
     mode: Option<Res<super::commander::CameraMode>>,
     first_person: Option<Res<super::commander::first_person::FirstPerson>>,
     adventure: Option<Res<super::commander::adventure::ClientPlayMode>>,
     scroll: Res<AccumulatedMouseScroll>,
-    mut wheel_acc: crate::session::SessionLocal<f32>,
+    mut body_keys: crate::session::SessionLocal<BodyKeys>,
 ) {
-    let wheel_acc = wheel_acc.get();
+    let BodyKeys { wheel_acc, sprint } = body_keys.get();
     let last_size = last_size.get();
     let coalescer = coalescer.get();
     let Some(player) = player.0 else { return };
@@ -141,14 +181,32 @@ pub fn forward_input(
     // takes the keys and the mouse, all but E — the sim's own fps-cam toggle,
     // which `first_person` owns here.
     let first_person = commander && first_person.is_some_and(|fp| fp.on);
-    // A client-local overlay (dev panel, chat) owns the pointer: its clicks and
+    // A client-local overlay (later chat) owns the pointer: its clicks and
     // the mouse travel to reach it must not break blocks or turn the camera.
     // Releases still go through so a button held when it opened never sticks.
     // A modal game screen (the Esc menu, the map, the inventory) holds the
     // pointer the same way: its clicks must not mine or place.
     // So does a pointer given back (`CursorPolicy::released`): the click that
     // takes it again must not also break a block.
-    let overlay_open = cursor.as_ref().is_some_and(|c| c.blocks_game() || (c.released && c.wants_grab()));
+    //
+    // E opening the inventory stops the look on the press's own frame: the
+    // sim opens it a tick later, and the view turning on until then read as
+    // the camera running past the press. Set before the gate is read, so this
+    // frame's travel is held back here and in `look::integrate_local_look`
+    // (ordered after) alike.
+    let adventure_body = first_person && adventure.as_ref().is_some_and(|m| m.adventure());
+    if let Some(c) = cursor.as_mut() {
+        let now = time.elapsed();
+        if c.inventory_opening.is_some_and(|at| {
+            c.ui_modal || now.saturating_sub(at) >= super::cursor::INVENTORY_OPEN_WAIT
+        }) {
+            c.inventory_opening = None;
+        }
+        if adventure_body && !c.loading && c.look_live() && keys.just_pressed(KeyCode::KeyE) {
+            c.inventory_opening = Some(now);
+        }
+    }
+    let overlay_open = cursor.as_ref().is_some_and(|c| !c.look_live());
     let send = |ev: InputEvent| {
         let _ = game.0.send(GameEventKind::PlayerInput(player, ev));
     };
@@ -156,17 +214,43 @@ pub fn forward_input(
     // Behind the loading screen nothing the player does reaches the sim: no
     // key, click or mouse travel (the body would walk and turn in a world the
     // player cannot see yet). Only the window size below still goes through.
-    let loading = cursor.is_some_and(|c| c.loading);
+    let loading = cursor.as_ref().is_some_and(|c| c.loading);
+    // What the sim reads as sprint (`held(ControlLeft) || held(Sprint)`), for
+    // the view's sprint FOV; off while the body gets no keys.
+    let body_keys = !loading && (!commander || first_person);
+    let sprinting = body_keys && (keys.pressed(KeyCode::ControlLeft) || sprint.sent);
+    if let Some(s) = sprint_input.as_mut() {
+        s.set_if_neq(super::commander::view_feel::SprintInput(sprinting));
+    }
     if loading {
     } else if !commander {
-        forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send);
+        forward_body_input(
+            &keys,
+            &buttons,
+            &motion,
+            &time,
+            &coalesce_window,
+            coalescer,
+            sprint,
+            &window,
+            overlay_open,
+            send,
+        );
     } else if first_person {
         // E is the sim's inventory key in Adventure; elsewhere it is the
         // fps-cam toggle `first_person` owns. Q reaches the sim only here,
         // never in the commander (where it holds the tool wheel).
         let adventure = adventure.is_some_and(|m| m.adventure());
         let send_body = |ev: InputEvent| {
-            if adventure || !matches!(ev, InputEvent::Key { key: game::Key::KeyE, .. }) {
+            if adventure
+                || !matches!(
+                    ev,
+                    InputEvent::Key {
+                        key: game::Key::KeyE,
+                        ..
+                    }
+                )
+            {
                 send(ev);
             }
         };
@@ -184,13 +268,27 @@ pub fn forward_input(
                 send_body(InputEvent::MouseWheel { x: 0.0, y: step });
             }
         }
-        forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send_body);
+        forward_body_input(
+            &keys,
+            &buttons,
+            &motion,
+            &time,
+            &coalesce_window,
+            coalescer,
+            sprint,
+            &window,
+            overlay_open,
+            send_body,
+        );
     }
     if let Ok((w, _)) = window.single() {
         let size = (w.physical_width(), w.physical_height());
         if *last_size != Some(size) {
             if last_size.is_some() {
-                send(InputEvent::Resized { width: size.0, height: size.1 });
+                send(InputEvent::Resized {
+                    width: size.0,
+                    height: size.1,
+                });
             }
             *last_size = Some(size);
         }
@@ -206,6 +304,7 @@ fn forward_body_input(
     time: &Time,
     coalesce_window: &MouseCoalesceWindow,
     coalescer: &mut MouseCoalescer,
+    sprint: &mut SprintLatch,
     window: &Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     overlay_open: bool,
     send: impl Fn(InputEvent),
@@ -217,8 +316,17 @@ fn forward_body_input(
     }
     for code in keys.get_just_released() {
         if let Some(key) = map_key(*code) {
-            send(InputEvent::Key { key, pressed: false });
+            send(InputEvent::Key {
+                key,
+                pressed: false,
+            });
         }
+    }
+    if let Some(pressed) = sprint.update(keys, time.elapsed_secs()) {
+        send(InputEvent::Key {
+            key: game::Key::Sprint,
+            pressed,
+        });
     }
     // Coalesce HERE, at the source — not at the send boundary. Each event is
     // predicted locally and replayed by the server, so emitting N events that
@@ -234,19 +342,35 @@ fn forward_body_input(
     let pointer_ours = window
         .single()
         .is_ok_and(|(w, c)| w.focused && c.grab_mode == CursorGrabMode::Locked);
-    let delta = if overlay_open || !pointer_ours { Vec2::ZERO } else { motion.delta };
+    let delta = if overlay_open || !pointer_ours {
+        Vec2::ZERO
+    } else {
+        motion.delta
+    };
     let pressing = !overlay_open && buttons.get_just_pressed().next().is_some();
-    let window_len = if pressing { Duration::ZERO } else { coalesce_window.0 };
+    let window_len = if pressing {
+        Duration::ZERO
+    } else {
+        coalesce_window.0
+    };
     if let Some(sum) = coalescer.accumulate(delta, time.delta(), window_len) {
-        send(InputEvent::MouseMotion { dx: sum.x, dy: sum.y });
+        send(InputEvent::MouseMotion {
+            dx: sum.x,
+            dy: sum.y,
+        });
     }
     if !overlay_open {
         for b in buttons.get_just_pressed() {
-            send(InputEvent::MouseButton { button: map_button(*b), pressed: true });
+            send(InputEvent::MouseButton {
+                button: map_button(*b),
+                pressed: true,
+            });
         }
     }
     for b in buttons.get_just_released() {
-        send(InputEvent::MouseButton { button: map_button(*b), pressed: false });
+        send(InputEvent::MouseButton {
+            button: map_button(*b),
+            pressed: false,
+        });
     }
 }
-

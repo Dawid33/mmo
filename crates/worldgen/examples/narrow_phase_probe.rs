@@ -1,7 +1,9 @@
 //! Narrow-phase probe: contact-graph shape + per-tick physics stage costs for
 //! a real worldgen region, under the production hash mode (Delta).
 //! Run: cargo run --release -p worldgen --example narrow_phase_probe
-use game::{Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Key, Region, RegionCoords, Rollback};
+use game::{
+    Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Key, Region, RegionCoords, Rollback,
+};
 use rapier3d::prelude::{PhysicsParts, PhysicsPipeline, StepJournal};
 use slotmapd::KeyData;
 use std::collections::HashMap;
@@ -63,7 +65,10 @@ fn summarize(label: &str, times: &[Duration]) {
     let mean = total / times.len() as u32;
     let max = times.iter().max().unwrap();
     let min = times.iter().min().unwrap();
-    println!("[{label}] ticks {}: mean {mean:?}  min {min:?}  max {max:?}", times.len());
+    println!(
+        "[{label}] ticks {}: mean {mean:?}  min {min:?}  max {max:?}",
+        times.len()
+    );
 }
 
 /// One production-equivalent journaled physics step (mirrors
@@ -92,7 +97,11 @@ fn direct_step(r: &mut Rollback, pipeline: &mut PhysicsPipeline, label: Option<&
         );
     }
     let t = Instant::now();
-    let pre = if scope.wants_delta_digest() { journal.pre_digest() } else { 0 };
+    let pre = if scope.wants_delta_digest() {
+        journal.pre_digest()
+    } else {
+        0
+    };
     let digest_dt = t.elapsed();
     scope.register(pre, move |phys, _| {
         let p = phys.raw_undo_parts();
@@ -186,7 +195,10 @@ fn main() {
     region
         .handle_event(GameEventKind::PlayerInput(
             0,
-            InputEvent::Key { key: Key::KeyW, pressed: true },
+            InputEvent::Key {
+                key: Key::KeyW,
+                pressed: true,
+            },
         ))
         .expect("input");
     let mut times = Vec::new();
@@ -218,7 +230,11 @@ fn main() {
     // Chunk removal: pick a real terrain chunk body (fixed, with colliders,
     // max contact-graph degree) and remove its entity — the next step takes
     // the wholesale NarrowPhase snapshot + full digest.
-    let victim: EntityKey = region.data().physics.bodies.iter()
+    let victim: EntityKey = region
+        .data()
+        .physics
+        .bodies
+        .iter()
         .filter(|(_, b)| b.is_fixed() && !b.colliders().is_empty())
         .max_by_key(|(_, b)| b.colliders().len())
         .map(|(_, b)| EntityKey::from(KeyData::from_ffi(b.user_data as u64)))

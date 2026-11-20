@@ -17,8 +17,8 @@
 //! only the process-global block properties, which every worker installs).
 
 use bevy::tasks::{AsyncComputeTaskPool, Task};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Every kind of compute job (the tag a worker dispatches on).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,4 +121,3 @@ pub fn encode_job<J: ComputeJob>(job: &J) -> Vec<u8> {
 pub fn decode_output<J: ComputeJob>(output: &[u8]) -> J::Output {
     bincode::deserialize(output).expect("compute output decodes")
 }
-

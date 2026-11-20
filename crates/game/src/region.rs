@@ -1,20 +1,20 @@
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap, VecDeque},
     ops::DerefMut,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::{Duration, Instant};
 
-use crossbeam::channel::Sender;
-use log::{debug, info};
 use crate::input::Key;
 use crate::{Chunk, Client, ClientId, GameData, Rollback, Tick};
+use crossbeam::channel::Sender;
+use log::{debug, info};
 
 use crate::{
-    camera::CameraController, physics::PhysicsController, ChunkCoords, Column, ColumnCoords,
-    Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, HaloEntityMsg,
-    RegionCoords, RegionId, ServerPacket,
+    ChunkCoords, Column, ColumnCoords, Controller, EntityBundle, GameDataUpdate, GameError,
+    GameEvent, GameEventKind, HaloEntityMsg, RegionCoords, RegionId, ServerPacket,
+    camera::CameraController, physics::PhysicsController,
 };
 
 /// A region started at world tick `t` ([`Region::start_at`]) allocates its
@@ -51,7 +51,11 @@ impl Rollback {
     /// [`crate::PICKUP_DELAY_TICKS`]. With no body to drop it from, it goes
     /// back on the cursor instead, so nothing is lost.
     pub(crate) fn drop_at_feet_safe(&mut self, client: ClientId, stack: crate::ItemStack) {
-        let feet = self.data.player_entites.get(&client).and_then(|&e| self.body_feet(e));
+        let feet = self
+            .data
+            .player_entites
+            .get(&client)
+            .and_then(|&e| self.body_feet(e));
         match feet {
             Some(feet) => {
                 let tick = *self.data.tick;
@@ -59,8 +63,11 @@ impl Rollback {
                 // From the body: a part a neighbour's piles cannot hold
                 // comes back to it. A loss to the caps is counted where it
                 // happens.
-                let by = self.client_body_id(client).unwrap_or(crate::EntityId::of_region(*self.data.region));
-                let _destroyed = self.deposit_items_by_safe(by, at, at, stack, tick, crate::PICKUP_DELAY_TICKS);
+                let by = self
+                    .client_body_id(client)
+                    .unwrap_or(crate::EntityId::of_region(*self.data.region));
+                let _destroyed =
+                    self.deposit_items_by_safe(by, at, at, stack, tick, crate::PICKUP_DELAY_TICKS);
             }
             None => {
                 if let Some(c) = self.data.clients.get_mut(&client) {
@@ -158,7 +165,9 @@ impl ReconcileStats {
     pub fn kind_slot(kind: &GameEventKind) -> usize {
         match kind {
             GameEventKind::Tick => 0,
-            GameEventKind::PlayerInput(..) | GameEventKind::UiAction(..) | GameEventKind::Order(..) => 1,
+            GameEventKind::PlayerInput(..)
+            | GameEventKind::UiAction(..)
+            | GameEventKind::Order(..) => 1,
             _ => 2,
         }
     }
@@ -257,11 +266,16 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::Order(c, o) => format!("Order(c={c:?}, {o:?})"),
         GameEventKind::CreateClient(c) => format!("CreateClient(c={c:?})"),
         GameEventKind::CreateClientAt(c, col, carried) => {
-            format!("CreateClientAt(c={c:?}, col={col:?}, carried={})", carried.is_some())
+            format!(
+                "CreateClientAt(c={c:?}, col={col:?}, carried={})",
+                carried.is_some()
+            )
         }
         GameEventKind::ClientLeft(c) => format!("ClientLeft(c={c:?})"),
         GameEventKind::ParkPlayer(c) => format!("ParkPlayer(c={c:?})"),
-        GameEventKind::RestorePlayer(c, r) => format!("RestorePlayer(c={c:?}, region={:?})", r.region),
+        GameEventKind::RestorePlayer(c, r) => {
+            format!("RestorePlayer(c={c:?}, region={:?})", r.region)
+        }
         GameEventKind::PlaceBody(c, at) => format!("PlaceBody(c={c:?}, at={at:?})"),
         GameEventKind::Quit => "Quit".to_string(),
         GameEventKind::EntityArrived(b) => {
@@ -270,13 +284,18 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::HaloEntity(d) => format!("HaloEntity({:?})", d.id),
         GameEventKind::HaloEntityGone(g) => format!("HaloEntityGone({:?})", g.id),
         GameEventKind::HaloSourceGone(rc) => format!("HaloSourceGone({rc:?})"),
-        GameEventKind::HaloUpdate(u) => format!("HaloUpdate(from={:?}, chunks={})", u.from, u.deltas.len()),
+        GameEventKind::HaloUpdate(u) => {
+            format!("HaloUpdate(from={:?}, chunks={})", u.from, u.deltas.len())
+        }
         GameEventKind::SpawnPerson(s) => format!("SpawnPerson({s:?})"),
         GameEventKind::DespawnPerson(p) => format!("DespawnPerson({p:?})"),
         GameEventKind::WalkOut(p, to) => format!("WalkOut({p:?}, {to:?})"),
         GameEventKind::Intent(m) => format!("Intent({m:?})"),
     };
-    format!("[id={} r=({},{}) {}]", e.id, e.region_id.x, e.region_id.z, kind)
+    format!(
+        "[id={} r=({},{}) {}]",
+        e.id, e.region_id.x, e.region_id.z, kind
+    )
 }
 
 impl Region {
@@ -355,7 +374,9 @@ impl Region {
             }
             self.expected_hashes.remove(&first);
         }
-        let Some((tick, expected)) = self.expected_hashes.remove(&id) else { return };
+        let Some((tick, expected)) = self.expected_hashes.remove(&id) else {
+            return;
+        };
         let actual = if predictions_on_top && !self.event_log.is_empty() {
             let logged: Vec<Logged> = self.event_log.iter().cloned().collect();
             while self.event_log.pop_back().is_some() {
@@ -382,7 +403,10 @@ impl Region {
                 self.id.z
             );
         } else {
-            debug!("[state-hash r={:?}] ok id={id} tick={tick} hash={actual:#010x}", self.id);
+            debug!(
+                "[state-hash r={:?}] ok id={id} tick={tick} hash={actual:#010x}",
+                self.id
+            );
         }
     }
 
@@ -488,7 +512,10 @@ impl Region {
                             );
                             if matches!(
                                 (&event.kind, &server_event.0.kind),
-                                (GameEventKind::PlayerInput(..), GameEventKind::PlayerInput(..))
+                                (
+                                    GameEventKind::PlayerInput(..),
+                                    GameEventKind::PlayerInput(..)
+                                )
                             ) {
                                 debug!(
                                     "[reconcile r={:?}] INPUT-VS-INPUT FULL DIFF:\n  predicted: {:?}\n  server:    {:?}",
@@ -566,7 +593,13 @@ impl Region {
                                     // that the server did not have is dropped
                                     // (never carried into the next slot) ...
                                     if matches!(server_kind, GameEventKind::Tick)
-                                        && matches!(e.kind, GameEventKind::HaloEntity(_) | GameEventKind::HaloEntityGone(_) | GameEventKind::HaloUpdate(_) | GameEventKind::Intent(_))
+                                        && matches!(
+                                            e.kind,
+                                            GameEventKind::HaloEntity(_)
+                                                | GameEventKind::HaloEntityGone(_)
+                                                | GameEventKind::HaloUpdate(_)
+                                                | GameEventKind::Intent(_)
+                                        )
                                     {
                                         temp_log.remove(i);
                                         dropped_mirrors += 1;
@@ -574,8 +607,13 @@ impl Region {
                                     }
                                     // ... and a server mirror never takes the
                                     // place of a later slot's prediction.
-                                    if matches!(server_kind, GameEventKind::HaloEntity(_) | GameEventKind::HaloEntityGone(_) | GameEventKind::HaloUpdate(_) | GameEventKind::Intent(_))
-                                        && matches!(e.kind, GameEventKind::Tick)
+                                    if matches!(
+                                        server_kind,
+                                        GameEventKind::HaloEntity(_)
+                                            | GameEventKind::HaloEntityGone(_)
+                                            | GameEventKind::HaloUpdate(_)
+                                            | GameEventKind::Intent(_)
+                                    ) && matches!(e.kind, GameEventKind::Tick)
                                     {
                                         break;
                                     }
@@ -663,7 +701,10 @@ impl Region {
                     self.id,
                     back.id,
                     next,
-                    self.event_log.front().map(|e| ev_desc(e)).unwrap_or_default(),
+                    self.event_log
+                        .front()
+                        .map(|e| ev_desc(e))
+                        .unwrap_or_default(),
                 );
             }
         }
@@ -687,7 +728,11 @@ impl Region {
     /// The tick of the confirmed state: the current tick less the predicted
     /// ticks on top of it.
     fn confirmed_tick(&self) -> Tick {
-        let predicted = self.event_log.iter().filter(|l| matches!(l.kind, GameEventKind::Tick)).count();
+        let predicted = self
+            .event_log
+            .iter()
+            .filter(|l| matches!(l.kind, GameEventKind::Tick))
+            .count();
         self.current_tick() - predicted as Tick
     }
 
@@ -704,8 +749,14 @@ impl Region {
         let mut replayed = VecDeque::new();
         for mut logged in log {
             if let Some(local) = self.local_client_id {
-                if logged.kind.input_client() == Some(local) && !self.data.clients.contains_key(&local) {
-                    debug!("[reconcile r={:?}] dropped {}: the local body is not here", self.id, ev_desc(&logged));
+                if logged.kind.input_client() == Some(local)
+                    && !self.data.clients.contains_key(&local)
+                {
+                    debug!(
+                        "[reconcile r={:?}] dropped {}: the local body is not here",
+                        self.id,
+                        ev_desc(&logged)
+                    );
                     continue;
                 }
             }
@@ -721,7 +772,12 @@ impl Region {
                     logged.id = r.id;
                 }
                 Err(ref e) => {
-                    debug!("[reconcile r={:?}] REPLAY-ERR for {}: {:?}", self.id, ev_desc(&logged), e);
+                    debug!(
+                        "[reconcile r={:?}] REPLAY-ERR for {}: {:?}",
+                        self.id,
+                        ev_desc(&logged),
+                        e
+                    );
                     logged.id = id;
                 }
             }
@@ -738,12 +794,19 @@ impl Region {
     /// is never confirmed here — drop it. Stamps are world ticks, so this is
     /// exact: inputs stamped `slot` or later followed the body here.
     fn drop_local_inputs_before(&mut self, slot: Tick) {
-        let Some(local) = self.local_client_id else { return };
+        let Some(local) = self.local_client_id else {
+            return;
+        };
         let stale = |l: &Logged| l.kind.input_client() == Some(local) && l.stamp < slot;
         if !self.event_log.iter().any(stale) {
             return;
         }
-        let kept: Vec<Logged> = self.event_log.iter().filter(|l| !stale(l)).cloned().collect();
+        let kept: Vec<Logged> = self
+            .event_log
+            .iter()
+            .filter(|l| !stale(l))
+            .cloned()
+            .collect();
         debug!(
             "[reconcile r={:?}] dropping {} local input(s) stamped before the arrival slot {slot}",
             self.id,
@@ -786,10 +849,12 @@ impl Region {
                 self.data.tick_slimes_safe(self.id);
                 // Adventurers' walks advance before the camera controller
                 // steers their bodies from them.
-                self.data.tick_walkers_safe(self.id, self.route_map.as_deref());
+                self.data
+                    .tick_walkers_safe(self.id, self.route_map.as_deref());
                 // People wander and walk their walks (kinematic targets for
                 // the physics step below).
-                self.data.tick_people_safe(self.id, self.route_map.as_deref());
+                self.data
+                    .tick_people_safe(self.id, self.route_map.as_deref());
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
@@ -811,14 +876,13 @@ impl Region {
                     .iter()
                     // Not while the inventory is open: its clicks are UI.
                     // Adventure (survival) clients mine instead, below.
-                    .filter(|(_, c)| c.mode != crate::PlayMode::Adventure && c.fps_cam_mode && !c.inventory_open)
+                    .filter(|(_, c)| {
+                        c.mode != crate::PlayMode::Adventure && c.fps_cam_mode && !c.inventory_open
+                    })
                     .filter_map(|(id, c)| {
                         if c.input.mouse_pressed(&crate::edit::BREAK_BUTTON) {
                             Some((*id, crate::edit::EditAction::Break))
-                        } else if c.input.mouse_pressed(&crate::edit::PLACE_BUTTON)
-                            // Held: only the cell a jump frees underfoot.
-                            || (c.input.mouse_held(&crate::edit::PLACE_BUTTON) && self.data.pillar_target(*id))
-                        {
+                        } else if self.data.place_due(*id, tick) {
                             Some((*id, crate::edit::EditAction::Place))
                         } else {
                             None
@@ -826,7 +890,11 @@ impl Region {
                     })
                     .collect();
                 for (client_id, action) in edits {
-                    self.data.player_edit_safe(client_id, action, &mut intents_out);
+                    if action == crate::edit::EditAction::Place {
+                        self.data.placed_at_safe(client_id, tick);
+                    }
+                    self.data
+                        .player_edit_safe(client_id, action, &mut intents_out);
                 }
                 // Survival places their owner refused give their item back.
                 let clients: Vec<ClientId> = self.data.clients.keys().copied().collect();
@@ -838,7 +906,8 @@ impl Region {
                     self.data.settle_container_replies_safe(client_id);
                 }
                 // Survival (Adventure): left held mines with break times,
-                // a right press places the selected block, Q / Ctrl+Q throw.
+                // right places the selected block (held: again every
+                // `PLACE_REPEAT_TICKS`), Q / Ctrl+Q throw.
                 let survivors: Vec<(ClientId, bool, Option<bool>)> = self
                     .data
                     .clients
@@ -846,19 +915,17 @@ impl Region {
                     .filter(|(_, c)| c.mode == crate::PlayMode::Adventure)
                     .map(|(id, c)| {
                         let hands = c.fps_cam_mode && !c.inventory_open;
-                        let place = hands
-                            && (c.input.mouse_pressed(&crate::edit::PLACE_BUTTON)
-                                // Held: only the cell a jump frees underfoot.
-                                || (c.input.mouse_held(&crate::edit::PLACE_BUTTON)
-                                    && self.data.pillar_target(*id)));
+                        let place = hands && self.data.place_due(*id, tick);
                         let throw = (hands && c.input.key_pressed(&Key::KeyQ))
                             .then(|| c.input.key_held(&Key::ControlLeft));
                         (*id, place, throw)
                     })
                     .collect();
                 for (client_id, place, throw) in survivors {
-                    self.data.tick_mining_safe(client_id, tick, &mut intents_out);
+                    self.data
+                        .tick_mining_safe(client_id, tick, &mut intents_out);
                     if place {
+                        self.data.placed_at_safe(client_id, tick);
                         self.data.survival_place_safe(client_id, &mut intents_out);
                     }
                     if let Some(whole_stack) = throw {
@@ -889,7 +956,11 @@ impl Region {
                                 }
                             }
                             if let Some(slot) = Key::DIGITS.iter().find_map(|k| {
-                                client.input.key_pressed(k).then(|| k.hotbar_slot()).flatten()
+                                client
+                                    .input
+                                    .key_pressed(k)
+                                    .then(|| k.hotbar_slot())
+                                    .flatten()
                             }) {
                                 client.selected = slot;
                             }
@@ -916,13 +987,15 @@ impl Region {
                 let (departures, halo) = self.data.scan_boundaries(self.id, self.map_extent);
                 // Replies queued for a departing entity go with it.
                 for (bundle, target) in &departures {
-                    self.data.forward_replies_safe(bundle.id, *target, &mut intents_out);
+                    self.data
+                        .forward_replies_safe(bundle.id, *target, &mut intents_out);
                 }
                 self.pending_departures = departures;
                 self.pending_halo_entities = halo;
                 self.data.tick.update(|t| *t += 1);
                 #[cfg(not(target_arch = "wasm32"))]
-                self.tick_perf.record(tick_start, controllers_done, input_done);
+                self.tick_perf
+                    .record(tick_start, controllers_done, input_done);
             }
             GameEventKind::PlayerInput(client_id, player_event) => {
                 let data: &mut GameData = self.data.deref_mut();
@@ -933,7 +1006,11 @@ impl Region {
                         crate::InputEvent::MouseWheel { y, .. } => {
                             // The wheel steps the hotbar while the body is
                             // driven and no inventory window holds the pointer.
-                            if c.mode == crate::PlayMode::Adventure && c.fps_cam_mode && !c.inventory_open && y != 0.0 {
+                            if c.mode == crate::PlayMode::Adventure
+                                && c.fps_cam_mode
+                                && !c.inventory_open
+                                && y != 0.0
+                            {
                                 let n = crate::HOTBAR_SLOTS as i32;
                                 // Minecraft: wheel down (negative y) = next slot.
                                 let step = if y > 0.0 { -1 } else { 1 };
@@ -951,7 +1028,10 @@ impl Region {
                 info!("{:?}", event);
                 self.data.clients.insert(
                     client_id,
-                    Client { inventory: crate::Inventory::starting_kit(), ..Client::default() },
+                    Client {
+                        inventory: crate::Inventory::starting_kit(),
+                        ..Client::default()
+                    },
                 );
                 self.data.create_player_safe(client_id);
             }
@@ -962,10 +1042,14 @@ impl Region {
                 let client = match carried {
                     // Session and region-local state reset.
                     Some(c) => crate::parked_client(&c),
-                    None => Client { inventory: crate::Inventory::starting_kit(), ..Client::default() },
+                    None => Client {
+                        inventory: crate::Inventory::starting_kit(),
+                        ..Client::default()
+                    },
                 };
                 self.data.clients.insert(client_id, client);
-                self.data.create_player_at_safe(client_id, crate::block_column_xz(column));
+                self.data
+                    .create_player_at_safe(client_id, crate::block_column_xz(column));
             }
             GameEventKind::RestorePlayer(client_id, record) => {
                 info!("{}", ev_desc(&event));
@@ -976,13 +1060,15 @@ impl Region {
                 self.data.place_body_at_safe(client_id, at);
             }
             GameEventKind::SpawnPerson(spawn) => {
-                self.data.apply_person_spawn_safe(spawn, self.id, self.route_map.as_deref());
+                self.data
+                    .apply_person_spawn_safe(spawn, self.id, self.route_map.as_deref());
             }
             GameEventKind::DespawnPerson(person) => {
                 self.data.despawn_person_safe(person);
             }
             GameEventKind::WalkOut(person, toward) => {
-                self.data.walk_out_safe(person, toward, self.id, self.route_map.as_deref());
+                self.data
+                    .walk_out_safe(person, toward, self.id, self.route_map.as_deref());
             }
             GameEventKind::ClientLeft(client_id) | GameEventKind::ParkPlayer(client_id) => {
                 info!("{:?}", event);
@@ -998,7 +1084,8 @@ impl Region {
             GameEventKind::EntityArrived(bundle) => {
                 // A walk in progress walks on (`path_plan.rs`).
                 if let Some(e) = self.data.apply_arrival(bundle) {
-                    self.data.continue_walk_safe(e, self.id, self.route_map.as_deref());
+                    self.data
+                        .continue_walk_safe(e, self.id, self.route_map.as_deref());
                 }
             }
             GameEventKind::HaloEntity(data) => {
@@ -1026,11 +1113,27 @@ impl Region {
                         // With a chest open: what moves in or out of it is an
                         // intent to its owner, here or across a seam
                         // (`containers.rs`).
-                        crate::UiAction::Click { slot, button, shift } if c.open_container.is_some() => {
-                            self.data.container_click_safe(client_id, slot, button, shift, &mut intents_out);
+                        crate::UiAction::Click {
+                            slot,
+                            button,
+                            shift,
+                        } if c.open_container.is_some() => {
+                            self.data.container_click_safe(
+                                client_id,
+                                slot,
+                                button,
+                                shift,
+                                &mut intents_out,
+                            );
                         }
-                        crate::UiAction::Click { slot, button, shift } => {
-                            let Client { cursor, inventory, .. } = c;
+                        crate::UiAction::Click {
+                            slot,
+                            button,
+                            shift,
+                        } => {
+                            let Client {
+                                cursor, inventory, ..
+                            } = c;
                             crate::click(cursor, inventory, None, slot, button, shift);
                         }
                         crate::UiAction::ToggleInventory => {
@@ -1047,12 +1150,14 @@ impl Region {
                 }
             }
             GameEventKind::Order(client_id, crate::Order::DevBreakBlock(p)) => {
-                self.data.dev_break_block_safe(client_id, p, &mut intents_out);
+                self.data
+                    .dev_break_block_safe(client_id, p, &mut intents_out);
             }
             GameEventKind::Intent(msg) => self.data.receive_intent_safe(msg),
             // A walk is planned against this region's identity.
             GameEventKind::Order(client_id, crate::Order::MoveTo(goal)) => {
-                self.data.move_to_safe(client_id, goal, self.id, self.route_map.as_deref());
+                self.data
+                    .move_to_safe(client_id, goal, self.id, self.route_map.as_deref());
             }
             GameEventKind::Order(client_id, order) => {
                 self.data.apply_order_safe(client_id, order);
@@ -1065,7 +1170,10 @@ impl Region {
         if !self.replaying {
             self.pending_intents.extend(intents_out);
         }
-        self.event_log.push_back(Logged { event: event.clone(), stamp });
+        self.event_log.push_back(Logged {
+            event: event.clone(),
+            stamp,
+        });
         Ok(event)
     }
 
@@ -1112,7 +1220,10 @@ impl Region {
         if tick <= now {
             return;
         }
-        debug_assert!(self.event_log.is_empty(), "jump_clock_to after the region ticked");
+        debug_assert!(
+            self.event_log.is_empty(),
+            "jump_clock_to after the region ticked"
+        );
         // Own forgotten transaction (R8): `update` always logs an undo entry.
         self.data.new_transaction();
         self.data.tick.update(|t| *t = tick);
@@ -1171,14 +1282,19 @@ impl Region {
     /// (`label_water_bodies`; a recipe cell holding a solid block — ice —
     /// is no volume).
     pub fn from_columns(id: RegionId, columns: Vec<(ColumnCoords, Column)>) -> Self {
-        let mut ground: Vec<(ColumnCoords, crate::ColumnGround)> =
-            columns.iter().filter_map(|(c, col)| col.ground().map(|g| (*c, g.clone()))).collect();
+        let mut ground: Vec<(ColumnCoords, crate::ColumnGround)> = columns
+            .iter()
+            .filter_map(|(c, col)| col.ground().map(|g| (*c, g.clone())))
+            .collect();
         let bodies = {
-            let by_coords: std::collections::BTreeMap<ColumnCoords, &Column> = columns.iter().map(|(c, col)| (*c, col)).collect();
+            let by_coords: std::collections::BTreeMap<ColumnCoords, &Column> =
+                columns.iter().map(|(c, col)| (*c, col)).collect();
             crate::label_water_bodies(&mut ground, |c, (lx, lz), y| {
                 use crate::ReadVol;
                 by_coords.get(&c).is_some_and(|col| {
-                    let b = col.get(crate::volume::BlockPos::new(lx as i32, y, lz as i32)).id;
+                    let b = col
+                        .get(crate::volume::BlockPos::new(lx as i32, y, lz as i32))
+                        .id;
                     b != crate::BlockId::AIR && !crate::block_props().is_liquid(b)
                 })
             })
@@ -1215,7 +1331,10 @@ impl Region {
     /// other time — see the read-after-progress invariant on the fields.
     pub fn take_transfers(
         &mut self,
-    ) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(HaloEntityMsg, RegionCoords)>) {
+    ) -> (
+        Vec<(EntityBundle, RegionCoords)>,
+        Vec<(HaloEntityMsg, RegionCoords)>,
+    ) {
         (
             std::mem::take(&mut self.pending_departures),
             std::mem::take(&mut self.pending_halo_entities),
@@ -1256,14 +1375,17 @@ impl Region {
         f(&mut self.data);
         self.data.forget();
         self.note_halo_writes();
-        self.pending_intents.extend(crate::item_piles::take_pile_intents());
+        self.pending_intents
+            .extend(crate::item_piles::take_pile_intents());
     }
 
     /// The chunk and pile writes of the event just handled that a neighbour
     /// mirrors join `halo_dirty` / `halo_pile_dirty`.
     fn note_halo_writes(&mut self) {
         for e in crate::halo::take_touched_chunks() {
-            let Some(c) = self.data.chunk_coords_of(e) else { continue };
+            let Some(c) = self.data.chunk_coords_of(e) else {
+                continue;
+            };
             if !crate::halo::halo_targets(c.x as i32, c.z as i32).is_empty() {
                 self.halo_dirty.insert(crate::chunk_index_key(c));
             }
@@ -1295,4 +1417,3 @@ impl Region {
         self.event_log.pop_back();
     }
 }
-

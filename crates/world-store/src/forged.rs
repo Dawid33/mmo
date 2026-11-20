@@ -15,8 +15,8 @@ use game::WorldMap;
 use rayon::prelude::*;
 use worldgen::forged::ForgedWorld;
 use worldgen::forged_tiles::{
-    ForgedMeta, TILE_CELLS, TILED_FORMAT_VERSION, TileCoords, TileLoader, decode_meta, encode_meta, encode_tile,
-    split,
+    ForgedMeta, TILE_CELLS, TILED_FORMAT_VERSION, TileCoords, TileLoader, decode_meta, encode_meta,
+    encode_tile, split,
 };
 
 use crate::codec::{WorldMapRowError, decode_world_map, encode_world_map};
@@ -68,8 +68,9 @@ fn content_crc(meta: &[u8], tiles: &[(TileCoords, Vec<u8>)], world_map: &[u8]) -
 /// tiles are not whole river buckets (`split`, which runs the meta's full
 /// `ForgedMeta::validate`) — is `Unsupported`.
 pub fn write_tiled(handle: &StoreHandle, artifact_bytes: Vec<u8>) -> Result<u32, StoreError> {
-    let whole = ForgedWorld::from_bytes(&artifact_bytes)
-        .map_err(|e| StoreError::Corrupt(format!("the forged world to store does not load: {e}")))?;
+    let whole = ForgedWorld::from_bytes(&artifact_bytes).map_err(|e| {
+        StoreError::Corrupt(format!("the forged world to store does not load: {e}"))
+    })?;
     let (meta, tiles) = split(&whole, TILE_CELLS).map_err(|e| {
         StoreError::Unsupported(format!(
             "cell size {} m is not supported by the tiled store: {e}",
@@ -79,8 +80,10 @@ pub fn write_tiled(handle: &StoreHandle, artifact_bytes: Vec<u8>) -> Result<u32,
     let world_map = encode_world_map(&worldgen::tile_map::build_world_map(&whole));
     drop(whole);
     let meta_bytes = encode_meta(&meta);
-    let mut tiles: Vec<(TileCoords, Vec<u8>)> =
-        tiles.into_par_iter().map(|t| (t.origin, encode_tile(&t))).collect();
+    let mut tiles: Vec<(TileCoords, Vec<u8>)> = tiles
+        .into_par_iter()
+        .map(|t| (t.origin, encode_tile(&t)))
+        .collect();
     tiles.sort_by_key(|(t, _)| *t);
     let content_crc = content_crc(&meta_bytes, &tiles, &world_map);
     handle.put_tiled(Box::new(TiledRows {
@@ -99,8 +102,11 @@ pub fn write_tiled(handle: &StoreHandle, artifact_bytes: Vec<u8>) -> Result<u32,
 /// An older one (the square worlds before v8) means the world must be
 /// re-forged — never re-tiled, nor forged anew over the store's saves.
 fn archive_is_current(handle: &StoreHandle) -> Result<bool, StoreError> {
-    let Some(archive) = handle.forged_archive()? else { return Ok(false) };
-    Ok(worldgen::forged::artifact_bytes_version(&archive).is_ok_and(|v| v == worldgen::forged::ARTIFACT_VERSION))
+    let Some(archive) = handle.forged_archive()? else {
+        return Ok(false);
+    };
+    Ok(worldgen::forged::artifact_bytes_version(&archive)
+        .is_ok_and(|v| v == worldgen::forged::ARTIFACT_VERSION))
 }
 
 /// The stored tiled world and its world map, or `None` if none is stored. A
@@ -112,10 +118,15 @@ fn archive_is_current(handle: &StoreHandle) -> Result<bool, StoreError> {
 /// later, as sampling or prefetch needs them, through [`StoreTiles`] on a
 /// clone of `handle`.
 pub fn load_forged(handle: &StoreHandle) -> Result<Option<(ForgedWorld, WorldMap)>, StoreError> {
-    let Some(head) = handle.forged_head()? else { return Ok(None) };
+    let Some(head) = handle.forged_head()? else {
+        return Ok(None);
+    };
     if head.format_version != TILED_FORMAT_VERSION {
         let archived = head.archived && archive_is_current(handle)?;
-        return Err(StoreError::OtherFormat { found: head.format_version, kind: FormatKind::Tiles { archived } });
+        return Err(StoreError::OtherFormat {
+            found: head.format_version,
+            kind: FormatKind::Tiles { archived },
+        });
     }
     let meta: ForgedMeta =
         decode_meta(&head.meta).map_err(|e| StoreError::Corrupt(format!("forged_meta: {e}")))?;
@@ -125,19 +136,25 @@ pub fn load_forged(handle: &StoreHandle) -> Result<Option<(ForgedWorld, WorldMap
             head.format_version, meta.format_version
         )));
     }
-    let map = handle
-        .forged_world_map()?
-        .ok_or_else(|| StoreError::Corrupt("a tiled forged world without its forged_world_map row".into()))?;
+    let map = handle.forged_world_map()?.ok_or_else(|| {
+        StoreError::Corrupt("a tiled forged world without its forged_world_map row".into())
+    })?;
     let map: WorldMap = decode_world_map(&map).map_err(|e| {
         log::warn!("[world-store] the stored world map is not served: {e}");
         let found = match e {
             WorldMapRowError::Version { found } => found,
             WorldMapRowError::Layout { .. } | WorldMapRowError::Damaged(_) => 0,
         };
-        StoreError::OtherFormat { found, kind: FormatKind::WorldMap { archived: head.archived } }
+        StoreError::OtherFormat {
+            found,
+            kind: FormatKind::WorldMap {
+                archived: head.archived,
+            },
+        }
     })?;
-    let world = ForgedWorld::from_tiles(meta, Arc::new(StoreTiles(handle.clone())), head.content_crc)
-        .map_err(|e| StoreError::Corrupt(format!("forged_meta: {e}")))?;
+    let world =
+        ForgedWorld::from_tiles(meta, Arc::new(StoreTiles(handle.clone())), head.content_crc)
+            .map_err(|e| StoreError::Corrupt(format!("forged_meta: {e}")))?;
     Ok(Some((world, map)))
 }
 
@@ -154,7 +171,10 @@ impl TileLoader for StoreTiles {
     fn load(&self, t: TileCoords) -> Result<Vec<u8>, String> {
         match self.0.forged_tile(t) {
             Ok(Some(bytes)) => Ok(bytes),
-            Ok(None) => Err(format!("the store holds no forged tile ({}, {})", t.tx, t.tz)),
+            Ok(None) => Err(format!(
+                "the store holds no forged tile ({}, {})",
+                t.tx, t.tz
+            )),
             Err(e) => Err(e.to_string()),
         }
     }

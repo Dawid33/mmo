@@ -7,8 +7,8 @@
 //! answers every write with `StoreError::ReadOnly`.
 
 use std::sync::Arc;
-use std::time::Instant;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use game::HostId;
 use game::{CutId, PlayerId, PlayerRecord, RegionCoords, Tick, WorldCut};
@@ -16,11 +16,12 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::coordinator_tx::{self, Decided};
 use crate::counters::Counters;
-use crate::rows::{self, i, CutEnd};
+use crate::rows::{self, CutEnd, i};
 use crate::succession::SUCCESSION_UNSUPPORTED;
 use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 use crate::{
-    CutCommitted, Dials, Fence, LockGuard, OpenMode, Pool, StoreError, StoreUrl, SuperRegion, WorldInfo, open_pool,
+    CutCommitted, Dials, Fence, LockGuard, OpenMode, Pool, StoreError, StoreUrl, SuperRegion,
+    WorldInfo, open_pool,
 };
 
 thread_local! {
@@ -46,19 +47,51 @@ enum ReplyTo<T> {
 pub(crate) struct Reply<T> {
     to: ReplyTo<T>,
     sent: Instant,
+    span: tracing::Span,
 }
 
 impl<T> Reply<T> {
-    pub(crate) fn sync(tx: crossbeam::channel::Sender<Result<T, StoreError>>) -> Self {
-        Reply { to: ReplyTo::Sync(tx), sent: Instant::now() }
+    pub(crate) fn sync(
+        tx: crossbeam::channel::Sender<Result<T, StoreError>>,
+        engine: &'static str,
+    ) -> Self {
+        Reply {
+            to: ReplyTo::Sync(tx),
+            sent: Instant::now(),
+            span: tracing::info_span!(
+                "world_store.request",
+                "db.system" = engine,
+                "db.operation" = tracing::field::Empty,
+                request_mode = "sync",
+                outcome = tracing::field::Empty,
+                "error.kind" = tracing::field::Empty
+            ),
+        }
     }
 
-    pub(crate) fn asynch(tx: oneshot::Sender<Result<T, StoreError>>) -> Self {
-        Reply { to: ReplyTo::Async(tx), sent: Instant::now() }
+    pub(crate) fn asynch(tx: oneshot::Sender<Result<T, StoreError>>, engine: &'static str) -> Self {
+        Reply {
+            to: ReplyTo::Async(tx),
+            sent: Instant::now(),
+            span: tracing::info_span!(
+                "world_store.request",
+                "db.system" = engine,
+                "db.operation" = tracing::field::Empty,
+                request_mode = "async",
+                outcome = tracing::field::Empty,
+                "error.kind" = tracing::field::Empty
+            ),
+        }
     }
 
     pub(crate) fn send(self, v: Result<T, StoreError>) {
         crate::counters::record_latency(self.sent.elapsed());
+        self.span
+            .record("outcome", if v.is_ok() { "ok" } else { "error" });
+        if let Err(error) = &v {
+            self.span.record("error.kind", store_error_kind(error));
+        }
+        let _entered = self.span.enter();
         // A caller that gave up waiting is not an error of the store.
         match self.to {
             ReplyTo::Sync(tx) => {
@@ -68,6 +101,25 @@ impl<T> Reply<T> {
                 let _ = tx.send(v);
             }
         }
+    }
+
+    pub(crate) fn span(&self) -> tracing::Span {
+        self.span.clone()
+    }
+}
+
+fn store_error_kind(error: &StoreError) -> &'static str {
+    match error {
+        StoreError::Backend(_) | StoreError::Locked(_) => "backend",
+        StoreError::Fenced { .. } => "fenced",
+        StoreError::Conflict => "conflict",
+        StoreError::StaleGeneration { .. } => "stale_generation",
+        StoreError::LockConflict { .. } | StoreError::Busy(_) => "retryable",
+        StoreError::ReadOnly => "read_only",
+        StoreError::Unsupported(_) => "unsupported",
+        StoreError::Corrupt(_) => "corrupt",
+        StoreError::CutAborted(_) | StoreError::CutPending(_) => "cut",
+        _ => "refused",
     }
 }
 
@@ -96,7 +148,10 @@ pub(crate) enum Request {
     ForgedWorldMap(Reply<Option<Vec<u8>>>),
     LoadRegion(RegionCoords, Fence, Reply<Option<game::StoredRegion>>),
     LoadTerrain(RegionCoords, Reply<Option<game::TerrainSnapshot>>),
-    RegionTops(RegionCoords, Reply<Option<(u64, Vec<(game::ChunkCoords, game::map_tile::ChunkTop)>)>>),
+    RegionTops(
+        RegionCoords,
+        Reply<Option<(u64, Vec<(game::ChunkCoords, game::map_tile::ChunkTop)>)>>,
+    ),
     StoredRegions(Reply<std::collections::BTreeMap<RegionCoords, u64>>),
     StoredRegionsSince(Tick, Reply<std::collections::BTreeMap<RegionCoords, u64>>),
     /// `pg_notify` of a committed cut (SQLite: nothing to do).
@@ -113,11 +168,20 @@ pub(crate) enum Request {
     /// Elastic 2b Task 3: a coordinator transition — the compare-and-set of its row and its
     /// store decisions, one transaction (`coordinator_tx.rs`). `injected[i]`: decision `i`
     /// fails without running (the decision test hook).
-    WriteTransition { w: Box<crate::TransitionWrite>, injected: Vec<bool>, reply: Reply<crate::TransitionWritten> },
+    WriteTransition {
+        w: Box<crate::TransitionWrite>,
+        injected: Vec<bool>,
+        reply: Reply<crate::TransitionWritten>,
+    },
     /// Test support: ONE decision in a transition of its own that rewrites the row's core
     /// as it stands (bootstrapping an empty row if there is none), its post-commit effect
     /// run at once; the typed outcome.
-    DecideAlone { d: Box<game::coordinator::StoreDecision>, injected: bool, stop_after: Option<u32>, reply: Reply<Decided> },
+    DecideAlone {
+        d: Box<game::coordinator::StoreDecision>,
+        injected: bool,
+        stop_after: Option<u32>,
+        reply: Reply<Decided>,
+    },
     /// A committed transition's post-commit effect (`coordinator_tx.rs`).
     AfterCommit(crate::AfterCommit, Option<u32>, Reply<()>),
     LoadCoordinator(Reply<Option<crate::StoredCoordinator>>),
@@ -167,11 +231,47 @@ pub(crate) enum Request {
     OpenSuccessions(Reply<Vec<crate::Succession>>),
     /// An heir reads its predecessor's in-flight rows.
     LoadInFlightOf(HostId, Fence, Reply<Vec<game::InFlightRow>>),
-    RegionsOfEntities(Vec<game::EntityId>, Reply<Vec<(game::EntityId, RegionCoords)>>),
+    RegionsOfEntities(
+        Vec<game::EntityId>,
+        Reply<Vec<(game::EntityId, RegionCoords)>>,
+    ),
     /// Test support (the handle's `#[doc(hidden)]` hooks).
     TestHook(TestHook, Reply<()>),
     /// Finish the queued commits, then stop.
     Shutdown,
+}
+
+impl Request {
+    pub(crate) fn category(&self) -> &'static str {
+        match self {
+            Request::PutTiled(..)
+            | Request::NotifyCut(..)
+            | Request::CommitCut(..)
+            | Request::ClaimSuperRegions(..)
+            | Request::BootstrapCoordinator(..)
+            | Request::RaiseCoordinatorEpoch(..)
+            | Request::WriteTransition { .. }
+            | Request::DecideAlone { .. }
+            | Request::AfterCommit(..)
+            | Request::RegisterReplica(..)
+            | Request::BeatReplica(..)
+            | Request::EnsureClockAnchor(..)
+            | Request::ClearClockAnchor(..)
+            | Request::SetSuperRegionRegions(..)
+            | Request::RegisterHost(..)
+            | Request::Heartbeat(..)
+            | Request::DrainHost(..)
+            | Request::PrepareCut(..)
+            | Request::AbortCut(..)
+            | Request::ResolvePrepared(..)
+            | Request::RollbackWorldOperator(..)
+            | Request::VouchHost(..)
+            | Request::TestHook(..) => "write",
+            Request::MailboxRead(..) | Request::LoginAnswersRead(..) => "read_ack",
+            Request::Shutdown => "control",
+            _ => "read",
+        }
+    }
 }
 
 /// Cut state shared by a handle (and its clones) and its store thread.
@@ -256,7 +356,11 @@ macro_rules! on_replicas {
 
 /// What [`spawn`] returns: the request sender, the thread, and the store's
 /// `world.super_region_regions`.
-pub(crate) type Spawned = (mpsc::UnboundedSender<Stamped>, std::thread::JoinHandle<()>, u32);
+pub(crate) type Spawned = (
+    mpsc::UnboundedSender<Stamped>,
+    std::thread::JoinHandle<()>,
+    u32,
+);
 
 /// Opens the store on a new `world-store` thread and returns it once the
 /// store is open (or the open's error).
@@ -275,7 +379,10 @@ pub(crate) fn spawn(
         .spawn(move || {
             ON_STORE_THREAD.with(|f| f.set(true));
             crate::counters::install(counters.clone());
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     let _ = opened_tx.send(Err(StoreError::Backend(format!("store runtime: {e}"))));
@@ -284,7 +391,10 @@ pub(crate) fn spawn(
             };
             // The heartbeat's own connection (Postgres): never one of the shared pool's.
             let beat = match &url {
-                StoreUrl::Postgres(u) => u.parse::<sqlx::postgres::PgConnectOptions>().ok().map(|o| o.application_name(HEARTBEAT_APP)),
+                StoreUrl::Postgres(u) => u
+                    .parse::<sqlx::postgres::PgConnectOptions>()
+                    .ok()
+                    .map(|o| o.application_name(HEARTBEAT_APP)),
                 _ => None,
             };
             rt.block_on(async move {
@@ -309,7 +419,18 @@ pub(crate) fn spawn(
                     }
                 };
                 let _ = opened_tx.send(Ok(s));
-                serve(pool, guard, s, world_tag, cuts, counters, mode == OpenMode::ReadOnly, beat, rx).await;
+                serve(
+                    pool,
+                    guard,
+                    s,
+                    world_tag,
+                    cuts,
+                    counters,
+                    mode == OpenMode::ReadOnly,
+                    beat,
+                    rx,
+                )
+                .await;
             });
         })
         .map_err(|e| StoreError::Backend(format!("spawn the world-store thread: {e}")))?;
@@ -321,7 +442,9 @@ pub(crate) fn spawn(
         }
         Err(_) => {
             let _ = join.join();
-            Err(StoreError::Backend("the world-store thread died while opening".into()))
+            Err(StoreError::Backend(
+                "the world-store thread died while opening".into(),
+            ))
         }
     }
 }
@@ -359,7 +482,9 @@ async fn serve(
                 let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
                 let result = on_pool!(&pool, run_cut(&cut, &fence, s, &end, lock_timeout_ms));
                 let result = match (&pool, &end) {
-                    (Pool::Pg(p), CutEnd::Prepare { gid, .. }) => settle_prepare(p, gid, cut.id, result, &cuts).await,
+                    (Pool::Pg(p), CutEnd::Prepare { gid, .. }) => {
+                        settle_prepare(p, gid, cut.id, result, &cuts).await
+                    }
                     _ => result,
                 };
                 let what = match end {
@@ -367,8 +492,17 @@ async fn serve(
                     CutEnd::Prepare { .. } => "prepared",
                 };
                 match &result {
-                    Ok(c) => log::debug!("[world-store] cut {} at tick {} {what} ({} regions)", c.id.0, cut.tick, c.versions.len()),
-                    Err(e) => log::error!("[world-store] cut {} at tick {} ({what}) failed: {e}", cut.id.0, cut.tick),
+                    Ok(c) => log::debug!(
+                        "[world-store] cut {} at tick {} {what} ({} regions)",
+                        c.id.0,
+                        cut.tick,
+                        c.versions.len()
+                    ),
+                    Err(e) => log::error!(
+                        "[world-store] cut {} at tick {} ({what}) failed: {e}",
+                        cut.id.0,
+                        cut.tick
+                    ),
                 }
                 reply.send(result);
             }
@@ -399,7 +533,10 @@ async fn serve(
                     continue;
                 };
                 let gid = two_phase::cut_gid(tag, cut.id, cut.host);
-                queue_cut(&commit_tx, (cut, fence, CutEnd::Prepare { gid, generation }, reply));
+                queue_cut(
+                    &commit_tx,
+                    (cut, fence, CutEnd::Prepare { gid, generation }, reply),
+                );
                 continue;
             }
             Request::TwoPhaseReady(r) => tokio::spawn(async move {
@@ -445,12 +582,19 @@ async fn serve(
                     reply.send(written)
                 })
             }
-            Request::DecideAlone { d, injected, stop_after, reply } => {
+            Request::DecideAlone {
+                d,
+                injected,
+                stop_after,
+                reply,
+            } => {
                 let dials = decision_dials(world_tag, &cuts);
                 let cuts = cuts.clone();
                 tokio::spawn(async move {
                     let decided = match (&pool, dials) {
-                        (Pool::Pg(p), Some(dials)) => decide_alone(p, *d, injected, stop_after, dials, &cuts).await,
+                        (Pool::Pg(p), Some(dials)) => {
+                            decide_alone(p, *d, injected, stop_after, dials, &cuts).await
+                        }
                         _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                     };
                     reply.send(decided)
@@ -467,7 +611,10 @@ async fn serve(
             }
             Request::AbortCut(cut, tick, r) => tokio::spawn(async move {
                 r.send(match &pool {
-                    Pool::Pg(p) => two_phase::abort_cut(p, world_tag.expect("set on Postgres"), cut, tick).await,
+                    Pool::Pg(p) => {
+                        two_phase::abort_cut(p, world_tag.expect("set on Postgres"), cut, tick)
+                            .await
+                    }
                     Pool::Sqlite(_) => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                 })
             }),
@@ -503,8 +650,12 @@ async fn serve(
                 let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
-                        Pool::Pg(p) => crate::operator::rollback_world_operator(p, lock_timeout_ms).await,
-                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
+                        Pool::Pg(p) => {
+                            crate::operator::rollback_world_operator(p, lock_timeout_ms).await
+                        }
+                        Pool::Sqlite(_) => {
+                            Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into()))
+                        }
                     })
                 })
             }
@@ -513,8 +664,12 @@ async fn serve(
                 let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     r.send(match &pool {
-                        Pool::Pg(p) => crate::operator::vouch_host(p, ordinal, lease_ms, lock_timeout_ms).await,
-                        Pool::Sqlite(_) => Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into())),
+                        Pool::Pg(p) => {
+                            crate::operator::vouch_host(p, ordinal, lease_ms, lock_timeout_ms).await
+                        }
+                        Pool::Sqlite(_) => {
+                            Err(StoreError::Unsupported(SUCCESSION_UNSUPPORTED.into()))
+                        }
                     })
                 })
             }
@@ -531,30 +686,54 @@ async fn serve(
                     r.send(on_pool!(&pool, drain_host(id, in_ms, lock_ms, lease_ms)))
                 })
             }
-            Request::OpenSuccessions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, open_successions())) }),
+            Request::OpenSuccessions(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, open_successions())) })
+            }
             Request::LoadInFlightOf(host, fence, r) => {
-                tokio::spawn(async move { r.send(on_pool!(&pool, load_in_flight_of(host, &fence))) })
+                tokio::spawn(
+                    async move { r.send(on_pool!(&pool, load_in_flight_of(host, &fence))) },
+                )
             }
             Request::RegionsOfEntities(ids, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, regions_of_entities(ids))) })
             }
-            Request::CutDecision(cut, r) => tokio::spawn(async move { r.send(on_pool!(&pool, cut_decision(cut))) }),
-            Request::LastCommittedCut(r) => tokio::spawn(async move { r.send(on_pool!(&pool, last_committed_cut())) }),
-            Request::WorldInfo(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_info())) }),
-            Request::ForgedArchive(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_archive())) }),
+            Request::CutDecision(cut, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, cut_decision(cut))) })
+            }
+            Request::LastCommittedCut(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, last_committed_cut())) })
+            }
+            Request::WorldInfo(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, world_info())) })
+            }
+            Request::ForgedArchive(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, forged_archive())) })
+            }
             Request::PutTiled(rows, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, put_tiled(rows)))
             }),
-            Request::ForgedHead(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_head())) }),
-            Request::ForgedTile(t, r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_tile(t))) }),
-            Request::ForgedWorldMap(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_world_map())) }),
+            Request::ForgedHead(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, forged_head())) })
+            }
+            Request::ForgedTile(t, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, forged_tile(t))) })
+            }
+            Request::ForgedWorldMap(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, forged_world_map())) })
+            }
             Request::LoadRegion(rc, fence, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, load_region(rc, &fence, s))) })
             }
-            Request::LoadTerrain(rc, r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_terrain(rc))) }),
-            Request::RegionTops(rc, r) => tokio::spawn(async move { r.send(on_pool!(&pool, region_tops(rc))) }),
-            Request::StoredRegions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions())) }),
+            Request::LoadTerrain(rc, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, load_terrain(rc))) })
+            }
+            Request::RegionTops(rc, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, region_tops(rc))) })
+            }
+            Request::StoredRegions(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions())) })
+            }
             Request::StoredRegionsSince(tick, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions_since(tick))) })
             }
@@ -565,14 +744,19 @@ async fn serve(
                     Pool::Sqlite(_) => Ok(()),
                 };
                 if let Err(e) = &done {
-                    log::warn!("[world-store] the notice of cut {} at tick {tick} was not sent ({e}); listeners resync by their poll", cut.0);
+                    log::warn!(
+                        "[world-store] the notice of cut {} at tick {tick} was not sent ({e}); listeners resync by their poll",
+                        cut.0
+                    );
                 }
                 r.send(done)
             }),
             Request::LoadInFlight(host, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, load_in_flight(host))) })
             }
-            Request::LoadHistory(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_history())) }),
+            Request::LoadHistory(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, load_history())) })
+            }
             Request::ResolvePlayer(token, r) => tokio::spawn(async move {
                 // A known token is a read: no wait behind a long commit. A new one
                 // inserts and reads back; the database assigns the id. On SQLite the
@@ -595,7 +779,10 @@ async fn serve(
                 let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     let _w = writer.lock().await;
-                    r.send(on_pool!(&pool, claim_super_regions(owner, srs, s, live, lock_ms)))
+                    r.send(on_pool!(
+                        &pool,
+                        claim_super_regions(owner, srs, s, live, lock_ms)
+                    ))
                 })
             }
             Request::BootstrapCoordinator(core, history, r) => tokio::spawn(async move {
@@ -606,33 +793,49 @@ async fn serve(
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, raise_coordinator_epoch()))
             }),
-            Request::LoadCoordinator(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_coordinator())) }),
-            Request::LoadCoordinatorSince(since, r) => {
-                tokio::spawn(async move { r.send(on_replicas!(&pool, load_coordinator_since(since))) })
+            Request::LoadCoordinator(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, load_coordinator())) })
             }
-            Request::RowVersion(r) => tokio::spawn(async move { r.send(on_replicas!(&pool, row_version())) }),
+            Request::LoadCoordinatorSince(since, r) => {
+                tokio::spawn(
+                    async move { r.send(on_replicas!(&pool, load_coordinator_since(since))) },
+                )
+            }
+            Request::RowVersion(r) => {
+                tokio::spawn(async move { r.send(on_replicas!(&pool, row_version())) })
+            }
             // The mailbox (coordinator HTTP API, `mailbox.rs`): no writer lock — a read's delete
             // touches only its own host's delivered rows, which nothing else writes but a
             // transition (on Postgres, which takes no writer lock either). SQLite: none.
             Request::MailboxRead(host, boot, after, limit, r) => tokio::spawn(async move {
                 r.send(match &pool {
-                    Pool::Pg(p) => crate::mailbox::mailbox_read_pg(p, host, boot, after, limit).await,
-                    Pool::Sqlite(_) => Err(StoreError::Unsupported(crate::mailbox::MAILBOX_UNSUPPORTED.into())),
+                    Pool::Pg(p) => {
+                        crate::mailbox::mailbox_read_pg(p, host, boot, after, limit).await
+                    }
+                    Pool::Sqlite(_) => Err(StoreError::Unsupported(
+                        crate::mailbox::MAILBOX_UNSUPPORTED.into(),
+                    )),
                 })
             }),
             Request::MailboxOldest(r) => tokio::spawn(async move {
                 r.send(match &pool {
                     Pool::Pg(p) => crate::mailbox::mailbox_oldest_pg(p).await,
-                    Pool::Sqlite(_) => Err(StoreError::Unsupported(crate::mailbox::MAILBOX_UNSUPPORTED.into())),
+                    Pool::Sqlite(_) => Err(StoreError::Unsupported(
+                        crate::mailbox::MAILBOX_UNSUPPORTED.into(),
+                    )),
                 })
             }),
             Request::LoginAnswersRead(after, limit, r) => tokio::spawn(async move {
                 r.send(match &pool {
                     Pool::Pg(p) => crate::mailbox::login_answers_read_pg(p, after, limit).await,
-                    Pool::Sqlite(_) => Err(StoreError::Unsupported(crate::mailbox::MAILBOX_UNSUPPORTED.into())),
+                    Pool::Sqlite(_) => Err(StoreError::Unsupported(
+                        crate::mailbox::MAILBOX_UNSUPPORTED.into(),
+                    )),
                 })
             }),
-            Request::Replicas(r) => tokio::spawn(async move { r.send(on_replicas!(&pool, replicas())) }),
+            Request::Replicas(r) => {
+                tokio::spawn(async move { r.send(on_replicas!(&pool, replicas())) })
+            }
             Request::RegisterReplica(addr, r) => {
                 let lease_ms = cuts.replica_lease_ms.load(Ordering::SeqCst);
                 let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
@@ -642,13 +845,17 @@ async fn serve(
                         Pool::Sqlite(_) => Some(writer.lock().await),
                         Pool::Pg(_) => None,
                     };
-                    r.send(on_replicas!(&pool, register_replica(&addr, lease_ms, lock_ms)))
+                    r.send(on_replicas!(
+                        &pool,
+                        register_replica(&addr, lease_ms, lock_ms)
+                    ))
                 })
             }
             // Postgres: the beat connection, as a host's heartbeat (never the shared pool).
             Request::BeatReplica(me, r) => match (&pool, &beat_tx) {
                 (Pool::Pg(_), Some(beat_tx)) => {
-                    if let Err(mpsc::error::SendError(job)) = beat_tx.send(BeatJob::Replica(me, r)) {
+                    if let Err(mpsc::error::SendError(job)) = beat_tx.send(BeatJob::Replica(me, r))
+                    {
                         job.refuse("the heartbeat task has stopped");
                     }
                     continue;
@@ -678,12 +885,19 @@ async fn serve(
                 let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
                     let _w = writer.lock().await;
-                    r.send(on_pool!(&pool, register_host(host, policy, lease_ms, lock_ms)))
+                    r.send(on_pool!(
+                        &pool,
+                        register_host(host, policy, lease_ms, lock_ms)
+                    ))
                 })
             }
             Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
-            Request::DesiredHosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, desired_hosts())) }),
-            Request::WorldGeneration(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_generation())) }),
+            Request::DesiredHosts(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, desired_hosts())) })
+            }
+            Request::WorldGeneration(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, world_generation())) })
+            }
             // Postgres: no writer lock (it is in-process and a claim can hold it for a minute; a
             // late beat would lapse the lease) — the statement writes only the caller's own row.
             // SQLite has one writer at a time, so it takes the lock like every write.
@@ -692,7 +906,9 @@ async fn serve(
             // the lease) — the beat task's own connection, under its deadline.
             Request::Heartbeat(ordinal, boot, load, r) => match (&pool, &beat_tx) {
                 (Pool::Pg(_), Some(beat_tx)) => {
-                    if let Err(mpsc::error::SendError(job)) = beat_tx.send(BeatJob::Host(ordinal, boot, load, r)) {
+                    if let Err(mpsc::error::SendError(job)) =
+                        beat_tx.send(BeatJob::Host(ordinal, boot, load, r))
+                    {
                         job.refuse("the heartbeat task has stopped");
                     }
                     continue;
@@ -722,7 +938,9 @@ async fn serve(
                             }
                             Err(e) => r.send(Err(e)),
                         },
-                        Pool::Sqlite(_) => r.send(Err(StoreError::Unsupported("a frozen fenced transaction needs Postgres".into()))),
+                        Pool::Sqlite(_) => r.send(Err(StoreError::Unsupported(
+                            "a frozen fenced transaction needs Postgres".into(),
+                        ))),
                     }
                 }),
                 TestHook::HoldConnections(n, hold_ms) => tokio::spawn(async move {
@@ -739,13 +957,19 @@ async fn serve(
                             tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
                             drop(held);
                         }
-                        Pool::Sqlite(_) => r.send(Err(StoreError::Unsupported("held pool connections need Postgres".into()))),
+                        Pool::Sqlite(_) => r.send(Err(StoreError::Unsupported(
+                            "held pool connections need Postgres".into(),
+                        ))),
                     }
                 }),
             },
             Request::Owners(r) => tokio::spawn(async move { r.send(on_pool!(&pool, owners())) }),
-            Request::OwnedBy(owner, r) => tokio::spawn(async move { r.send(on_pool!(&pool, owned_by(owner))) }),
-            Request::DbNowMs(r) => tokio::spawn(async move { r.send(on_pool!(&pool, db_now_ms())) }),
+            Request::OwnedBy(owner, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, owned_by(owner))) })
+            }
+            Request::DbNowMs(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, db_now_ms())) })
+            }
         };
         tasks.push(task);
     }
@@ -799,7 +1023,10 @@ pub(crate) const HEARTBEAT_APP: &str = "mmo-heartbeat";
 /// fails fast. One statement over the caller's own `hosts` row, UNFENCED on purpose (as
 /// `rows`' `heartbeat`, which SQLite still uses). A coordinator replica's beat (Elastic 2b Task
 /// 4) is the same shape over its own `coordinator_replicas` row (`replicas.rs`).
-async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::UnboundedReceiver<BeatJob>) {
+async fn beats(
+    options: sqlx::postgres::PgConnectOptions,
+    mut rx: mpsc::UnboundedReceiver<BeatJob>,
+) {
     use sqlx::{ConnectOptions, Connection, Row};
     let deadline = std::time::Duration::from_millis(crate::HEARTBEAT_DEADLINE_MS);
     let sql = crate::rows::heartbeat_sql(crate::succession::PG_NOW_MS);
@@ -814,8 +1041,16 @@ async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::Unbounde
                         conn = Some(options.connect().await?);
                     }
                     let mut tx = conn.as_mut().expect("connected above").begin().await?;
-                    sqlx::query(&format!("SET LOCAL lock_timeout = '{}ms'", crate::HEARTBEAT_LOCK_TIMEOUT_MS)).execute(&mut *tx).await?;
-                    let row = sqlx::query(&replica_sql).bind(i(me.0)).fetch_optional(&mut *tx).await?;
+                    sqlx::query(&format!(
+                        "SET LOCAL lock_timeout = '{}ms'",
+                        crate::HEARTBEAT_LOCK_TIMEOUT_MS
+                    ))
+                    .execute(&mut *tx)
+                    .await?;
+                    let row = sqlx::query(&replica_sql)
+                        .bind(i(me.0))
+                        .fetch_optional(&mut *tx)
+                        .await?;
                     tx.commit().await?;
                     Ok::<bool, sqlx::Error>(row.is_some())
                 };
@@ -842,12 +1077,24 @@ async fn beats(options: sqlx::postgres::PgConnectOptions, mut rx: mpsc::Unbounde
                 conn = Some(options.connect().await?);
             }
             let mut tx = conn.as_mut().expect("connected above").begin().await?;
-            sqlx::query(&format!("SET LOCAL lock_timeout = '{}ms'", crate::HEARTBEAT_LOCK_TIMEOUT_MS)).execute(&mut *tx).await?;
-            let row = crate::rows::bind_load(sqlx::query(&sql).bind(i(ordinal.0)).bind(crate::rows::i(boot)), load)
-                .fetch_optional(&mut *tx)
-                .await?;
+            sqlx::query(&format!(
+                "SET LOCAL lock_timeout = '{}ms'",
+                crate::HEARTBEAT_LOCK_TIMEOUT_MS
+            ))
+            .execute(&mut *tx)
+            .await?;
+            let row = crate::rows::bind_load(
+                sqlx::query(&sql)
+                    .bind(i(ordinal.0))
+                    .bind(crate::rows::i(boot)),
+                load,
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
             tx.commit().await?;
-            Ok::<crate::Beat, sqlx::Error>(crate::rows::beat_of(row.map(|r| r.try_get::<Option<i64>, _>(0)).transpose()?))
+            Ok::<crate::Beat, sqlx::Error>(crate::rows::beat_of(
+                row.map(|r| r.try_get::<Option<i64>, _>(0)).transpose()?,
+            ))
         };
         let answer = match tokio::time::timeout(deadline, beat).await {
             Ok(Ok(beaten)) => Ok(beaten),
@@ -896,7 +1143,9 @@ async fn settle_prepare(
         Err(e) => {
             let staged = two_phase::is_staged(p, gid).await;
             if !matches!(staged, Ok(false)) {
-                log::error!("[world-store] part {gid} failed ({e}) and may be staged ({staged:?}); this handle's cuts wait for cut_decided");
+                log::error!(
+                    "[world-store] part {gid} failed ({e}) and may be staged ({staged:?}); this handle's cuts wait for cut_decided"
+                );
             }
             (Err(e), matches!(staged, Ok(false)))
         }
@@ -910,7 +1159,9 @@ async fn settle_prepare(
 /// Hands a cut to the committer task.
 fn queue_cut(commit_tx: &mpsc::UnboundedSender<QueuedCut>, queued: QueuedCut) {
     if let Err(mpsc::error::SendError((_, _, _, reply))) = commit_tx.send(queued) {
-        reply.send(Err(StoreError::Backend("the world-store committer has stopped".into())));
+        reply.send(Err(StoreError::Backend(
+            "the world-store committer has stopped".into(),
+        )));
     }
 }
 
@@ -918,7 +1169,10 @@ fn queue_cut(commit_tx: &mpsc::UnboundedSender<QueuedCut>, queued: QueuedCut) {
 /// passes every other request through. A player resolve is a read unless the
 /// key is new — that case is refused where it is served.
 /// The dials of the coordinator's store decisions (Postgres: `world_tag` is set).
-fn decision_dials(world_tag: Option<u32>, cuts: &CutState) -> Option<coordinator_tx::DecisionDials> {
+fn decision_dials(
+    world_tag: Option<u32>,
+    cuts: &CutState,
+) -> Option<coordinator_tx::DecisionDials> {
     Some(coordinator_tx::DecisionDials {
         world_tag: world_tag?,
         lock_timeout_ms: cuts.lock_timeout_ms.load(Ordering::SeqCst),
@@ -984,15 +1238,26 @@ async fn decide_alone(
                 let decided = decided.pop().expect("one decision");
                 let (_, effects) = coordinator_tx::answers(&w, version, Vec::new());
                 debug_assert!(effects.is_empty());
-                if let Decided::Cut { cut, tick, committed: Ok(committed) } = &decided {
-                    let finish = crate::AfterCommit::FinishCut { cut: *cut, tick: *tick, committed: *committed };
+                if let Decided::Cut {
+                    cut,
+                    tick,
+                    committed: Ok(committed),
+                } = &decided
+                {
+                    let finish = crate::AfterCommit::FinishCut {
+                        cut: *cut,
+                        tick: *tick,
+                        committed: *committed,
+                    };
                     after_commit(p, Some(dials.world_tag), finish, stop_after, cuts).await?;
                 }
                 return Ok(decided);
             }
         }
     }
-    Err(StoreError::Backend(format!("the coordinator row moved {DECIDE_ALONE_TRIES} times under a lone decision")))
+    Err(StoreError::Backend(format!(
+        "the coordinator row moved {DECIDE_ALONE_TRIES} times under a lone decision"
+    )))
 }
 
 fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option<Request> {

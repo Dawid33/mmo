@@ -108,6 +108,15 @@ coordinators := "1"
 chunk_blocks := env_var_or_default("VOXEL_CHUNK_BLOCKS", "16")
 export VOXEL_CHUNK_BLOCKS := chunk_blocks
 
+# How a chop brings a tree down — a BUILD-time constant (`game::TREE_FELLING`,
+# crates/game/src/trees.rs): `instant` (default) clears the tree at once and
+# drops its items where they stood; `physics` topples the felled part as a
+# voxel body. Mirrors `[env]` in .cargo/config.toml; server and client must
+# share it (a chop is predicted).
+#   just tree_felling=physics run
+tree_felling := env_var_or_default("VOXEL_TREE_FELLING", "instant")
+export VOXEL_TREE_FELLING := tree_felling
+
 # Spawn island size (phase 3 of the island spec): the island centred on the home
 # region, as a diameter in 64 m cells — a BUILD-time constant
 # (`worldgen::islands::SPAWN_ISLAND_CELLS`), 0 = the default 16 (1 km), at most
@@ -207,13 +216,16 @@ client:
 # stamps a prefab beside the landing of the adventure site's region only (needs it never saved, so `--reset`; more
 # `--prefab`s join with `;`); `VOXEL_PREFAB_DIRS=prefab-imports/statuen just run --reset --prefab "statuen-06;statuen-07"`
 # adds a prefab directory. Builds both binaries — the client spawns the world's server itself,
-# like a menu start.
+# like a menu start. The world's history is short and small — `founders` per civ, `history_years`
+# of history (7 and 1: every fortress starts under 10 dwarfs; `just founders=30 history_years=100 run
+# --reset` is the menu's default); read only when the world is (re-)forged, so add `--reset`.
 run *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
+    export VOXEL_HISTORY_FOUNDERS={{founders}} VOXEL_HISTORY_YEARS={{history_years}}
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug world {{args}}
 
@@ -238,10 +250,18 @@ town style *args:
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
+    export VOXEL_HISTORY_FOUNDERS={{founders}} VOXEL_HISTORY_YEARS={{history_years}}
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug world --reset --town {{style}} {{args}}
 
 run_two_port := "6476"
+
+# The debug world's history (`run`, `run-two`, `run-release`, `town`): founders per civ and years run
+# before play (VOXEL_HISTORY_FOUNDERS / VOXEL_HISTORY_YEARS, server/src/world_file.rs). Read only when
+# its history is bootstrapped (`--reset`).
+founders := "7"
+history_years := "1"
+
 
 # `run` with TWO clients on one server: two players adventuring at one site. Client 1 is the
 # debug launch, hosting the world's server on UDP `run_two_port` (`--port`); once its
@@ -257,6 +277,7 @@ run-two *args:
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
+    export VOXEL_HISTORY_FOUNDERS={{founders}} VOXEL_HISTORY_YEARS={{history_years}}
     {{cap}} {{cargo}} build --bin client --bin server
     port={{run_two_port}}
     if [ -n "$(ss -Huln "sport = :$port")" ]; then
@@ -340,6 +361,7 @@ run-release *args:
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
+    export VOXEL_HISTORY_FOUNDERS={{founders}} VOXEL_HISTORY_YEARS={{history_years}}
     {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 ./target/release/client debug world {{args}}
 
@@ -375,6 +397,7 @@ fly-probe seconds="45":
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_VSYNC="${VOXEL_VSYNC:-off}" # measuring: the player's vsync setting must not cap the frame rate
     export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     out="target/fly-probe"; mkdir -p "$out"
@@ -405,6 +428,7 @@ shuttle-probe boundary="region" seconds="45" overshoot="":
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_VSYNC="${VOXEL_VSYNC:-off}" # measuring: the player's vsync setting must not cap the frame rate
     export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{overshoot}}" ]; then export VOXEL_AUTOPILOT_OVERSHOOT_M="{{overshoot}}"; fi
@@ -907,7 +931,7 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
 # The server the browser build's main menu prefills in Join server (the deployed
 # game's hostname: the WebTransport certificate is Let's Encrypt's for that name,
 # so the bare deploy_host IP would fail the browser's TLS check). Baked into
-# `web-release` / `deploy` bundles as VOXEL_WEB_SERVER; `just web` leaves it unset,
+# `web-release` bundles as VOXEL_WEB_SERVER; `just web` leaves it unset,
 # so a dev page prefills 127.0.0.1 (the local `just server`).
 web_server := "orion.factoriosurvivalworld.com"
 
@@ -965,37 +989,44 @@ web-check:
 # The browser release bundle in target/web/ (scripts/web_release.sh): the
 # `wasm-release` profile, wasm-bindgen (the Cargo.lock-matched CLI, installed under
 # target/tools on first use), wasm-opt -O3 from a pinned binaryen release (also
-# under target/tools; BINARYEN=none skips it), index.html, api/version and assets/. Built at the play
+# under target/tools; BINARYEN=none skips it), index.html, api/version and assets/.
+# Every build/transform stage gets a user-systemd scope containing its full
+# process tree: MemoryHigh 14G, MemoryMax 16G, no swap. Override with
+# WASM_BUILD_MEMORY_{HIGH,MAX,SWAP_MAX}=none (or a systemd size); unavailable
+# cgroups fail closed. Downloads stay outside the guard. Built at the play
 # region size, like the server it talks to; its Join server field prefills
 # `web_server`. Serve the directory as is.
 web-release:
     VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_WEB_SERVER={{web_server}} CAP="{{cap}}" scripts/web_release.sh
 
-# ---- Deploy (the game box) ---------------------------------------------------
+# ---- Deploy ------------------------------------------------------------------
 
-# The public web build on root@5.9.7.138: https://orion.factoriosurvivalworld.com/
-# (deploy/web/compose.yml: the release server in a Debian container with the
-# Let's Encrypt certificate of the survival-world proxy, and a file server for the
-# bundle behind that proxy). Builds the browser bundle and the release server
-# with the same region/chunk dials, rsyncs both to /srv/mmo and restarts the
-# server (orderly: the world is saved; open tabs reload on the new version). The
-# proxy site, firewall (UDP 6466/6467) and DNS record are in
-# ~/Projects/mod/mods/survival-world. `just deploy-host=user@host deploy` to aim elsewhere.
+# Two commands bring a cluster up to date (docs/superpowers/plans/2026-11-15-two-command-deploy.md):
+#   just deploy --infra   every OpenTofu root, planned and applied in order
+#   just deploy --game    build, push and release login, world and panel (and forge a new world)
+# Both flags run infra first, then game. --yes, --dry-run and --only <root> narrow/steer a run;
+# `just target=twin deploy …` does the same against the k3d twin. The flock keeps two runs
+# from this checkout apart. The per-root orion-* and world-* recipes stay as escape hatches;
+# all the orchestration lives in scripts/deploy/.
+target := "orion"
+[positional-arguments]
+deploy *flags:
+    mkdir -p target
+    @echo "deploy: target ready; acquiring target/deploy.lock"
+    @flock -E 75 -n target/deploy.lock \
+        env PYTHONPATH={{justfile_directory()}}/scripts python3 -m deploy \
+        --target {{target}} "$@" || { rc=$?; if [ "$rc" -eq 75 ]; then echo "deploy: another deploy is already running in this checkout" >&2; fi; exit "$rc"; }
+
+# Static checks for the orchestrator. Deploy feature tests stay temporary under
+# the repository's regression-only test policy; `deploy --help` needs no tools,
+# credentials or cluster.
+deploy-test:
+    PYTHONPATH={{justfile_directory()}}/scripts python3 -m py_compile scripts/deploy/*.py
+    PYTHONPATH={{justfile_directory()}}/scripts python3 -m deploy --help >/dev/null
+    bash -n scripts/orion_login_push.sh scripts/orion_panel_push.sh scripts/orion_world_push.sh scripts/world_update.sh scripts/web_release.sh scripts/wasm_build_guard.sh
+
+# The host that `tunnel` and `orion-vpn-peer` use (the old compose game is gone).
 deploy_host := "root@5.9.7.138"
-
-deploy: deploy-build deploy-push
-
-# Build only: target/web + target/release/server.
-deploy-build: web-release
-    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release --bin server
-
-# Ship what deploy-build made and restart (scripts/deploy_push.sh).
-deploy-push:
-    DEPLOY_HOST={{deploy_host}} scripts/deploy_push.sh
-
-# Follow the deployed server's log.
-deploy-logs:
-    ssh {{deploy_host}} docker compose -f /srv/mmo/compose.yml logs -f --tail 200 server
 
 # `orion` itself goes over the VPN; recipes take `orion_context=orion-ssh` with this.
 # Fallback for when the VPN is down: forward the k3s API to localhost:6443 over ssh (context orion-ssh).
@@ -1024,7 +1055,7 @@ orion-vpn-status:
     ping -c1 -W2 10.99.0.1 >/dev/null && echo "box 10.99.0.1: ok" || echo "box 10.99.0.1: NO ANSWER"
     getent hosts kube-dns.kube-system.svc.cluster.local >/dev/null && echo "cluster DNS: ok" || echo "cluster DNS: FAILS"
     kubectl --context {{orion_context}} get --raw /livez >/dev/null 2>&1 && echo "k3s API: ok" || echo "k3s API: FAILS"
-    echo "grafana: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local/api/health) (000 = no answer)"
+    echo "grafana (vpn-names): $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://grafana.vpn.errantry.renownandruin.com/api/health) (000 = no answer)"
     echo "keycloak admin (https, vpn-names): $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 https://keycloak.vpn.errantry.renownandruin.com/admin/master/console/) (000 = no answer)"
     echo "garage admin: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://garage.garage.svc.cluster.local:3903/health) (000 = no answer)"
 
@@ -1780,7 +1811,8 @@ physics-next-upstream:
 # context `k3d-mmo`) shaped like the orion server — k3d's bundled Traefik and
 # local-path stay on — with the OpenTofu roots under deploy/envs/local applied:
 # platform (the CloudNativePG operator) -> postgres (cluster `pg`, world `twin`) ->
-# login (no ECR, no Keycloak) -> world (namespace world-twin: a coordinator, two
+# pg-management (login's rehearsal database) -> login (no ECR, no Keycloak) ->
+# world (namespace world-twin: a coordinator, two
 # hosts, toolbox, web). It runs the release images, never a client. Everyday work
 # does NOT need it (`run` stays native); it proves the deployment modules and the
 # server in pods (`twin-check`). k3d is a pinned binary under target/tools
@@ -1818,56 +1850,38 @@ twin-up:
     kubectl --context {{twin_ctx}} wait --for=condition=Ready node --all --timeout=180s
     echo "twin: cluster mmo is up (context {{twin_ctx}}); next: just twin-images && just twin-apply"
 
-# Build the release images (world-images-build, orion-login-build) as mmo/server:twin,
-# mmo/web:twin and mmo/login:twin, each from a staging directory as the push scripts
-# do, and import them into the twin's node (no registry).
-twin-images: world-images-build orion-login-build
-    #!/usr/bin/env bash
-    set -euo pipefail
-    stage=$(mktemp -d)
-    trap 'rm -rf "$stage"' EXIT
-    mkdir "$stage/server" "$stage/web" "$stage/login"
-    cp target/release/server target/release/worldctl deploy/images/server/Dockerfile "$stage/server/"
-    cp -R target/web "$stage/web/web"
-    cp deploy/images/web/Dockerfile deploy/images/web/nginx.conf "$stage/web/"
-    cp target/release/login deploy/images/login/Dockerfile "$stage/login/"
-    for name in server web login; do
-        echo "twin: building mmo/$name:twin"
-        docker build -q -t "mmo/$name:twin" "$stage/$name" > /dev/null
-    done
-    scripts/k3d.sh image import mmo/server:twin mmo/web:twin mmo/login:twin -c mmo
-    echo "twin: images imported; running pods keep their old image until they are re-created"
+# Build and import the twin's images (push only, no release): the deploy orchestrator does it.
+twin-images:
+    just target=twin deploy --game --only login --only panel --only world --push-only
 
-# Apply the four local roots in order (platform -> postgres -> login -> world), without
+# Apply the six local roots in order (platform -> postgres -> pg-management -> login -> world -> panel) without
 # asking: the cluster is a throwaway. Each root's .terraform lives under target/twin/.
 twin-apply:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for r in platform postgres login world; do
-        echo "twin: applying deploy/envs/local/$r"
-        export TF_DATA_DIR="{{justfile_directory()}}/target/twin/$r/.terraform"
-        {{tofu}} -chdir=deploy/envs/local/$r init -input=false -reconfigure > /dev/null
-        {{tofu}} -chdir=deploy/envs/local/$r apply -input=false -auto-approve
-        if [ "$r" = postgres ]; then
-            # The operator creates the database after the apply returns; pods started before
-            # that exit on "database world_twin does not exist" and crash-loop until it does.
-            echo "twin: waiting for the operator to create database world_twin"
-            kubectl --context {{twin_ctx}} -n postgres wait database/world-twin --for=jsonpath='{.status.applied}'=true --timeout=300s
-        fi
-    done
-    echo "twin: applied; the world waits for its forge: just twin-check (forges and checks), or just world_ctx={{twin_ctx}} world_ns=world-twin world-ctl forge"
+    just target=twin deploy --infra --yes
 
 # The twin's integration check (scripts/twin_check.sh): pods wait for a forge, serve after
 # it, the hosts' PodDisruptionBudgets, survive a killed host (a new id), a clean host leave,
 # a coordinator restart, a drain (world-drain: drained, not restarted) and a host brought back,
-# a world stop and start; records memory. Run on a FRESH twin-apply (it forges the world). Exit 0 = pass.
-twin-check:
-    TWIN_CONTEXT={{twin_ctx}} scripts/twin_check.sh
+# a world stop and start; records memory. Run on a FRESH twin-apply (it forges the world).
+# Set telemetry=1 to require the local profile stack and record Tempo/Pyroscope evidence.
+# Exit 0 = pass.
+twin-check telemetry="0":
+    TWIN_CONTEXT={{twin_ctx}} TWIN_CHECK_TELEMETRY={{telemetry}} scripts/twin_check.sh
+
+# Elastic 6's login move, on the throwaway twin only. Stops only login, restores
+# its old database into pg-management, applies use_management_db/stopped, and
+# proves account issuance plus a join through the same still-running world.
+twin-pg-move-login:
+    TWIN_CONTEXT={{twin_ctx}} scripts/twin_pg_move_login.sh
 
 # Delete the twin's cluster (its database included) and the roots' local state.
 twin-down:
     -scripts/k3d.sh cluster delete mmo
     rm -f target/twin/*.tfstate target/twin/*.tfstate.backup
+
+# The twin's world panel (deploy/envs/local/panel) on http://127.0.0.1:<port>/ (port-forward).
+twin-panel port="8090":
+    kubectl --context {{twin_ctx}} -n panel port-forward svc/panel {{port}}:80
 
 # kubectl against the twin, e.g. `just twin-kube get pods -A`.
 [positional-arguments]
@@ -1875,8 +1889,11 @@ twin-kube *args:
     kubectl --context {{twin_ctx}} "$@"
 
 # ---------------------------------------------------------------------------
-# The orion k3s server (Hetzner 5.9.7.138, kube context `orion`): OpenTofu roots
-# under deploy/envs/orion — `bootstrap` (the S3 state bucket), `platform`
+# The orion k3s server (Hetzner 5.9.7.138, kube context `orion`). Deploy with
+# `just deploy --infra` (every root below, in order) and `just deploy --game`
+# (images and release). The orion-* recipes here are escape hatches for doing
+# one step by hand; plan before every apply. The roots under deploy/envs/orion:
+# `bootstrap` (the S3 state bucket, still manual), `platform`
 # (cert-manager, Traefik settings), `dns` (the renownandruin.com records no module makes), `garage` (the S3-compatible object store on the
 # server itself: https://s3.errantry.renownandruin.com) and `garage-buckets` (its buckets
 # and access keys, through the admin API: needs `just orion-garage-admin` running),
@@ -1887,8 +1904,9 @@ twin-kube *args:
 # (identity provider at https://auth.errantry.renownandruin.com) and `keycloak-realm` (its realm,
 # clients and mail, through the admin API: needs `just orion-keycloak-admin` running), `registry`
 # (the ECR repository mmo/login and the cluster's pull-only IAM user), `login` (the
-# game's login service at https://login.errantry.renownandruin.com), `postgres` (the CloudNativePG cluster
-# `pg` and its nightly dump to Garage), `world` (one game world: errantry) and `site` (the website at
+# game's login service at https://login.errantry.renownandruin.com), `postgres` (the region
+# CloudNativePG cluster `pg`), `pg-management` (login + Keycloak, with its own nightly dump
+# and management-backups bucket), `world` (one game world: errantry) and `site` (the website at
 # https://www.errantry.renownandruin.com, from website/). State lives in AWS S3 (deploy/envs/orion/backend.s3.tfbackend,
 # key orion/<root>.tfstate); AWS credentials come from the default chain
 # (`AWS_PROFILE=…` to pick a profile). Every recipe pins the `orion` context,
@@ -1896,7 +1914,7 @@ twin-kube *args:
 # docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
 orion_context := "orion"
 
-# `tofu init` an orion root (bootstrap | platform | dns | garage | garage-buckets | monitoring | picoshare | zulip | vpn-names | keycloak | keycloak-realm | registry | login | postgres | world | site) against its S3 state.
+# `tofu init` an orion root (bootstrap | platform | dns | garage | garage-buckets | monitoring | picoshare | zulip | vpn-names | keycloak | keycloak-realm | registry | login | postgres | pg-management | world | site) against its S3 state.
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
@@ -1929,7 +1947,8 @@ orion-bootstrap-plan:
 orion-kube *args:
     kubectl --context {{orion_context}} "$@"
 
-# Grafana without the public Ingress: http://127.0.0.1:3000 (port-forward).
+# Grafana is VPN-only (http://grafana.vpn.errantry.renownandruin.com); with the VPN down this forwards it to
+# http://127.0.0.1:3000 (its root_url stays the VPN name, so Keycloak sign-in needs the VPN: use the admin password).
 orion-grafana port="3000":
     kubectl --context {{orion_context}} -n monitoring port-forward svc/kube-prometheus-stack-grafana {{port}}:80
 
@@ -1990,7 +2009,13 @@ orion-keycloak-admin-password:
 # Release build of the login binary (what orion-login-push puts in the image). It must use the
 # world's region size: the host link's hello refuses a login built at another VOXEL_REGION_BLOCKS.
 orion-login-build:
-    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release -p login --bin login
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rev=$(git rev-parse --short HEAD)
+    [ -z "$(git status --porcelain)" ] || rev="$rev-dirty"
+    rm -f target/release/login.build-dials
+    ERRANTRY_BUILD_REVISION="$rev" VOXEL_BUILD_REVISION="$rev" VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release -p login --bin login --features login/pyroscope
+    printf 'region_blocks=%s\nchunk_blocks=%s\n' '{{play_blocks}}' '{{chunk_blocks}}' > target/release/login.build-dials
 
 # Build the image (labelled with the git revision), push it to ECR as mmo/login:latest and
 # `kubectl set image` it on the login Deployment BY DIGEST (every push rolls out), waiting for the
@@ -2007,13 +2032,14 @@ world-images-build:
     #!/usr/bin/env bash
     set -euo pipefail
     # One revision for the binaries and the image labels: computed once, written beside the
-    # build for scripts/orion_world_push.sh. assets/ counts (the shaders are compiled into the bundle).
+    # build for scripts/orion_world_push.sh. Any dirty checkout is visible in the release label.
     rev=$(git rev-parse --short HEAD)
-    [ -z "$(git status --porcelain -- crates Cargo.lock assets)" ] || rev="$rev-dirty"
+    [ -z "$(git status --porcelain)" ] || rev="$rev-dirty"
     mkdir -p target/world-images
-    rm -f target/world-images/revision
-    VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_BUILD_REVISION="$rev" {{cap}} {{cargo}} build --release -p server --bin server -p world-store --bin worldctl
+    rm -f target/world-images/revision target/world-images/build-dials
+    ERRANTRY_BUILD_REVISION="$rev" VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_BUILD_REVISION="$rev" {{cap}} {{cargo}} build --release -p server --bin server -p world-store --bin worldctl --features server/pyroscope
     env -u VOXEL_WEB_SERVER -u VOXEL_LOGIN_URL VOXEL_REGION_BLOCKS={{play_blocks}} CAP="{{cap}}" scripts/web_release.sh
+    printf 'region_blocks=%s\nchunk_blocks=%s\n' '{{play_blocks}}' '{{chunk_blocks}}' > target/world-images/build-dials
     printf '%s' "$rev" > target/world-images/revision
 
 # Build both images, push them to ECR as mmo/server:latest and mmo/web:latest and print their digests
@@ -2041,6 +2067,39 @@ orion-login *args:
 # Follow the login service's log.
 orion-login-logs:
     kubectl --context {{orion_context}} -n login logs -f deploy/login --tail 200
+
+# The world panel (crates/panel, deploy/modules/panel; plan docs/superpowers/plans/2026-11-15-r5b-world-panel.md):
+# an operator page over every world namespace of a cluster (state, pods, /readyz, metrics, release
+# history, forge Jobs) that starts, stops and forges worlds as the world-* recipes do. No Ingress, no
+# login: on orion it is reached by port-forward only.
+# The panel on orion: http://127.0.0.1:<port>/ (port-forward to the panel namespace).
+orion-panel port="8090":
+    kubectl --context {{orion_context}} -n panel port-forward svc/panel {{port}}:80
+
+# Release build of the panel binary (what orion-panel-push and twin-images put in the image).
+orion-panel-build:
+    rm -f target/release/panel.build-dials
+    {{cap}} {{cargo}} build --release -p panel --bin panel
+    printf 'region_blocks=%s\nchunk_blocks=%s\n' '{{play_blocks}}' '{{chunk_blocks}}' > target/release/panel.build-dials
+
+# Build the image (labelled with the git revision), push it to ECR as mmo/panel:latest and set it on
+# the panel Deployment BY DIGEST (scripts/orion_panel_push.sh). Before the panel root exists it only pushes.
+orion-panel-push: orion-panel-build
+    KUBE_CONTEXT={{orion_context}} TOFU={{tofu}} scripts/orion_panel_push.sh
+
+# The panel run from this checkout against any context, with YOUR kubectl credentials (through a
+# `kubectl proxy` on 127.0.0.1:<proxy>), on http://127.0.0.1:<port>/. e.g. `just panel ctx=k3d-mmo`.
+# It can do whatever your kubeconfig can: start, stop and forge act on that cluster.
+panel ctx=world_ctx port="8090" proxy="18001":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{cap}} {{cargo}} build -p panel --bin panel
+    kubectl --context {{ctx}} proxy --address 127.0.0.1 --port {{proxy}} > /dev/null &
+    proxy_pid=$!
+    trap 'kill $proxy_pid 2>/dev/null || true' EXIT
+    for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:{{proxy}}/version 2>/dev/null && break; sleep 0.1; done
+    echo "panel: context {{ctx}}, http://127.0.0.1:{{port}}/"
+    PANEL_KUBE_API=http://127.0.0.1:{{proxy}} PANEL_BIND=127.0.0.1:{{port}} target/debug/panel
 
 # One game world is one Kubernetes namespace. These recipes work on the world in
 # `world_ctx` / `world_ns`; the twin reuses them: `just world_ctx=k3d-mmo world_ns=world-twin world-status`.
@@ -2262,6 +2321,7 @@ world-drain name secs="300":
 # Waits up to WORLD_STOP_TIMEOUT s per wait (default 150). A stop that fails leaves the reconciler at 0:
 # `just world-start` brings it back (after the coordinator). A world with no fleet Deployment (from before
 # Elastic 4) skips that step.
+# crates/panel/src/ops.rs runs the same steps: keep the two in step.
 world-stop:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2401,6 +2461,7 @@ world-stop:
 # Deployment starts too (the coordinator adds its minimum, the reconciler creates them). Also the way back
 # from a failed world-stop (the reconciler left at 0). A world with no fleet Deployment (from before
 # Elastic 4) skips that step. WORLD_START_TIMEOUT s per wait (default 300).
+# crates/panel/src/ops.rs runs the same steps: keep the two in step.
 world-start:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2529,23 +2590,13 @@ world-start:
 world-register $name="Errantry":
     #!/usr/bin/env bash
     set -euo pipefail
-    k() { kubectl --context {{world_ctx}} -n {{world_ns}} "$@"; }
-    ns="{{world_ns}}"
-    id="${ns#world-}"
-    case "$name" in *\'*) echo "world-register: the name must not contain a single quote" >&2; exit 2 ;; esac
-    pin=$(k get secret coordinator-identity -o jsonpath='{.data.link\.cert-sha256\.cert}' | base64 -d | sha256sum | cut -d' ' -f1)
-    case "$pin" in
-        *[!0-9a-f]*|'') echo "world-register: no usable link certificate in Secret coordinator-identity" >&2; exit 1 ;;
-    esac
-    # sha256sum of nothing: the Secret or its key is missing.
-    [ "$pin" != e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] ||
-        { echo "world-register: Secret coordinator-identity has no link.cert-sha256.cert" >&2; exit 1; }
-    [ "${#pin}" -eq 64 ] || { echo "world-register: link pin is not 64 hex digits" >&2; exit 1; }
-    echo "Run this (it replaces the row of world '$id'; nothing was changed by this recipe):"
+    # One implementation of these arguments, shared with `just deploy --game`
+    # (scripts/deploy/game.py::register_args). Prints only; runs nothing.
+    args=$(PYTHONPATH={{justfile_directory()}}/scripts python3 -m deploy.game register-args \
+        {{world_ctx}} {{world_ns}} "$name")
+    id="{{world_ns}}"
+    echo "Run this (it replaces the row of world '${id#world-}'; nothing was changed by this recipe):"
     echo
-    args="world add $id --name '$name' --link https://coordinator.$ns.svc.cluster.local:6480 --link-cert $pin"
-    web_host=$(k get ingress -o jsonpath='{.items[0].spec.rules[0].host}' 2>/dev/null || true)
-    if [ -n "$web_host" ]; then args="$args --map-url https://$web_host/map/$id"; fi
     if [ "{{world_ctx}}" = "{{orion_context}}" ]; then
         echo "just orion-login $args"
     else
@@ -2599,6 +2650,87 @@ orion-pg-backup-now:
     kubectl --context {{orion_context}} -n postgres create job --from=cronjob/pg-dump "$job"
     echo "orion-pg-backup-now: started $job"
 
+# Run the management database dump now (login + Keycloak), in its own bucket.
+orion-pg-mgmt-backup-now:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    job="pg-dump-management-manual-$(date -u +%Y%m%d%H%M%S)"
+    kubectl --context {{orion_context}} -n pg-management create job --from=cronjob/pg-dump "$job"
+    echo "orion-pg-mgmt-backup-now: started $job"
+
+# PRINTS a service database move from its old StatefulSet to pg-management.
+# It never runs a stop, dump, restore or apply. login is moved before keycloak.
+pg-move ctx ns svc:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{svc}}" in
+        login) table=accounts; verify="POST a join through the web proxy and run login account issue-refresh <email>"; session_note="The world must remain running throughout the login move; joins or rejoins may answer 503 only while login is stopped." ;;
+        keycloak) table=user_entity; verify="sign in at the admin console and orion theme, then POST /v1/login/oidc at login"; session_note="Keycloak's in-memory sessions are lost on restart: existing users sign in again after the move." ;;
+        *) echo "pg-move: service must be login or keycloak" >&2; exit 2 ;;
+    esac
+    cat <<EOF
+    # Elastic 6: move {{svc}} (writer window). This is a PRINTED runbook; run each line deliberately.
+    ctx={{ctx}}
+    ns={{ns}}
+    svc={{svc}}
+    table=$table
+    dump=./{{svc}}-before-pg-management.dump
+    k="kubectl --context \$ctx -n \$ns"
+    km="kubectl --context \$ctx -n pg-management"
+
+    # 1. Stop the service writer and wait until no pod can write.
+    \$k scale deploy/\$svc --replicas=0
+    \$k wait pod -l app.kubernetes.io/name=\$svc --for=delete --timeout=120s
+
+    # 2. Dump the old StatefulSet while it is still running at replicas=1.
+    \$k exec \${svc}-postgres-0 -- pg_dump -Fc -U \$svc -d \$svc > "\$dump"
+    test -s "\$dump"
+    source_count=\$(\$k exec \${svc}-postgres-0 -- psql -U \$svc -d \$svc -Atc "select count(*) from \$table")
+
+    # 3/4. Restore to the empty database owned by the CNPG-managed role.
+    primary=\$(\$km get pods -l 'cnpg.io/cluster=pg-management,cnpg.io/instanceRole=primary' -o jsonpath='{.items[0].metadata.name}')
+    \$km exec -i "\$primary" -c postgres -- pg_restore -U postgres --no-owner --role=\$svc -d \$svc < "\$dump"
+
+    # 5. Refuse the cut-over unless every public table is owned by the service
+    # role and the known service table has the same row count on both sides.
+    \$km exec "\$primary" -c postgres -- psql -U postgres -d \$svc -Atc "select tableowner, count(*) from pg_tables where schemaname = 'public' group by 1"
+    # Expected: one line, exactly: {{svc}}|<count>
+    target_count=\$(\$km exec "\$primary" -c postgres -- psql -U postgres -d \$svc -Atc "select count(*) from \$table")
+    test "\$source_count" = "\$target_count"
+
+    # 6. Point the root at management and retain the old volume/password.
+    case "\$ctx" in
+      k3d-mmo)
+        plan=target/twin/{{svc}}-management.tfplan
+        TF_DATA_DIR=\$PWD/target/twin/{{svc}}/.terraform TF_PLUGIN_CACHE_DIR=\$PWD/target/tofu-plugin-cache \\
+          tofu -chdir=deploy/envs/local/{{svc}} plan -input=false -out="\$PWD/\$plan" -var=use_management_db=true -var=own_postgres=stopped
+        TF_DATA_DIR=\$PWD/target/twin/{{svc}}/.terraform TF_PLUGIN_CACHE_DIR=\$PWD/target/tofu-plugin-cache \\
+          tofu -chdir=deploy/envs/local/{{svc}} apply -input=false "\$PWD/\$plan"
+        ;;
+      *)
+        plan=\$PWD/target/orion-{{svc}}-management.tfplan
+        just orion-init {{svc}}
+        tofu -chdir=deploy/envs/orion/{{svc}} plan -input=false -out="\$plan" -var=kube_context=\$ctx \\
+          -var=use_management_db=true -var=own_postgres=stopped
+        tofu -chdir=deploy/envs/orion/{{svc}} apply -input=false "\$plan"
+        ;;
+    esac
+
+    # 7. Verify: $verify.
+    # Also stay below pg-management's max_connections=100:
+    \$km exec "\$primary" -c postgres -- psql -U postgres -d \$svc -Atc 'select count(*) from pg_stat_activity'
+    # $session_note
+    # Keep login on pg-management for the verify window before moving Keycloak.
+
+    # 8. Rollback (verify window only): writes since the cut are NOT moved back.
+    # Set use_management_db=false, own_postgres=running and repeat a saved plan/apply
+    # of the {{svc}} root. Expected: {{svc}} starts again on its retained old volume
+    # with the row set from the move, losing only management-side writes since then.
+    # After 14 days and one verified management dump restore drill, an owner may
+    # separately choose own_postgres=absent; the code still retains the old-volume
+    # variables/resources so no cleanup is implied by this rehearsal.
+    EOF
+
 # PRINTS (runs nothing: a restore overwrites) the two sequences that restore one nightly dump: A, the
 # drill into a SCRATCH database beside the live one, checked by its table owners; B, the live restore
 # (world stopped, the live database renamed aside, recreated owned by the world's role, restored, owners
@@ -2645,27 +2777,6 @@ orion-pg-restore world object:
     # 7. later, once the world plays: drop the old one
     $k exec <primary-pod> -c postgres -- dropdb ${db}_before_restore
     EOF
-
-# Put the login root's service token on the box (/srv/mmo/secrets/service-token, mode 600) for the
-# game host. The token travels through the pipe only.
-orion-login-token-push:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tok=$({{tofu}} -chdir=deploy/envs/orion/login output -raw service_token)
-    if [ -z "$tok" ]; then
-        echo "orion-login-token-push: the login root has no service token (apply it first)" >&2
-        exit 1
-    fi
-    n=$(printf '%s' "$tok" | wc -c | tr -d ' ')
-    # printf is a builtin: the token is never in a process argument list. The box installs the
-    # file only if it arrived whole (its size equals the expected byte count).
-    if printf '%s' "$tok" | ssh -o BatchMode=yes {{deploy_host}} "umask 077 && mkdir -p /srv/mmo/secrets && cat > /srv/mmo/secrets/service-token.new && [ \"\$(wc -c < /srv/mmo/secrets/service-token.new)\" -eq $n ] && mv -f /srv/mmo/secrets/service-token.new /srv/mmo/secrets/service-token || { rm -f /srv/mmo/secrets/service-token.new; exit 1; }"; then
-        echo "orion-login-token-push: token written to {{deploy_host}}:/srv/mmo/secrets/service-token"
-    else
-        echo "orion-login-token-push: failed — the token on the box is unchanged" >&2
-        exit 1
-    fi
-    unset tok
 
 # Every test in the repository that is not tagged slow: both Rust workspaces (the root and
 # quest/), the vendored forks' upstream tests and the website's node test — after
@@ -2753,6 +2864,7 @@ diag:
     #!/usr/bin/env bash
     set -uo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_VSYNC="${VOXEL_VSYNC:-off}" # measuring: the player's vsync setting must not cap the frame rate
     export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/diag
@@ -2844,6 +2956,7 @@ trace-chrome:
     #!/usr/bin/env bash
     set -uo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_VSYNC="${VOXEL_VSYNC:-off}" # measuring: the player's vsync setting must not cap the frame rate
     export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
@@ -2877,6 +2990,7 @@ trace-join:
     #!/usr/bin/env bash
     set -uo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_VSYNC="${VOXEL_VSYNC:-off}" # measuring: the player's vsync setting must not cap the frame rate
     export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
@@ -2893,7 +3007,7 @@ trace-join:
     # The rapier fork traces its solver internals: most of the file, none of the frame.
     scripts/trace_summary.py "$json" --until-ms {{join_ms}} --top 40 --skip-cat rapier3d --skip-cat parry3d
 
-# Start Pyroscope (:4040) + Grafana (:3000). Build with `--features pyroscope` to push profiles.
+# Start Pyroscope (:4040), Alloy (OTLP :4317/:4318), Tempo (:3200) and Grafana (:3000).
 profile-up:
     docker compose up -d
 
@@ -2913,7 +3027,8 @@ profile-client:
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin client --features pyroscope --target-dir {{variant_dir}}/pyroscope
 
-# Server instrumented with pyroscope, client plain alongside; pushes to :4040 (`just profile-up` first).
+# Server instrumented with Pyroscope and OTLP tracing, client plain alongside
+# (`just profile-up` first).
 profile-server:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2923,7 +3038,16 @@ profile-server:
     RUST_BACKTRACE=1 {{cargo}} run --bin client &
     client_pid=$!
     trap 'kill "$client_pid" 2>/dev/null || true' EXIT
-    PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin server --features pyroscope --target-dir {{variant_dir}}/pyroscope
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+    OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf \
+    OTEL_TRACES_SAMPLER=parentbased_traceidratio \
+    OTEL_TRACES_SAMPLER_ARG=1 \
+    VOXEL_TELEMETRY_ENVIRONMENT=development \
+    VOXEL_TELEMETRY_CLUSTER=local \
+    PYROSCOPE=1 \
+    PYROSCOPE_SERVER=http://127.0.0.1:4040 \
+    PYROSCOPE_SAMPLE_RATE=100 \
+    RUST_BACKTRACE=1 {{cap}} {{cargo}} run --bin server --features pyroscope --target-dir {{variant_dir}}/pyroscope
 
 # Run the client with the Tracy frame profiler compiled in (bevy `trace_tracy`,
 # opt-in via the client's `tracy` feature — plain builds never compile the
@@ -2975,6 +3099,7 @@ perf-client:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_VSYNC="${VOXEL_VSYNC:-off}" # measuring: the player's vsync setting must not cap the frame rate
     export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server --profile profiling

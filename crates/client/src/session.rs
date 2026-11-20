@@ -155,7 +155,9 @@ pub struct PreparingWorld;
 /// its view ([`view_draws_world`]): they bin into every view and would
 /// otherwise draw (or at least render) the world behind the frontend —
 /// `RenderLayers` only filter Bevy's own mesh queues.
-#[derive(Component, Clone, Copy, Default, Debug, bevy::render::extract_component::ExtractComponent)]
+#[derive(
+    Component, Clone, Copy, Default, Debug, bevy::render::extract_component::ExtractComponent,
+)]
 pub struct FrontendCamera;
 
 /// Whether a render view draws the world: every view but the
@@ -242,12 +244,18 @@ impl SessionResetExt for App {
     }
 
     fn add_session_reset_with(&mut self, f: fn(&mut World)) -> &mut Self {
-        self.world_mut().get_resource_or_init::<SessionResets>().0.push(f);
+        self.world_mut()
+            .get_resource_or_init::<SessionResets>()
+            .0
+            .push(f);
         self
     }
 
     fn add_session_message_clear<T: Message>(&mut self) -> &mut Self {
-        self.world_mut().get_resource_or_init::<SessionMessageClears>().0.push(clear_messages::<T>);
+        self.world_mut()
+            .get_resource_or_init::<SessionMessageClears>()
+            .0
+            .push(clear_messages::<T>);
         self
     }
 }
@@ -256,20 +264,27 @@ impl SessionResetExt for App {
 /// run every registered reset in registration order, then clear every
 /// registered message queue. Usable as an exclusive system.
 pub fn end_session(world: &mut World) {
-    let roots: Vec<Entity> =
-        world.query_filtered::<Entity, With<SessionScoped>>().iter(world).collect();
+    let roots: Vec<Entity> = world
+        .query_filtered::<Entity, With<SessionScoped>>()
+        .iter(world)
+        .collect();
     for root in roots {
         // A scoped entity may sit inside another scoped tree, already gone.
         if let Ok(entity) = world.get_entity_mut(root) {
             entity.despawn(); // recursive: takes the children along
         }
     }
-    let resets = world.get_resource::<SessionResets>().map(|r| r.0.clone()).unwrap_or_default();
+    let resets = world
+        .get_resource::<SessionResets>()
+        .map(|r| r.0.clone())
+        .unwrap_or_default();
     for reset in resets {
         reset(world);
     }
-    let clears =
-        world.get_resource::<SessionMessageClears>().map(|c| c.0.clone()).unwrap_or_default();
+    let clears = world
+        .get_resource::<SessionMessageClears>()
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
     for clear in clears {
         clear(world);
     }
@@ -370,7 +385,9 @@ fn home_after_session(login: Option<&crate::login::flow::LoginSession>) -> AppSt
 /// Whether a start may wait without a chosen world: a rejoin is asking the
 /// login service for its ticket (`login::flow`).
 fn rejoining(world: &World) -> bool {
-    world.get_resource::<crate::login::flow::LoginSession>().is_some_and(|l| l.rejoining())
+    world
+        .get_resource::<crate::login::flow::LoginSession>()
+        .is_some_and(|l| l.rejoining())
 }
 
 /// Tear the lost session down for a rejoin (a new session, built the usual
@@ -384,7 +401,10 @@ pub(crate) fn leave_for_rejoin(world: &mut World) {
     // the app in the world with no session, and `OnEnter(InWorld)` would end the rejoin
     // (`rejoin_arrived`): it is taken back. The rejoin waits on the starting screen.
     if let Some(mut next) = world.get_resource_mut::<NextState<AppState>>() {
-        if matches!(*next, NextState::Pending(AppState::InWorld) | NextState::PendingIfNeq(AppState::InWorld)) {
+        if matches!(
+            *next,
+            NextState::Pending(AppState::InWorld) | NextState::PendingIfNeq(AppState::InWorld)
+        ) {
             next.reset();
         }
     }
@@ -400,7 +420,9 @@ fn after_session_end(
     now: f64,
 ) -> SessionOutcome {
     use crate::login::flow::AfterSession;
-    let after = login.map_or(AfterSession::AsBefore, |login| login.session_lost(reason, state, now));
+    let after = login.map_or(AfterSession::AsBefore, |login| {
+        login.session_lost(reason, state, now)
+    });
     match (after, state, reason) {
         (AfterSession::Rejoin, ..) => SessionOutcome::Rejoin,
         (AfterSession::GaveUp, ..) => SessionOutcome::Home,
@@ -445,7 +467,9 @@ impl Plugin for SessionPlugin {
         // Only with a renderer (added after `DefaultPlugins`): the extraction's
         // sync hooks need the render world's resources, which headless apps lack.
         if app.get_sub_app(bevy::render::RenderApp).is_some() {
-            app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<FrontendCamera>::default());
+            app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<
+                FrontendCamera,
+            >::default());
         }
     }
 }
@@ -456,7 +480,15 @@ fn sync_frontend_camera(
     mut commands: Commands,
     state: Res<State<AppState>>,
     in_play: Res<InPlay>,
-    cameras: Query<Entity, With<FrontendCamera>>,
+    // Not the inventory's model camera, which borrows the marker to draw no
+    // world (`renderer/character_preview.rs`).
+    cameras: Query<
+        Entity,
+        (
+            With<FrontendCamera>,
+            Without<crate::renderer::character_preview::CharacterPreviewCamera>,
+        ),
+    >,
 ) {
     if frontend_owns(*state.get(), in_play.0) {
         if cameras.is_empty() {
@@ -484,7 +516,10 @@ fn frontend_camera_bundle() -> impl Bundle {
         // Present-but-empty, so the world's `attach_skybox` / `attach_fog`
         // (which fill in every `Camera3d` lacking them) leave this one alone.
         bevy::core_pipeline::Skybox::default(),
-        bevy::pbr::DistanceFog { color: Color::NONE, ..default() },
+        bevy::pbr::DistanceFog {
+            color: Color::NONE,
+            ..default()
+        },
         Name::new("frontend camera"),
     )
 }
@@ -507,7 +542,14 @@ impl SessionChannels {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded();
         let (request_send, request_recv) = crossbeam::channel::unbounded();
-        Self { game_send, game_recv, client_send, client_recv, request_send, request_recv }
+        Self {
+            game_send,
+            game_recv,
+            client_send,
+            client_recv,
+            request_send,
+            request_recv,
+        }
     }
 
     /// Make these the app's session channels.
@@ -532,11 +574,11 @@ pub fn install_dead_channels(world: &mut World) {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use flow::{
-    join_server_stops, leave_session, server_stops_finished, GameThread, SessionFlowPlugin, SERVER_LOG_TAIL_LINES,
-    WAITING_FOR_PREVIOUS_SERVER,
+    GameThread, SERVER_LOG_TAIL_LINES, SessionFlowPlugin, WAITING_FOR_PREVIOUS_SERVER,
+    join_server_stops, leave_session, server_stops_finished,
 };
 #[cfg(target_arch = "wasm32")]
-pub use web_flow::{leave_session, SessionFlowPlugin, SimConfig};
+pub use web_flow::{SessionFlowPlugin, SimConfig, leave_session};
 
 /// Starting and leaving a world session (native only; wasm keeps today's
 /// single in-process session).
@@ -561,12 +603,13 @@ mod flow {
     use game::GameEventKind;
 
     use super::{
-        after_session_end, end_session, home_after_session, install_dead_channels, leave_for_rejoin, rejoining,
-        AppState, HostPort, JoinServer, LastSessionError, PendingJoin, PendingWorld, PreparingWorld, SessionChannels,
-        SessionEnded, SessionOutcome, StartingLog, StartingStatus,
+        AppState, HostPort, JoinServer, LastSessionError, PendingJoin, PendingWorld,
+        PreparingWorld, SessionChannels, SessionEnded, SessionOutcome, StartingLog, StartingStatus,
+        after_session_end, end_session, home_after_session, install_dead_channels,
+        leave_for_rejoin, rejoining,
     };
     use crate::instance::{ClientRequest, Command};
-    use crate::local_host::{server_log_path, LocalHost, STOP_GRACE};
+    use crate::local_host::{LocalHost, STOP_GRACE, server_log_path};
     use crate::renderer::collider_debug::DebugFlagsRes;
     use crate::renderer::{ClientRequests, GameEvents, LocalPlayer};
     use crate::world_scale::WorldScale;
@@ -606,7 +649,6 @@ mod flow {
         }
     }
 
-
     /// Server stops still running in the background (each waits up to
     /// [`STOP_GRACE`]).
     static SERVER_STOPS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
@@ -619,7 +661,10 @@ mod flow {
                 None => warn!("[session] local server could not be reaped"),
             })
             .expect("spawn the server stop thread");
-        SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
+        SERVER_STOPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(handle);
     }
 
     /// Wait for every background server stop (the process must not exit
@@ -654,7 +699,10 @@ mod flow {
             if let Some(mut error) = world.get_resource_mut::<LastSessionError>() {
                 if let Some(reason) = error.0.as_mut() {
                     if !tail.is_empty() {
-                        reason.push_str(&format!("\n\nServer log ({}):\n{tail}", host.log_path().display()));
+                        reason.push_str(&format!(
+                            "\n\nServer log ({}):\n{tail}",
+                            host.log_path().display()
+                        ));
                     }
                 }
             }
@@ -678,7 +726,11 @@ mod flow {
 
     /// Whether every background server stop has finished (never blocks).
     pub fn server_stops_finished() -> bool {
-        SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()).iter().all(|stop| stop.is_finished())
+        SERVER_STOPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .all(|stop| stop.is_finished())
     }
 
     /// In `Starting`, once no previous server is still stopping (it may still
@@ -689,18 +741,30 @@ mod flow {
         if let Some(JoinServer(addr)) = world.remove_resource::<JoinServer>() {
             info!("[session] joining the server on {addr}");
             // A dev server's map, if the environment names it (`renderer::map`).
-            if let Some(base) = std::env::var(crate::renderer::map::store::MAP_URL_ENV).ok().filter(|b| !b.is_empty()) {
-                world.insert_resource(crate::renderer::map::MapWorld::http(&addr.to_string(), &base));
+            if let Some(base) = std::env::var(crate::renderer::map::store::MAP_URL_ENV)
+                .ok()
+                .filter(|b| !b.is_empty())
+            {
+                world.insert_resource(crate::renderer::map::MapWorld::http(
+                    &addr.to_string(),
+                    &base,
+                ));
             }
             connect_session(world, addr, None, None);
             return;
         }
         if let Some(join) = world.remove_resource::<PendingJoin>() {
             // The world id and address only: never the JWT.
-            info!("[session] joining online world {:?} on {}", join.ticket.world, join.addr);
+            info!(
+                "[session] joining online world {:?} on {}",
+                join.ticket.world, join.addr
+            );
             // The world's map, where the login service says it is served (`renderer::map`).
             if let Some(base) = join.ticket.map_url.as_deref().filter(|b| !b.is_empty()) {
-                world.insert_resource(crate::renderer::map::MapWorld::http(&join.ticket.world, base));
+                world.insert_resource(crate::renderer::map::MapWorld::http(
+                    &join.ticket.world,
+                    base,
+                ));
             }
             let host = crate::netcode::HostTarget {
                 quic: join
@@ -724,7 +788,9 @@ mod flow {
         }
         join_server_stops(); // all finished: reaps without waiting
         set_status(world, "");
-        let pending = world.remove_resource::<PendingWorld>().expect("checked above");
+        let pending = world
+            .remove_resource::<PendingWorld>()
+            .expect("checked above");
         let log = server_log_path(&pending.entry_dir, &pending.terrain);
         let port = world.get_resource::<HostPort>().map(|p| p.0);
         let dev_structures = world.remove_resource::<crate::local_host::DevStructures>();
@@ -735,7 +801,10 @@ mod flow {
         let host = match LocalHost::start_with_env(&pending.terrain, &log, port, &extra_env) {
             Ok(host) => host,
             Err(e) => {
-                fail_start(world, format!("Could not start the server for {:?}: {e}", pending.name));
+                fail_start(
+                    world,
+                    format!("Could not start the server for {:?}: {e}", pending.name),
+                );
                 return;
             }
         };
@@ -750,7 +819,10 @@ mod flow {
         world.insert_resource(host);
         // The map reads this world's own store beside its server (`renderer::map`).
         let store = worldgen::world_store::store_path_for(&pending.terrain);
-        world.insert_resource(crate::renderer::map::MapWorld::local(&pending.entry_dir, &store));
+        world.insert_resource(crate::renderer::map::MapWorld::local(
+            &pending.entry_dir,
+            &store,
+        ));
         connect_session(world, addr, None, None);
     }
 
@@ -783,7 +855,10 @@ mod flow {
     /// is torn down at once: a failed start leaves nothing running behind it.
     fn fail_start(world: &mut World, why: String) {
         error!("[session] {why}");
-        let tail = world.get_resource::<LocalHost>().map(|h| h.log_tail(SERVER_LOG_TAIL_LINES)).unwrap_or_default();
+        let tail = world
+            .get_resource::<LocalHost>()
+            .map(|h| h.log_tail(SERVER_LOG_TAIL_LINES))
+            .unwrap_or_default();
         leave_session(world);
         world.resource_mut::<LastSessionError>().0 = Some(why);
         world.get_resource_or_init::<StartingLog>().0 = tail;
@@ -801,7 +876,9 @@ mod flow {
     fn watch_local_host(host: Option<ResMut<LocalHost>>, mut ended: MessageWriter<SessionEnded>) {
         let Some(mut host) = host else { return };
         if let Some(status) = host.try_exited() {
-            ended.write(SessionEnded { reason: Some(format!("The server exited ({status}).")) });
+            ended.write(SessionEnded {
+                reason: Some(format!("The server exited ({status}).")),
+            });
         }
     }
 
@@ -820,11 +897,16 @@ mod flow {
         time: Option<Res<Time<Real>>>,
         mut commands: Commands,
     ) {
-        let Some(last) = ended.read().last() else { return };
+        let Some(last) = ended.read().last() else {
+            return;
+        };
         if !matches!(state.get(), AppState::Starting | AppState::InWorld) {
             return;
         }
-        info!("[session] session ended: {}", last.reason.as_deref().unwrap_or("left by the player"));
+        info!(
+            "[session] session ended: {}",
+            last.reason.as_deref().unwrap_or("left by the player")
+        );
         let now = time.map_or(0.0, |t| t.elapsed_secs_f64());
         let reason = last.reason.clone();
         match after_session_end(reason.as_deref(), *state.get(), login.as_deref_mut(), now) {
@@ -863,19 +945,46 @@ mod flow {
         fn build(&self, app: &mut App) {
             app.add_systems(OnEnter(AppState::Starting), begin_starting)
                 .add_systems(
-                    OnTransition { exited: AppState::Starting, entered: AppState::MainMenu },
+                    OnTransition {
+                        exited: AppState::Starting,
+                        entered: AppState::MainMenu,
+                    },
                     leave_session,
                 )
                 .add_systems(
-                    OnTransition { exited: AppState::InWorld, entered: AppState::MainMenu },
+                    OnTransition {
+                        exited: AppState::InWorld,
+                        entered: AppState::MainMenu,
+                    },
                     leave_session,
                 )
                 // An online session ends on the world list.
-                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Worlds }, leave_session)
-                .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::Worlds }, leave_session)
+                .add_systems(
+                    OnTransition {
+                        exited: AppState::Starting,
+                        entered: AppState::Worlds,
+                    },
+                    leave_session,
+                )
+                .add_systems(
+                    OnTransition {
+                        exited: AppState::InWorld,
+                        entered: AppState::Worlds,
+                    },
+                    leave_session,
+                )
                 // A rejoin whose login was revoked ends on the sign-in screen.
-                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Login }, leave_session)
-                .add_systems(OnEnter(AppState::InWorld), crate::login::flow::rejoin_arrived)
+                .add_systems(
+                    OnTransition {
+                        exited: AppState::Starting,
+                        entered: AppState::Login,
+                    },
+                    leave_session,
+                )
+                .add_systems(
+                    OnEnter(AppState::InWorld),
+                    crate::login::flow::rejoin_arrived,
+                )
                 .add_systems(
                     Update,
                     (
@@ -890,7 +999,6 @@ mod flow {
         }
     }
 }
-
 
 /// Joining and leaving a server from the browser (wasm has no local server:
 /// it can only join one).
@@ -909,12 +1017,12 @@ mod web_flow {
     use bevy::prelude::*;
 
     use super::{
-        after_session_end, end_session, home_after_session, install_dead_channels, leave_for_rejoin, rejoining,
-        AppState, LastSessionError, PendingJoin, PendingServer, SessionChannels, SessionEnded, SessionOutcome,
-        StartingLog, StartingStatus,
+        AppState, LastSessionError, PendingJoin, PendingServer, SessionChannels, SessionEnded,
+        SessionOutcome, StartingLog, StartingStatus, after_session_end, end_session,
+        home_after_session, install_dead_channels, leave_for_rejoin, rejoining,
     };
-    use crate::renderer::collider_debug::DebugFlagsRes;
     use crate::renderer::LocalPlayer;
+    use crate::renderer::collider_debug::DebugFlagsRes;
     use crate::sim_driver::SimDriverRes;
     use crate::world_scale::WorldScale;
 
@@ -959,15 +1067,21 @@ mod web_flow {
         if rejoining(world) && !world.contains_resource::<PendingJoin>() {
             return; // the rejoin's ticket comes later (`join_when_ticketed`)
         }
-        let (address, server, credential) = if let Some(join) = world.remove_resource::<PendingJoin>() {
+        let (address, server, credential) = if let Some(join) =
+            world.remove_resource::<PendingJoin>()
+        {
             // The world's map: same-origin under the page's own proxy (`/map/<world id>`).
             let origin = web_sys::window().and_then(|w| w.location().origin().ok());
             if let Some(origin) = origin {
                 let base = format!("{origin}/map/{}", join.ticket.world);
-                world.insert_resource(crate::renderer::map::MapWorld::http(&join.ticket.world, &base));
+                world.insert_resource(crate::renderer::map::MapWorld::http(
+                    &join.ticket.world,
+                    &base,
+                ));
             }
             let url = join.ticket.webtransport.clone().unwrap_or_default();
-            match crate::web_endpoint::web_server_for_ticket(&url, join.ticket.cert_hash.as_deref()) {
+            match crate::web_endpoint::web_server_for_ticket(&url, join.ticket.cert_hash.as_deref())
+            {
                 Ok(server) => (url, server, Some(join.credential())),
                 Err(why) => {
                     fail_start(world, format!("Cannot join {:?}: {why}", join.ticket.world));
@@ -998,7 +1112,13 @@ mod web_flow {
         channels.install(world);
         let debug_flags = world.resource::<DebugFlagsRes>().0.clone();
         let config = *world.resource::<SimConfig>();
-        let driver = crate::sim_driver::start_session(server, channels, debug_flags, config.world_scale, credential);
+        let driver = crate::sim_driver::start_session(
+            server,
+            channels,
+            debug_flags,
+            config.world_scale,
+            credential,
+        );
         world.insert_resource(driver);
     }
 
@@ -1037,11 +1157,16 @@ mod web_flow {
         time: Option<Res<Time<Real>>>,
         mut commands: Commands,
     ) {
-        let Some(last) = ended.read().last() else { return };
+        let Some(last) = ended.read().last() else {
+            return;
+        };
         if !matches!(state.get(), AppState::Starting | AppState::InWorld) {
             return;
         }
-        info!("[session] session ended: {}", last.reason.as_deref().unwrap_or("left by the player"));
+        info!(
+            "[session] session ended: {}",
+            last.reason.as_deref().unwrap_or("left by the player")
+        );
         let now = time.map_or(0.0, |t| t.elapsed_secs_f64());
         let reason = last.reason.clone();
         match after_session_end(reason.as_deref(), *state.get(), login.as_deref_mut(), now) {
@@ -1074,14 +1199,47 @@ mod web_flow {
         fn build(&self, app: &mut App) {
             app.add_systems(OnEnter(AppState::Starting), begin_join)
                 .add_systems(OnEnter(AppState::InWorld), receiving_map)
-                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::MainMenu }, leave_session)
-                .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::MainMenu }, leave_session)
+                .add_systems(
+                    OnTransition {
+                        exited: AppState::Starting,
+                        entered: AppState::MainMenu,
+                    },
+                    leave_session,
+                )
+                .add_systems(
+                    OnTransition {
+                        exited: AppState::InWorld,
+                        entered: AppState::MainMenu,
+                    },
+                    leave_session,
+                )
                 // An online session ends on the world list.
-                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Worlds }, leave_session)
-                .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::Worlds }, leave_session)
+                .add_systems(
+                    OnTransition {
+                        exited: AppState::Starting,
+                        entered: AppState::Worlds,
+                    },
+                    leave_session,
+                )
+                .add_systems(
+                    OnTransition {
+                        exited: AppState::InWorld,
+                        entered: AppState::Worlds,
+                    },
+                    leave_session,
+                )
                 // A rejoin whose login was revoked ends on the sign-in screen.
-                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Login }, leave_session)
-                .add_systems(OnEnter(AppState::InWorld), crate::login::flow::rejoin_arrived)
+                .add_systems(
+                    OnTransition {
+                        exited: AppState::Starting,
+                        entered: AppState::Login,
+                    },
+                    leave_session,
+                )
+                .add_systems(
+                    OnEnter(AppState::InWorld),
+                    crate::login::flow::rejoin_arrived,
+                )
                 .add_systems(
                     Update,
                     (
@@ -1095,4 +1253,3 @@ mod web_flow {
         }
     }
 }
-

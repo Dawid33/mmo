@@ -50,6 +50,34 @@ variable "postgres_volume_size" {
   default = "10Gi"
 }
 
+variable "database" {
+  description = "Management PostgreSQL connection. null keeps this module's old keycloak-postgres StatefulSet."
+  type = object({
+    host     = string
+    port     = number
+    database = string
+    user     = string
+    password = string
+  })
+  default   = null
+  nullable  = true
+  sensitive = true
+}
+
+variable "own_postgres" {
+  description = "Lifecycle of the old Keycloak PostgreSQL. absent is owner-approved cleanup only."
+  type        = string
+  default     = "running"
+  validation {
+    condition     = contains(["running", "stopped", "absent"], var.own_postgres)
+    error_message = "own_postgres must be running, stopped, or absent."
+  }
+  validation {
+    condition     = var.database != null || var.own_postgres == "running"
+    error_message = "The old Keycloak PostgreSQL must stay running while no external database is configured."
+  }
+}
+
 variable "memory_limits" {
   description = "Memory limit of each pod. Keycloak sizes its heap from this (70%); below 2Gi is not recommended for production."
   type        = map(string)

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::monthly_climate::{MonthlyClimate, CLIMATE_MONTHS};
+use crate::monthly_climate::{CLIMATE_MONTHS, MonthlyClimate};
 
 /// The widest map the frame accepts (Q8 map metres, 2^38 = 1,073 km): every
 /// `x · 360 · 65536` (and `z · 180 · 65536`) then fits `i64`.
@@ -93,10 +93,16 @@ impl WorldClimate {
         monthly.validate()?;
         let cell = monthly.cell_m * 256.0;
         if cell.fract() != 0.0 || cell < 1.0 || cell > CLIMATE_MAX_EXTENT_Q8 as f64 {
-            return Err(format!("climate cell {} m is not a whole number of 1/256 m", monthly.cell_m));
+            return Err(format!(
+                "climate cell {} m is not a whole number of 1/256 m",
+                monthly.cell_m
+            ));
         }
         if frame.cell_q8 != cell as i64 {
-            return Err(format!("frame cell {} (Q8) but the family's cell is {} m", frame.cell_q8, monthly.cell_m));
+            return Err(format!(
+                "frame cell {} (Q8) but the family's cell is {} m",
+                frame.cell_q8, monthly.cell_m
+            ));
         }
         for (what, extent) in [("width", frame.width_q8), ("height", frame.height_q8)] {
             if extent < 1 || extent > CLIMATE_MAX_EXTENT_Q8 {
@@ -116,11 +122,17 @@ impl WorldClimate {
             ));
         }
         if frame.wrap_x != monthly.wrap_x {
-            return Err(format!("frame wrap_x {} but the family's is {}", frame.wrap_x, monthly.wrap_x));
+            return Err(format!(
+                "frame wrap_x {} but the family's is {}",
+                frame.wrap_x, monthly.wrap_x
+            ));
         }
         let crc = monthly.content_crc();
         if frame.monthly_crc != crc {
-            return Err(format!("frame names climate crc {:08x}, the family's is {crc:08x}", frame.monthly_crc));
+            return Err(format!(
+                "frame names climate crc {:08x}, the family's is {crc:08x}",
+                frame.monthly_crc
+            ));
         }
         Ok(Self { frame, monthly })
     }
@@ -129,12 +141,22 @@ impl WorldClimate {
     /// when the map wraps (`bx · 256` must fit `i64`).
     pub fn point_of_block(&self, world_block_x: i64, world_block_z: i64) -> MapPoint {
         let o = self.frame.origin_q8;
-        self.fold(MapPoint { x: world_block_x * 256 + 128 + o[0], z: world_block_z * 256 + 128 + o[1] })
+        self.fold(MapPoint {
+            x: world_block_x * 256 + 128 + o[0],
+            z: world_block_z * 256 + 128 + o[1],
+        })
     }
 
     /// `p` with x folded into `[0, width)` when the map wraps; else `p`.
     pub fn fold(&self, p: MapPoint) -> MapPoint {
-        if self.frame.wrap_x { MapPoint { x: p.x.rem_euclid(self.frame.width_q8), z: p.z } } else { p }
+        if self.frame.wrap_x {
+            MapPoint {
+                x: p.x.rem_euclid(self.frame.width_q8),
+                z: p.z,
+            }
+        } else {
+            p
+        }
     }
 
     /// Longitude, Q16 degrees east of the west edge: `x · 360 · 65536 / width`
@@ -142,7 +164,13 @@ impl WorldClimate {
     /// is 360°); any other is folded (wrapping map) or clamped.
     pub fn lon_q16(&self, p: MapPoint) -> i64 {
         let w = self.frame.width_q8;
-        let x = if (0..=w).contains(&p.x) { p.x } else if self.frame.wrap_x { p.x.rem_euclid(w) } else { p.x.clamp(0, w) };
+        let x = if (0..=w).contains(&p.x) {
+            p.x
+        } else if self.frame.wrap_x {
+            p.x.rem_euclid(w)
+        } else {
+            p.x.clamp(0, w)
+        };
         (x * 360 * Q16).div_euclid(w)
     }
 
@@ -168,18 +196,31 @@ impl WorldClimate {
         let (nx, nz) = (i64::from(self.monthly.nx), i64::from(self.monthly.nz));
         // On the map first: folded (wrap) or clamped x, clamped z — beyond an
         // edge both cells of a pair are the edge cell, so the clamp changes no value.
-        let x = if f.wrap_x { p.x.rem_euclid(f.width_q8) } else { p.x.clamp(0, f.width_q8) };
+        let x = if f.wrap_x {
+            p.x.rem_euclid(f.width_q8)
+        } else {
+            p.x.clamp(0, f.width_q8)
+        };
         let z = p.z.clamp(0, f.height_q8);
         let (ix, tx) = axis(x, f.cell_q8);
         let (iz, tz) = axis(z, f.cell_q8);
-        let col = |i: i64| if f.wrap_x { i.rem_euclid(nx) } else { i.clamp(0, nx - 1) };
+        let col = |i: i64| {
+            if f.wrap_x {
+                i.rem_euclid(nx)
+            } else {
+                i.clamp(0, nx - 1)
+            }
+        };
         let row = |i: i64| i.clamp(0, nz - 1);
         let (x0, x1, z0, z1) = (col(ix), col(ix + 1), row(iz), row(iz + 1));
         let w11 = (tx * tz).div_euclid(Q16);
         let w10 = tx - w11;
         let w01 = tz - w11;
         let w00 = Q16 - tx - tz + w11;
-        ([(x0, z0), (x1, z0), (x0, z1), (x1, z1)], [w00, w10, w01, w11])
+        (
+            [(x0, z0), (x1, z0), (x0, z1), (x1, z1)],
+            [w00, w10, w01, w11],
+        )
     }
 
     /// The month-interpolated normals at `p` (Ruling 4); `month_q16` is
@@ -194,8 +235,10 @@ impl WorldClimate {
         // Temperature-like planes: the bilinear blend of months m0−1 … m0+2,
         // the two sharpened control points, linear between them.
         let curve = |v: fn(&MonthlyClimate, usize) -> i64| -> i64 {
-            let n: [i64; 4] =
-                std::array::from_fn(|k| self.blend(&at, (m0 + k as i64 - 1).rem_euclid(MONTHS), v).div_euclid(Q16));
+            let n: [i64; 4] = std::array::from_fn(|k| {
+                self.blend(&at, (m0 + k as i64 - 1).rem_euclid(MONTHS), v)
+                    .div_euclid(Q16)
+            });
             let (c0, c1) = (sharpened(n[0], n[1], n[2]), sharpened(n[1], n[2], n[3]));
             (c0 * (Q16 - wt) + c1 * wt).div_euclid(Q16)
         };
@@ -205,8 +248,11 @@ impl WorldClimate {
         let south = curve(|c, i| i64::from(c.wind_south_q[i]) * 16);
         // Piecewise constant: the month `mq` lies in.
         let here = mq.div_euclid(Q16);
-        let precip = (self.blend(&at, here, |c, i| i64::from(c.precip_deci_mm[i])) * 100).div_euclid(Q16);
-        let wet = self.blend(&at, here, |c, i| i64::from(c.wet_day_255[i])).div_euclid(255);
+        let precip =
+            (self.blend(&at, here, |c, i| i64::from(c.precip_deci_mm[i])) * 100).div_euclid(Q16);
+        let wet = self
+            .blend(&at, here, |c, i| i64::from(c.wet_day_255[i]))
+            .div_euclid(255);
         NormalsNow {
             temp_sea_centi_c: temp as i32,
             diurnal_centi_c: diurnal as i32,
@@ -224,16 +270,28 @@ impl WorldClimate {
         let year = |v: fn(&MonthlyClimate, usize) -> i64| -> [i32; 12] {
             std::array::from_fn(|m| self.blend(&at, m as i64, v).div_euclid(Q16) as i32)
         };
-        (year(|c, i| i64::from(c.temp_sea_centi_c[i])), year(|c, i| i64::from(c.precip_deci_mm[i])))
+        (
+            year(|c, i| i64::from(c.temp_sea_centi_c[i])),
+            year(|c, i| i64::from(c.precip_deci_mm[i])),
+        )
     }
 
     /// `Σ wᵢ · vᵢ` over the four cells of `at` (`cell_weights`) in month `m`
     /// (`0 ≤ m < 12`): Q16 of the plane's unit; the caller divides.
-    fn blend(&self, at: &([(i64, i64); 4], [i64; 4]), m: i64, v: fn(&MonthlyClimate, usize) -> i64) -> i64 {
+    fn blend(
+        &self,
+        at: &([(i64, i64); 4], [i64; 4]),
+        m: i64,
+        v: fn(&MonthlyClimate, usize) -> i64,
+    ) -> i64 {
         let (cells, w) = at;
         let mut s = 0i64;
         for k in 0..4 {
-            s += w[k] * v(&self.monthly, self.monthly.index(m as usize, cells[k].0, cells[k].1));
+            s += w[k]
+                * v(
+                    &self.monthly,
+                    self.monthly.index(m as usize, cells[k].0, cells[k].1),
+                );
         }
         s
     }
@@ -250,7 +308,10 @@ impl WorldClimate {
 fn axis(v: i64, cell_q8: i64) -> (i64, i64) {
     let u2 = 2 * v - cell_q8;
     let span = 2 * cell_q8;
-    (u2.div_euclid(span), (u2.rem_euclid(span) * Q16).div_euclid(span))
+    (
+        u2.div_euclid(span),
+        (u2.rem_euclid(span) * Q16).div_euclid(span),
+    )
 }
 
 /// Ruling 4's control point: `N[m] + (2·N[m] − N[m−1] − N[m+1]) / 8` (floored).
@@ -260,7 +321,9 @@ fn sharpened(prev: i64, n: i64, next: i64) -> i64 {
 
 impl std::fmt::Debug for WorldClimate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorldClimate").field("frame", &self.frame).finish_non_exhaustive()
+        f.debug_struct("WorldClimate")
+            .field("frame", &self.frame)
+            .finish_non_exhaustive()
     }
 }
 

@@ -30,6 +30,7 @@
 //! ears, leaves, wings).
 use bevy::asset::io::Reader;
 use bevy::asset::{AssetLoader, LoadContext, RenderAssetUsages};
+use bevy::camera::visibility::RenderLayers;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -94,13 +95,23 @@ pub struct BbAnimationPlayer {
 
 impl Default for BbAnimationPlayer {
     fn default() -> Self {
-        Self { animation: None, elapsed: 0.0, speed: 1.0, paused: false, variables: Default::default(), fade: None }
+        Self {
+            animation: None,
+            elapsed: 0.0,
+            speed: 1.0,
+            paused: false,
+            variables: Default::default(),
+            fade: None,
+        }
     }
 }
 
 impl BbAnimationPlayer {
     pub fn playing(name: &str) -> Self {
-        Self { animation: Some(name.to_string()), ..Self::default() }
+        Self {
+            animation: Some(name.to_string()),
+            ..Self::default()
+        }
     }
 
     /// Switch to `name` from its start, at once.
@@ -141,7 +152,10 @@ impl Plugin for BbModelPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<BbModelAsset>()
             .register_asset_loader(BbModelLoader)
-            .add_systems(Update, (respawn_reloaded_bbmodels, spawn_bbmodels, animate_bbmodels).chain());
+            .add_systems(
+                Update,
+                (respawn_reloaded_bbmodels, spawn_bbmodels, animate_bbmodels).chain(),
+            );
     }
 }
 
@@ -171,7 +185,10 @@ impl AssetLoader for BbModelLoader {
         load_context: &mut LoadContext<'_>,
     ) -> Result<BbModelAsset, BbModelLoadError> {
         let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await.map_err(|e| BbModelLoadError(e.to_string()))?;
+        reader
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| BbModelLoadError(e.to_string()))?;
         // Textures that are not embedded are files next to the model: read
         // them up front, since the parser's resolver is synchronous.
         let mut external = std::collections::HashMap::new();
@@ -197,13 +214,23 @@ impl AssetLoader for BbModelLoader {
 
 /// `relative_path` / `path` of every texture with no embedded source.
 fn external_texture_paths(bytes: &[u8]) -> Vec<String> {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
     v.get("textures")
         .and_then(|t| t.as_array())
         .into_iter()
         .flatten()
-        .filter(|t| t.get("source").and_then(|s| s.as_str()).is_none_or(|s| !s.starts_with("data:")))
-        .filter_map(|t| t.get("relative_path").or_else(|| t.get("path")).and_then(|p| p.as_str()))
+        .filter(|t| {
+            t.get("source")
+                .and_then(|s| s.as_str())
+                .is_none_or(|s| !s.starts_with("data:"))
+        })
+        .filter_map(|t| {
+            t.get("relative_path")
+                .or_else(|| t.get("path"))
+                .and_then(|p| p.as_str())
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -218,10 +245,21 @@ fn build_asset(model: bbmodel::Model, cx: &mut LoadContext<'_>) -> BbModelAsset 
             cx.add_labeled_asset(format!("Material{i}"), material(Some(image), t.alpha))
         })
         .collect();
-    let untextured = cx.add_labeled_asset("MaterialUntextured".to_string(), material(None, bbmodel::AlphaKind::Opaque));
-    let bounds = model.bounds().map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi)));
+    let untextured = cx.add_labeled_asset(
+        "MaterialUntextured".to_string(),
+        material(None, bbmodel::AlphaKind::Opaque),
+    );
+    let bounds = model
+        .bounds()
+        .map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi)));
     for a in &model.animations {
-        debug!("bbmodel {}: animation {:?} {:?} {:.2}s", cx.path(), a.name, a.loop_mode, a.length);
+        debug!(
+            "bbmodel {}: animation {:?} {:?} {:.2}s",
+            cx.path(),
+            a.name,
+            a.loop_mode,
+            a.length
+        );
     }
     let nodes = model
         .nodes
@@ -238,7 +276,10 @@ fn build_asset(model: bbmodel::Model, cx: &mut LoadContext<'_>) -> BbModelAsset 
                 .enumerate()
                 .map(|(p, part)| {
                     let mesh = cx.add_labeled_asset(format!("Mesh{n}_{p}"), part_mesh(part));
-                    let material = part.texture.and_then(|t| materials.get(t).cloned()).unwrap_or(untextured.clone());
+                    let material = part
+                        .texture
+                        .and_then(|t| materials.get(t).cloned())
+                        .unwrap_or(untextured.clone());
                     (mesh, material)
                 })
                 .collect(),
@@ -249,12 +290,21 @@ fn build_asset(model: bbmodel::Model, cx: &mut LoadContext<'_>) -> BbModelAsset 
     for node in &mut skeleton.nodes {
         node.parts.clear();
     }
-    BbModelAsset { name: skeleton.name.clone(), nodes, bounds, skeleton }
+    BbModelAsset {
+        name: skeleton.name.clone(),
+        nodes,
+        bounds,
+        skeleton,
+    }
 }
 
 fn texture_image(t: &bbmodel::Texture) -> Image {
     let mut image = Image::new(
-        Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
+        Extent3d {
+            width: t.width,
+            height: t.height,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         t.rgba.clone(),
         TextureFormat::Rgba8UnormSrgb,
@@ -270,7 +320,11 @@ fn texture_image(t: &bbmodel::Texture) -> Image {
 
 fn material(texture: Option<Handle<Image>>, alpha: bbmodel::AlphaKind) -> StandardMaterial {
     StandardMaterial {
-        base_color: if texture.is_some() { Color::WHITE } else { Color::srgb(0.6, 0.6, 0.6) },
+        base_color: if texture.is_some() {
+            Color::WHITE
+        } else {
+            Color::srgb(0.6, 0.6, 0.6)
+        },
         base_color_texture: texture,
         alpha_mode: match alpha {
             bbmodel::AlphaKind::Opaque => AlphaMode::Opaque,
@@ -287,21 +341,26 @@ fn material(texture: Option<Handle<Image>>, alpha: bbmodel::AlphaKind) -> Standa
 }
 
 fn part_mesh(part: &bbmodel::Part) -> Mesh {
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, part.positions.clone())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, part.normals.clone())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, part.uvs.clone())
-        .with_inserted_indices(Indices::U32(part.indices.clone()))
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, part.positions.clone())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, part.normals.clone())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, part.uvs.clone())
+    .with_inserted_indices(Indices::U32(part.indices.clone()))
 }
 
 /// Builds the child hierarchy of every `BbModel` whose asset has loaded.
 pub fn spawn_bbmodels(
     mut commands: Commands,
     models: Res<Assets<BbModelAsset>>,
-    pending: Query<(Entity, &BbModel), Without<BbModelSpawned>>,
+    pending: Query<(Entity, &BbModel, Option<&RenderLayers>), Without<BbModelSpawned>>,
 ) {
-    for (entity, model) in &pending {
-        let Some(asset) = models.get(&model.0) else { continue };
+    for (entity, model, layers) in &pending {
+        let Some(asset) = models.get(&model.0) else {
+            continue;
+        };
         let mut spawned: Vec<Entity> = Vec::with_capacity(asset.nodes.len());
         for node in &asset.nodes {
             let parent = node.parent.map_or(entity, |p| spawned[p]);
@@ -315,13 +374,20 @@ pub fn spawn_bbmodels(
                 ))
                 .id();
             for (mesh, material) in &node.parts {
-                commands.spawn((
-                    Mesh3d(mesh.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::IDENTITY,
-                    BbModelPart,
-                    ChildOf(id),
-                ));
+                let part = commands
+                    .spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::IDENTITY,
+                        BbModelPart,
+                        ChildOf(id),
+                    ))
+                    .id();
+                // The model's render layers are its meshes' (they are not
+                // inherited): a model on a layer of its own stays on it.
+                if let Some(layers) = layers {
+                    commands.entity(part).insert(layers.clone());
+                }
             }
             spawned.push(id);
         }
@@ -338,7 +404,9 @@ pub fn animate_bbmodels(
 ) {
     let dt = time.delta_secs();
     for (model, spawned, mut player) in &mut players {
-        let Some(asset) = models.get(&model.0) else { continue };
+        let Some(asset) = models.get(&model.0) else {
+            continue;
+        };
         let skeleton = &asset.skeleton;
         if !player.paused {
             let step = dt * player.speed;
@@ -383,7 +451,9 @@ pub fn respawn_reloaded_bbmodels(
     parts: Query<(), With<BbModelPart>>,
 ) {
     for event in events.read() {
-        let AssetEvent::Modified { id } = event else { continue };
+        let AssetEvent::Modified { id } = event else {
+            continue;
+        };
         for (entity, model, children) in &spawned {
             if model.0.id() != *id {
                 continue;
@@ -397,4 +467,3 @@ pub fn respawn_reloaded_bbmodels(
         }
     }
 }
-

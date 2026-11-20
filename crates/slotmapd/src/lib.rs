@@ -215,11 +215,11 @@ extern crate alloc;
 #[doc(hidden)]
 pub mod __impl {
     pub use core::convert::From;
+    pub use core::hash::Hasher;
     pub use core::result::Result;
     #[cfg(feature = "serde")]
     pub use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub use state_hash::StateHash;
-    pub use core::hash::Hasher;
 }
 
 pub mod basic;
@@ -589,7 +589,6 @@ mod tests {
     #[test]
     fn macro_expansion() {
         #![allow(dead_code)]
-        use super::new_key_type;
 
         // Clobber namespace with clashing names - should still work.
         trait Serialize {}

@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use game::{
-    CutId, HostId, EntityId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, TerrainSnapshot, Tick,
-    WorldCut,
+    CutId, EntityId, HostId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion,
+    TerrainSnapshot, Tick, WorldCut,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -16,7 +16,10 @@ use game::coordinator::StoreDecision;
 use crate::coordinator_tx::Decided;
 use crate::counters::{Counters, StoreCounters};
 use crate::thread::{self, Reply, Request, Stamped};
-use crate::{Declared, Dials, Fence, OpenMode, StoreError, StoreUrl, Succession, SuccessionId, SuccessionKind, SuperRegion};
+use crate::{
+    Declared, Dials, Fence, OpenMode, StoreError, StoreUrl, Succession, SuccessionId,
+    SuccessionKind, SuperRegion,
+};
 
 /// A lone decision's outcome of another kind than asked (a bug of the store thread).
 fn unexpected(d: Decided) -> StoreError {
@@ -194,7 +197,8 @@ impl StoreHandle {
     pub fn open(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<StoreHandle, StoreError> {
         let cuts = Arc::new(thread::CutState::new());
         let counters = Arc::new(Counters::default());
-        let (tx, join, super_region_regions) = thread::spawn(url, dials, mode, cuts.clone(), counters.clone())?;
+        let (tx, join, super_region_regions) =
+            thread::spawn(url, dials, mode, cuts.clone(), counters.clone())?;
         Ok(StoreHandle {
             tx,
             join: Arc::new(Mutex::new(Some(join))),
@@ -250,7 +254,11 @@ impl StoreHandle {
         self.fail_decisions
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .ok()
-            .map(|_| StoreError::Backend("injected decision failure (StoreHandle::fail_next_decisions)".into()))
+            .map(|_| {
+                StoreError::Backend(
+                    "injected decision failure (StoreHandle::fail_next_decisions)".into(),
+                )
+            })
     }
 
     /// Test hook: the host lease (ms) this handle's declarations and registrations judge a
@@ -296,7 +304,9 @@ impl StoreHandle {
     /// once the locks are held. (Postgres.)
     #[doc(hidden)]
     pub fn freeze_in_fenced_tx(&self, fence: Fence, hold_ms: u64) -> Result<(), StoreError> {
-        self.ask(|r| Request::TestHook(crate::thread::TestHook::FreezeInFencedTx(fence, hold_ms), r))
+        self.ask(|r| {
+            Request::TestHook(crate::thread::TestHook::FreezeInFencedTx(fence, hold_ms), r)
+        })
     }
 
     /// Test hook: `n` connections of this store's shared pool are taken and held for
@@ -324,7 +334,9 @@ impl StoreHandle {
         self.fail_writes
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .ok()
-            .map(|_| StoreError::Backend("injected write failure (StoreHandle::fail_next_writes)".into()))
+            .map(|_| {
+                StoreError::Backend("injected write failure (StoreHandle::fail_next_writes)".into())
+            })
     }
 
     /// Regions per super-region side (`world.super_region_regions`): what
@@ -342,7 +354,12 @@ impl StoreHandle {
 
     /// Sends a request stamped with now; a stopped thread gives it back.
     fn send(&self, req: Request) -> Result<(), Request> {
-        self.tx.send(Stamped { sent: std::time::Instant::now(), req }).map_err(|e| e.0.req)
+        self.tx
+            .send(Stamped {
+                sent: std::time::Instant::now(),
+                req,
+            })
+            .map_err(|e| e.0.req)
     }
 
     fn ask<T>(&self, make: impl FnOnce(Reply<T>) -> Request) -> Result<T, StoreError> {
@@ -353,23 +370,43 @@ impl StoreHandle {
             ));
         }
         let (tx, rx) = crossbeam::channel::bounded(1);
-        self.send(make(Reply::sync(tx))).map_err(|_| stopped())?;
+        let reply = Reply::sync(tx, self.engine());
+        let span = reply.span();
+        let req = make(reply);
+        span.record("db.operation", req.category());
+        self.send(req).map_err(|_| stopped())?;
         rx.recv().map_err(|_| stopped())?
     }
 
     /// [`Self::ask`] without waiting: the answer arrives on the receiver (a stopped store
     /// thread: the receiver disconnects).
-    fn ask_later<T>(&self, make: impl FnOnce(Reply<T>) -> Request) -> crossbeam::channel::Receiver<Result<T, StoreError>> {
+    fn ask_later<T>(
+        &self,
+        make: impl FnOnce(Reply<T>) -> Request,
+    ) -> crossbeam::channel::Receiver<Result<T, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
-        let _ = self.send(make(Reply::sync(tx)));
+        let reply = Reply::sync(tx, self.engine());
+        let span = reply.span();
+        let req = make(reply);
+        span.record("db.operation", req.category());
+        let _ = self.send(req);
         rx
     }
 
     /// An answer already known, on a receiver.
-    fn answered<T>(v: Result<T, StoreError>) -> crossbeam::channel::Receiver<Result<T, StoreError>> {
+    fn answered<T>(
+        v: Result<T, StoreError>,
+    ) -> crossbeam::channel::Receiver<Result<T, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
         let _ = tx.send(v);
         rx
+    }
+
+    fn engine(&self) -> &'static str {
+        match self.url {
+            StoreUrl::Sqlite(_) | StoreUrl::Memory => "sqlite",
+            StoreUrl::Postgres(_) => "postgres",
+        }
     }
 
     pub fn world_info(&self) -> Result<WorldInfo, StoreError> {
@@ -392,7 +429,10 @@ impl StoreHandle {
     }
 
     /// One encoded tile row, `None` if the store holds no such tile.
-    pub(crate) fn forged_tile(&self, t: worldgen::forged_tiles::TileCoords) -> Result<Option<Vec<u8>>, StoreError> {
+    pub(crate) fn forged_tile(
+        &self,
+        t: worldgen::forged_tiles::TileCoords,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         self.ask(|r| Request::ForgedTile(t, r))
     }
 
@@ -402,7 +442,11 @@ impl StoreHandle {
 
     /// The region as last committed; `None` if it never was (it never ran).
     /// Fenced: refused with `Fenced` unless `fence` still holds its super-region.
-    pub fn load_region(&self, rc: RegionCoords, fence: &Fence) -> Result<Option<StoredRegion>, StoreError> {
+    pub fn load_region(
+        &self,
+        rc: RegionCoords,
+        fence: &Fence,
+    ) -> Result<Option<StoredRegion>, StoreError> {
         let fence = fence.clone();
         self.ask(|r| Request::LoadRegion(rc, fence, r))
     }
@@ -428,13 +472,18 @@ impl StoreHandle {
     }
 
     /// [`Self::stored_regions`], answered on the receiver (a main loop never waits).
-    pub fn stored_regions_later(&self) -> crossbeam::channel::Receiver<Result<BTreeMap<RegionCoords, u64>, StoreError>> {
+    pub fn stored_regions_later(
+        &self,
+    ) -> crossbeam::channel::Receiver<Result<BTreeMap<RegionCoords, u64>, StoreError>> {
         self.ask_later(Request::StoredRegions)
     }
 
     /// The stored regions saved at `tick` or later (by a cut at `tick` or a later one), with
     /// their `terrain_version`: what a [`crate::CutNotice::Cut`] at `tick` may have changed.
-    pub fn stored_regions_since(&self, tick: Tick) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
+    pub fn stored_regions_since(
+        &self,
+        tick: Tick,
+    ) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
         self.ask(|r| Request::StoredRegionsSince(tick, r))
     }
 
@@ -456,7 +505,11 @@ impl StoreHandle {
     }
 
     /// [`Self::notify_cut`] without waiting (a failure is logged by the store thread).
-    pub fn notify_cut_later(&self, cut: CutId, tick: Tick) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
+    pub fn notify_cut_later(
+        &self,
+        cut: CutId,
+        tick: Tick,
+    ) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
         self.ask_later(|r| Request::NotifyCut(cut, tick, r))
     }
 
@@ -466,9 +519,19 @@ impl StoreHandle {
     /// — says `Cut` per notice and `Resync` on every (re)connect; in both modes a `Resync`
     /// every [`crate::TERRAIN_POLL_SECS`]. SQLite: a receiver that never says anything. The
     /// thread ends once the receiver is dropped.
-    pub fn listen_cuts(&self, mode: crate::NotifyMode) -> crossbeam::channel::Receiver<crate::CutNotice> {
+    pub fn listen_cuts(
+        &self,
+        mode: crate::NotifyMode,
+    ) -> crossbeam::channel::Receiver<crate::CutNotice> {
         let period = crate::listen::poll_period(&self.poll_ms);
-        crate::listen::start(self.listen_url(), "terrain-listener", crate::WORLD_CUT_CHANNEL, mode, period, crate::listen::cut_notices())
+        crate::listen::start(
+            self.listen_url(),
+            "terrain-listener",
+            crate::WORLD_CUT_CHANNEL,
+            mode,
+            period,
+            crate::listen::cut_notices(),
+        )
     }
 
     /// The notices on `channel` (`listen.rs`): in [`crate::NotifyMode::Listen`] one direct,
@@ -477,13 +540,24 @@ impl StoreHandle {
     /// poll period: [`crate::COORDINATOR_POLL_MS`] for [`crate::COORDINATOR_ROW_CHANNEL`], the
     /// terrain poll for any other. SQLite: a receiver that never says anything. The thread ends
     /// once the receiver is dropped.
-    pub fn listen_channel(&self, channel: &'static str, mode: crate::NotifyMode) -> crossbeam::channel::Receiver<crate::Notice> {
+    pub fn listen_channel(
+        &self,
+        channel: &'static str,
+        mode: crate::NotifyMode,
+    ) -> crossbeam::channel::Receiver<crate::Notice> {
         let period = if channel == crate::COORDINATOR_ROW_CHANNEL {
             std::time::Duration::from_millis(crate::COORDINATOR_POLL_MS)
         } else {
             crate::listen::poll_period(&self.poll_ms)
         };
-        crate::listen::start(self.listen_url(), "row-listener", channel, mode, period, |n| n)
+        crate::listen::start(
+            self.listen_url(),
+            "row-listener",
+            channel,
+            mode,
+            period,
+            |n| n,
+        )
     }
 
     /// Where a listener connects: [`crate::WORLD_DB_DIRECT_ENV`]'s URL if set, else the store's
@@ -491,7 +565,10 @@ impl StoreHandle {
     fn listen_url(&self) -> Option<String> {
         match &self.url {
             StoreUrl::Postgres(url) => Some(
-                std::env::var(crate::WORLD_DB_DIRECT_ENV).ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| url.clone()),
+                std::env::var(crate::WORLD_DB_DIRECT_ENV)
+                    .ok()
+                    .filter(|u| !u.trim().is_empty())
+                    .unwrap_or_else(|| url.clone()),
             ),
             StoreUrl::Sqlite(_) | StoreUrl::Memory => None,
         }
@@ -501,9 +578,18 @@ impl StoreHandle {
     /// its cursor `after` deleted (delivered), then at most `limit` of its rows after `after` for
     /// its boot `boot`, as `(seq, game::encode_packet bytes)` in `seq` (commit) order — one
     /// statement, no `coordinator` lock. Read-only handles: `ReadOnly`. SQLite: `Unsupported`.
-    pub async fn mailbox_read(&self, host: HostId, boot: u64, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+    pub async fn mailbox_read(
+        &self,
+        host: HostId,
+        boot: u64,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
         let (tx, rx) = oneshot::channel();
-        self.send(Request::MailboxRead(host, boot, after, limit, Reply::asynch(tx))).map_err(|_| stopped())?;
+        let reply = Reply::asynch(tx, self.engine());
+        reply.span().record("db.operation", "read_ack");
+        self.send(Request::MailboxRead(host, boot, after, limit, reply))
+            .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
     }
 
@@ -512,13 +598,18 @@ impl StoreHandle {
     /// how many rows the host has. SQLite: `Unsupported`.
     pub async fn mailbox_oldest(&self) -> Result<Vec<crate::MailboxHead>, StoreError> {
         let (tx, rx) = oneshot::channel();
-        self.send(Request::MailboxOldest(Reply::asynch(tx))).map_err(|_| stopped())?;
+        let reply = Reply::asynch(tx, self.engine());
+        reply.span().record("db.operation", "read");
+        self.send(Request::MailboxOldest(reply))
+            .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
     }
 
     /// [`Self::mailbox_oldest`], answered on the receiver (the coordinator's ticker reads it with
     /// its `hosts` read).
-    pub fn mailbox_oldest_later(&self) -> crossbeam::channel::Receiver<Result<Vec<crate::MailboxHead>, StoreError>> {
+    pub fn mailbox_oldest_later(
+        &self,
+    ) -> crossbeam::channel::Receiver<Result<Vec<crate::MailboxHead>, StoreError>> {
         self.ask_later(Request::MailboxOldest)
     }
 
@@ -527,9 +618,16 @@ impl StoreHandle {
     /// the newest row kept (another incarnation's cursor: a re-forged world); a read deletes
     /// nothing (transitions prune them by age, `TransitionWrite::login_prune_before_ms`). SQLite:
     /// `Unsupported`.
-    pub async fn login_answers_read(&self, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+    pub async fn login_answers_read(
+        &self,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
         let (tx, rx) = oneshot::channel();
-        self.send(Request::LoginAnswersRead(after, limit, Reply::asynch(tx))).map_err(|_| stopped())?;
+        let reply = Reply::asynch(tx, self.engine());
+        reply.span().record("db.operation", "read");
+        self.send(Request::LoginAnswersRead(after, limit, reply))
+            .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
     }
 
@@ -537,7 +635,8 @@ impl StoreHandle {
     /// [`crate::TERRAIN_POLL_SECS`]). Shared by every clone.
     #[doc(hidden)]
     pub fn set_terrain_poll_period(&self, period: std::time::Duration) {
-        self.poll_ms.store(period.as_millis().max(1) as u64, Ordering::SeqCst);
+        self.poll_ms
+            .store(period.as_millis().max(1) as u64, Ordering::SeqCst);
     }
 
     /// The in-flight rows the last committed cuts left, in their order: host `host`'s
@@ -574,7 +673,9 @@ impl StoreHandle {
             let _ = tx.send(Err(e));
             return rx;
         }
-        if let Err(req) = self.send(Request::CommitCut(Box::new(cut), fence, Reply::sync(tx))) {
+        let reply = Reply::sync(tx, self.engine());
+        reply.span().record("db.operation", "cut_write");
+        if let Err(req) = self.send(Request::CommitCut(Box::new(cut), fence, reply)) {
             if let Request::CommitCut(_, _, reply) = req {
                 reply.send(Err(stopped()));
             }
@@ -617,9 +718,13 @@ impl StoreHandle {
     ) -> crossbeam::channel::Receiver<Result<CutCommitted, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
         let refused = if fence.all_hosts {
-            Some(StoreError::Unsupported("a two-phase cut needs a per-host fence".into()))
+            Some(StoreError::Unsupported(
+                "a two-phase cut needs a per-host fence".into(),
+            ))
         } else if cut.history.is_some() {
-            Some(StoreError::Unsupported("the history is the coordinator's; a host's cut part never carries it".into()))
+            Some(StoreError::Unsupported(
+                "the history is the coordinator's; a host's cut part never carries it".into(),
+            ))
         } else {
             None
         };
@@ -639,7 +744,9 @@ impl StoreHandle {
             }
             *pending = Some(cut.id);
         }
-        let req = Request::PrepareCut(Box::new(cut), fence, generation, Reply::sync(tx));
+        let reply = Reply::sync(tx, self.engine());
+        reply.span().record("db.operation", "cut_write");
+        let req = Request::PrepareCut(Box::new(cut), fence, generation, reply);
         if let Err(Request::PrepareCut(c, _, _, reply)) = self.send(req) {
             self.cuts.settle(c.id);
             reply.send(Err(stopped()));
@@ -679,7 +786,16 @@ impl StoreHandle {
         settles: Vec<SuccessionId>,
         moves: Vec<game::LandMove>,
     ) -> Result<bool, StoreError> {
-        let d = StoreDecision::DecideCut(game::coordinator::CutDecide { cut, tick, commit, hosts, leaving, generation, settles, moves });
+        let d = StoreDecision::DecideCut(game::coordinator::CutDecide {
+            cut,
+            tick,
+            commit,
+            hosts,
+            leaving,
+            generation,
+            settles,
+            moves,
+        });
         match self.decide_alone(d)? {
             Decided::Cut { committed, .. } => committed,
             other => Err(unexpected(other)),
@@ -703,8 +819,20 @@ impl StoreHandle {
     fn decide_alone(&self, d: StoreDecision) -> Result<Decided, StoreError> {
         let cut = matches!(d, StoreDecision::DecideCut(_));
         let injected = cut && self.injected_decision_failure().is_some();
-        let stop_after = if cut { self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take() } else { None };
-        self.ask(|reply| Request::DecideAlone { d: Box::new(d), injected, stop_after, reply })
+        let stop_after = if cut {
+            self.stop_commits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        } else {
+            None
+        };
+        self.ask(|reply| Request::DecideAlone {
+            d: Box::new(d),
+            injected,
+            stop_after,
+            reply,
+        })
     }
 
     /// A host's "abort unless decided": records an abort of `cut` if it has no
@@ -719,7 +847,11 @@ impl StoreHandle {
     }
 
     /// [`Self::abort_cut`], answered on the receiver.
-    pub fn abort_cut_later(&self, cut: CutId, tick: Tick) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
+    pub fn abort_cut_later(
+        &self,
+        cut: CutId,
+        tick: Tick,
+    ) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
         if let Some(e) = self.injected_decision_failure() {
             return Self::answered(Err(e));
         }
@@ -754,7 +886,10 @@ impl StoreHandle {
     }
 
     /// [`Self::cut_decision`], answered on the receiver.
-    pub fn cut_decision_later(&self, cut: CutId) -> crossbeam::channel::Receiver<Result<Option<bool>, StoreError>> {
+    pub fn cut_decision_later(
+        &self,
+        cut: CutId,
+    ) -> crossbeam::channel::Receiver<Result<Option<bool>, StoreError>> {
         self.ask_later(|r| Request::CutDecision(cut, r))
     }
 
@@ -767,7 +902,10 @@ impl StoreHandle {
     }
 
     /// [`Self::cut_decided`], answered on the receiver (a host's main loop never waits).
-    pub fn cut_decided_later(&self, cut: CutId) -> crossbeam::channel::Receiver<Result<Option<bool>, StoreError>> {
+    pub fn cut_decided_later(
+        &self,
+        cut: CutId,
+    ) -> crossbeam::channel::Receiver<Result<Option<bool>, StoreError>> {
         self.ask_later(|r| Request::CutDecided(cut, r))
     }
 
@@ -797,7 +935,12 @@ impl StoreHandle {
         kind: SuccessionKind,
         generation: u64,
     ) -> Result<Declared, StoreError> {
-        match self.decide_alone(StoreDecision::Declare(game::coordinator::Declare { dead, heirs, kind, generation }))? {
+        match self.decide_alone(StoreDecision::Declare(game::coordinator::Declare {
+            dead,
+            heirs,
+            kind,
+            generation,
+        }))? {
             Decided::Declared(declared) => declared,
             other => Err(unexpected(other)),
         }
@@ -842,8 +985,15 @@ impl StoreHandle {
     /// heir or survivor). The lock walk is in `succession.rs`. Postgres only (`Unsupported` on
     /// SQLite).
     #[doc(hidden)]
-    pub fn end_landless_host(&self, host: HostId, boot: u64) -> Result<crate::LandlessEnd, StoreError> {
-        match self.decide_alone(StoreDecision::EndLandless(game::coordinator::EndLandless { host, boot }))? {
+    pub fn end_landless_host(
+        &self,
+        host: HostId,
+        boot: u64,
+    ) -> Result<crate::LandlessEnd, StoreError> {
+        match self.decide_alone(StoreDecision::EndLandless(game::coordinator::EndLandless {
+            host,
+            boot,
+        }))? {
             Decided::Ended { outcome, .. } => outcome,
             other => Err(unexpected(other)),
         }
@@ -857,7 +1007,10 @@ impl StoreHandle {
     /// [`game::coordinator::Assigned::HostNotLive`], [`game::coordinator::Assigned::HostDraining`].
     /// The lock walk is in `succession.rs`. Postgres only (`Unsupported` on SQLite).
     #[doc(hidden)]
-    pub fn assign_land(&self, a: game::coordinator::AssignLand) -> Result<game::coordinator::Assigned, StoreError> {
+    pub fn assign_land(
+        &self,
+        a: game::coordinator::AssignLand,
+    ) -> Result<game::coordinator::Assigned, StoreError> {
         match self.decide_alone(StoreDecision::AssignLand(a))? {
             Decided::Assigned { outcome, .. } => outcome,
             other => Err(unexpected(other)),
@@ -868,7 +1021,10 @@ impl StoreHandle {
     /// coordinator adds one only inside its transition; here in a transition of its own over the
     /// row as it stands. Only `Done` writes. The lock walk is in `succession.rs`. Postgres only.
     #[doc(hidden)]
-    pub fn add_desired_host(&self, a: game::coordinator::AddHost) -> Result<game::coordinator::HostAdded, StoreError> {
+    pub fn add_desired_host(
+        &self,
+        a: game::coordinator::AddHost,
+    ) -> Result<game::coordinator::HostAdded, StoreError> {
         match self.decide_alone(StoreDecision::AddHost(a))? {
             Decided::HostAdded { outcome, .. } => outcome,
             other => Err(unexpected(other)),
@@ -878,7 +1034,10 @@ impl StoreHandle {
     /// Elastic 4: a `desired_hosts` row marked draining, and its host's `hosts` row
     /// ([`StoreDecision::DrainHost`]) — test support, as [`Self::add_desired_host`].
     #[doc(hidden)]
-    pub fn drain_desired_host(&self, d: game::coordinator::DrainHost) -> Result<game::coordinator::HostDrained, StoreError> {
+    pub fn drain_desired_host(
+        &self,
+        d: game::coordinator::DrainHost,
+    ) -> Result<game::coordinator::HostDrained, StoreError> {
         match self.decide_alone(StoreDecision::DrainHost(d))? {
             Decided::HostDrained { outcome, .. } => outcome,
             other => Err(unexpected(other)),
@@ -888,7 +1047,10 @@ impl StoreHandle {
     /// Elastic 4: a `desired_hosts` row deleted ([`StoreDecision::RemoveHost`]) — test support,
     /// as [`Self::add_desired_host`].
     #[doc(hidden)]
-    pub fn remove_desired_host(&self, r: game::coordinator::RemoveHost) -> Result<game::coordinator::HostRemoved, StoreError> {
+    pub fn remove_desired_host(
+        &self,
+        r: game::coordinator::RemoveHost,
+    ) -> Result<game::coordinator::HostRemoved, StoreError> {
         match self.decide_alone(StoreDecision::RemoveHost(r))? {
             Decided::HostRemoved { outcome, .. } => outcome,
             other => Err(unexpected(other)),
@@ -919,14 +1081,20 @@ impl StoreHandle {
     }
 
     /// [`Self::open_successions`], answered on the receiver.
-    pub fn open_successions_later(&self) -> crossbeam::channel::Receiver<Result<Vec<Succession>, StoreError>> {
+    pub fn open_successions_later(
+        &self,
+    ) -> crossbeam::channel::Receiver<Result<Vec<Succession>, StoreError>> {
         self.ask_later(Request::OpenSuccessions)
     }
 
     /// The in-flight rows the last committed cuts left for host `host`, read by its heir
     /// `fence.owner`: refused with `Unsupported` unless an open succession makes it the heir
     /// of `host` (as a cut part's [`WorldCut::adopts`]).
-    pub fn load_in_flight_of(&self, host: HostId, fence: &Fence) -> Result<Vec<InFlightRow>, StoreError> {
+    pub fn load_in_flight_of(
+        &self,
+        host: HostId,
+        fence: &Fence,
+    ) -> Result<Vec<InFlightRow>, StoreError> {
         let fence = fence.clone();
         self.ask(|r| Request::LoadInFlightOf(host, fence, r))
     }
@@ -944,7 +1112,10 @@ impl StoreHandle {
 
     /// The region of every stored row of each id (an id stored twice gives two entries, an
     /// unknown one none), in the order of `ids`, then by region.
-    pub fn regions_of_entities(&self, ids: Vec<EntityId>) -> Result<Vec<(EntityId, RegionCoords)>, StoreError> {
+    pub fn regions_of_entities(
+        &self,
+        ids: Vec<EntityId>,
+    ) -> Result<Vec<(EntityId, RegionCoords)>, StoreError> {
         self.ask(|r| Request::RegionsOfEntities(ids, r))
     }
 
@@ -960,7 +1131,10 @@ impl StoreHandle {
     /// the caller's namespaced player key — `server::player_store::PlayerKey`).
     /// A key never seen gets the next id, written at once (the one write
     /// outside cuts); its record is `None` until a cut writes one.
-    pub fn resolve_player(&self, key: &str) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
+    pub fn resolve_player(
+        &self,
+        key: &str,
+    ) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
         let key = key.to_string();
         self.ask(|r| Request::ResolvePlayer(key, r))
     }
@@ -981,14 +1155,21 @@ impl StoreHandle {
         key: &str,
     ) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
         let (tx, rx) = oneshot::channel();
-        self.send(Request::ResolvePlayer(key.to_string(), Reply::asynch(tx))).map_err(|_| stopped())?;
+        let reply = Reply::asynch(tx, self.engine());
+        reply.span().record("db.operation", "player_write_read");
+        self.send(Request::ResolvePlayer(key.to_string(), reply))
+            .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
     }
 
     /// Claims `srs` for `owner` (one transaction): each super-region's epoch
     /// goes up by one (a new one starts at 1), fencing whoever held it.
     /// Unguarded: a boot's claim before it registered (`AllInOne`, `Static`), tools and tests.
-    pub fn claim_super_regions(&self, owner: HostId, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+    pub fn claim_super_regions(
+        &self,
+        owner: HostId,
+        srs: Vec<SuperRegion>,
+    ) -> Result<Fence, StoreError> {
         self.ask(|r| Request::ClaimSuperRegions(owner, srs, None, r))
     }
 
@@ -996,7 +1177,12 @@ impl StoreHandle {
     /// None }` (nothing claimed) unless host `owner`'s `hosts` row is still that live boot —
     /// a boot declared dead (R4) cannot take its rows back from the heir. What a `claim` host
     /// re-claims its own rows with.
-    pub fn claim_super_regions_live(&self, owner: HostId, boot: u64, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+    pub fn claim_super_regions_live(
+        &self,
+        owner: HostId,
+        boot: u64,
+        srs: Vec<SuperRegion>,
+    ) -> Result<Fence, StoreError> {
         self.ask(|r| Request::ClaimSuperRegions(owner, srs, Some(boot), r))
     }
 
@@ -1004,7 +1190,11 @@ impl StoreHandle {
     /// epoch 1 — or [`crate::Bootstrapped::Exists`] when a row with a projection is there
     /// (first writer wins; nothing written: load it). There is no claim: the row's version is
     /// the coordinator's fence.
-    pub fn bootstrap_coordinator(&self, core: Vec<u8>, history: Vec<u8>) -> Result<crate::Bootstrapped, StoreError> {
+    pub fn bootstrap_coordinator(
+        &self,
+        core: Vec<u8>,
+        history: Vec<u8>,
+    ) -> Result<crate::Bootstrapped, StoreError> {
         self.ask(|r| Request::BootstrapCoordinator(core, history, r))
     }
 
@@ -1023,7 +1213,10 @@ impl StoreHandle {
     /// `Conflict` when the version moved (nothing written, no decision run); any other error:
     /// whether it committed is not known. SQLite: `Unsupported` for a transition with
     /// decisions.
-    pub fn write_transition_later(&self, w: crate::TransitionWrite) -> crossbeam::channel::Receiver<Result<crate::TransitionWritten, StoreError>> {
+    pub fn write_transition_later(
+        &self,
+        w: crate::TransitionWrite,
+    ) -> crossbeam::channel::Receiver<Result<crate::TransitionWritten, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
         if let Some(e) = self.injected_failure() {
             let _ = tx.send(Err(e));
@@ -1032,9 +1225,18 @@ impl StoreHandle {
         let injected: Vec<bool> = w
             .decisions
             .iter()
-            .map(|d| matches!(d, StoreDecision::DecideCut(_)) && self.injected_decision_failure().is_some())
+            .map(|d| {
+                matches!(d, StoreDecision::DecideCut(_))
+                    && self.injected_decision_failure().is_some()
+            })
             .collect();
-        let req = Request::WriteTransition { w: Box::new(w), injected, reply: Reply::sync(tx) };
+        let reply = Reply::sync(tx, self.engine());
+        reply.span().record("db.operation", "coordinator_write");
+        let req = Request::WriteTransition {
+            w: Box::new(w),
+            injected,
+            reply,
+        };
         if let Err(Request::WriteTransition { reply, .. }) = self.send(req) {
             reply.send(Err(stopped()));
         }
@@ -1046,9 +1248,16 @@ impl StoreHandle {
     /// committed cut announced. Answered on the receiver; a failure is retried by the caller (or
     /// left to the lookups: a host's `cut_decided`, a start's `resolve_prepared`, the listeners'
     /// poll).
-    pub fn after_commit_later(&self, a: crate::AfterCommit) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
+    pub fn after_commit_later(
+        &self,
+        a: crate::AfterCommit,
+    ) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
         let stop_after = match a {
-            crate::AfterCommit::FinishCut { .. } => self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take(),
+            crate::AfterCommit::FinishCut { .. } => self
+                .stop_commits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
             crate::AfterCommit::NotifyCut { .. } => None,
         };
         self.ask_later(|r| Request::AfterCommit(a, stop_after, r))
@@ -1060,14 +1269,19 @@ impl StoreHandle {
     }
 
     /// [`Self::load_coordinator`], answered on the receiver (a caller bounded by a deadline).
-    pub fn load_coordinator_later(&self) -> crossbeam::channel::Receiver<Result<Option<StoredCoordinator>, StoreError>> {
+    pub fn load_coordinator_later(
+        &self,
+    ) -> crossbeam::channel::Receiver<Result<Option<StoredCoordinator>, StoreError>> {
         self.ask_later(Request::LoadCoordinator)
     }
 
     /// The coordinator's projection with its history only if a transition wrote it after
     /// version `history_version` (else [`StoredCoordinator::history`] is empty: the caller's
     /// history is the row's); `None` before the first write (Elastic 2b Task 4).
-    pub fn load_coordinator_since(&self, history_version: u64) -> Result<Option<StoredCoordinator>, StoreError> {
+    pub fn load_coordinator_since(
+        &self,
+        history_version: u64,
+    ) -> Result<Option<StoredCoordinator>, StoreError> {
         self.ask(|r| Request::LoadCoordinatorSince(history_version, r))
     }
 
@@ -1104,12 +1318,17 @@ impl StoreHandle {
     }
 
     /// [`Self::beat_replica`], answered on the receiver.
-    pub fn beat_replica_later(&self, me: game::coordinator::ReplicaId) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
+    pub fn beat_replica_later(
+        &self,
+        me: game::coordinator::ReplicaId,
+    ) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
         self.ask_later(|r| Request::BeatReplica(me, r))
     }
 
     /// Every `coordinator_replicas` row, by id, answered on the receiver (a replica's lapse watch).
-    pub fn replicas_later(&self) -> crossbeam::channel::Receiver<Result<Vec<crate::ReplicaRow>, StoreError>> {
+    pub fn replicas_later(
+        &self,
+    ) -> crossbeam::channel::Receiver<Result<Vec<crate::ReplicaRow>, StoreError>> {
         self.ask_later(Request::Replicas)
     }
 
@@ -1128,7 +1347,10 @@ impl StoreHandle {
     /// The world's clock anchor (R3): stores `proposed` if the world has none, and
     /// returns the stored anchor either way — the first writer wins, so every host
     /// and the coordinator of a world number ticks from the same instant.
-    pub fn ensure_clock_anchor(&self, proposed: game::ClockAnchor) -> Result<game::ClockAnchor, StoreError> {
+    pub fn ensure_clock_anchor(
+        &self,
+        proposed: game::ClockAnchor,
+    ) -> Result<game::ClockAnchor, StoreError> {
         self.ask(|r| Request::EnsureClockAnchor(proposed, r))
     }
 
@@ -1162,7 +1384,11 @@ impl StoreHandle {
     ///
     /// Then every clean or dead row that owns no `super_regions` and no `in_flight` row and
     /// that no open succession names is deleted (its id is never issued again).
-    pub fn register_host(&self, host: NewHost, policy: game::CrashPolicy) -> Result<Registered, StoreError> {
+    pub fn register_host(
+        &self,
+        host: NewHost,
+        policy: game::CrashPolicy,
+    ) -> Result<Registered, StoreError> {
         self.ask(|r| Request::RegisterHost(host, policy, r))
     }
 
@@ -1188,7 +1414,12 @@ impl StoreHandle {
     /// With Postgres a row lock held by a registration or a decision makes the beat fail with an error
     /// after [`crate::HEARTBEAT_LOCK_TIMEOUT_MS`] (not `live: false`). Unfenced on purpose: it writes only the caller's own row and proves nothing but
     /// liveness (ownership is what the fence proves, and every write still checks it).
-    pub fn heartbeat(&self, ordinal: HostId, boot: u64, load: game::HostLoad) -> Result<Beat, StoreError> {
+    pub fn heartbeat(
+        &self,
+        ordinal: HostId,
+        boot: u64,
+        load: game::HostLoad,
+    ) -> Result<Beat, StoreError> {
         self.ask(|r| Request::Heartbeat(ordinal, boot, load, r))
     }
 
@@ -1220,7 +1451,9 @@ impl StoreHandle {
     }
 
     /// [`Self::owners`], answered on the receiver.
-    pub fn owners_later(&self) -> crossbeam::channel::Receiver<Result<Vec<(SuperRegion, i64, u64)>, StoreError>> {
+    pub fn owners_later(
+        &self,
+    ) -> crossbeam::channel::Receiver<Result<Vec<(SuperRegion, i64, u64)>, StoreError>> {
         self.ask_later(Request::Owners)
     }
 
@@ -1231,7 +1464,10 @@ impl StoreHandle {
     }
 
     /// [`Self::owned_by`], answered on the receiver.
-    pub fn owned_by_later(&self, owner: HostId) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
+    pub fn owned_by_later(
+        &self,
+        owner: HostId,
+    ) -> crossbeam::channel::Receiver<Result<Fence, StoreError>> {
         self.ask_later(|r| Request::OwnedBy(owner, r))
     }
 

@@ -51,13 +51,21 @@ pub struct ExportedChunk {
 #[derive(Serialize)]
 pub enum ExportedCollider {
     /// Solid cells of one `Voxels` grid, in the shape's iteration order.
-    Voxels { voxel_size: [f32; 3], keys: Vec<[i32; 3]> },
+    Voxels {
+        voxel_size: [f32; 3],
+        keys: Vec<[i32; 3]>,
+    },
     /// The full-chunk collapse; `translation` is body-local.
-    Cuboid { half_extents: [f32; 3], translation: [f32; 3] },
+    Cuboid {
+        half_extents: [f32; 3],
+        translation: [f32; 3],
+    },
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1).map(|a| a.parse::<i32>().expect("region coords are integers"));
+    let mut args = std::env::args()
+        .skip(1)
+        .map(|a| a.parse::<i32>().expect("region coords are integers"));
     let (x, z) = (args.next().unwrap_or(0), args.next().unwrap_or(0));
     let mats = Materials {
         stone: game::BlockId(2),
@@ -71,7 +79,10 @@ fn main() {
         biome: worldgen::material::BiomeBlocks::NONE,
     };
     let rc = RegionCoords::new(x, z);
-    let region = game::Region::from_columns(rc, worldgen::generate_region(rc, worldgen::WORLD_SEED, mats));
+    let region = game::Region::from_columns(
+        rc,
+        worldgen::generate_region(rc, worldgen::WORLD_SEED, mats),
+    );
     let physics = &region.data().data.physics;
 
     let (mut voxel_grids, mut cells, mut cuboids) = ([0usize; 3], [0usize; 3], 0usize);
@@ -98,7 +109,10 @@ fn main() {
                 };
                 voxel_grids[scale] += 1;
                 cells[scale] += keys.len();
-                colliders.push(ExportedCollider::Voxels { voxel_size: s.to_array(), keys });
+                colliders.push(ExportedCollider::Voxels {
+                    voxel_size: s.to_array(),
+                    keys,
+                });
             } else if let Some(cub) = c.shape().as_cuboid() {
                 let he = cub.half_extents;
                 let tr = local.translation;
@@ -108,10 +122,16 @@ fn main() {
                     translation: tr.to_array(),
                 });
             } else {
-                panic!("unexpected terrain collider shape {:?}", c.shape().shape_type());
+                panic!(
+                    "unexpected terrain collider shape {:?}",
+                    c.shape().shape_type()
+                );
             }
         }
-        chunks.push(ExportedChunk { origin: t.to_array(), colliders });
+        chunks.push(ExportedChunk {
+            origin: t.to_array(),
+            colliders,
+        });
     }
 
     let export = RegionExport {
@@ -119,7 +139,10 @@ fn main() {
         region_chunks: game::REGION_CHUNKS as u32,
         region_size: game::REGION_SIZE,
         units_per_meter: game::movement::UNITS_PER_METER,
-        player_capsule: [game::movement::PLAYER_CAPSULE_HALF_HEIGHT, game::movement::PLAYER_CAPSULE_RADIUS],
+        player_capsule: [
+            game::movement::PLAYER_CAPSULE_HALF_HEIGHT,
+            game::movement::PLAYER_CAPSULE_RADIUS,
+        ],
         walk_speed: game::movement::WALK_SPEED * game::movement::UNITS_PER_METER,
         chunks,
     };
@@ -132,7 +155,10 @@ fn main() {
     println!("bodies (one per chunk): {}", export.chunks.len());
     println!("cuboid collapses:       {cuboids}");
     for (i, size) in [16, 8, 1].iter().enumerate() {
-        println!("voxels grids @ {size:>2}:     {} ({} solid cells)", voxel_grids[i], cells[i]);
+        println!(
+            "voxels grids @ {size:>2}:     {} ({} solid cells)",
+            voxel_grids[i], cells[i]
+        );
     }
     println!("wrote {} ({} bytes)", path.display(), bytes.len());
 }

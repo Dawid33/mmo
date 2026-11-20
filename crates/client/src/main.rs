@@ -4,10 +4,10 @@ use bevy::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
+#[cfg(not(target_arch = "wasm32"))]
+use client::instance::{Command, start_game_thread};
 use client::renderer;
 use client::world_scale::WorldScale;
-#[cfg(not(target_arch = "wasm32"))]
-use client::instance::{start_game_thread, Command};
 
 /// Share of total cores given to the AsyncCompute task pool, which runs the
 /// background chunk-meshing jobs (`renderer/meshing.rs`). Normal clients take
@@ -102,21 +102,6 @@ pub fn orion_worker_main(role: String, base: String) {
     client::web_worker::worker_main(&role, base);
 }
 
-/// `VOXEL_VSYNC=on|1|true`: vsync (`AutoVsync`); `immediate` / `mailbox` /
-/// `fifo`: that present mode exactly (fails at startup if the surface lacks
-/// it); unset or anything else: `AutoNoVsync`.
-#[cfg(not(target_arch = "wasm32"))]
-fn present_mode_from_env() -> bevy::window::PresentMode {
-    use bevy::window::PresentMode;
-    match std::env::var("VOXEL_VSYNC").unwrap_or_default().to_ascii_lowercase().as_str() {
-        "on" | "1" | "true" => PresentMode::AutoVsync,
-        "immediate" => PresentMode::Immediate,
-        "mailbox" => PresentMode::Mailbox,
-        "fifo" => PresentMode::Fifo,
-        _ => PresentMode::AutoNoVsync,
-    }
-}
-
 fn main() {
     // Before any thread: it may set WGPU_ADAPTER_NAME (never the slow NVK GPU
     // by accident). `RENDER_BENCH` and probes pin theirs and are left alone.
@@ -149,7 +134,7 @@ fn main() {
     #[cfg(all(feature = "pyroscope", not(target_arch = "wasm32")))]
     let agent_running = if std::env::var("PYROSCOPE").is_ok() {
         use pyroscope::PyroscopeAgent;
-        use pyroscope_pprofrs::{pprof_backend, PprofConfig};
+        use pyroscope_pprofrs::{PprofConfig, pprof_backend};
         let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
             .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
             .build()
@@ -168,6 +153,11 @@ fn main() {
     // (VOXEL_VIEW_DISTANCE_M); VOXEL_FOG_VISIBILITY_M sets the haze alone.
     let view_distance = client::renderer::atmosphere::ViewDistance::from_env(&world_scale)
         .unwrap_or_else(|error| panic!("{error}"));
+    // The saved graphics settings (the Settings window), unless the
+    // environment above pins the view: they may replace the ring table and
+    // the haze.
+    let (world_scale, view_distance, graphics_settings) =
+        client::graphics_settings::startup(world_scale, view_distance);
 
     // Shared debug toggles: render thread (F3 dev panel) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
@@ -179,7 +169,11 @@ fn main() {
     let debug_scenario = {
         let args: Vec<String> = std::env::args().skip(1).collect();
         client::debug_launch::parse_args(&args)
-            .and_then(|scenario| scenario.map(client::debug_launch::DebugLaunchPlugin::from_env).transpose())
+            .and_then(|scenario| {
+                scenario
+                    .map(client::debug_launch::DebugLaunchPlugin::from_env)
+                    .transpose()
+            })
             .unwrap_or_else(|message| {
                 eprintln!("{message}");
                 std::process::exit(2);
@@ -200,10 +194,16 @@ fn main() {
     let (command_send, game_send, client_recv, request_send) = {
         let command_send = start_game_thread();
         let channels = client::session::SessionChannels::new();
-        let app_ends = (channels.game_send.clone(), channels.client_recv.clone(), channels.request_send.clone());
+        let app_ends = (
+            channels.game_send.clone(),
+            channels.client_recv.clone(),
+            channels.request_send.clone(),
+        );
         if skip_menu {
             let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466));
-            command_send.send(channels.connect(addr, debug_flags.clone(), world_scale, None, None)).unwrap();
+            command_send
+                .send(channels.connect(addr, debug_flags.clone(), world_scale, None, None))
+                .unwrap();
         }
         let (game_send, client_recv, request_send) = app_ends;
         (command_send, game_send, client_recv, request_send)
@@ -214,7 +214,11 @@ fn main() {
     #[cfg(target_arch = "wasm32")]
     let (game_send, client_recv, request_send) = {
         let channels = client::session::SessionChannels::new();
-        (channels.game_send.clone(), channels.client_recv.clone(), channels.request_send.clone())
+        (
+            channels.game_send.clone(),
+            channels.client_recv.clone(),
+            channels.request_send.clone(),
+        )
     };
 
     // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
@@ -233,22 +237,24 @@ fn main() {
         title: "Errantry".into(),
         ..Default::default()
     };
-    // Native presents without vsync by default, so the frame rate shows the
-    // real per-frame cost (a vsync'd frame sits at the refresh rate however much
-    // headroom it has); `VOXEL_VSYNC=on` brings vsync back. The browser paces
-    // its own frames.
+    // Vsync is the player's setting (the Settings window, on by default);
+    // `VOXEL_VSYNC` pins it at start — the measuring recipes set `off`, so the
+    // frame rate shows the real per-frame cost. The browser paces its own
+    // frames.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        primary_window.present_mode = present_mode_from_env();
+        primary_window.present_mode =
+            client::graphics_settings::present_mode_at_start(&graphics_settings);
     }
     // `VOXEL_WINDOW=WxH`: the window's physical size (perf A/B: a quarter of
     // the pixels tells a fragment-bound pass from a geometry-bound one).
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some((w, h)) = std::env::var("VOXEL_WINDOW")
-        .ok()
-        .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))))
-    {
-        primary_window.resolution = bevy::window::WindowResolution::new(w, h).with_scale_factor_override(1.0);
+    if let Some((w, h)) = std::env::var("VOXEL_WINDOW").ok().and_then(|v| {
+        v.split_once('x')
+            .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+    }) {
+        primary_window.resolution =
+            bevy::window::WindowResolution::new(w, h).with_scale_factor_override(1.0);
     }
     #[cfg(not(target_arch = "wasm32"))]
     if renderer::render_bench::enabled() {
@@ -257,7 +263,6 @@ fn main() {
             renderer::render_bench::BENCHMARK_HEIGHT,
         )
         .with_scale_factor_override(1.0);
-        primary_window.present_mode = bevy::window::PresentMode::AutoNoVsync;
     }
     // Track the canvas's parent (the full-viewport <body> in index.html) so the
     // render buffer resizes with the browser window instead of CSS-stretching.
@@ -289,12 +294,17 @@ fn main() {
             .set(renderer::render_plugin()),
     )
     .insert_resource(world_scale)
-    .insert_resource(view_distance);
+    .insert_resource(view_distance)
+    .insert_resource(graphics_settings)
+    .add_plugins(client::graphics_settings::GraphicsSettingsPlugin);
     // App states + the session reset registry + the frontend camera. The menu
     // is the default; the dev bypass starts straight in the world; the browser
     // with a login service opens on the login screen (else its join-only menu).
     let login_first = cfg!(target_arch = "wasm32") && client::login::login_url().is_some();
-    app.add_plugins(client::session::SessionPlugin { skip_menu, login_first });
+    app.add_plugins(client::session::SessionPlugin {
+        skip_menu,
+        login_first,
+    });
     // The menu screens: on every build, since a bypass session can still end
     // up in the menu (leave, lost server). `skip_menu` only picks the initial
     // state; the browser's menu only joins a server (`frontend::JOIN_ONLY`).
@@ -367,6 +377,4 @@ fn main() {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    
-}
+mod tests {}

@@ -51,7 +51,10 @@ impl WorldgenCache {
             .join("../../target/worldgen-cache")
             .join(format!("{key:08x}"));
         if let Err(e) = fs::create_dir_all(&dir) {
-            warn!("worldgen cache: cannot create {}: {e}, caching disabled", dir.display());
+            warn!(
+                "worldgen cache: cannot create {}: {e}, caching disabled",
+                dir.display()
+            );
             return Self { dir: None };
         }
         info!("worldgen cache: {}", dir.display());
@@ -79,7 +82,10 @@ impl WorldgenCache {
             Err(e) => {
                 // Format drift in `game`'s column types lands here: treat it
                 // as a miss and regenerate rather than fail the region.
-                warn!("worldgen cache: discarding unreadable {}: {e}", path.display());
+                warn!(
+                    "worldgen cache: discarding unreadable {}: {e}",
+                    path.display()
+                );
                 let _ = fs::remove_file(&path);
                 None
             }
@@ -102,12 +108,20 @@ impl WorldgenCache {
         // directory and may generate the same region at the same time.
         let thread = format!("{:?}", std::thread::current().id());
         let thread: String = thread.chars().filter(char::is_ascii_digit).collect();
-        let tmp = dir.join(format!("{}.tmp.{}.{thread}", region_file(rc), std::process::id()));
+        let tmp = dir.join(format!(
+            "{}.tmp.{}.{thread}",
+            region_file(rc),
+            std::process::id()
+        ));
         if let Err(e) = fs::write(&tmp, &bytes).and_then(|()| fs::rename(&tmp, &path)) {
             warn!("worldgen cache: cannot write {}: {e}", path.display());
             let _ = fs::remove_file(&tmp);
         } else {
-            info!("worldgen cache: stored {} ({} KiB)", region_file(rc), bytes.len() / 1024);
+            info!(
+                "worldgen cache: stored {} ({} KiB)",
+                region_file(rc),
+                bytes.len() / 1024
+            );
         }
     }
 
@@ -151,14 +165,30 @@ fn region_file(rc: RegionCoords) -> String {
 /// (sorted by path). `None` if the source tree is unreadable (e.g. a binary
 /// deployed away from the repo) — the cache just disables itself then.
 fn cache_key(seed: u64, block_manifest: &str) -> Option<u32> {
-    cache_key_for(seed, block_manifest, game::REGION_CHUNKS, crate::islands::SPAWN_ISLAND_CELLS)
+    cache_key_for(
+        seed,
+        block_manifest,
+        game::REGION_CHUNKS,
+        crate::islands::SPAWN_ISLAND_CELLS,
+    )
 }
 
 /// `cache_key` for an explicit region edge: a region file holds exactly
 /// `region_chunks²` columns, so builds with different `REGION_CHUNKS` must
 /// never share a cache directory.
-fn cache_key_for(seed: u64, block_manifest: &str, region_chunks: usize, island_cells: u32) -> Option<u32> {
-    cache_key_with(seed, block_manifest, region_chunks, island_cells, crate::structures::active().content_hash())
+fn cache_key_for(
+    seed: u64,
+    block_manifest: &str,
+    region_chunks: usize,
+    island_cells: u32,
+) -> Option<u32> {
+    cache_key_with(
+        seed,
+        block_manifest,
+        region_chunks,
+        island_cells,
+        crate::structures::active().content_hash(),
+    )
 }
 
 /// `cache_key_for` with the structure source's identity given: hashed only when non-zero, after every
@@ -211,4 +241,3 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     }
     Ok(())
 }
-

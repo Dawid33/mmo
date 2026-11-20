@@ -76,9 +76,23 @@ impl BiomeBlocks {
             salt: resolve("salt"),
         };
         let all = [
-            b.snow, b.ice, b.glacier_ice, b.mud, b.peat, b.gravel, b.red_sand, b.dry_grass, b.podzol, b.frozen_dirt, b.salt,
+            b.snow,
+            b.ice,
+            b.glacier_ice,
+            b.mud,
+            b.peat,
+            b.gravel,
+            b.red_sand,
+            b.dry_grass,
+            b.podzol,
+            b.frozen_dirt,
+            b.salt,
         ];
-        if all.contains(&BlockId::AIR) { BiomeBlocks::NONE } else { b }
+        if all.contains(&BlockId::AIR) {
+            BiomeBlocks::NONE
+        } else {
+            b
+        }
     }
 }
 
@@ -110,10 +124,18 @@ pub const SALT_FLAT_SAND_DEPTH_BLOCKS: i32 = 2;
 
 impl GroundCover {
     /// No soil: the rock comes straight to the surface.
-    pub const BARE_ROCK: GroundCover = GroundCover { surface: BlockId::AIR, soil: BlockId::AIR, soil_depth: 0 };
+    pub const BARE_ROCK: GroundCover = GroundCover {
+        surface: BlockId::AIR,
+        soil: BlockId::AIR,
+        soil_depth: 0,
+    };
 
     const fn of(surface: BlockId, soil: BlockId, soil_depth: i32) -> GroundCover {
-        GroundCover { surface, soil, soil_depth }
+        GroundCover {
+            surface,
+            soil,
+            soil_depth,
+        }
     }
 }
 
@@ -134,8 +156,11 @@ pub struct TreeBlocks {
 impl TreeBlocks {
     /// Trees disabled (every block air).
     pub const NONE: TreeBlocks = TreeBlocks {
-        species: [SpeciesBlocks { log: BlockId::AIR, branch: BlockId::AIR, leaves: BlockId::AIR };
-            crate::trees::SPECIES.len()],
+        species: [SpeciesBlocks {
+            log: BlockId::AIR,
+            branch: BlockId::AIR,
+            leaves: BlockId::AIR,
+        }; crate::trees::SPECIES.len()],
     };
 
     pub fn enabled(&self) -> bool {
@@ -152,7 +177,11 @@ impl TreeBlocks {
                     // Leafless: `leaves` is never placed; the block itself
                     // (not air) keeps "a species' blocks" free of air.
                     let b = resolve(s.name);
-                    return SpeciesBlocks { log: b, branch: b, leaves: b };
+                    return SpeciesBlocks {
+                        log: b,
+                        branch: b,
+                        leaves: b,
+                    };
                 }
                 SpeciesBlocks {
                     log: resolve(&format!("{}_log", s.name)),
@@ -184,7 +213,11 @@ impl Materials {
     /// `material_at`'s cover at surface block `block_y`: grass over dirt, or
     /// sand on beaches.
     fn temperate_cover(&self, block_y: i32) -> GroundCover {
-        GroundCover::of(self.material_at(0, block_y), self.material_at(1, block_y), SOIL_DEPTH_BLOCKS)
+        GroundCover::of(
+            self.material_at(0, block_y),
+            self.material_at(1, block_y),
+            SOIL_DEPTH_BLOCKS,
+        )
     }
 
     /// The ground cover of a column of `biome` whose surface block is
@@ -218,7 +251,9 @@ impl Materials {
             Biome::Tundra => GroundCover::of(b.frozen_dirt, b.gravel, TUNDRA_GRAVEL_DEPTH_BLOCKS),
             Biome::Glacier => GroundCover::BARE_ROCK,
             Biome::SandDesert => GroundCover::of(self.sand, self.sand, DESERT_SAND_DEPTH_BLOCKS),
-            Biome::RockyWasteland => GroundCover::of(b.gravel, b.gravel, WASTELAND_GRAVEL_DEPTH_BLOCKS),
+            Biome::RockyWasteland => {
+                GroundCover::of(b.gravel, b.gravel, WASTELAND_GRAVEL_DEPTH_BLOCKS)
+            }
             Biome::Badlands => GroundCover::of(b.red_sand, b.red_sand, SOIL_DEPTH_BLOCKS),
             Biome::Marsh => GroundCover::of(b.mud, b.peat, MARSH_PEAT_DEPTH_BLOCKS),
             Biome::Swamp => GroundCover::of(b.mud, b.peat, SWAMP_PEAT_DEPTH_BLOCKS),
@@ -265,4 +300,3 @@ impl Materials {
         }
     }
 }
-

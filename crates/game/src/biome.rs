@@ -25,8 +25,15 @@ pub const MOUNTAIN_MIN_M: f32 = 1200.0;
 /// ~750, broadleaf / rain forest wetter. So desert < 250 mm, grassland
 /// 250–450, savanna 450–650, shrubland / marsh 650–800, conifer 800–1,100,
 /// broadleaf from 1,100 mm.
-pub const RAIN_INDEX_MM: [(f32, f32); 7] =
-    [(0.0, 0.0), (250.0, 10.0), (450.0, 20.0), (650.0, 33.0), (800.0, 66.0), (1100.0, 75.0), (2500.0, 100.0)];
+pub const RAIN_INDEX_MM: [(f32, f32); 7] = [
+    (0.0, 0.0),
+    (250.0, 10.0),
+    (450.0, 20.0),
+    (650.0, 33.0),
+    (800.0, 66.0),
+    (1100.0, 75.0),
+    (2500.0, 100.0),
+];
 /// Below this mean annual temperature (°C) land is tundra or glacier and
 /// the sea is frozen.
 pub const FROZEN_C: f32 = -5.0;
@@ -56,8 +63,11 @@ pub const FORGE_DRAINAGE_FLAT_DRY: u8 = 35;
 /// DF 0, flat dry impermeable ground (shale, clay) is the top of DF's
 /// waterlogged row (just under `DRAINAGE_WET` — sand in a desert, marsh in
 /// the wet), and the rest stretches to 100.
-pub const DRAINAGE_MAP: [(f32, f32); 3] =
-    [(FORGE_DRAINAGE_FLOOR as f32, 0.0), (FORGE_DRAINAGE_FLAT_DRY as f32 + 1.0, 33.0), (100.0, 100.0)];
+pub const DRAINAGE_MAP: [(f32, f32); 3] = [
+    (FORGE_DRAINAGE_FLOOR as f32, 0.0),
+    (FORGE_DRAINAGE_FLAT_DRY as f32 + 1.0, 33.0),
+    (100.0, 100.0),
+];
 /// DF drainage cuts (on DF's scale, after `df_drainage`).
 /// Under this is waterlogged: desert sand, marsh and swamp rows.
 pub const DRAINAGE_WET: f32 = 33.0;
@@ -240,7 +250,11 @@ pub fn classify(c: &CellClimate) -> Biome {
         return Biome::Lake;
     }
     if c.height_m < 0.0 {
-        return if t < FROZEN_C { Biome::FrozenOcean } else { Biome::Ocean };
+        return if t < FROZEN_C {
+            Biome::FrozenOcean
+        } else {
+            Biome::Ocean
+        };
     }
     if c.height_m >= MOUNTAIN_MIN_M {
         return Biome::Mountain;
@@ -377,4 +391,3 @@ pub fn region_type(b: Biome, drainage: u8) -> RegionType {
         Biome::SandDesert | Biome::RockyWasteland | Biome::Badlands => RegionType::Desert,
     }
 }
-

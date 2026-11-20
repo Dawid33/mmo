@@ -28,14 +28,20 @@ pub fn adventure_civ_at(sites: &[SiteMarker], civs: &[CivMarker], index: i32) ->
 }
 
 /// The Adventure tab's site at button `index` (the picked civ's populated sites).
-pub fn adventure_site_at(sel: &AdventureSelection, sites: &[SiteMarker], index: i32) -> Option<SiteMarker> {
+pub fn adventure_site_at(
+    sel: &AdventureSelection,
+    sites: &[SiteMarker],
+    index: i32,
+) -> Option<SiteMarker> {
     let i = usize::try_from(index).ok()?;
     sel.sites(sites).into_iter().nth(i)
 }
 
 /// A populated site in `region` (a site marker clicked on the map).
 pub fn adventure_site_in(sites: &[SiteMarker], region: RegionCoords) -> Option<&SiteMarker> {
-    sites.iter().find(|s| s.region == region && !s.abandoned && s.population > 0)
+    sites
+        .iter()
+        .find(|s| s.region == region && !s.abandoned && s.population > 0)
 }
 
 /// "<site> — pop N".
@@ -69,10 +75,19 @@ pub const LEGENDS_ALL_TEXT: &str = "All events";
 pub fn legends_filter_entries(civs: &[CivMarker], sites: &[SiteMarker]) -> Vec<LegendsFilterEntry> {
     let mut civs: Vec<&CivMarker> = civs.iter().collect();
     civs.sort_by_key(|c| c.civ);
-    let mut out =
-        vec![LegendsFilterEntry { filter: LegendsFilter::All, text: LEGENDS_ALL_TEXT.into(), depth: 0, dimmed: false }];
+    let mut out = vec![LegendsFilterEntry {
+        filter: LegendsFilter::All,
+        text: LEGENDS_ALL_TEXT.into(),
+        depth: 0,
+        dimmed: false,
+    }];
     for civ in civs {
-        out.push(LegendsFilterEntry { filter: LegendsFilter::Civ(civ.civ), text: civ.name.clone(), depth: 0, dimmed: false });
+        out.push(LegendsFilterEntry {
+            filter: LegendsFilter::Civ(civ.civ),
+            text: civ.name.clone(),
+            depth: 0,
+            dimmed: false,
+        });
         for s in sites.iter().filter(|s| s.civ == civ.civ) {
             out.push(LegendsFilterEntry {
                 filter: LegendsFilter::Site(s.site),
@@ -87,14 +102,24 @@ pub fn legends_filter_entries(civs: &[CivMarker], sites: &[SiteMarker]) -> Vec<L
 
 /// The row of `filter` in `entries`; -1 when it is not listed (a person filter).
 pub fn legends_filter_index(entries: &[LegendsFilterEntry], filter: &LegendsFilter) -> i32 {
-    entries.iter().position(|e| &e.filter == filter).map_or(-1, |i| i as i32)
+    entries
+        .iter()
+        .position(|e| &e.filter == filter)
+        .map_or(-1, |i| i as i32)
 }
 
 /// "<filter name> — N events" (the All row's name for `All`).
-pub fn legends_header(entries: &[LegendsFilterEntry], filter: &LegendsFilter, total: u32) -> String {
+pub fn legends_header(
+    entries: &[LegendsFilterEntry],
+    filter: &LegendsFilter,
+    total: u32,
+) -> String {
     let name = match filter {
         LegendsFilter::Person(p) => format!("Person {}", p.0),
-        f => entries.iter().find(|e| &e.filter == f).map_or_else(|| "Events".to_string(), |e| e.text.clone()),
+        f => entries
+            .iter()
+            .find(|e| &e.filter == f)
+            .map_or_else(|| "Events".to_string(), |e| e.text.clone()),
     };
     let noun = if total == 1 { "event" } else { "events" };
     format!("{name} \u{2014} {total} {noun}")
@@ -143,7 +168,10 @@ pub struct TabsView {
 pub fn tabs_view(h: &HistoryView) -> TabsView {
     let civs = AdventureSelection::civs(&h.sites, &h.civs);
     let sites = h.adventure.sites(&h.sites);
-    let picked_site = h.adventure.site.and_then(|id| sites.iter().position(|s| s.site == id));
+    let picked_site = h
+        .adventure
+        .site
+        .and_then(|id| sites.iter().position(|s| s.site == id));
     let legends_filters = legends_filter_entries(&h.civs, &h.sites);
     TabsView {
         adventure_civ_picked: h
@@ -199,7 +227,11 @@ pub fn sync_arrival_tabs(ui: &GameUi, h: &HistoryView, shown: &mut Option<TabsVi
         let rows: Vec<LegendsFilterRow> = new
             .legends_filters
             .iter()
-            .map(|e| LegendsFilterRow { text: e.text.as_str().into(), depth: e.depth, dimmed: e.dimmed })
+            .map(|e| LegendsFilterRow {
+                text: e.text.as_str().into(),
+                depth: e.depth,
+                dimmed: e.dimmed,
+            })
             .collect();
         ui.set_legends_filters(ModelRc::new(VecModel::from(rows)));
     }
@@ -211,13 +243,21 @@ pub fn sync_arrival_tabs(ui: &GameUi, h: &HistoryView, shown: &mut Option<TabsVi
     }
     if first || old.legends_lines != new.legends_lines {
         let model = ui.get_legends_lines();
-        let appended = !old.legends_lines.is_empty() && new.legends_lines.starts_with(&old.legends_lines);
+        let appended =
+            !old.legends_lines.is_empty() && new.legends_lines.starts_with(&old.legends_lines);
         let extended = appended
             && model.row_count() == old.legends_lines.len()
-            && model.as_any().downcast_ref::<VecModel<SharedString>>().is_some_and(|vm| {
-                vm.extend(new.legends_lines[old.legends_lines.len()..].iter().map(|s| SharedString::from(s.as_str())));
-                true
-            });
+            && model
+                .as_any()
+                .downcast_ref::<VecModel<SharedString>>()
+                .is_some_and(|vm| {
+                    vm.extend(
+                        new.legends_lines[old.legends_lines.len()..]
+                            .iter()
+                            .map(|s| SharedString::from(s.as_str())),
+                    );
+                    true
+                });
         if !extended {
             ui.set_legends_lines(strings(&new.legends_lines));
         }
@@ -227,4 +267,3 @@ pub fn sync_arrival_tabs(ui: &GameUi, h: &HistoryView, shown: &mut Option<TabsVi
     }
     *shown = Some(new);
 }
-

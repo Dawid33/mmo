@@ -71,7 +71,7 @@
 use std::path::Path;
 
 use game::HostId;
-use worldgen::forge::{self, play, ForgeParams};
+use worldgen::forge::{self, ForgeParams, play};
 
 use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
@@ -96,7 +96,9 @@ pub fn run(args: &[String]) -> Result<String, String> {
         Some("retile") => {
             let db = parse_retile(&args[1..])?;
             let crc = retile(&db)?;
-            Ok(format!("worldctl: re-tiled {db} from its archive (content crc {crc:#010x})"))
+            Ok(format!(
+                "worldctl: re-tiled {db} from its archive (content crc {crc:#010x})"
+            ))
         }
         Some("export") => {
             let (db, out) = parse_export(&args[1..])?;
@@ -106,21 +108,31 @@ pub fn run(args: &[String]) -> Result<String, String> {
         Some("clock-reset") => {
             let db = parse_clock_reset(&args[1..])?;
             clock_reset(&db)?;
-            Ok(format!("worldctl: cleared the world clock anchor of {db}; the next host or coordinator start writes a new one"))
+            Ok(format!(
+                "worldctl: cleared the world clock anchor of {db}; the next host or coordinator start writes a new one"
+            ))
         }
         Some("super-region") => {
             let (db, n) = parse_super_region(&args[1..])?;
             set_super_region(&db, n)?;
-            Ok(format!("worldctl: the world's super-regions are now {n} x {n} regions; run its hosts with VOXEL_SUPER_REGION_REGIONS={n}"))
+            Ok(format!(
+                "worldctl: the world's super-regions are now {n} x {n} regions; run its hosts with VOXEL_SUPER_REGION_REGIONS={n}"
+            ))
         }
         Some("hosts") => {
-            let [url] = &args[1..] else { return Err(USAGE.to_string()) };
-            let db = StoreUrl::parse(url).map_err(|e| format!("hosts: the world store URL: {e}"))?;
+            let [url] = &args[1..] else {
+                return Err(USAGE.to_string());
+            };
+            let db =
+                StoreUrl::parse(url).map_err(|e| format!("hosts: the world store URL: {e}"))?;
             list_hosts(&db)
         }
         Some("desired") => {
-            let [url] = &args[1..] else { return Err(USAGE.to_string()) };
-            let db = StoreUrl::parse(url).map_err(|e| format!("desired: the world store URL: {e}"))?;
+            let [url] = &args[1..] else {
+                return Err(USAGE.to_string());
+            };
+            let db =
+                StoreUrl::parse(url).map_err(|e| format!("desired: the world store URL: {e}"))?;
             list_desired(&db)
         }
         Some("drain") => {
@@ -150,24 +162,47 @@ fn parse_db(value: &str) -> Result<StoreUrl, String> {
 /// `forge`'s flags: the store and the forge parameters.
 pub fn parse_forge(args: &[String]) -> Result<(StoreUrl, ForgeParams), String> {
     let mut db = None;
-    let mut p = ForgeParams { quiet: false, ..ForgeParams::default() };
+    let mut p = ForgeParams {
+        quiet: false,
+        ..ForgeParams::default()
+    };
     let (mut width, mut height) = (None, None);
     let mut it = args.iter();
     while let Some(flag) = it.next() {
-        let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value\n{USAGE}"));
+        let mut value = || {
+            it.next()
+                .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))
+        };
         match flag.as_str() {
             "--db" => db = Some(parse_db(value()?)?),
             "--size" => {
                 let size = play::size_flag(value()?)?;
                 (width, height) = (Some(size.width_m), Some(size.height_m));
             }
-            "--width" => width = Some(value()?.parse().map_err(|_| "--width <metres>".to_string())?),
-            "--height" => height = Some(value()?.parse().map_err(|_| "--height <metres>".to_string())?),
-            "--cell" => p.cell_m = value()?.parse().map_err(|_| "--cell <metres>".to_string())?,
+            "--width" => {
+                width = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "--width <metres>".to_string())?,
+                )
+            }
+            "--height" => {
+                height = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "--height <metres>".to_string())?,
+                )
+            }
+            "--cell" => {
+                p.cell_m = value()?
+                    .parse()
+                    .map_err(|_| "--cell <metres>".to_string())?
+            }
             "--seed" => {
                 let v = value()?;
                 let hex = v.trim_start_matches("0x").replace('_', "");
-                p.seed = u64::from_str_radix(&hex, 16).map_err(|_| format!("--seed {v}: not a hex number"))?;
+                p.seed = u64::from_str_radix(&hex, 16)
+                    .map_err(|_| format!("--seed {v}: not a hex number"))?;
             }
             // A generator preset (forge::presets, by name, any case): replaces
             // every knob, so give it before any --set.
@@ -176,7 +211,9 @@ pub fn parse_forge(args: &[String]) -> Result<(StoreUrl, ForgeParams), String> {
                 let preset = forge::presets::PRESETS
                     .iter()
                     .find(|p| p.name.eq_ignore_ascii_case(name))
-                    .ok_or_else(|| format!("--preset: no preset named {name} (see forge/presets.rs)"))?;
+                    .ok_or_else(|| {
+                        format!("--preset: no preset named {name} (see forge/presets.rs)")
+                    })?;
                 p.knobs = forge::presets::apply(preset);
             }
             // In the knob's range: load holds a stored knob to it.
@@ -185,7 +222,10 @@ pub fn parse_forge(args: &[String]) -> Result<(StoreUrl, ForgeParams), String> {
         }
     }
     (p.width_m, p.height_m) = play::sides_flags(width, height, (p.width_m, p.height_m))?;
-    Ok((db.ok_or_else(|| format!("forge needs --db <url>\n{USAGE}"))?, p))
+    Ok((
+        db.ok_or_else(|| format!("forge needs --db <url>\n{USAGE}"))?,
+        p,
+    ))
 }
 
 fn parse_retile(args: &[String]) -> Result<StoreUrl, String> {
@@ -206,7 +246,9 @@ fn parse_clock_reset(args: &[String]) -> Result<StoreUrl, String> {
 /// `super-region`'s store and side: `<url> <n>`, `n` a whole number >= 1 (what hosts accept
 /// in `VOXEL_SUPER_REGION_REGIONS`). Errors never echo the URL.
 fn parse_super_region(args: &[String]) -> Result<(StoreUrl, u32), String> {
-    let [url, n] = args else { return Err(USAGE.to_string()) };
+    let [url, n] = args else {
+        return Err(USAGE.to_string());
+    };
     let n = n
         .trim()
         .parse::<u32>()
@@ -220,12 +262,12 @@ fn parse_super_region(args: &[String]) -> Result<(StoreUrl, u32), String> {
 /// `retire-host`'s store and host id: `<url> <host id>` (the bare number `worldctl hosts`
 /// lists). Errors never echo the URL.
 fn parse_retire_host(args: &[String]) -> Result<(StoreUrl, HostId), String> {
-    let [url, id] = args else { return Err(USAGE.to_string()) };
-    let id = id
-        .trim()
-        .parse::<u64>()
-        .map(HostId)
-        .map_err(|_| format!("retire-host: {id:?} is not a host id (the number `worldctl hosts <url>` lists)"))?;
+    let [url, id] = args else {
+        return Err(USAGE.to_string());
+    };
+    let id = id.trim().parse::<u64>().map(HostId).map_err(|_| {
+        format!("retire-host: {id:?} is not a host id (the number `worldctl hosts <url>` lists)")
+    })?;
     let db = StoreUrl::parse(url).map_err(|e| format!("retire-host: the world store URL: {e}"))?;
     Ok((db, id))
 }
@@ -238,14 +280,15 @@ fn parse_drain(args: &[String]) -> Result<(StoreUrl, HostId, u64), String> {
         [url, id, flag, secs] if flag == "--in" => (url, id, Some(secs)),
         _ => return Err(USAGE.to_string()),
     };
-    let id = id
-        .trim()
-        .parse::<u64>()
-        .map(HostId)
-        .map_err(|_| format!("drain: {id:?} is not a host id (the number `worldctl hosts <url>` lists)"))?;
+    let id = id.trim().parse::<u64>().map(HostId).map_err(|_| {
+        format!("drain: {id:?} is not a host id (the number `worldctl hosts <url>` lists)")
+    })?;
     let secs = match secs {
         None => game::DRAIN_WARNING_SECS,
-        Some(s) => s.trim().parse::<u64>().map_err(|_| format!("drain: --in {s:?} is not a number of seconds"))?,
+        Some(s) => s
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("drain: --in {s:?} is not a number of seconds"))?,
     };
     if secs > crate::DRAIN_MAX_SECS {
         return Err(format!(
@@ -261,15 +304,22 @@ fn parse_drain(args: &[String]) -> Result<(StoreUrl, HostId, u64), String> {
 /// `worldctl drain`: marks host `id` of `db` draining within `in_ms` and prints its
 /// [`host_line`] as it stands after the mark. Errors never echo the URL.
 pub fn drain_host(db: &StoreUrl, id: HostId, in_ms: u64) -> Result<String, String> {
-    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer).map_err(|e| format!("drain: the world store: {e}"))?;
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer)
+        .map_err(|e| format!("drain: the world store: {e}"))?;
     let result = (|| {
         let fail = |e: crate::StoreError| format!("drain: {e}");
         store.drain_host(id, in_ms).map_err(fail)?;
         let rows = store.hosts().map_err(fail)?;
         let owners = store.owners().map_err(fail)?;
         let now = store.db_now_ms().map_err(fail)?;
-        let row = rows.iter().find(|r| r.id == id).ok_or_else(|| format!("drain: host {}'s row is gone", id.0))?;
-        let land = owners.iter().filter(|(_, o, _)| u64::try_from(*o).is_ok_and(|o| o == id.0)).count();
+        let row = rows
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| format!("drain: host {}'s row is gone", id.0))?;
+        let land = owners
+            .iter()
+            .filter(|(_, o, _)| u64::try_from(*o).is_ok_and(|o| o == id.0))
+            .count();
         let line = host_line(row, land, now);
         // Another live host that is not draining: the next gate host and claimer. None: say so.
         let lease = store.host_lease_ms();
@@ -318,7 +368,12 @@ fn parse_export(args: &[String]) -> Result<(StoreUrl, String), String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--db" => db = Some(parse_db(it.next().ok_or_else(|| format!("--db needs a value\n{USAGE}"))?)?),
+            "--db" => {
+                db = Some(parse_db(
+                    it.next()
+                        .ok_or_else(|| format!("--db needs a value\n{USAGE}"))?,
+                )?)
+            }
             path if out.is_none() && !path.starts_with("--") => out = Some(path.to_string()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
@@ -342,10 +397,17 @@ pub fn forge_into(db: &StoreUrl, params: &ForgeParams) -> Result<u32, String> {
         let info = store.world_info().map_err(|e| e.to_string())?;
         let regions = store.stored_regions().map_err(|e| e.to_string())?;
         if info.has_artifact || !regions.is_empty() {
-            return Err(format!("{db} already holds a world; forge into a new database"));
+            return Err(format!(
+                "{db} already holds a world; forge into a new database"
+            ));
         }
         let bytes = std::panic::catch_unwind(|| forge::forge(params).artifact(params).to_bytes())
-            .map_err(|e| format!("the forge failed: {}", forge::play::panic_message(e.as_ref())))?;
+            .map_err(|e| {
+            format!(
+                "the forge failed: {}",
+                forge::play::panic_message(e.as_ref())
+            )
+        })?;
         crate::write_tiled(&store, bytes).map_err(|e| e.to_string())
     })();
     store.shutdown();
@@ -386,7 +448,8 @@ pub fn clock_reset(db: &StoreUrl) -> Result<(), String> {
 /// Sets `db`'s super-region side to `n`, refused unless no host has claimed a super-region
 /// yet. Errors never echo the URL.
 pub fn set_super_region(db: &StoreUrl, n: u32) -> Result<(), String> {
-    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer).map_err(|e| format!("the world store: {e}"))?;
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer)
+        .map_err(|e| format!("the world store: {e}"))?;
     let result = match store.set_super_region_regions(n) {
         Ok(true) => Ok(()),
         Ok(false) => Err(format!(
@@ -403,18 +466,36 @@ pub fn set_super_region(db: &StoreUrl, n: u32) -> Result<(), String> {
 /// One line of `worldctl hosts` for `row` (the module docs), `land` super-regions owned, the
 /// database clock `now_ms`.
 pub fn host_line(row: &crate::HostRow, land: usize, now_ms: u64) -> String {
-    let name = if row.name.is_empty() { "-" } else { row.name.as_str() };
-    let state = if row.state == crate::HOST_LIVE { "live" } else { "dead" };
+    let name = if row.name.is_empty() {
+        "-"
+    } else {
+        row.name.as_str()
+    };
+    let state = if row.state == crate::HOST_LIVE {
+        "live"
+    } else {
+        "dead"
+    };
     let clean = if row.clean { "clean" } else { "dirty" };
-    let seen = if row.seen_ms == 0 { "vouched".to_string() } else { now_ms.saturating_sub(row.seen_ms).to_string() };
-    let drain = row.drain_in_ms.map_or_else(|| "-".to_string(), |ms| ms.to_string());
-    format!("{} {name} {state} {clean} land={land} seen={seen} drain={drain}", row.id.0)
+    let seen = if row.seen_ms == 0 {
+        "vouched".to_string()
+    } else {
+        now_ms.saturating_sub(row.seen_ms).to_string()
+    };
+    let drain = row
+        .drain_in_ms
+        .map_or_else(|| "-".to_string(), |ms| ms.to_string());
+    format!(
+        "{} {name} {state} {clean} land={land} seen={seen} drain={drain}",
+        row.id.0
+    )
 }
 
 /// `worldctl hosts <url>`: every `hosts` row of `db`, one [`host_line`] each, by id. Opened
 /// read-only (beside a running world). Errors never echo the URL.
 pub fn list_hosts(db: &StoreUrl) -> Result<String, String> {
-    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::ReadOnly).map_err(|e| format!("hosts: the world store: {e}"))?;
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::ReadOnly)
+        .map_err(|e| format!("hosts: the world store: {e}"))?;
     let result = (|| {
         let fail = |e: crate::StoreError| format!("hosts: {e}");
         let rows = store.hosts().map_err(fail)?;
@@ -423,7 +504,10 @@ pub fn list_hosts(db: &StoreUrl) -> Result<String, String> {
         let lines: Vec<String> = rows
             .iter()
             .map(|r| {
-                let land = owners.iter().filter(|(_, o, _)| u64::try_from(*o).is_ok_and(|o| o == r.id.0)).count();
+                let land = owners
+                    .iter()
+                    .filter(|(_, o, _)| u64::try_from(*o).is_ok_and(|o| o == r.id.0))
+                    .count();
                 host_line(r, land, now)
             })
             .collect();
@@ -436,18 +520,28 @@ pub fn list_hosts(db: &StoreUrl) -> Result<String, String> {
 /// One `worldctl desired` line: `<name> slot=<n> <wanted|draining> age=<ms>`.
 pub fn desired_line(row: &game::coordinator::DesiredHost, now_ms: u64) -> String {
     let state = if row.draining { "draining" } else { "wanted" };
-    format!("{} slot={} {state} age={}", row.name, row.slot, now_ms.saturating_sub(row.created_ms))
+    format!(
+        "{} slot={} {state} age={}",
+        row.name,
+        row.slot,
+        now_ms.saturating_sub(row.created_ms)
+    )
 }
 
 /// `worldctl desired <url>`: every `desired_hosts` row of `db`, one [`desired_line`] each, by
 /// slot. Opened read-only (beside a running world). Errors never echo the URL.
 pub fn list_desired(db: &StoreUrl) -> Result<String, String> {
-    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::ReadOnly).map_err(|e| format!("desired: the world store: {e}"))?;
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::ReadOnly)
+        .map_err(|e| format!("desired: the world store: {e}"))?;
     let result = (|| {
         let fail = |e: crate::StoreError| format!("desired: {e}");
         let rows = store.desired_hosts().map_err(fail)?;
         let now = store.db_now_ms().map_err(fail)?;
-        Ok(rows.iter().map(|r| desired_line(r, now)).collect::<Vec<_>>().join("\n"))
+        Ok(rows
+            .iter()
+            .map(|r| desired_line(r, now))
+            .collect::<Vec<_>>()
+            .join("\n"))
     })();
     store.shutdown();
     result
@@ -459,7 +553,8 @@ pub fn retire_host(db: &StoreUrl, ordinal: HostId) -> Result<String, String> {
     if !matches!(db, StoreUrl::Postgres(_)) {
         return Err("retire-host: a world of several hosts is a Postgres world; this store has one host, nothing to retire".into());
     }
-    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer).map_err(|e| format!("retire-host: the world store: {e}"))?;
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer)
+        .map_err(|e| format!("retire-host: the world store: {e}"))?;
     let result = retire_on(&store, db, ordinal);
     store.shutdown();
     result
@@ -472,12 +567,17 @@ fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: HostId) -> Result<Stri
     let fail = |e: crate::StoreError| format!("retire-host: {e}");
     let rows = store.hosts().map_err(fail)?;
     let now = store.db_now_ms().map_err(fail)?;
-    let fresh = |r: &crate::HostRow| r.seen_ms != 0 && now.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS;
+    let fresh =
+        |r: &crate::HostRow| r.seen_ms != 0 && now.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS;
     let running = |r: &crate::HostRow| !r.clean && r.state == crate::HOST_LIVE && fresh(r);
     if rows.iter().any(|r| r.id == ordinal && running(r)) {
         return Err(format!("retire-host: host {ord} is running: stop it first"));
     }
-    let alive: Vec<HostId> = rows.iter().filter(|r| r.id != ordinal && running(r)).map(|r| r.id).collect();
+    let alive: Vec<HostId> = rows
+        .iter()
+        .filter(|r| r.id != ordinal && running(r))
+        .map(|r| r.id)
+        .collect();
     let alive_n: Vec<u64> = alive.iter().map(|h| h.0).collect();
     if !alive.is_empty() {
         return match store.vouch_host(ordinal).map_err(fail)? {
@@ -485,7 +585,9 @@ fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: HostId) -> Result<Stri
                 "worldctl: host {ord}'s row in {db} is vouched dead (seen_ms = 0); hosts {alive_n:?} run: the coordinator \
                  declares host {ord} dead at its next read and one of them inherits its land, if it holds any (claim ownership)"
             )),
-            crate::Vouched::Running => Err(format!("retire-host: host {ord} is running: stop it first")),
+            crate::Vouched::Running => {
+                Err(format!("retire-host: host {ord} is running: stop it first"))
+            }
             crate::Vouched::Refused(why) => Err(format!("retire-host: {why}")),
         };
     }
@@ -495,14 +597,16 @@ fn retire_on(store: &StoreHandle, db: &StoreUrl, ordinal: HostId) -> Result<Stri
 }
 
 /// What `retire-host` says with no host running (Elastic 2a: the offline retirement is gone).
-const OFFLINE_RETIRE_REFUSED: &str =
-    "no host is running: start one — the first registration takes the land (a total crash); retire-host only vouches \
+const OFFLINE_RETIRE_REFUSED: &str = "no host is running: start one — the first registration takes the land (a total crash); retire-host only vouches \
      for a dead row while hosts run";
 
 /// Rolls `db`'s world back (`rollback --yes`): `(generation, successions abandoned)`.
 pub fn rollback(db: &StoreUrl) -> Result<(u64, u64), String> {
-    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer).map_err(|e| format!("rollback: the world store: {e}"))?;
-    let result = store.rollback_world_operator().map_err(|e| format!("rollback: {e}"));
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer)
+        .map_err(|e| format!("rollback: the world store: {e}"))?;
+    let result = store
+        .rollback_world_operator()
+        .map_err(|e| format!("rollback: {e}"));
     store.shutdown();
     result
 }
@@ -516,7 +620,9 @@ pub fn retile(db: &StoreUrl) -> Result<u32, String> {
         let archive = store
             .forged_archive()
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("{db} keeps no archived forge file to re-tile from; re-forge the world"))?;
+            .ok_or_else(|| {
+                format!("{db} keeps no archived forge file to re-tile from; re-forge the world")
+            })?;
         crate::write_tiled(&store, archive).map_err(|e| e.to_string())
     })();
     store.shutdown();

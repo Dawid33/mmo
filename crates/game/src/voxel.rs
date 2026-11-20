@@ -4,8 +4,8 @@ use block_mesh::ndshape::ConstShape3u32;
 use block_mesh::{MergeVoxel, VoxelVisibility};
 
 use crate::block::{
-    local_index, voxel_index, Block, BlockIndex, ChiselData, BLOCK_VOXELS, BRICKS_PER_CHUNK_EDGE, CHUNK_BLOCKS,
-    CHUNK_BLOCK_COUNT,
+    BLOCK_VOXELS, BRICKS_PER_CHUNK_EDGE, Block, BlockIndex, CHUNK_BLOCK_COUNT, CHUNK_BLOCKS,
+    ChiselData, local_index, voxel_index,
 };
 use crate::registry::BlockId;
 
@@ -43,7 +43,10 @@ pub struct DenseBlocks {
 
 impl DenseBlocks {
     fn new(blocks: Box<[Block]>) -> Self {
-        Self { blocks, digest: DigestCache::default() }
+        Self {
+            blocks,
+            digest: DigestCache::default(),
+        }
     }
 
     /// `(crc32, length)` of the grid's state-hash byte stream ([`dense_stream`]),
@@ -92,7 +95,10 @@ impl DigestCache {
 
     fn set(&self, (crc, len): (u32, u64)) {
         debug_assert!(len < 1 << 31);
-        self.0.store(Self::SET | len << 32 | crc as u64, std::sync::atomic::Ordering::Relaxed);
+        self.0.store(
+            Self::SET | len << 32 | crc as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     fn clear(&mut self) {
@@ -102,7 +108,9 @@ impl DigestCache {
 
 impl Clone for DigestCache {
     fn clone(&self) -> Self {
-        Self(std::sync::atomic::AtomicU64::new(self.0.load(std::sync::atomic::Ordering::Relaxed)))
+        Self(std::sync::atomic::AtomicU64::new(
+            self.0.load(std::sync::atomic::Ordering::Relaxed),
+        ))
     }
 }
 
@@ -170,7 +178,11 @@ impl Default for ChunkBlocks {
 impl ChunkBlocks {
     /// The canonical form of a linear block list (`len == CHUNK_BLOCK_COUNT`).
     pub fn from_vec(blocks: Vec<Block>) -> Self {
-        assert_eq!(blocks.len(), CHUNK_BLOCK_COUNT, "a chunk holds exactly CHUNK_BLOCK_COUNT blocks");
+        assert_eq!(
+            blocks.len(),
+            CHUNK_BLOCK_COUNT,
+            "a chunk holds exactly CHUNK_BLOCK_COUNT blocks"
+        );
         match Self::all_equal(&blocks) {
             Some(b) => ChunkBlocks::Uniform(b),
             None => ChunkBlocks::Dense(DenseBlocks::new(blocks.into_boxed_slice())),
@@ -229,7 +241,15 @@ impl ChunkBlocks {
     }
 }
 
-#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize, ::borrow::Partial, Hash, state_hash::StateHash)]
+#[derive(
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    ::borrow::Partial,
+    Hash,
+    state_hash::StateHash,
+)]
 #[module(crate)]
 pub struct Chunk {
     /// Authoritative block grid, `CHUNK_BLOCK_COUNT` blocks, canonical.
@@ -251,7 +271,10 @@ impl Clone for Chunk {
     fn clone(&self) -> Self {
         #[cfg(test)]
         CHUNK_CLONES.with(|c| c.set(c.get() + 1));
-        Self { blocks: self.blocks.clone(), chisel: self.chisel.clone() }
+        Self {
+            blocks: self.blocks.clone(),
+            chisel: self.chisel.clone(),
+        }
     }
 }
 
@@ -259,7 +282,10 @@ impl Default for Chunk {
     /// All-air. `Component<T>` requires `T: Default`; real content comes from
     /// constructors like [`Chunk::flat_floor`].
     fn default() -> Self {
-        Self { blocks: ChunkBlocks::default(), chisel: BTreeMap::new() }
+        Self {
+            blocks: ChunkBlocks::default(),
+            chisel: BTreeMap::new(),
+        }
     }
 }
 
@@ -295,7 +321,10 @@ impl Chunk {
                 }
             }
         }
-        Self { blocks: ChunkBlocks::from_vec(blocks), chisel }
+        Self {
+            blocks: ChunkBlocks::from_vec(blocks),
+            chisel,
+        }
     }
 
     /// Block at block-granularity coords (each axis 0..CHUNK_BLOCKS).
@@ -313,7 +342,10 @@ impl Chunk {
 
     /// A chunk uniformly filled with `block` (no chisel detail).
     pub fn uniform(block: Block) -> Self {
-        Self { blocks: ChunkBlocks::Uniform(block), chisel: BTreeMap::new() }
+        Self {
+            blocks: ChunkBlocks::Uniform(block),
+            chisel: BTreeMap::new(),
+        }
     }
 
     /// True iff every block equals `block` (full Block, incl. `data`) and there
@@ -373,8 +405,14 @@ pub struct BrickView<'a> {
 impl Chunk {
     /// Brick `b` (each axis `0..BRICKS_PER_CHUNK_EDGE`) of this chunk.
     pub fn brick(&self, b: [usize; 3]) -> BrickView<'_> {
-        debug_assert!(b.iter().all(|&v| v < BRICKS_PER_CHUNK_EDGE), "brick {b:?} outside the chunk");
-        BrickView { chunk: self, origin: b.map(|v| v * BRICK_BLOCKS) }
+        debug_assert!(
+            b.iter().all(|&v| v < BRICKS_PER_CHUNK_EDGE),
+            "brick {b:?} outside the chunk"
+        );
+        BrickView {
+            chunk: self,
+            origin: b.map(|v| v * BRICK_BLOCKS),
+        }
     }
 
     /// Every brick with its chunk-local brick coords, x fastest, then y, then z.
@@ -390,7 +428,11 @@ impl Chunk {
 impl BrickView<'_> {
     fn index(&self, bx: usize, by: usize, bz: usize) -> BlockIndex {
         debug_assert!(bx < BRICK_BLOCKS && by < BRICK_BLOCKS && bz < BRICK_BLOCKS);
-        BlockIndex::from_xyz(self.origin[0] + bx, self.origin[1] + by, self.origin[2] + bz)
+        BlockIndex::from_xyz(
+            self.origin[0] + bx,
+            self.origin[1] + by,
+            self.origin[2] + bz,
+        )
     }
 
     /// Block at brick-local block coords (each axis `0..BRICK_BLOCKS`).
@@ -437,7 +479,9 @@ impl BrickView<'_> {
                     for vz in 0..BLOCK_VOXELS {
                         for vy in 0..BLOCK_VOXELS {
                             for vx in 0..BLOCK_VOXELS {
-                                let m = materials.as_ref().map_or(id, |m| m[local_index(vx, vy, vz)]);
+                                let m = materials
+                                    .as_ref()
+                                    .map_or(id, |m| m[local_index(vx, vy, vz)]);
                                 let li = voxel_index(
                                     bx * BLOCK_VOXELS + vx,
                                     by * BLOCK_VOXELS + vy,
@@ -484,7 +528,18 @@ impl ChunkCoords {
 
 /// Region-local (x, z) address of a vertical column, 0..REGION_CHUNKS.
 #[derive(
-    Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    state_hash::StateHash,
+    PartialOrd,
+    Ord,
 )]
 pub struct ColumnCoords {
     pub x: usize,
@@ -497,7 +552,18 @@ impl ColumnCoords {
     }
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone, Hash, state_hash::StateHash, PartialEq, Eq)]
+#[derive(
+    Default,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    Copy,
+    Clone,
+    Hash,
+    state_hash::StateHash,
+    PartialEq,
+    Eq,
+)]
 pub struct Voxel {
     pub block: BlockId,
 }

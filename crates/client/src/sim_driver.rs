@@ -7,15 +7,15 @@
 //! ([`crate::web_worker::sim`]) and [`drive_sim`] only moves messages; with
 //! workers off (`?workers=0`, or a page that did not publish the module) the
 //! sim runs here, on the page's main thread, once per frame.
+use crate::connections::ConnEvent;
 use bevy::platform::cell::SyncCell;
 use bevy::prelude::*;
 use crossbeam::channel::Receiver;
-use crate::connections::ConnEvent;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
+use crate::GameInstanceManager;
 use crate::session::{SessionChannels, SessionEnded};
 use crate::web_endpoint::WebServer;
-use crate::GameInstanceManager;
 
 /// The inline (main-thread) backend.
 pub struct SimDriver {
@@ -53,24 +53,40 @@ pub fn start_session(
     credential: Option<game::Credential>,
 ) -> SimDriverRes {
     if crate::web_worker::enabled() {
-        match crate::web_worker::sim::SimWorker::start(server.clone(), channels.clone(), debug_flags.clone(), world_scale, credential.clone())
-        {
+        match crate::web_worker::sim::SimWorker::start(
+            server.clone(),
+            channels.clone(),
+            debug_flags.clone(),
+            world_scale,
+            credential.clone(),
+        ) {
             Ok(worker) => return SimDriverRes(SyncCell::new(SimBackend::Worker(Box::new(worker)))),
-            Err(e) => error!("[session] sim worker failed to start ({e:?}): running the sim on the main thread"),
+            Err(e) => error!(
+                "[session] sim worker failed to start ({e:?}): running the sim on the main thread"
+            ),
         }
     }
-    let SessionChannels { game_send, game_recv, client_send, request_recv, .. } = channels;
+    let SessionChannels {
+        game_send,
+        game_recv,
+        client_send,
+        request_recv,
+        ..
+    } = channels;
     let (server_send, server_recv) = crossbeam::channel::unbounded();
     // The addr is unused on wasm; GameInstanceManager::new keeps one
     // signature on both targets.
     let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-    let mut manager = GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr, debug_flags);
+    let mut manager =
+        GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr, debug_flags);
     // Same subscription scale as the native game thread (`?world=` here).
     manager.set_world_scale(world_scale);
     manager.set_request_recv(request_recv);
     // One WebTransport session per host: the login one here, the others opened by the
     // manager through the page (`PageOpener`).
-    manager.set_conn_opener(Box::new(crate::netcode_web::PageOpener::new(server_send.clone())));
+    manager.set_conn_opener(Box::new(crate::netcode_web::PageOpener::new(
+        server_send.clone(),
+    )));
     crate::netcode_web::connect(
         server,
         crate::connections::LOGIN_CONN,
@@ -79,25 +95,41 @@ pub fn start_session(
         credential,
     );
     manager.start();
-    let driver = SimDriver { manager, server_recv, client_tick_ms: 0.0, ended: false };
+    let driver = SimDriver {
+        manager,
+        server_recv,
+        client_tick_ms: 0.0,
+        ended: false,
+    };
     SimDriverRes(SyncCell::new(SimBackend::Inline(Box::new(driver))))
 }
 
 /// Once per frame while a session runs: run due client ticks, then drain
 /// both directions of traffic. Mirrors what the native threads do with
 /// sleeps and blocking select. A lost home connection ends the session.
-pub fn drive_sim(time: Res<Time>, driver: Option<ResMut<SimDriverRes>>, mut ended: MessageWriter<SessionEnded>) {
+pub fn drive_sim(
+    time: Res<Time>,
+    driver: Option<ResMut<SimDriverRes>>,
+    mut ended: MessageWriter<SessionEnded>,
+) {
     let Some(mut driver) = driver else { return };
     let driver = match driver.0.get() {
         SimBackend::Worker(worker) => {
             if let Some(reason) = worker.pump() {
-                ended.write(SessionEnded { reason: Some(reason) });
+                ended.write(SessionEnded {
+                    reason: Some(reason),
+                });
             }
             return;
         }
         SimBackend::Inline(driver) => driver,
     };
-    let SimDriver { manager, server_recv, client_tick_ms, ended: over } = &mut **driver;
+    let SimDriver {
+        manager,
+        server_recv,
+        client_tick_ms,
+        ended: over,
+    } = &mut **driver;
     if *over {
         return;
     }
@@ -118,7 +150,9 @@ pub fn drive_sim(time: Res<Time>, driver: Option<ResMut<SimDriverRes>>, mut ende
         // The home connection ended (its connect gave up, the server went, a refusal).
         Err(game::GameError::Disconnected(reason)) => {
             *over = true;
-            ended.write(SessionEnded { reason: Some(reason) });
+            ended.write(SessionEnded {
+                reason: Some(reason),
+            });
         }
         Err(e) => panic!("game sim crashed: {e:?}"),
     }

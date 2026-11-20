@@ -32,7 +32,8 @@ pub fn player_name() -> PlayerName {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let var = |name: &str| std::env::var(name).ok();
-        let saved = data_dir().and_then(|dir| std::fs::read_to_string(dir.join(PLAYER_NAME_FILE)).ok());
+        let saved =
+            data_dir().and_then(|dir| std::fs::read_to_string(dir.join(PLAYER_NAME_FILE)).ok());
         first_valid([
             (PLAYER_NAME_ENV, var(PLAYER_NAME_ENV)),
             ("the saved player name", saved),
@@ -49,7 +50,9 @@ pub fn player_name() -> PlayerName {
 
 /// The first source whose value is a valid name; an invalid non-empty value
 /// is skipped with a warning naming its source.
-pub fn first_valid(sources: impl IntoIterator<Item = (&'static str, Option<String>)>) -> Option<PlayerName> {
+pub fn first_valid(
+    sources: impl IntoIterator<Item = (&'static str, Option<String>)>,
+) -> Option<PlayerName> {
     sources.into_iter().find_map(|(source, value)| {
         let value = value?;
         if value.trim().is_empty() {
@@ -80,15 +83,25 @@ pub fn data_dir() -> Option<std::path::PathBuf> {
 
 /// [`data_dir`] from the variables' values (empty counts as unset).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn data_dir_from(xdg_data_home: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
-    let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+pub fn data_dir_from(
+    xdg_data_home: Option<&str>,
+    home: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    let set = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
     let data = set(xdg_data_home).or_else(|| set(home).map(|home| home.join(".local/share")))?;
     Some(data.join("mmo"))
 }
 
 /// The generated browser name for two random bytes: `player-<4 hex>`.
 pub fn generated_name(bytes: [u8; 2]) -> PlayerName {
-    PlayerName(format!("{DEFAULT_PLAYER_NAME}-{:02x}{:02x}", bytes[0], bytes[1]))
+    PlayerName(format!(
+        "{DEFAULT_PLAYER_NAME}-{:02x}{:02x}",
+        bytes[0], bytes[1]
+    ))
 }
 
 /// A query value as typed in a URL: `+` is a space, `%XX` escapes decoded
@@ -112,11 +125,19 @@ mod web {
             .and_then(|w| w.location().search().ok())
             .and_then(|search| {
                 crate::world_scale::query_param(&search, PLAYER_NAME_QUERY).map(|raw| {
-                    query_value(raw, |s| js_sys::decode_uri_component(s).ok().and_then(|v| v.as_string()))
+                    query_value(raw, |s| {
+                        js_sys::decode_uri_component(s)
+                            .ok()
+                            .and_then(|v| v.as_string())
+                    })
                 })
             });
-        let storage = window.as_ref().and_then(|w| w.local_storage().ok().flatten());
-        let saved = storage.as_ref().and_then(|s| s.get_item(PLAYER_NAME_STORAGE_KEY).ok().flatten());
+        let storage = window
+            .as_ref()
+            .and_then(|w| w.local_storage().ok().flatten());
+        let saved = storage
+            .as_ref()
+            .and_then(|s| s.get_item(PLAYER_NAME_STORAGE_KEY).ok().flatten());
         if let Some(name) = first_valid([("?name=", query), ("the saved player name", saved)]) {
             return name;
         }
@@ -125,7 +146,10 @@ mod web {
             Some(storage) if storage.set_item(PLAYER_NAME_STORAGE_KEY, &name.0).is_ok() => {
                 log::info!("[client] new player name {:?} in localStorage", name.0);
             }
-            _ => log::warn!("[client] localStorage unavailable: playing as {:?} this time only", name.0),
+            _ => log::warn!(
+                "[client] localStorage unavailable: playing as {:?} this time only",
+                name.0
+            ),
         }
         name
     }
@@ -144,4 +168,3 @@ mod web {
         bytes
     }
 }
-

@@ -81,10 +81,15 @@ fn expand(input: &mut DeriveInput) -> syn::Result<TokenStream2> {
         .collect();
     let where_clause = input.generics.make_where_clause();
     if custom_bounds.is_empty() {
-        let params: Vec<_> = input.generics.type_params().map(|p| p.ident.clone()).collect();
+        let params: Vec<_> = input
+            .generics
+            .type_params()
+            .map(|p| p.ident.clone())
+            .collect();
         let wc = input.generics.make_where_clause();
         for p in params {
-            wc.predicates.push(parse_quote!(#p: ::state_hash::StateHash));
+            wc.predicates
+                .push(parse_quote!(#p: ::state_hash::StateHash));
         }
     } else {
         where_clause.predicates.extend(custom_bounds);
@@ -116,7 +121,9 @@ fn expand(input: &mut DeriveInput) -> syn::Result<TokenStream2> {
             for (idx, v) in e.variants.iter().enumerate() {
                 let vi = &v.ident;
                 let idx = idx as u32;
-                let binds: Vec<_> = (0..v.fields.len()).map(|i| format_ident!("__f{}", i)).collect();
+                let binds: Vec<_> = (0..v.fields.len())
+                    .map(|i| format_ident!("__f{}", i))
+                    .collect();
                 let names: Vec<TokenStream2> = binds.iter().map(|b| quote!(#b)).collect();
                 let stmts = hash_fields(&v.fields, &names)?;
                 let pat = match &v.fields {
@@ -142,7 +149,10 @@ fn expand(input: &mut DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
         Data::Union(u) => {
-            return Err(syn::Error::new_spanned(u.union_token, "StateHash cannot be derived for unions"));
+            return Err(syn::Error::new_spanned(
+                u.union_token,
+                "StateHash cannot be derived for unions",
+            ));
         }
     };
 

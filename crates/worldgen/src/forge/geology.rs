@@ -13,8 +13,8 @@
 
 use crate::forge::par;
 use crate::forge::periodic::PeriodicX;
+use crate::forge::world::{ForgeParams, World, hash01};
 use crate::noise::OctaveNoise;
-use crate::forge::world::{hash01, ForgeParams, World};
 
 pub struct Rock {
     pub name: &'static str,
@@ -23,12 +23,30 @@ pub struct Rock {
 
 /// Rock ids index this table; erodibilities are knobs (`Knobs::rock_erodibility`).
 pub const ROCKS: [Rock; 6] = [
-    Rock { name: "sandstone", rgb: [214, 180, 120] },
-    Rock { name: "shale", rgb: [110, 116, 128] },
-    Rock { name: "limestone", rgb: [226, 222, 200] },
-    Rock { name: "conglomerate", rgb: [160, 110, 84] },
-    Rock { name: "basalt", rgb: [58, 60, 66] },
-    Rock { name: "granite", rgb: [222, 150, 160] },
+    Rock {
+        name: "sandstone",
+        rgb: [214, 180, 120],
+    },
+    Rock {
+        name: "shale",
+        rgb: [110, 116, 128],
+    },
+    Rock {
+        name: "limestone",
+        rgb: [226, 222, 200],
+    },
+    Rock {
+        name: "conglomerate",
+        rgb: [160, 110, 84],
+    },
+    Rock {
+        name: "basalt",
+        rgb: [58, 60, 66],
+    },
+    Rock {
+        name: "granite",
+        rgb: [222, 150, 160],
+    },
 ];
 const SANDSTONE: u8 = 0;
 const SHALE: u8 = 1;
@@ -79,7 +97,8 @@ impl Geology {
         let wrap = PeriodicX::for_world(p).for_noise(FOLD_WAVELENGTH_M);
         let bedding = par::map_range(w.cells(), |i| {
             let (x, z) = w.center(i);
-            dip_z * (z - half_z) + k.fold_amplitude_m * 2.0 * wrap.sample(x, z, |x, z| folds.sample2(x, z))
+            dip_z * (z - half_z)
+                + k.fold_amplitude_m * 2.0 * wrap.sample(x, z, |x, z| folds.sample2(x, z))
         });
 
         let mut column = Vec::new();
@@ -112,7 +131,11 @@ impl Geology {
         }
         column.push((basement_top.min(s), GRANITE));
         let erodibility = [0u8, 1, 2, 3, 4, 5].map(|id| k.rock_erodibility(id));
-        Geology { bedding, column, erodibility }
+        Geology {
+            bedding,
+            column,
+            erodibility,
+        }
     }
 
     /// Formations from the top down: (top s, rock id).

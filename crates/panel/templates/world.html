@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ id }} · World panel{% endblock %}
+{% block crumb %}<span class="crumb">/ {{ namespace }}</span>{% endblock %}
+{% block content %}
+<h1>{{ id }}</h1>
+<p class="muted">Namespace <span class="mono">{{ namespace }}</span>{% if let Some(g) = grafana %} · <a href="{{ g }}" target="_blank" rel="noopener">Grafana dashboard</a>{% endif %}</p>
+
+<h2>Actions</h2>
+<div class="card">
+  <div class="actions">
+    <button class="primary" hx-post="/worlds/{{ namespace }}/start" hx-target="#notice" hx-disabled-elt="this">Start</button>
+    <button class="danger" hx-post="/worlds/{{ namespace }}/stop" hx-target="#notice" hx-disabled-elt="this"
+      hx-confirm="Stop {{ id }}? Every host leaves through its leave cut (up to about 90 s), then the coordinator stops. Players are disconnected.">Stop</button>
+    <span class="muted">Start: coordinator, then every host. Stop: hosts leave first, then the coordinator. Web and toolbox keep running.</span>
+  </div>
+  <div id="notice"></div>
+</div>
+
+<h2>Forge</h2>
+<div class="card">
+  <p class="muted" style="margin-top:0">Runs <span class="mono">worldctl forge</span> as a Job on the running release's server image. Only for a world that has not been forged: worldctl refuses a store that holds a world. Empty fields use worldctl's defaults.</p>
+  <form class="forge" hx-post="/worlds/{{ namespace }}/forge" hx-target="#forge-notice" hx-disabled-elt="find button"
+    hx-confirm="Start a forge Job for {{ id }}?">
+    <label>Preset
+      <select name="preset">
+        <option value="">(default knobs)</option>
+        {% for p in presets %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Size
+      <select name="size">
+        <option value="">(16 × 16 km)</option>
+        {% for s in sizes %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Cell (m)<input name="cell_m" inputmode="numeric" placeholder="32"></label>
+    <label>Seed (hex)<input name="seed" placeholder="d5c0de0206"></label>
+    <label>Memory limit (MiB)<input name="memory_mi" inputmode="numeric" placeholder="{{ default_memory }}"></label>
+    <div><button class="primary" type="submit">Forge</button></div>
+  </form>
+  <div id="forge-notice"></div>
+</div>
+
+<div hx-get="/fragments/worlds/{{ namespace }}" hx-trigger="load, every 3s">Loading…</div>
+{% endblock %}

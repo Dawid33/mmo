@@ -1,12 +1,12 @@
 //! Event handlers: deaths, and the monthly marriages and births of a site.
 
+use super::History;
 use super::calendar::*;
+use super::grid::{ROUTE_MAX_NODES, route};
 use super::log::LogKind;
 use super::records::*;
 use super::rng::*;
 use super::rules::*;
-use super::grid::{route, ROUTE_MAX_NODES};
-use super::History;
 
 /// Why a region cannot take a new site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,7 +73,9 @@ impl History {
         self.mark_content_dirty();
         let now = self.now;
         self.positions.remove(&person);
-        let Some(p) = self.people.get_mut(&person) else { return };
+        let Some(p) = self.people.get_mut(&person) else {
+            return;
+        };
         if !p.alive() {
             return;
         }
@@ -124,7 +126,11 @@ impl History {
             _ => return,
         }
         // Its people are in a region being shut down: try again once it has parked.
-        if self.sites[&sid].members.iter().any(|p| self.in_stopping_region(*p)) {
+        if self.sites[&sid]
+            .members
+            .iter()
+            .any(|p| self.in_stopping_region(*p))
+        {
             let at = self.deferred();
             self.schedule(at, super::Step::SiteMonth(sid));
             return;
@@ -133,7 +139,10 @@ impl History {
         self.births(sid);
         self.consider_leaving(sid);
         if self.sites.get(&sid).is_some_and(|s| s.abandoned.is_none()) {
-            self.schedule(self.now.plus_days(DAYS_PER_MONTH), super::Step::SiteMonth(sid));
+            self.schedule(
+                self.now.plus_days(DAYS_PER_MONTH),
+                super::Step::SiteMonth(sid),
+            );
         }
     }
 
@@ -141,7 +150,11 @@ impl History {
     pub(crate) fn consider_leaving(&mut self, sid: SiteId) {
         let (civ, region, crowd) = {
             let s = &self.sites[&sid];
-            (s.civ, s.region, crowding_per_mille(s.members.len() as u32, s.capacity))
+            (
+                s.civ,
+                s.region,
+                crowding_per_mille(s.members.len() as u32, s.capacity),
+            )
         };
         if crowd < CROWDED_PER_MILLE {
             return;
@@ -186,7 +199,9 @@ impl History {
         cands
             .into_iter()
             .filter(|(_, id)| self.same_landmass(from, self.sites[id].region))
-            .find(|(_, id)| route(self.grid(), from, self.sites[id].region, ROUTE_MAX_NODES).is_some())
+            .find(|(_, id)| {
+                route(self.grid(), from, self.sites[id].region, ROUTE_MAX_NODES).is_some()
+            })
             .map(|(_, id)| id)
     }
 
@@ -195,7 +210,11 @@ impl History {
             .members
             .iter()
             .copied()
-            .filter(|p| self.people.get(p).is_some_and(|q| q.alive() && q.age_years(self.now) >= ADULT_AGE_YEARS))
+            .filter(|p| {
+                self.people
+                    .get(p)
+                    .is_some_and(|q| q.alive() && q.age_years(self.now) >= ADULT_AGE_YEARS)
+            })
             .collect()
     }
 
@@ -204,28 +223,36 @@ impl History {
         if adults.is_empty() {
             return;
         }
-        let start = (self.roll(self.now, u64::from(sid.0), SALT_MIGRATE) % adults.len() as u64) as usize;
+        let start =
+            (self.roll(self.now, u64::from(sid.0), SALT_MIGRATE) % adults.len() as u64) as usize;
         let household = household_of(self, adults[start]);
         let to_region = self.sites[&to].region;
         self.start_journey(household, sid, to_region, Purpose::Migrate { to });
     }
 
     fn send_embark_party(&mut self, sid: SiteId) {
-        let Some(s) = self.sites.get(&sid).filter(|s| s.abandoned.is_none()) else { return };
+        let Some(s) = self.sites.get(&sid).filter(|s| s.abandoned.is_none()) else {
+            return;
+        };
         let (civ, region) = (s.civ, s.region);
         let adults = self.living_adults(sid);
         if adults.is_empty() {
             return;
         }
-        let start = (self.roll(self.now, u64::from(sid.0), SALT_EMBARK) % adults.len() as u64) as usize;
-        let order = std::iter::once(adults[start]).chain(adults.iter().copied().filter(|a| *a != adults[start]));
+        let start =
+            (self.roll(self.now, u64::from(sid.0), SALT_EMBARK) % adults.len() as u64) as usize;
+        let order = std::iter::once(adults[start])
+            .chain(adults.iter().copied().filter(|a| *a != adults[start]));
         let mut party: Vec<PersonId> = Vec::new();
         let (mut women, mut men) = (false, false);
         for a in order {
             if party.contains(&a) {
                 continue;
             }
-            let household: Vec<PersonId> = household_of(self, a).into_iter().filter(|p| !party.contains(p)).collect();
+            let household: Vec<PersonId> = household_of(self, a)
+                .into_iter()
+                .filter(|p| !party.contains(p))
+                .collect();
             if party.len() + household.len() > EMBARK_PARTY_MAX as usize {
                 continue;
             }
@@ -253,12 +280,22 @@ impl History {
 
     /// Whether a new site may be founded in `region`.
     pub fn embark_allowed(&self, region: crate::RegionCoords) -> Result<(), EmbarkRefusal> {
-        embark_allowed_in(self.grid(), self.sites.values().map(|s| (s.id, s.region, s.abandoned.is_some())), region)
+        embark_allowed_in(
+            self.grid(),
+            self.sites
+                .values()
+                .map(|s| (s.id, s.region, s.abandoned.is_some())),
+            region,
+        )
     }
 
     /// The best region to found a site in from `from_region`: allowed, reachable, scored
     /// `capacity * 1000 / (distance + 1)`, ties by `(z, x)`.
-    pub fn embark_target(&self, _civ: CivId, from_region: crate::RegionCoords) -> Option<crate::RegionCoords> {
+    pub fn embark_target(
+        &self,
+        _civ: CivId,
+        from_region: crate::RegionCoords,
+    ) -> Option<crate::RegionCoords> {
         let r = EMBARK_MAX_SEARCH_REGIONS as i32;
         let mut cands: Vec<(std::cmp::Reverse<u64>, i32, i32)> = Vec::new();
         // Wrapped: a candidate is its canonical region, visited once (a narrow map's scan
@@ -272,7 +309,8 @@ impl History {
                 }
                 let (z, x) = (rc.z, rc.x);
                 if self.embark_allowed(rc).is_ok() && self.same_landmass(from_region, rc) {
-                    let score = u64::from(self.grid().capacity(rc)) * 1000 / (self.grid().distance(from_region, rc) as u64 + 1);
+                    let score = u64::from(self.grid().capacity(rc)) * 1000
+                        / (self.grid().distance(from_region, rc) as u64 + 1);
                     cands.push((std::cmp::Reverse(score), z, x));
                 }
             }
@@ -285,7 +323,9 @@ impl History {
     }
 
     fn related(&self, a: PersonId, b: PersonId) -> bool {
-        let (Some(pa), Some(pb)) = (self.people.get(&a), self.people.get(&b)) else { return false };
+        let (Some(pa), Some(pb)) = (self.people.get(&a), self.people.get(&b)) else {
+            return false;
+        };
         pa.mother == Some(b)
             || pa.father == Some(b)
             || pb.mother == Some(a)
@@ -295,9 +335,9 @@ impl History {
     }
 
     fn eligible(&self, id: PersonId) -> bool {
-        self.people
-            .get(&id)
-            .is_some_and(|p| p.alive() && p.spouse.is_none() && p.age_years(self.now) >= ADULT_AGE_YEARS)
+        self.people.get(&id).is_some_and(|p| {
+            p.alive() && p.spouse.is_none() && p.age_years(self.now) >= ADULT_AGE_YEARS
+        })
     }
 
     fn marriages(&mut self, sid: SiteId) {
@@ -306,14 +346,18 @@ impl History {
             if !self.eligible(id) {
                 continue;
             }
-            if !self.chance(self.now, u64::from(id.0), SALT_MARRY, MARRY_PER_MILLE_MONTHLY) {
+            if !self.chance(
+                self.now,
+                u64::from(id.0),
+                SALT_MARRY,
+                MARRY_PER_MILLE_MONTHLY,
+            ) {
                 continue;
             }
             let sex = self.people[&id].sex;
-            let partner = members
-                .iter()
-                .copied()
-                .find(|&o| o != id && self.people[&o].sex != sex && self.eligible(o) && !self.related(id, o));
+            let partner = members.iter().copied().find(|&o| {
+                o != id && self.people[&o].sex != sex && self.eligible(o) && !self.related(id, o)
+            });
             if let Some(o) = partner {
                 self.people.get_mut(&id).unwrap().spouse = Some(o);
                 self.people.get_mut(&o).unwrap().spouse = Some(id);
@@ -330,9 +374,16 @@ impl History {
     pub fn civ_population(&self, civ: CivId) -> u32 {
         let away = |p: &Person| {
             p.alive()
-                && p.site.and_then(|s| self.sites.get(&s)).is_some_and(|s| s.civ == civ && !s.members.contains(&p.id))
+                && p.site
+                    .and_then(|s| self.sites.get(&s))
+                    .is_some_and(|s| s.civ == civ && !s.members.contains(&p.id))
         };
-        let members: u32 = self.sites.values().filter(|s| s.civ == civ).map(|s| s.members.len() as u32).sum();
+        let members: u32 = self
+            .sites
+            .values()
+            .filter(|s| s.civ == civ)
+            .map(|s| s.members.len() as u32)
+            .sum();
         let travellers = self
             .journeys
             .values()
@@ -365,7 +416,8 @@ impl History {
             if p.sex != Sex::Female
                 || !p.alive()
                 || p.age_years(now) > FERTILE_MAX_AGE_YEARS
-                || p.last_birth.is_some_and(|lb| now.0.saturating_sub(lb.0) < gap)
+                || p.last_birth
+                    .is_some_and(|lb| now.0.saturating_sub(lb.0) < gap)
                 || !self.sites[&sid].members.contains(&f)
             {
                 continue;
@@ -375,13 +427,33 @@ impl History {
                 break;
             }
             let members = self.sites[&sid].members.len() as u32;
-            if !self.chance(now, u64::from(m.0), SALT_BIRTH, birth_per_mille(members, capacity)) {
+            if !self.chance(
+                now,
+                u64::from(m.0),
+                SALT_BIRTH,
+                birth_per_mille(members, capacity),
+            ) {
                 continue;
             }
-            let sex = if self.roll(now, u64::from(m.0), SALT_SEX) & 1 == 0 { Sex::Female } else { Sex::Male };
+            let sex = if self.roll(now, u64::from(m.0), SALT_SEX) & 1 == 0 {
+                Sex::Female
+            } else {
+                Sex::Male
+            };
             let id = PersonId(self.next_ids[0]);
             self.next_ids[0] += 1;
-            self.people.insert(id, Person::newborn(id, sex, now, Some(m), Some(f), Some(sid), Location::AtSite(sid)));
+            self.people.insert(
+                id,
+                Person::newborn(
+                    id,
+                    sex,
+                    now,
+                    Some(m),
+                    Some(f),
+                    Some(sid),
+                    Location::AtSite(sid),
+                ),
+            );
             // Born to an embodied mother: the child gets a body beside her.
             if let Some(rc) = self.embodied_in(m) {
                 let p = self.people.get_mut(&id).unwrap();
@@ -395,8 +467,16 @@ impl History {
                 self.people.get_mut(&parent).unwrap().children.push(id);
             }
             self.people.get_mut(&m).unwrap().last_birth = Some(now);
-            self.log_event(LogKind::Born { person: id, mother: Some(m), father: Some(f), site: Some(sid) });
-            self.schedule(now.plus_days(death_age_days(self.seed, id, now)), super::Step::Death(id));
+            self.log_event(LogKind::Born {
+                person: id,
+                mother: Some(m),
+                father: Some(f),
+                site: Some(sid),
+            });
+            self.schedule(
+                now.plus_days(death_age_days(self.seed, id, now)),
+                super::Step::Death(id),
+            );
         }
     }
 }
@@ -422,10 +502,9 @@ pub fn embark_allowed_in(
     if sites.iter().any(|(_, r, _)| *r == region) {
         return Err(EmbarkRefusal::Occupied);
     }
-    if let Some((id, _, _)) = sites
-        .iter()
-        .find(|(_, r, abandoned)| !*abandoned && grid.distance(*r, region) < i64::from(EMBARK_MIN_DISTANCE_REGIONS))
-    {
+    if let Some((id, _, _)) = sites.iter().find(|(_, r, abandoned)| {
+        !*abandoned && grid.distance(*r, region) < i64::from(EMBARK_MIN_DISTANCE_REGIONS)
+    }) {
         return Err(EmbarkRefusal::TooClose { site: *id });
     }
     Ok(())

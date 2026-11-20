@@ -131,7 +131,11 @@ impl RenumberBudget {
 /// The sites as last broadcast, bucketed: a broadcast goes out when a site is founded or
 /// abandoned, or a population crosses a multiple of 10.
 fn sites_key(history: &History) -> Vec<(SiteId, bool, u32)> {
-    history.site_markers().into_iter().map(|m| (m.site, m.abandoned, m.population / 10)).collect()
+    history
+        .site_markers()
+        .into_iter()
+        .map(|m| (m.site, m.abandoned, m.population / 10))
+        .collect()
 }
 
 /// The world coordinator's core.
@@ -686,7 +690,10 @@ impl Coordinator {
         c.committed_raw = raw_core(&c.projection());
         let live = c.replicas.clone();
         // Outside the log: a rebase before the next commit orphans them again (its own rule).
-        c.orphan_marks(|stamp| !live.contains(&stamp.replica), "it was handed out by a replica that is not live");
+        c.orphan_marks(
+            |stamp| !live.contains(&stamp.replica),
+            "it was handed out by a replica that is not live",
+        );
         c.rebase_deadlines(now_ms);
         if c.calendar_gap(now_ms) {
             // Downtime: re-anchored at once where the calendar last stood (never the stored
@@ -783,7 +790,8 @@ impl Coordinator {
     /// alone writes no history, Elastic 2a decision 7; final review I1).
     fn calendar_resume(&self) -> CalendarTick {
         let (ms, tick) = self.calendar_anchor;
-        let seen = CalendarTick(tick.0 + self.calendar_seen_ms.saturating_sub(ms) / crate::TICK_RATE);
+        let seen =
+            CalendarTick(tick.0 + self.calendar_seen_ms.saturating_sub(ms) / crate::TICK_RATE);
         seen.max(self.history.now())
     }
 
@@ -817,9 +825,14 @@ impl Coordinator {
         }
         // A host of a generation older than the coordinator's rollback: told, not applied (it
         // is not attached: told at the boot its `Attach` named).
-        if let HostMsg::Attach { generation, boot, .. } = &msg {
+        if let HostMsg::Attach {
+            generation, boot, ..
+        } = &msg
+        {
             if let Some(g) = self.rolled_back_to.filter(|g| generation < g) {
-                log::warn!("coordinator: host {host} attaches with generation {generation}, the world rolled back to {g}");
+                log::warn!(
+                    "coordinator: host {host} attaches with generation {generation}, the world rolled back to {g}"
+                );
                 return self.push_to_boot(host, *boot, CoordMsg::Generation(g));
             }
         }
@@ -845,13 +858,17 @@ impl Coordinator {
                 policy: _,
             } => {
                 if named != host {
-                    log::warn!("coordinator: host {host}'s Attach names host {named}; taken as host {host}'s");
+                    log::warn!(
+                        "coordinator: host {host}'s Attach names host {named}; taken as host {host}'s"
+                    );
                 }
                 self.note_attach_epoch(host, boot, epoch);
                 if generation > self.generation_seen {
                     // A newer world generation: every host started its hops over.
                     if !self.hop_of.is_empty() {
-                        log::info!("coordinator: world generation {generation}: player hops start over");
+                        log::info!(
+                            "coordinator: world generation {generation}: player hops start over"
+                        );
                     }
                     self.generation_seen = generation;
                     self.hop_of.clear();
@@ -889,7 +906,14 @@ impl Coordinator {
                 }
                 self.incarnations.insert(rc, incarnation);
                 let events = self.history.region_started(rc);
-                self.push(Target::Host(host), CoordMsg::SpawnPeople { rc, incarnation, events });
+                self.push(
+                    Target::Host(host),
+                    CoordMsg::SpawnPeople {
+                        rc,
+                        incarnation,
+                        events,
+                    },
+                );
             }
             HostMsg::RegionStopping { rc } => {
                 if !self.runs_elsewhere(rc, host) {
@@ -902,7 +926,11 @@ impl Coordinator {
                     self.history.region_parked(rc, people);
                 }
             }
-            HostMsg::PersonCrossed { person, to, delivered } => {
+            HostMsg::PersonCrossed {
+                person,
+                to,
+                delivered,
+            } => {
                 if delivered {
                     // The host put the body in `to`, which it runs.
                     self.region_host.entry(to).or_insert(host);
@@ -923,8 +951,15 @@ impl Coordinator {
                 }
             }
             HostMsg::Positions(people) => self.history.note_positions(people),
-            HostMsg::DirectiveBounced { directive, incarnation } => {
-                let latest = self.incarnations.get(&directive.region).copied().unwrap_or(0);
+            HostMsg::DirectiveBounced {
+                directive,
+                incarnation,
+            } => {
+                let latest = self
+                    .incarnations
+                    .get(&directive.region)
+                    .copied()
+                    .unwrap_or(0);
                 if incarnation < latest {
                     log::debug!(
                         "coordinator: bounce for {:?} incarnation {incarnation} (latest {latest}) dropped: {:?}",
@@ -935,11 +970,18 @@ impl Coordinator {
                     self.history.defer_directive(directive);
                 }
             }
-            HostMsg::Request { id, player, hop, req } => self.request(host, id, player, hop, req),
+            HostMsg::Request {
+                id,
+                player,
+                hop,
+                req,
+            } => self.request(host, id, player, hop, req),
             HostMsg::Settle { id, req } => self.settle(host, id, req),
             HostMsg::PlayerOnline(p) => self.player_online(host, p),
             HostMsg::PlayerOffline { player, hop } => self.player_offline(host, player, hop),
-            HostMsg::PlayerHandedTo { player, to, hop } => self.player_handed(host, player, to, hop),
+            HostMsg::PlayerHandedTo { player, to, hop } => {
+                self.player_handed(host, player, to, hop)
+            }
             HostMsg::ReleaseClaim { player } => self.release_claim(player),
             HostMsg::CutPrepared { cut } => self.cut_prepared(host, cut),
             HostMsg::CutFailed { cut, why } => self.cut_failed(host, cut, why),
@@ -947,9 +989,12 @@ impl Coordinator {
             HostMsg::SuccessionApplied { id } => self.succession_applied(host, id),
             HostMsg::SuccessionAdopted { id } => self.succession_adopted(host, id),
             HostMsg::LandWanted { sr } | HostMsg::LandNeeded { sr } => self.land_asked(host, sr),
-            HostMsg::CutPeerCount { cut, peer, received_through, boot } => {
-                self.cut_peer_count(host, cut, peer, received_through, boot)
-            }
+            HostMsg::CutPeerCount {
+                cut,
+                peer,
+                received_through,
+                boot,
+            } => self.cut_peer_count(host, cut, peer, received_through, boot),
             HostMsg::Login(_) => unreachable!("handled above"),
         }
         self.push_directives();
@@ -961,11 +1006,15 @@ impl Coordinator {
     /// dead host again.
     fn zombie_message(&mut self, host: HostId, msg: HostMsg) {
         match msg {
-            HostMsg::Request { id, req, .. } | HostMsg::Settle { id, req } if req.changes_state() => {
+            HostMsg::Request { id, req, .. } | HostMsg::Settle { id, req }
+                if req.changes_state() =>
+            {
                 log::warn!("coordinator: a request of host {host}'s succeeded boot: refused");
                 self.settle(host, id, req);
             }
-            other => log::debug!("coordinator: a message of host {host}'s succeeded boot dropped: {other:?}"),
+            other => log::debug!(
+                "coordinator: a message of host {host}'s succeeded boot dropped: {other:?}"
+            ),
         }
     }
 
@@ -974,7 +1023,9 @@ impl Coordinator {
     fn runs_elsewhere(&self, rc: RegionCoords, host: HostId) -> bool {
         match self.region_host.get(&rc) {
             Some(&other) if other != host => {
-                log::warn!("coordinator: host {host}'s message about {rc:?} ignored: host {other} runs it");
+                log::warn!(
+                    "coordinator: host {host}'s message about {rc:?} ignored: host {other} runs it"
+                );
                 true
             }
             _ => false,
@@ -996,7 +1047,10 @@ impl Coordinator {
         self.push_directives();
         self.broadcast_daily(to, now_ms);
         for (region, line) in self.history.take_notices() {
-            let to = self.region_host.get(&region).map_or(Target::Every, |h| Target::Host(*h));
+            let to = self
+                .region_host
+                .get(&region)
+                .map_or(Target::Every, |h| Target::Host(*h));
             self.push(to, CoordMsg::Notice { region, line });
         }
         // Successions listed by `Attach`es while this replica did not know the open ones (on any
@@ -1044,10 +1098,19 @@ impl Coordinator {
             if !clean {
                 return Vec::new();
             }
-            debug_assert!(self.decisions.is_empty(), "a store decision waits, yet nothing durable is pending");
-            debug_assert!(self.delivery == Delivery::Direct || self.out.is_empty(), "a mailbox message waits outside a transition");
+            debug_assert!(
+                self.decisions.is_empty(),
+                "a store decision waits, yet nothing durable is pending"
+            );
+            debug_assert!(
+                self.delivery == Delivery::Direct || self.out.is_empty(),
+                "a mailbox message waits outside a transition"
+            );
             if self.replicas.len() > 1 && !self.out.is_empty() {
-                let Some(check) = self.version_check.filter(|c| c.confirmed && c.version == self.version) else {
+                let Some(check) = self
+                    .version_check
+                    .filter(|c| c.confirmed && c.version == self.version)
+                else {
                     return Vec::new();
                 };
                 self.version_check = None;
@@ -1064,7 +1127,10 @@ impl Coordinator {
             self.decisions.clear();
             self.outbox_drop.clear();
             if !self.login_outbox.is_empty() {
-                log::debug!("coordinator: {} login answers with no login service behind this core: dropped", self.login_outbox.len());
+                log::debug!(
+                    "coordinator: {} login answers with no login service behind this core: dropped",
+                    self.login_outbox.len()
+                );
                 self.login_outbox.clear();
             }
         }
@@ -1101,8 +1167,15 @@ impl Coordinator {
     pub(super) fn push_to_attached_now(&mut self, msg: CoordMsg) {
         match self.delivery {
             Delivery::Mailbox if !self.unstored => {
-                let rows: Vec<OutboxMsg> =
-                    self.attachments().iter().map(|(&host, &boot)| OutboxMsg { host, boot, msg: msg.clone() }).collect();
+                let rows: Vec<OutboxMsg> = self
+                    .attachments()
+                    .iter()
+                    .map(|(&host, &boot)| OutboxMsg {
+                        host,
+                        boot,
+                        msg: msg.clone(),
+                    })
+                    .collect();
                 self.outbox.extend(rows);
             }
             _ => self.push(Target::Every, msg),
@@ -1126,12 +1199,19 @@ impl Coordinator {
             match to {
                 Target::Host(h) => match self.attachment(h) {
                     Some(boot) => self.outbox.push(OutboxMsg { host: h, boot, msg }),
-                    None => log::debug!("coordinator: host {h} is not attached: a message for it dropped"),
+                    None => log::debug!(
+                        "coordinator: host {h} is not attached: a message for it dropped"
+                    ),
                 },
                 Target::Every => {
-                    let hosts: Vec<(HostId, u64)> = self.attachments().iter().map(|(h, b)| (*h, *b)).collect();
+                    let hosts: Vec<(HostId, u64)> =
+                        self.attachments().iter().map(|(h, b)| (*h, *b)).collect();
                     for (host, boot) in hosts {
-                        self.outbox.push(OutboxMsg { host, boot, msg: msg.clone() });
+                        self.outbox.push(OutboxMsg {
+                            host,
+                            boot,
+                            msg: msg.clone(),
+                        });
                     }
                 }
             }
@@ -1162,13 +1242,21 @@ impl Coordinator {
     /// cut that host could have been told of) — each is looked up as an unknown cut is (the
     /// store's decision, an undecided one aborted), and a dropped relay stays dropped.
     pub fn refresh_not_newer(&mut self) {
-        let Some((cuts, seen)) = self.refresh_covers.take() else { return };
-        let covered: Vec<(HostId, CutId)> = self.stale_cuts.drain(..cuts.min(self.stale_cuts.len())).collect();
+        let Some((cuts, seen)) = self.refresh_covers.take() else {
+            return;
+        };
+        let covered: Vec<(HostId, CutId)> = self
+            .stale_cuts
+            .drain(..cuts.min(self.stale_cuts.len()))
+            .collect();
         if seen {
             self.stale_seen = false;
         }
         for (host, cut) in covered {
-            log::warn!("coordinator: host {host} named cut {}, which the row does not hold either: looked up", cut.0);
+            log::warn!(
+                "coordinator: host {host} named cut {}, which the row does not hold either: looked up",
+                cut.0
+            );
             self.clean_checked = false;
             self.queue_cut_lookup(host, cut);
         }
@@ -1185,7 +1273,10 @@ impl Coordinator {
     /// in order.
     #[doc(hidden)]
     pub fn take_recorded(&mut self) -> Vec<(u64, Input)> {
-        self.recorded.as_mut().map(std::mem::take).unwrap_or_default()
+        self.recorded
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// Test support: this core applies its next inputs as replica `r` (a reference core fed every
@@ -1211,13 +1302,29 @@ impl Coordinator {
     /// decided so far. `None`: no check wanted (one replica: none at all).
     pub fn version_check_wanted(&mut self) -> Option<u64> {
         // Under `Mailbox` nothing leaves without a transition: its compare-and-set is the check.
-        if self.unstored || self.delivery == Delivery::Mailbox || self.writing || self.evicted() || self.replicas.len() <= 1 || self.out.is_empty() || self.is_stale() {
+        if self.unstored
+            || self.delivery == Delivery::Mailbox
+            || self.writing
+            || self.evicted()
+            || self.replicas.len() <= 1
+            || self.out.is_empty()
+            || self.is_stale()
+        {
             return None;
         }
-        if self.version_check.is_some_and(|c| c.version == self.version) || self.durable_pending() {
+        if self
+            .version_check
+            .is_some_and(|c| c.version == self.version)
+            || self.durable_pending()
+        {
             return None;
         }
-        self.version_check = Some(VersionCheck { version: self.version, out_len: self.out.len(), log_len: self.log.len(), confirmed: false });
+        self.version_check = Some(VersionCheck {
+            version: self.version,
+            out_len: self.out.len(),
+            log_len: self.log.len(),
+            confirmed: false,
+        });
         Some(self.version)
     }
 
@@ -1271,7 +1378,9 @@ impl Coordinator {
                 // restart): each attaches again. A mailbox outlives its replicas (`Mailbox`: kept).
                 let attached: Vec<HostId> = self.attached_hosts().collect();
                 for h in attached {
-                    log::info!("coordinator: replica {me} registered alone: host {h}'s link died with its replica: detached");
+                    log::info!(
+                        "coordinator: replica {me} registered alone: host {h}'s link died with its replica: detached"
+                    );
                     self.detach_host(h);
                 }
             }
@@ -1286,7 +1395,9 @@ impl Coordinator {
     /// Not live any more (a replay onto a row that dropped it already): nothing.
     fn on_replica_lapsed(&mut self, r: ReplicaId) {
         if r == self.replica {
-            log::warn!("coordinator: replica {r} is told it lapsed itself: ignored (its beat decides)");
+            log::warn!(
+                "coordinator: replica {r} is told it lapsed itself: ignored (its beat decides)"
+            );
             return;
         }
         if self.replicas.contains(&r) {
@@ -1309,7 +1420,10 @@ impl Coordinator {
     /// attached, or every one draining). World-wide: every replica relays the login service's
     /// orders to it ([`Self::login_order`]).
     pub fn gate_host(&self) -> Option<HostId> {
-        self.attached_live().into_iter().filter(|h| self.takes_logins(*h)).min()
+        self.attached_live()
+            .into_iter()
+            .filter(|h| self.takes_logins(*h))
+            .min()
     }
 
     /// Whether attached live host `host` may be the gate host: not leaving (its leave asked
@@ -1318,7 +1432,10 @@ impl Coordinator {
     /// replica that reads no `hosts` rows knows them too).
     fn takes_logins(&self, host: HostId) -> bool {
         // Elastic 5: nor a host giving land in the open move, nor one scale-down empties.
-        !self.leave_asked(host) && !self.draining.contains(&host) && !self.gives_land(host) && !self.evacuating(host)
+        !self.leave_asked(host)
+            && !self.draining.contains(&host)
+            && !self.gives_land(host)
+            && !self.evacuating(host)
     }
 
     /// An order of the login service: for the world's gate host of this moment
@@ -1329,7 +1446,9 @@ impl Coordinator {
     /// runtime answers the login service `Starting` (a spawn, fleet dials set, with
     /// [`Input::StartWanted`]) or `NoGate` (the join answers 503; a kick is resent).
     pub fn login_order(&mut self, order: crate::LoginOrder) -> Option<(HostId, CoordMsg)> {
-        let fleet::Gate::Host(gate) = self.login_gate() else { return None };
+        let fleet::Gate::Host(gate) = self.login_gate() else {
+            return None;
+        };
         Some((gate, CoordMsg::Login(order)))
     }
 
@@ -1340,9 +1459,30 @@ impl Coordinator {
     /// transition commits, issues it again. The gate host, or `None` (no gate host anywhere,
     /// [`fleet::Gate::Nobody`]).
     pub fn relay_login_order(&mut self, order: crate::LoginOrder) -> Option<HostId> {
-        let fleet::Gate::Host(gate) = self.login_gate() else { return None };
+        let fleet::Gate::Host(gate) = self.login_gate() else {
+            return None;
+        };
         self.clean_checked = false;
         self.push(Target::Host(gate), CoordMsg::Login(order));
+        Some(gate)
+    }
+
+    /// [`Self::relay_login_order`] with a sampled trace parent that survives the
+    /// durable mailbox. Unsampled or invalid contexts use the legacy variant.
+    pub fn relay_login_order_traced(
+        &mut self,
+        order: crate::LoginOrder,
+        trace: Option<crate::coordinator::TraceCarrier>,
+    ) -> Option<HostId> {
+        let fleet::Gate::Host(gate) = self.login_gate() else {
+            return None;
+        };
+        self.clean_checked = false;
+        let msg = match trace {
+            Some(trace) => CoordMsg::LoginTraced { order, trace },
+            None => CoordMsg::Login(order),
+        };
+        self.push(Target::Host(gate), msg);
         Some(gate)
     }
 
@@ -1390,7 +1530,10 @@ impl Coordinator {
         }
         // The marks handed out since the last transition are this one's: it commits, if at
         // all, as the next version of the row it was read at (the compare-and-set).
-        let stamp = CallStamp { replica: self.replica, version: self.version + 1 };
+        let stamp = CallStamp {
+            replica: self.replica,
+            version: self.version + 1,
+        };
         self.stamp_pending_marks(stamp);
         // Routed at the attachments this transition commits with: under `Mailbox` every message
         // is a row of its host's mailbox, written with it.
@@ -1464,10 +1607,20 @@ impl Coordinator {
         let decisions = self.hand_back(t);
         // A fleet decision (Elastic 4) carries no mark either, and its answer is lost: the next
         // read (issued after now) shows what it did — the next one is decided from that.
-        if decisions.iter().any(|d| matches!(d, StoreDecision::AddHost(_) | StoreDecision::DrainHost(_) | StoreDecision::RemoveHost(_))) {
+        if decisions.iter().any(|d| {
+            matches!(
+                d,
+                StoreDecision::AddHost(_)
+                    | StoreDecision::DrainHost(_)
+                    | StoreDecision::RemoveHost(_)
+            )
+        }) {
             self.fleet_settled(self.clock_ms);
         }
-        let ends: Vec<StoreDecision> = decisions.into_iter().filter(|d| matches!(d, StoreDecision::EndReplica(_))).collect();
+        let ends: Vec<StoreDecision> = decisions
+            .into_iter()
+            .filter(|d| matches!(d, StoreDecision::EndReplica(_)))
+            .collect();
         let later = std::mem::replace(&mut self.decisions, ends);
         self.decisions.extend(later);
         if let Some(stamp) = stamp {
@@ -1527,7 +1680,10 @@ impl Coordinator {
     /// ticker's read (never logged): a rebase drops it with the rest of `outbox_drop`, and the
     /// next read decides it again if the rows are still there and still nobody's.
     pub(super) fn drop_orphan_mailbox(&mut self, host: HostId, boot: u64) {
-        self.outbox_drop.push(MailboxDrop { host, boot: Some(boot) });
+        self.outbox_drop.push(MailboxDrop {
+            host,
+            boot: Some(boot),
+        });
     }
 
     /// `t` back in the core (not committed as far as this replica knows): its messages ahead of
@@ -1593,7 +1749,9 @@ impl Coordinator {
         match answer {
             DecisionAnswer::Cut { stamp, cut, .. } => self.cut_mark_is(*cut, *stamp),
             DecisionAnswer::Declared { stamp, .. } => self.successions_declaring() == Some(*stamp),
-            DecisionAnswer::Ended { stamp, end, .. } => self.successions_ending() == Some((end.host, end.boot, *stamp)),
+            DecisionAnswer::Ended { stamp, end, .. } => {
+                self.successions_ending() == Some((end.host, end.boot, *stamp))
+            }
             DecisionAnswer::RolledBack { stamp, .. } => self.successions_rolling() == Some(*stamp),
             DecisionAnswer::Begin { .. } | DecisionAnswer::ReplicaEnded { .. } => true,
             // No mark (Elastic 3): the store's `WHERE owner = NO_OWNER` refuses a second
@@ -1602,7 +1760,9 @@ impl Coordinator {
             DecisionAnswer::Assigned { .. } => true,
             // No mark either (Elastic 4): each fleet decision is idempotent; a lost answer is
             // repaired by the next `hosts` read, which carries the table.
-            DecisionAnswer::HostAdded { .. } | DecisionAnswer::HostDrained { .. } | DecisionAnswer::HostRemoved { .. } => true,
+            DecisionAnswer::HostAdded { .. }
+            | DecisionAnswer::HostDrained { .. }
+            | DecisionAnswer::HostRemoved { .. } => true,
         }
     }
 
@@ -1617,23 +1777,42 @@ impl Coordinator {
     fn on_decision(&mut self, answer: DecisionAnswer, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         match answer {
-            DecisionAnswer::Cut { stamp, cut, committed } => self.cut_answered(stamp, cut, committed),
+            DecisionAnswer::Cut {
+                stamp,
+                cut,
+                committed,
+            } => self.cut_answered(stamp, cut, committed),
             DecisionAnswer::Begin { cut, bound } => match bound {
-                Ok(bound) => log::debug!("coordinator: world cut {}: its begin is recorded (hosts below {bound} take part)", cut.0),
+                Ok(bound) => log::debug!(
+                    "coordinator: world cut {}: its begin is recorded (hosts below {bound} take part)",
+                    cut.0
+                ),
                 Err(e) => log::warn!(
                     "coordinator: world cut {}: its begin could not be recorded ({e}); a host joining during it aborts it",
                     cut.0
                 ),
             },
-            DecisionAnswer::Declared { stamp, outcome } => self.declare_answered(stamp, outcome, now_ms),
-            DecisionAnswer::Ended { stamp, end, outcome } => self.end_answered(stamp, end, outcome, now_ms),
-            DecisionAnswer::RolledBack { stamp, outcome } => self.rollback_answered(stamp, outcome, now_ms),
-            DecisionAnswer::ReplicaEnded { replica } => log::info!("coordinator: replica {replica}'s row is ended"),
-            DecisionAnswer::Assigned { assign, outcome, .. } => self.assign_answered(assign, outcome, now_ms),
-            // Elastic 4: nothing durable; the next fleet decision is paced (`fleet.rs`).
-            DecisionAnswer::HostAdded { .. } | DecisionAnswer::HostDrained { .. } | DecisionAnswer::HostRemoved { .. } => {
-                self.fleet_answered(&answer, now_ms)
+            DecisionAnswer::Declared { stamp, outcome } => {
+                self.declare_answered(stamp, outcome, now_ms)
             }
+            DecisionAnswer::Ended {
+                stamp,
+                end,
+                outcome,
+            } => self.end_answered(stamp, end, outcome, now_ms),
+            DecisionAnswer::RolledBack { stamp, outcome } => {
+                self.rollback_answered(stamp, outcome, now_ms)
+            }
+            DecisionAnswer::ReplicaEnded { replica } => {
+                log::info!("coordinator: replica {replica}'s row is ended")
+            }
+            DecisionAnswer::Assigned {
+                assign, outcome, ..
+            } => self.assign_answered(assign, outcome, now_ms),
+            // Elastic 4: nothing durable; the next fleet decision is paced (`fleet.rs`).
+            DecisionAnswer::HostAdded { .. }
+            | DecisionAnswer::HostDrained { .. }
+            | DecisionAnswer::HostRemoved { .. } => self.fleet_answered(&answer, now_ms),
         }
     }
 
@@ -1649,7 +1828,10 @@ impl Coordinator {
     /// transition would encode it — nothing is taken or marked.
     #[doc(hidden)]
     pub fn encode_projection(&self) -> (Vec<u8>, Vec<u8>) {
-        (seal_core(&raw_core(&self.projection())), crate::history::persist::encode(&self.history))
+        (
+            seal_core(&raw_core(&self.projection())),
+            crate::history::persist::encode(&self.history),
+        )
     }
 
     /// Test support: the projection as it stands, in `Debug` form (a failing comparison of two
@@ -1701,12 +1883,26 @@ impl Coordinator {
     /// treated as bounced (held for the region's next start), never broadcast.
     fn push_directive(&mut self, directive: Directive) {
         let Some(&host) = self.region_host.get(&directive.region) else {
-            log::debug!("coordinator: no host runs {:?}; directive deferred: {:?}", directive.region, directive.event);
+            log::debug!(
+                "coordinator: no host runs {:?}; directive deferred: {:?}",
+                directive.region,
+                directive.event
+            );
             self.history.defer_directive(directive);
             return;
         };
-        let incarnation = self.incarnations.get(&directive.region).copied().unwrap_or(0);
-        self.push(Target::Host(host), CoordMsg::Directive { directive, incarnation });
+        let incarnation = self
+            .incarnations
+            .get(&directive.region)
+            .copied()
+            .unwrap_or(0);
+        self.push(
+            Target::Host(host),
+            CoordMsg::Directive {
+                directive,
+                incarnation,
+            },
+        );
     }
 
     /// Forget every directive for `host` not yet handed out (waiting or free to leave):
@@ -1714,19 +1910,24 @@ impl Coordinator {
     /// Those already handed to the link reach the host ahead of [`CoordMsg::Attached`],
     /// and it drops them. Other hosts' directives stand.
     fn drop_unsent_directives(&mut self, host: HostId) {
-        self.drop_unsent(host, "directives", |m| matches!(m, CoordMsg::Directive { .. }));
+        self.drop_unsent(host, "directives", |m| {
+            matches!(m, CoordMsg::Directive { .. })
+        });
     }
 
     /// Forget every message for `host` matching `drops` not yet handed out (waiting or
     /// free to leave), superseded by its attach (`what` names them in the log).
     fn drop_unsent(&mut self, host: HostId, what: &str, drops: impl Fn(&CoordMsg) -> bool) {
         let before = self.out.len() + self.outbox.len();
-        self.out.retain(|(to, m)| !(*to == Target::Host(host) && drops(m)));
+        self.out
+            .retain(|(to, m)| !(*to == Target::Host(host) && drops(m)));
         // Rows of a transition handed back (`Mailbox`): not written yet either.
         self.outbox.retain(|o| !(o.host == host && drops(&o.msg)));
         let dropped = before - self.out.len() - self.outbox.len();
         if dropped > 0 {
-            log::info!("coordinator: {dropped} unsent {what} for host {host} superseded by its attach");
+            log::info!(
+                "coordinator: {dropped} unsent {what} for host {host} superseded by its attach"
+            );
         }
     }
 
@@ -1739,11 +1940,14 @@ impl Coordinator {
             // the calendar before it ([`Self::calendar_resume`]).
             self.calendar_seen_ms = self.calendar_seen_ms.max(self.clock_ms);
         }
-        self.push(to, CoordMsg::View {
-            civs: self.history.civ_markers(),
-            sites: self.history.site_markers(),
-            calendar,
-        });
+        self.push(
+            to,
+            CoordMsg::View {
+                civs: self.history.civ_markers(),
+                sites: self.history.site_markers(),
+                calendar,
+            },
+        );
     }
 
     /// At a calendar day's turn (at store `now_ms`): the calendar, and the sites if they
@@ -1778,15 +1982,24 @@ impl Coordinator {
     fn first_of_generation(&mut self, host: HostId, generation: u64) {
         self.attached_generation = generation;
         self.moves_world_changed("a newer world generation attached");
-        let gone: BTreeSet<HostId> =
-            self.region_host.values().chain(self.online_on.values()).copied().filter(|h| *h != host).collect();
+        let gone: BTreeSet<HostId> = self
+            .region_host
+            .values()
+            .chain(self.online_on.values())
+            .copied()
+            .filter(|h| *h != host)
+            .collect();
         for h in gone {
-            log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is gone");
+            log::warn!(
+                "coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is gone"
+            );
             self.host_succeeded(h);
         }
         let attached: Vec<HostId> = self.attached_hosts().filter(|h| *h != host).collect();
         for h in attached {
-            log::warn!("coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is detached");
+            log::warn!(
+                "coordinator: host {host} attaches at world generation {generation}: host {h} of an older one is detached"
+            );
             self.detach_host(h);
         }
     }
@@ -1813,20 +2026,27 @@ impl Coordinator {
         self.drop_unsent_directives(host);
         // The attach reports everyone afresh: an answer to an earlier report (perhaps the
         // old process's, whose numbers a restarted host reuses) is void.
-        self.drop_unsent(host, "claim answers", |m| matches!(m, CoordMsg::ClaimIs { .. } | CoordMsg::HopIs { .. }));
+        self.drop_unsent(host, "claim answers", |m| {
+            matches!(m, CoordMsg::ClaimIs { .. } | CoordMsg::HopIs { .. })
+        });
         self.push(Target::Host(host), CoordMsg::Attached { epoch });
         let listed: BTreeSet<RegionCoords> = running.iter().map(|r| r.rc).collect();
         for rc in self.history.live_regions() {
             let runs_here = self.region_host.get(&rc).is_none_or(|h| *h == host);
             if runs_here && !listed.contains(&rc) {
-                log::warn!("coordinator: {rc:?} was live but host {host} does not run it; parking it empty");
+                log::warn!(
+                    "coordinator: {rc:?} was live but host {host} does not run it; parking it empty"
+                );
                 self.history.region_parked(rc, Vec::new());
             }
         }
         self.region_host.retain(|_, h| *h != host);
         for r in &running {
             if let Some(other) = self.region_host.insert(r.rc, host) {
-                log::warn!("coordinator: host {host} attached running {:?}, which host {other} had announced", r.rc);
+                log::warn!(
+                    "coordinator: host {host} attached running {:?}, which host {other} had announced",
+                    r.rc
+                );
             }
             self.incarnations.insert(r.rc, r.incarnation);
         }
@@ -1872,14 +2092,29 @@ impl Coordinator {
     /// host is told the latest ([`CoordMsg::HopIs`]) in case the report is of its current
     /// placement (a login that could not know the hops elsewhere).
     fn player_online(&mut self, host: HostId, report: OnlinePlayer) {
-        let OnlinePlayer { player, claim, claim_pending, report, hop } = report;
+        let OnlinePlayer {
+            player,
+            claim,
+            claim_pending,
+            report,
+            hop,
+        } = report;
         let known = self.hop_of(player);
         let on = self.online_on.get(&player).copied();
         // Two hosts are never online at one hop: at the known hop only the host the
         // player is online on (a re-report, or the grant's host) counts.
         if hop < known || (hop == known && on != Some(host)) {
-            log::debug!("coordinator: {player:?} online on host {host} at hop {hop} ignored (hop {known}, online on {on:?})");
-            self.push(Target::Host(host), CoordMsg::HopIs { player, reported: hop, hop: known });
+            log::debug!(
+                "coordinator: {player:?} online on host {host} at hop {hop} ignored (hop {known}, online on {on:?})"
+            );
+            self.push(
+                Target::Host(host),
+                CoordMsg::HopIs {
+                    player,
+                    reported: hop,
+                    hop: known,
+                },
+            );
             return;
         }
         self.displace(player, host, hop);
@@ -1890,10 +2125,14 @@ impl Coordinator {
         match (mine, claim) {
             (Some(mine), Some(theirs)) if mine == theirs => {}
             (Some(mine), theirs) if claim_pending => {
-                log::debug!("coordinator: {player:?} comes online with {theirs:?} and a request unsettled; it holds {mine:?}");
+                log::debug!(
+                    "coordinator: {player:?} comes online with {theirs:?} and a request unsettled; it holds {mine:?}"
+                );
             }
             (Some(mine), theirs) => {
-                log::warn!("coordinator: {player:?} comes online with {theirs:?}; its {mine:?} here is dropped");
+                log::warn!(
+                    "coordinator: {player:?} comes online with {theirs:?}; its {mine:?} here is dropped"
+                );
                 self.release_claim(player);
                 if let Some(theirs) = theirs {
                     self.adopt_claim(player, theirs);
@@ -1904,8 +2143,17 @@ impl Coordinator {
         }
         let now = self.player_claims.get(&player).copied();
         if now != claim {
-            log::info!("coordinator: host {host} reported {player:?} with {claim:?}; the claim is {now:?}");
-            self.push(Target::Host(host), CoordMsg::ClaimIs { player, claim: now, report });
+            log::info!(
+                "coordinator: host {host} reported {player:?} with {claim:?}; the claim is {now:?}"
+            );
+            self.push(
+                Target::Host(host),
+                CoordMsg::ClaimIs {
+                    player,
+                    claim: now,
+                    report,
+                },
+            );
         }
     }
 
@@ -1918,7 +2166,9 @@ impl Coordinator {
         let known = self.hop_of(player);
         let on = self.online_on.get(&player).copied();
         if hop < known || (hop == known && on != Some(host)) {
-            log::debug!("coordinator: {player:?} offline on host {host} at hop {hop} ignored (hop {known}, online on {on:?})");
+            log::debug!(
+                "coordinator: {player:?} offline on host {host} at hop {hop} ignored (hop {known}, online on {on:?})"
+            );
             return;
         }
         if on == Some(host) {
@@ -1938,13 +2188,24 @@ impl Coordinator {
     /// an older placement's messages in flight, or a duplicate) it renumbers above `hop`
     /// and reports again — the newest reporter wins, as the newest session does.
     fn displace(&mut self, player: PlayerId, by: HostId, hop: u64) {
-        let Some(&(host, reported)) = self.online_reported.get(&player) else { return };
+        let Some(&(host, reported)) = self.online_reported.get(&player) else {
+            return;
+        };
         if host == by || self.online_on.get(&player) != Some(&host) {
             return;
         }
         if self.displaced_told.insert((player, host, reported)) {
-            log::debug!("coordinator: {player:?} moved off host {host} (hop {reported}) by host {by} at hop {hop}: told");
-            self.push(Target::Host(host), CoordMsg::HopIs { player, reported, hop });
+            log::debug!(
+                "coordinator: {player:?} moved off host {host} (hop {reported}) by host {by} at hop {hop}: told"
+            );
+            self.push(
+                Target::Host(host),
+                CoordMsg::HopIs {
+                    player,
+                    reported,
+                    hop,
+                },
+            );
         }
     }
 
@@ -1956,7 +2217,9 @@ impl Coordinator {
         let known = self.hop_of(player);
         let on = self.online_on.get(&player).copied();
         if hop < known || (hop == known && on != Some(host)) {
-            log::debug!("coordinator: {player:?} handed by host {host} to {to} at hop {hop} ignored (hop {known}, online on {on:?})");
+            log::debug!(
+                "coordinator: {player:?} handed by host {host} to {to} at hop {hop} ignored (hop {known}, online on {on:?})"
+            );
             return;
         }
         if on != Some(host) {
@@ -1969,7 +2232,9 @@ impl Coordinator {
             // declaration came): nobody will report the player there — offline, not "online
             // on" a dead ordinal. If the hand-off
             // reached the dead host's journal the heir parks it and reports it offline too.
-            log::info!("coordinator: {player:?} handed by host {host} to host {to}, which was succeeded: offline");
+            log::info!(
+                "coordinator: {player:?} handed by host {host} to host {to}, which was succeeded: offline"
+            );
             self.online_on.remove(&player);
             return;
         }
@@ -1995,9 +2260,13 @@ impl Coordinator {
             Some(reply) => reply.clone(),
             None => {
                 let refusal = match req {
-                    WorldRequest::StartAdventure(_) => WorldReply::AdventureRefused(AdventureRefusal::WorldUnavailable),
+                    WorldRequest::StartAdventure(_) => {
+                        WorldReply::AdventureRefused(AdventureRefusal::WorldUnavailable)
+                    }
                     other => {
-                        log::warn!("coordinator: settle of {id:?} for a query {other:?}: nothing to settle");
+                        log::warn!(
+                            "coordinator: settle of {id:?} for a query {other:?}: nothing to settle"
+                        );
                         return;
                     }
                 };
@@ -2017,7 +2286,14 @@ impl Coordinator {
         hop < known || (hop == known && self.online_on.get(&player).is_some_and(|on| *on != host))
     }
 
-    fn request(&mut self, host: HostId, id: RequestId, player: PlayerId, hop: u64, req: WorldRequest) {
+    fn request(
+        &mut self,
+        host: HostId,
+        id: RequestId,
+        player: PlayerId,
+        hop: u64,
+        req: WorldRequest,
+    ) {
         if let Some(reply) = self.memo.get(&id) {
             log::debug!("coordinator: {id:?} repeated; answering from the memo");
             let reply = reply.clone();
@@ -2026,7 +2302,9 @@ impl Coordinator {
         // A state-changing request of an older placement of its player grants nothing:
         // refused through the settle path (memoised), as a zombie's is.
         if req.changes_state() && self.from_older_placement(host, player, hop) {
-            log::warn!("coordinator: {id:?} of {player:?} at hop {hop} from host {host} is of an older placement: refused");
+            log::warn!(
+                "coordinator: {id:?} of {player:?} at hop {hop} from host {host} is of an older placement: refused"
+            );
             return self.settle(host, id, req);
         }
         let memoise = req.changes_state();
@@ -2046,7 +2324,11 @@ impl Coordinator {
             let known = self.hop_of(player);
             self.displace(player, host, known);
             self.online_on.insert(player, host);
-            if self.online_reported.get(&player).is_some_and(|(h, _)| *h != host) {
+            if self
+                .online_reported
+                .get(&player)
+                .is_some_and(|(h, _)| *h != host)
+            {
                 self.online_reported.remove(&player);
             }
         }
@@ -2054,7 +2336,10 @@ impl Coordinator {
         if granted {
             // Every host's view of the sites follows at once (the player may play on
             // another host); clients still get them at the day's turn.
-            self.push(Target::Every, CoordMsg::SiteMarkers(self.history.site_markers()));
+            self.push(
+                Target::Every,
+                CoordMsg::SiteMarkers(self.history.site_markers()),
+            );
         }
     }
 
@@ -2064,14 +2349,19 @@ impl Coordinator {
         if self.memo.insert(id, reply).is_none() {
             self.memo_order.push_back(id);
         }
-        let quiet = self.memo_warned_ms.is_some_and(|ms| self.clock_ms.saturating_sub(ms) < MEMO_WARN_SECS * 1000);
+        let quiet = self
+            .memo_warned_ms
+            .is_some_and(|ms| self.clock_ms.saturating_sub(ms) < MEMO_WARN_SECS * 1000);
         if self.memo.len() > ANSWERED_MEMO_MAX && !quiet {
             self.memo_warned_ms = Some(self.clock_ms);
             let mut per_host: BTreeMap<HostId, usize> = BTreeMap::new();
             for id in self.memo.keys() {
                 *per_host.entry(id.host).or_default() += 1;
             }
-            let (host, n) = per_host.into_iter().max_by_key(|(_, n)| *n).expect("not empty");
+            let (host, n) = per_host
+                .into_iter()
+                .max_by_key(|(_, n)| *n)
+                .expect("not empty");
             log::error!(
                 "coordinator: {} unacknowledged answers remembered (over {ANSWERED_MEMO_MAX}); host {host} holds {n}",
                 self.memo.len()
@@ -2085,12 +2375,18 @@ impl Coordinator {
     /// process is gone).
     fn forget_settled(&mut self, host: HostId, boot: u64, below: u64, attach: bool) {
         let new_boot = attach && self.boots_seen.entry(host).or_default().insert(boot);
-        let forget = |id: &RequestId| id.host == host && ((id.boot == boot && id.seq < below) || (new_boot && id.boot != boot));
+        let forget = |id: &RequestId| {
+            id.host == host
+                && ((id.boot == boot && id.seq < below) || (new_boot && id.boot != boot))
+        };
         let before = self.memo.len();
         self.memo.retain(|id, _| !forget(id));
         if self.memo.len() != before {
             self.memo_order.retain(|id| !forget(id));
-            log::debug!("coordinator: {} answers of host {host} acknowledged", before - self.memo.len());
+            log::debug!(
+                "coordinator: {} answers of host {host} acknowledged",
+                before - self.memo.len()
+            );
         }
     }
 
@@ -2103,7 +2399,11 @@ impl Coordinator {
         if s.abandoned.is_some() {
             return refuse(AdventureRefusal::SiteAbandoned);
         }
-        if !s.members.iter().any(|&p| self.history.person(p).is_some_and(|p| p.died.is_none())) {
+        if !s
+            .members
+            .iter()
+            .any(|&p| self.history.person(p).is_some_and(|p| p.died.is_none()))
+        {
             return refuse(AdventureRefusal::Unpopulated);
         }
         if self.player_claims.contains_key(&player) {

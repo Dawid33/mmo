@@ -41,12 +41,12 @@ use bevy::{
     render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
     shader::ShaderRef,
 };
-use game::{BlockId, RegionId, TileSource, REGION_BLOCKS, REGION_SIZE};
+use game::{BlockId, REGION_BLOCKS, REGION_SIZE, RegionId, TileSource};
 
 use super::block_textures::BlockTextureLayers;
-use super::commander::level::{camera_cut, WorkingLevel};
+use super::commander::level::{WorkingLevel, camera_cut};
 use super::commander::tiles::TileMirror;
-use super::fortress_view::{overlay_base_level, OverlayTexture, CAP_DARKEN};
+use super::fortress_view::{CAP_DARKEN, OverlayTexture, overlay_base_level};
 use super::voxel_pull::BlockArrayTexture;
 
 /// The cap's cells across the home region: `REGION_BLOCKS²` cells, index
@@ -89,7 +89,12 @@ pub fn slice_ids(src: &impl TileSource, level: i32) -> Vec<u16> {
 /// `BlockId` -> its top-face texture layer, 0 (the missing texture) for ids
 /// without layers. Indexed by id.
 pub fn top_layer_lut(layers: &BlockTextureLayers) -> Vec<u16> {
-    let len = layers.0.keys().map(|id| id.0 as usize + 1).max().unwrap_or(1);
+    let len = layers
+        .0
+        .keys()
+        .map(|id| id.0 as usize + 1)
+        .max()
+        .unwrap_or(1);
     let mut lut = vec![0u16; len];
     for (id, [top, _, _]) in &layers.0 {
         lut[id.0 as usize] = *top as u16;
@@ -106,7 +111,12 @@ pub struct SliceState {
 }
 
 /// Whether the ids texture is stale for this level, region and mirror version.
-pub fn needs_rebuild(state: &SliceState, level: Option<i32>, region: Option<RegionId>, version: u64) -> bool {
+pub fn needs_rebuild(
+    state: &SliceState,
+    level: Option<i32>,
+    region: Option<RegionId>,
+    version: u64,
+) -> bool {
     state.level != level || state.region != region || state.mirror_version != version
 }
 
@@ -185,7 +195,11 @@ impl Plugin for SlicePlanePlugin {
 /// An R16Uint 2D texture, kept in the main world too so it can be rewritten.
 fn u16_image(width: u32, height: u32, texels: &[u16]) -> Image {
     Image::new(
-        Extent3d { width, height, depth_or_array_layers: 1 },
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         bytemuck::cast_slice(texels).to_vec(),
         TextureFormat::R16Uint,
@@ -204,7 +218,9 @@ fn spawn_slice_plane(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SlicePlaneMaterial>>,
 ) {
-    let (Some(blocks), Some(layers), Some(overlay)) = (blocks, layers, overlay) else { return };
+    let (Some(blocks), Some(layers), Some(overlay)) = (blocks, layers, overlay) else {
+        return;
+    };
     if !existing.is_empty() {
         return;
     }
@@ -216,12 +232,18 @@ fn spawn_slice_plane(
         ids: ids.clone(),
         top_layers,
         blocks: blocks.0.clone(),
-        params: SliceParams { origin: Vec4::new(0.0, 0.0, 0.0, 1.0 - CAP_DARKEN), overlay: UVec4::ZERO },
+        params: SliceParams {
+            origin: Vec4::new(0.0, 0.0, 0.0, 1.0 - CAP_DARKEN),
+            overlay: UVec4::ZERO,
+        },
         overlay: overlay.0.clone(),
     });
     commands.spawn((
         Name::new("slice plane"),
-        SlicePlane { material: material.clone(), ids },
+        SlicePlane {
+            material: material.clone(),
+            ids,
+        },
         Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(REGION_SIZE / 2.0)).mesh())),
         MeshMaterial3d(material),
         Transform::default(),
@@ -239,8 +261,12 @@ fn update_slice_plane(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<SlicePlaneMaterial>>,
 ) {
-    let Ok((plane, mut tf, mut visibility)) = plane.single_mut() else { return };
-    let (Some(cut), Some(home), Some(level)) = (camera_cut(&working, &tiles), tiles.region(), working.level) else {
+    let Ok((plane, mut tf, mut visibility)) = plane.single_mut() else {
+        return;
+    };
+    let (Some(cut), Some(home), Some(level)) =
+        (camera_cut(&working, &tiles), tiles.region(), working.level)
+    else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
@@ -258,6 +284,9 @@ fn update_slice_plane(
         material.params.origin = Vec4::new(origin.x, 0.0, origin.z, 1.0 - CAP_DARKEN);
         material.params.overlay = overlay_params(level);
     }
-    *state = SliceState { level: Some(level), region: Some(home), mirror_version: tiles.version() };
+    *state = SliceState {
+        level: Some(level),
+        region: Some(home),
+        mirror_version: tiles.version(),
+    };
 }
-

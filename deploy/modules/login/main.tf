@@ -2,7 +2,7 @@
 # accounts' refresh tokens, the signed join tickets and the JWKS the game hosts
 # verify them with. Keycloak (modules/keycloak) owns the passwords; this service
 # trades a Keycloak access token for its own refresh token. Its own PostgreSQL is
-# in postgres.tf.
+# in postgres.tf until the owner completes a management-database move.
 #
 # The image is mmo/login in ECR (the registry root; deploy/images/login/Dockerfile:
 # debian + the release binary at /usr/local/bin/login, entrypoint `login`). The
@@ -44,6 +44,24 @@ locals {
   ns     = kubernetes_namespace_v1.login.metadata[0].name
   labels = { "app.kubernetes.io/name" = "login" }
   port   = 8790
+  telemetry_env = merge({
+    OTEL_SDK_DISABLED           = var.telemetry.tracing_enabled ? "false" : "true"
+    VOXEL_TELEMETRY_ENVIRONMENT = var.telemetry.environment
+    VOXEL_TELEMETRY_CLUSTER     = var.telemetry.cluster
+    }, var.telemetry.tracing_enabled ? {
+    OTEL_EXPORTER_OTLP_ENDPOINT    = var.telemetry.otlp_endpoint
+    OTEL_EXPORTER_OTLP_PROTOCOL    = var.telemetry.otlp_protocol
+    OTEL_TRACES_SAMPLER            = var.telemetry.trace_sampler
+    OTEL_TRACES_SAMPLER_ARG        = tostring(var.telemetry.trace_sampler_ratio)
+    OTEL_BSP_MAX_QUEUE_SIZE        = tostring(var.telemetry.bsp_max_queue_size)
+    OTEL_BSP_SCHEDULE_DELAY        = tostring(var.telemetry.bsp_schedule_delay_ms)
+    OTEL_BSP_MAX_EXPORT_BATCH_SIZE = tostring(var.telemetry.bsp_max_export_batch_size)
+    OTEL_BSP_EXPORT_TIMEOUT        = tostring(var.telemetry.bsp_export_timeout_ms)
+    } : {}, var.telemetry.profile_enabled ? {
+    PYROSCOPE             = "1"
+    PYROSCOPE_SERVER      = var.telemetry.profile_endpoint
+    PYROSCOPE_SAMPLE_RATE = tostring(var.telemetry.profile_sample_rate)
+  } : {})
 }
 
 resource "kubernetes_namespace_v1" "login" {
@@ -107,7 +125,7 @@ resource "kubernetes_deployment_v1" "login" {
           # Not the pull secret (ecr.tf): it changes every 6 hours and is read
           # by the kubelet, not by the pods.
           "checksum/secrets" = sha256(join(",", [
-            random_password.db.result,
+            local.db_password,
             random_password.service_token.result,
             tls_private_key.signing.private_key_pem,
           ]))
@@ -187,6 +205,29 @@ resource "kubernetes_deployment_v1" "login" {
             name  = "VOXEL_OIDC_CLIENT_ID"
             value = var.oidc_client_id
           }
+          dynamic "env" {
+            for_each = local.telemetry_env
+            content {
+              name  = env.key
+              value = env.value
+            }
+          }
+          env {
+            name = "K8S_POD_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.name"
+              }
+            }
+          }
+          env {
+            name = "K8S_NAMESPACE_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.namespace"
+              }
+            }
+          }
           env {
             name  = "VOXEL_SERVICE_TOKEN_FILE"
             value = "/run/login/service-token"
@@ -206,7 +247,7 @@ resource "kubernetes_deployment_v1" "login" {
           }
           env {
             name  = "VOXEL_LOGIN_DB"
-            value = "postgres://login:$(PGPASSWORD)@${kubernetes_service_v1.postgres.metadata[0].name}:5432/login"
+            value = local.db_url
           }
           port {
             name           = "http"
@@ -255,7 +296,6 @@ resource "kubernetes_deployment_v1" "login" {
   lifecycle {
     ignore_changes = [spec[0].template[0].spec[0].container[0].image]
   }
-  depends_on = [kubernetes_stateful_set_v1.postgres]
 }
 
 resource "kubernetes_pod_disruption_budget_v1" "login" {

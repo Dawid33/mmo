@@ -35,7 +35,10 @@ fn main() {
     let col_t = t.elapsed();
     black_box(acc);
     let ns_per_column = col_t.as_nanos() as f64 / N as f64;
-    println!("column():        {:>8.1} ns/call  ({N} calls in {col_t:?})", ns_per_column);
+    println!(
+        "column():        {:>8.1} ns/call  ({N} calls in {col_t:?})",
+        ns_per_column
+    );
 
     // 2. density_at throughput (the cheap per-y part), one profile reused.
     let prof = p.column(123.0, 456.0);
@@ -47,7 +50,10 @@ fn main() {
     }
     let dy_t = t.elapsed();
     black_box(acc);
-    println!("density_at():    {:>8.1} ns/call", dy_t.as_nanos() as f64 / M as f64);
+    println!(
+        "density_at():    {:>8.1} ns/call",
+        dy_t.as_nanos() as f64 / M as f64
+    );
 
     // 3. final_density (full 3D graph eval) for comparison.
     const K: usize = 200_000;
@@ -59,7 +65,10 @@ fn main() {
     }
     let fd_t = t.elapsed();
     black_box(acc);
-    println!("final_density(): {:>8.1} ns/call", fd_t.as_nanos() as f64 / K as f64);
+    println!(
+        "final_density(): {:>8.1} ns/call",
+        fd_t.as_nanos() as f64 / K as f64
+    );
 
     // 4. Whole region, for the share math.
     let t = Instant::now();

@@ -11,8 +11,8 @@ use rapier3d::math::Vector;
 
 use crate::movement::{Immersion, PLAYER_EYE_HEIGHT, PLAYER_HEIGHT};
 use crate::{
-    BlockId, BlockPos, ColumnCoords, ColumnGround, EntityKey, Rollback, WorldBlockPos,
-    BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS,
+    BLOCK_VOXELS, BlockId, BlockPos, CHUNK_BLOCKS, ColumnCoords, ColumnGround, EntityKey,
+    REGION_BLOCKS, Rollback, WorldBlockPos,
 };
 
 /// Water units in one full cell.
@@ -35,12 +35,33 @@ pub const NO_BODY: u32 = u32::MAX;
 /// A water body of one region: its region-local lexicographically smallest
 /// member block column, packed as `x * REGION_BLOCKS + z`. (`Default` only
 /// because `#[undo(map)]` keys need it.)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub struct WaterBodyId(pub u32);
 
 /// A body of static water: the 4-connected block columns of one region
 /// sharing one recipe `water_top`, labelled once at genesis.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub struct WaterBody {
     /// The surface, absolute: `(water_top + 1) * WATER_FULL`.
     pub level: i64,
@@ -88,17 +109,29 @@ pub fn label_water_bodies(
         }
         let top = ground[i].1.water_top[lx * cb + lz];
         let id = WaterBodyId((start.0 * REGION_BLOCKS as usize + start.1) as u32);
-        let mut body = WaterBody { level: (i64::from(top) + 1) * i64::from(WATER_FULL), volume: 0 };
+        let mut body = WaterBody {
+            level: (i64::from(top) + 1) * i64::from(WATER_FULL),
+            volume: 0,
+        };
         ground[i].1.water_body[lx * cb + lz] = id.0;
         let mut stack = vec![start];
         while let Some((x, z)) = stack.pop() {
             let (i, lx, lz) = at[&(x, z)];
             let (c, g) = &ground[i];
-            let (lo, hi) = g.recipe_water(lx, lz).expect("labelled columns hold recipe water");
+            let (lo, hi) = g
+                .recipe_water(lx, lz)
+                .expect("labelled columns hold recipe water");
             let cells = (lo..=hi).filter(|&y| !is_ice(*c, (lx, lz), y)).count() as u64;
             body.volume += cells * u64::from(WATER_FULL);
-            for n in [(x + 1, z), (x, z + 1), (x.wrapping_sub(1), z), (x, z.wrapping_sub(1))] {
-                let Some(&(j, nx, nz)) = at.get(&n) else { continue };
+            for n in [
+                (x + 1, z),
+                (x, z + 1),
+                (x.wrapping_sub(1), z),
+                (x, z.wrapping_sub(1)),
+            ] {
+                let Some(&(j, nx, nz)) = at.get(&n) else {
+                    continue;
+                };
                 let g = &mut ground[j].1;
                 if g.water_body[nx * cb + nz] == NO_BODY && g.water_top[nx * cb + nz] == top {
                     g.water_body[nx * cb + nz] = id.0;
@@ -156,11 +189,20 @@ impl Rollback {
     /// first). Written only when it changed. Runs at the opening of the
     /// tick, after the intents, so every mover plans with it.
     pub(crate) fn tick_immersion_safe(&mut self) {
-        let movers: Vec<EntityKey> =
-            self.data.ecs.motion.iter().filter_map(|(k, m)| m.map(|_| k)).collect();
+        let movers: Vec<EntityKey> = self
+            .data
+            .ecs
+            .motion
+            .iter()
+            .filter_map(|(k, m)| m.map(|_| k))
+            .collect();
         for e in movers {
-            let Some((feet, height)) = self.mover_extent(e) else { continue };
-            let Some(mut motion) = *self.data.ecs.motion.try_get(e) else { continue };
+            let Some((feet, height)) = self.mover_extent(e) else {
+                continue;
+            };
+            let Some(mut motion) = *self.data.ecs.motion.try_get(e) else {
+                continue;
+            };
             let immersion = immersion_at(self, feet, height);
             if motion.immersion != immersion {
                 motion.immersion = immersion;
@@ -174,11 +216,20 @@ impl Rollback {
     fn mover_extent(&self, e: EntityKey) -> Option<(Vector, f32)> {
         let handle = (*self.data.ecs.rigidbody.try_get(e))?;
         let body = self.data.physics.bodies.get(handle)?;
-        let collider = self.data.physics.colliders.get(*body.colliders().first()?)?;
+        let collider = self
+            .data
+            .physics
+            .colliders
+            .get(*body.colliders().first()?)?;
         let aabb = collider.shape().compute_local_aabb();
-        let lift = collider.position_wrt_parent().map_or(0.0, |p| p.translation.y);
+        let lift = collider
+            .position_wrt_parent()
+            .map_or(0.0, |p| p.translation.y);
         let t = body.translation();
-        Some((Vector::new(t.x, t.y + lift + aabb.mins.y, t.z), aabb.maxs.y - aabb.mins.y))
+        Some((
+            Vector::new(t.x, t.y + lift + aabb.mins.y, t.z),
+            aabb.maxs.y - aabb.mins.y,
+        ))
     }
 
     /// Water units in world block `p`, own region ∪ halo; 0 beyond them.
@@ -190,10 +241,14 @@ impl Rollback {
         // Canonical (an unwrapped cell of this region's frame folds), so the
         // halo's ground key below is the neighbour's.
         let p = self.data.canonical_block(p);
-        let Some(block) = self.halo_block(p) else { return 0 };
+        let Some(block) = self.halo_block(p) else {
+            return 0;
+        };
         let cb = CHUNK_BLOCKS as i64;
         let (lx, lz) = (p.x.rem_euclid(cb) as usize, p.z.rem_euclid(cb) as usize);
-        let recipe = self.recipe_ground_at(p).and_then(|g| g.recipe_water(lx, lz));
+        let recipe = self
+            .recipe_ground_at(p)
+            .and_then(|g| g.recipe_water(lx, lz));
         static_water_units(block.id, recipe, p.y)
     }
 
@@ -204,9 +259,16 @@ impl Rollback {
         let cb = CHUNK_BLOCKS as i32;
         let [x, _, z] = self.data.local_block(p);
         if (0..n).contains(&x) && (0..n).contains(&z) {
-            return self.data.ground.get(&ColumnCoords::new((x / cb) as usize, (z / cb) as usize));
+            return self
+                .data
+                .ground
+                .get(&ColumnCoords::new((x / cb) as usize, (z / cb) as usize));
         }
-        self.data.halo_ground.get(&self.data.world_chunk([x.div_euclid(cb), 0, z.div_euclid(cb)]))
+        self.data.halo_ground.get(
+            &self
+                .data
+                .world_chunk([x.div_euclid(cb), 0, z.div_euclid(cb)]),
+        )
     }
 
     /// The water body of region-local block `pos`'s column, when the cell
@@ -221,9 +283,11 @@ impl Rollback {
             return None;
         }
         let cb = CHUNK_BLOCKS as i32;
-        let g = self.data.ground.get(&ColumnCoords::new((pos.x / cb) as usize, (pos.z / cb) as usize))?;
+        let g = self.data.ground.get(&ColumnCoords::new(
+            (pos.x / cb) as usize,
+            (pos.z / cb) as usize,
+        ))?;
         let b = g.water_body[(pos.x % cb) as usize * CHUNK_BLOCKS + (pos.z % cb) as usize];
         (b != NO_BODY).then_some(WaterBodyId(b))
     }
 }
-

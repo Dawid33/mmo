@@ -4,7 +4,7 @@
 //! made a body on flat voxel ground sink, fall through its skin, or trip.
 //! See `walking_smoothness.rs` for what they did to a walking player.
 use game::parry::math::{IVector, Pose, Vector};
-use game::parry::query::{cast_shapes, ShapeCastOptions, ShapeCastStatus};
+use game::parry::query::{ShapeCastOptions, ShapeCastStatus, cast_shapes};
 use game::parry::shape::{Capsule, Cuboid, Voxels};
 
 /// The player capsule and the character controller's skin for it.
@@ -37,7 +37,11 @@ fn walking_step() -> Vector {
 
 fn assert_floor_hit(hit: Option<game::parry::query::ShapeCastHit>, context: &str) {
     let hit = hit.unwrap_or_else(|| panic!("{context}: the floor was missed"));
-    assert!(hit.time_of_impact < 1.0e-3, "{context}: toi {}", hit.time_of_impact);
+    assert!(
+        hit.time_of_impact < 1.0e-3,
+        "{context}: toi {}",
+        hit.time_of_impact
+    );
     let n = hit.normal1;
     assert!(
         n.x.abs() < 1.0e-4 && n.z.abs() < 1.0e-4 && n.y > 0.9999,
@@ -57,7 +61,13 @@ fn cast_starting_at_the_target_distance_hits_with_the_true_normal() {
     let cuboid = Cuboid::new(v(8.0, 8.0, 8.0));
     let capsule = Capsule::new_y(r(HALF_HEIGHT), r(RADIUS));
     // Around the skin: where time-of-impact error leaves a parked shape.
-    for gap in [SKIN + 0.0015, SKIN + 0.0005, SKIN, SKIN - 0.0005, SKIN - 0.006] {
+    for gap in [
+        SKIN + 0.0015,
+        SKIN + 0.0005,
+        SKIN,
+        SKIN - 0.0005,
+        SKIN - 0.006,
+    ] {
         for z in [-6.0, -2.5, 0.0, 2.01, 5.0] {
             let pos2 = Pose::translation(r(0.3), r(8.0 + HALF_HEIGHT + RADIUS + gap), r(z));
             let hit = cast_shapes(
@@ -86,7 +96,13 @@ fn voxel_floor(size: f32) -> Voxels {
     Voxels::new(Vector::splat(r(size)), &cells)
 }
 
-fn cast_on_floor(floor: &Voxels, size: f32, x: f32, z: f32, vel: Vector) -> Option<game::parry::query::ShapeCastHit> {
+fn cast_on_floor(
+    floor: &Voxels,
+    size: f32,
+    x: f32,
+    z: f32,
+    vel: Vector,
+) -> Option<game::parry::query::ShapeCastHit> {
     let capsule = Capsule::new_y(r(HALF_HEIGHT), r(RADIUS));
     let pos2 = Pose::translation(r(x), r(size + HALF_HEIGHT + RADIUS + SKIN + 0.001), r(z));
     let distance = vel.length();
@@ -114,7 +130,10 @@ fn voxels_cast_sees_the_voxel_under_a_hovering_shape() {
     // The leading face of the capsule's AABB is 0.16 short of the z = 32
     // voxel border: the search crosses it long before it descends.
     for z in [16.0 + 9.443, 32.0 - RADIUS - 0.16, 32.0 - RADIUS - 0.01] {
-        assert_floor_hit(cast_on_floor(&floor, 16.0, 24.0, z, walking_step()), &format!("z {z}"));
+        assert_floor_hit(
+            cast_on_floor(&floor, 16.0, 24.0, z, walking_step()),
+            &format!("z {z}"),
+        );
     }
 }
 
@@ -139,4 +158,3 @@ fn voxels_cast_reports_no_edges_inside_a_flat_floor() {
         "a flat floor must not stop a slide along it: {slide:?}"
     );
 }
-

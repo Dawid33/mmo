@@ -19,7 +19,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::orders::{TilePos, TileSource};
-use crate::{block_props, df_depth, BlockId, WADE_COST, WADE_MAX_DEPTH};
+use crate::{BlockId, WADE_COST, WADE_MAX_DEPTH, block_props, df_depth};
 
 /// Default expansion budget of one search, in nodes.
 pub const MAX_PATH_NODES: u32 = 32_768;
@@ -75,19 +75,33 @@ fn heuristic(a: TilePos, b: TilePos) -> u32 {
 /// is a jump.
 pub fn step_is_walk_up(src: &impl TileSource, from: TilePos, to: TilePos) -> bool {
     to[1] == from[1] + 1
-        && src.slope([to[0], to[1] - 1, to[2]]).is_some_and(|s| crate::walk_up(s, [from[0] - to[0], from[2] - to[2]]))
+        && src
+            .slope([to[0], to[1] - 1, to[2]])
+            .is_some_and(|s| crate::walk_up(s, [from[0] - to[0], from[2] - to[2]]))
 }
 
 /// Per tile of `path`: whether the step onto it is a walk-up
 /// ([`step_is_walk_up`]); the first tile is `false`.
 pub fn walk_ups(src: &impl TileSource, path: &[TilePos]) -> Vec<bool> {
     let steps = path.windows(2).map(|w| step_is_walk_up(src, w[0], w[1]));
-    path.first().map(|_| false).into_iter().chain(steps).collect()
+    path.first()
+        .map(|_| false)
+        .into_iter()
+        .chain(steps)
+        .collect()
 }
 
 /// Neighbour offsets in a fixed order (orthogonals first).
-const DIRS: [[i32; 2]; 8] =
-    [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+const DIRS: [[i32; 2]; 8] = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [1, 1],
+    [1, -1],
+    [-1, 1],
+    [-1, -1],
+];
 
 fn successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) {
     out.clear();
@@ -103,7 +117,8 @@ fn successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) 
             let diagonal = dx != 0 && dz != 0;
             if diagonal {
                 let top = p[1].max(q[1]);
-                if !passable(src, [p[0] + dx, top, p[2]]) || !passable(src, [p[0], top, p[2] + dz]) {
+                if !passable(src, [p[0] + dx, top, p[2]]) || !passable(src, [p[0], top, p[2] + dz])
+                {
                     continue;
                 }
             }
@@ -131,7 +146,12 @@ pub fn path_cost(src: &impl TileSource, path: &[TilePos]) -> Option<u32> {
 
 /// The cheapest path `from..=to` inclusive, or `None` when unreachable, an
 /// end is not standable, or more than `max_nodes` nodes would be expanded.
-pub fn find_path(src: &impl TileSource, from: TilePos, to: TilePos, max_nodes: u32) -> Option<Vec<TilePos>> {
+pub fn find_path(
+    src: &impl TileSource,
+    from: TilePos,
+    to: TilePos,
+    max_nodes: u32,
+) -> Option<Vec<TilePos>> {
     if !standable(src, to) {
         return None;
     }
@@ -206,13 +226,19 @@ pub const COLUMN_BAND_MARGIN: i32 = 2;
 /// widened by [`COLUMN_BAND_MARGIN`], else the fixed fallback constants.
 pub fn column_scan_range(src: &impl TileSource, column: [i32; 2]) -> (i32, i32) {
     src.column_band(column)
-        .map_or((COLUMN_SCAN_Y_MIN, COLUMN_SCAN_Y_MAX), |(lo, hi)| (lo - COLUMN_BAND_MARGIN, hi + COLUMN_BAND_MARGIN))
+        .map_or((COLUMN_SCAN_Y_MIN, COLUMN_SCAN_Y_MAX), |(lo, hi)| {
+            (lo - COLUMN_BAND_MARGIN, hi + COLUMN_BAND_MARGIN)
+        })
 }
 
 /// A standable tile in `column` (`[x, z]`): the one closest to `y_hint`
 /// (lower first on a tie), or the topmost when `None`. Scans the column's
 /// band ([`column_scan_range`]).
-pub fn nearest_standable(src: &impl TileSource, column: [i32; 2], y_hint: Option<i32>) -> Option<TilePos> {
+pub fn nearest_standable(
+    src: &impl TileSource,
+    column: [i32; 2],
+    y_hint: Option<i32>,
+) -> Option<TilePos> {
     let at = |y: i32| [column[0], y, column[1]];
     let (y_min, y_max) = column_scan_range(src, column);
     match y_hint {

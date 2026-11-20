@@ -6,6 +6,9 @@
 locals {
   ns = kubernetes_namespace_v1.monitoring.metadata[0].name
 
+  # Public: TLS at Traefik. Not public: the operator VPN's tunnel is the encryption.
+  grafana_url = "${var.grafana_public ? "https" : "http"}://${var.grafana_host}"
+
   # Thanos (sidecar, store, compactor) reads its objstore Secret once, at start.
   # This goes on those pods as an annotation, so pointing the Secret somewhere
   # else (another endpoint, bucket or key) restarts them. The key's id only,
@@ -35,6 +38,8 @@ resource "helm_release" "kube_prometheus_stack" {
     thanos_image      = var.thanos_image
     objstore_checksum = local.objstore_checksum
     grafana_host      = var.grafana_host
+    grafana_url       = local.grafana_url
+    grafana_public    = var.grafana_public
     ingress_class     = var.ingress_class
     cluster_issuer    = var.cluster_issuer
 
@@ -151,6 +156,7 @@ resource "helm_release" "tempo" {
     insecure      = var.object_store.insecure
     region        = var.object_store.region
     retention     = var.tempo_retention
+    namespace     = local.ns
     storage_class = var.storage_class
     size          = var.volume_sizes["tempo"]
   })]

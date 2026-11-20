@@ -17,13 +17,13 @@ pub enum Command {
     Leave,
     Where,
     Clear,
-    /// Every designation done at once (the Debug tab's button).
+    /// Every designation done at once (the debug pane's button).
     #[cfg(feature = "dev_ui")]
     Complete,
-    /// Drop a 1 m body at the cursor (the Debug tab's button).
+    /// Drop a 1 m body at the cursor (the debug pane's button).
     #[cfg(feature = "dev_ui")]
     DropBody,
-    /// Flip one of the Debug tab's switches.
+    /// Flip one of the debug pane's switches.
     #[cfg(feature = "dev_ui")]
     Toggle(DevToggle),
 }
@@ -43,7 +43,7 @@ pub const HELP: &[&str] = &[
     "/toggle boundaries|grid|culling|lod|near|colliders|xray - flip a debug view",
 ];
 
-/// The names `/toggle` takes, in the Debug tab's order.
+/// The names `/toggle` takes, in the debug pane's order.
 #[cfg(feature = "dev_ui")]
 pub const TOGGLE_NAMES: [(&str, DevToggle); 7] = [
     ("boundaries", DevToggle::Boundaries),
@@ -87,7 +87,9 @@ pub fn submit(line: &str) -> Submitted {
 fn parse(verb: &str, args: &[&str]) -> Result<Command, String> {
     let alone = |command: Command| match args.first() {
         None => Ok(command),
-        Some(extra) => Err(format!("/{verb} takes nothing after it (got \"{extra}\"). Try /help")),
+        Some(extra) => Err(format!(
+            "/{verb} takes nothing after it (got \"{extra}\"). Try /help"
+        )),
     };
     match verb {
         "help" => alone(Command::Help),
@@ -114,4 +116,3 @@ fn parse(verb: &str, args: &[&str]) -> Result<Command, String> {
         _ => Err(format!("Unknown command: /{verb}. Try /help")),
     }
 }
-

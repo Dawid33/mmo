@@ -19,7 +19,12 @@ pub struct Niche {
 
 impl Niche {
     pub const fn new(min: f32, opt_lo: f32, opt_hi: f32, max: f32) -> Niche {
-        Niche { min, opt_lo, opt_hi, max }
+        Niche {
+            min,
+            opt_lo,
+            opt_hi,
+            max,
+        }
     }
 
     /// Suitability of `v`, 0..=1.

@@ -42,12 +42,17 @@ pub fn encode<T: Serialize>(format: u8, v: &T) -> Vec<u8> {
 pub fn decode<T: DeserializeOwned>(expected: u8, bytes: &[u8]) -> Result<T, StoreError> {
     let _cpu = crate::counters::CpuSpan::start();
     let name = std::any::type_name::<T>();
-    let (&format, body) = bytes.split_first().ok_or_else(|| StoreError::Corrupt(format!("{name}: empty blob")))?;
+    let (&format, body) = bytes
+        .split_first()
+        .ok_or_else(|| StoreError::Corrupt(format!("{name}: empty blob")))?;
     if format != expected {
-        return Err(StoreError::Corrupt(format!("{name}: format byte {format}, expected {expected}")));
+        return Err(StoreError::Corrupt(format!(
+            "{name}: format byte {format}, expected {expected}"
+        )));
     }
     let mut raw = Vec::new();
-    zstd::stream::copy_decode(body, &mut raw).map_err(|e| StoreError::Corrupt(format!("{name}: zstd: {e}")))?;
+    zstd::stream::copy_decode(body, &mut raw)
+        .map_err(|e| StoreError::Corrupt(format!("{name}: zstd: {e}")))?;
     bincode::deserialize(&raw).map_err(|e| StoreError::Corrupt(format!("{name}: bincode: {e}")))
 }
 
@@ -86,7 +91,10 @@ impl std::fmt::Display for WorldMapRowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WorldMapRowError::Layout { format } => {
-                write!(f, "row format {format}, this build reads format {FORMAT_WORLD_MAP}")
+                write!(
+                    f,
+                    "row format {format}, this build reads format {FORMAT_WORLD_MAP}"
+                )
             }
             WorldMapRowError::Version { found } => write!(
                 f,
@@ -101,7 +109,9 @@ impl std::fmt::Display for WorldMapRowError {
 /// The inverse of [`encode_world_map`].
 pub fn decode_world_map(bytes: &[u8]) -> Result<game::WorldMap, WorldMapRowError> {
     let _cpu = crate::counters::CpuSpan::start();
-    let Some(&format) = bytes.first() else { return Err(WorldMapRowError::Damaged("empty row".into())) };
+    let Some(&format) = bytes.first() else {
+        return Err(WorldMapRowError::Damaged("empty row".into()));
+    };
     if format != FORMAT_WORLD_MAP {
         return Err(WorldMapRowError::Layout { format });
     }
@@ -118,6 +128,7 @@ pub fn decode_world_map(bytes: &[u8]) -> Result<game::WorldMap, WorldMapRowError
         return Err(WorldMapRowError::Damaged("crc32 mismatch".into()));
     }
     let mut raw = Vec::new();
-    zstd::stream::copy_decode(body, &mut raw).map_err(|e| WorldMapRowError::Damaged(format!("zstd: {e}")))?;
+    zstd::stream::copy_decode(body, &mut raw)
+        .map_err(|e| WorldMapRowError::Damaged(format!("zstd: {e}")))?;
     bincode::deserialize(&raw).map_err(|e| WorldMapRowError::Damaged(format!("bincode: {e}")))
 }

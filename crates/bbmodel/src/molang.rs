@@ -191,8 +191,10 @@ enum Tok {
 }
 
 fn lex(s: &str) -> Result<Vec<Tok>, String> {
-    const SYMS: [&str; 18] =
-        ["&&", "||", "??", "<=", ">=", "==", "!=", "+", "-", "*", "/", "(", ")", ",", "?", ":", "<", ">"];
+    const SYMS: [&str; 18] = [
+        "&&", "||", "??", "<=", ">=", "==", "!=", "+", "-", "*", "/", "(", ")", ",", "?", ":", "<",
+        ">",
+    ];
     let b = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -200,12 +202,16 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
         let c = b[i] as char;
         if c.is_whitespace() {
             i += 1;
-        } else if c.is_ascii_digit() || (c == '.' && b.get(i + 1).is_some_and(|d| d.is_ascii_digit())) {
+        } else if c.is_ascii_digit()
+            || (c == '.' && b.get(i + 1).is_some_and(|d| d.is_ascii_digit()))
+        {
             let start = i;
             while i < b.len() && ((b[i] as char).is_ascii_digit() || b[i] == b'.') {
                 i += 1;
             }
-            let n: f32 = s[start..i].parse().map_err(|_| format!("bad number in {s:?}"))?;
+            let n: f32 = s[start..i]
+                .parse()
+                .map_err(|_| format!("bad number in {s:?}"))?;
             // Molang allows a trailing `f`.
             if i < b.len() && (b[i] == b'f' || b[i] == b'F') {
                 i += 1;
@@ -213,7 +219,9 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
             out.push(Tok::Num(n));
         } else if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
-            while i < b.len() && ((b[i] as char).is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.') {
+            while i < b.len()
+                && ((b[i] as char).is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.')
+            {
                 i += 1;
             }
             out.push(Tok::Name(expand(&s[start..i].to_ascii_lowercase())));
@@ -231,7 +239,12 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
 }
 
 fn expand(name: &str) -> String {
-    for (short, long) in [("q.", "query."), ("v.", "variable."), ("t.", "temp."), ("c.", "context.")] {
+    for (short, long) in [
+        ("q.", "query."),
+        ("v.", "variable."),
+        ("t.", "temp."),
+        ("c.", "context."),
+    ] {
         if let Some(rest) = name.strip_prefix(short) {
             return format!("{long}{rest}");
         }
@@ -266,7 +279,11 @@ impl Parser {
             let a = self.ternary()?;
             if !self.take(":") {
                 // Molang's binary conditional `a ? b` (0 when false).
-                return Ok(Expr::Ternary(Box::new(c), Box::new(a), Box::new(Expr::Num(0.0))));
+                return Ok(Expr::Ternary(
+                    Box::new(c),
+                    Box::new(a),
+                    Box::new(Expr::Num(0.0)),
+                ));
             }
             let b = self.ternary()?;
             return Ok(Expr::Ternary(Box::new(c), Box::new(a), Box::new(b)));
@@ -277,7 +294,9 @@ impl Parser {
     fn binary(&mut self, min_prec: u8) -> Result<Expr, String> {
         let mut lhs = self.unary()?;
         loop {
-            let Some(Tok::Sym(s)) = self.peek() else { break };
+            let Some(Tok::Sym(s)) = self.peek() else {
+                break;
+            };
             let (op, prec) = match *s {
                 "??" => (Op::Coalesce, 1),
                 "||" => (Op::Or, 2),
@@ -363,11 +382,19 @@ fn fold(e: Expr) -> Expr {
     match e {
         Expr::Neg(a) => {
             let a = fold(*a);
-            if constant(&a) { Expr::Num(-a.eval(&cx)) } else { Expr::Neg(Box::new(a)) }
+            if constant(&a) {
+                Expr::Num(-a.eval(&cx))
+            } else {
+                Expr::Neg(Box::new(a))
+            }
         }
         Expr::Not(a) => {
             let a = fold(*a);
-            if constant(&a) { Expr::Num(Expr::Not(Box::new(a)).eval(&cx)) } else { Expr::Not(Box::new(a)) }
+            if constant(&a) {
+                Expr::Num(Expr::Not(Box::new(a)).eval(&cx))
+            } else {
+                Expr::Not(Box::new(a))
+            }
         }
         Expr::Bin(op, a, b) => {
             let (a, b) = (fold(*a), fold(*b));
@@ -379,7 +406,9 @@ fn fold(e: Expr) -> Expr {
             }
             e
         }
-        Expr::Ternary(c, a, b) => Expr::Ternary(Box::new(fold(*c)), Box::new(fold(*a)), Box::new(fold(*b))),
+        Expr::Ternary(c, a, b) => {
+            Expr::Ternary(Box::new(fold(*c)), Box::new(fold(*a)), Box::new(fold(*b)))
+        }
         Expr::Call(name, args) => {
             let args: Vec<Expr> = args.into_iter().map(fold).collect();
             let pure = !name.starts_with("math.random") && !name.starts_with("math.die_roll");
@@ -394,4 +423,3 @@ fn fold(e: Expr) -> Expr {
         e => e,
     }
 }
-

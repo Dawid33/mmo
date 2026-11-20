@@ -30,7 +30,11 @@ pub struct Fence {
 
 impl Default for Fence {
     fn default() -> Self {
-        Fence { owner: HostId::SOLO, epochs: BTreeMap::new(), all_hosts: false }
+        Fence {
+            owner: HostId::SOLO,
+            epochs: BTreeMap::new(),
+            all_hosts: false,
+        }
     }
 }
 
@@ -59,7 +63,10 @@ impl Fence {
 /// is still fenced by every super-region the host claimed, so a fenced-out host
 /// writes no record.
 pub fn touched_super_regions(cut: &WorldCut, s: u32) -> BTreeSet<SuperRegion> {
-    cut.regions.iter().map(|(rc, _)| super_region_of(*rc, s)).collect()
+    cut.regions
+        .iter()
+        .map(|(rc, _)| super_region_of(*rc, s))
+        .collect()
 }
 
 /// The super-regions a commit with `fence` must find still held: the cut's

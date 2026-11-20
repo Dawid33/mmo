@@ -9,8 +9,7 @@ use core::ops::Deref;
 /// It is possible to bypass the wrapper with `.as_mut_internal`. But this should only
 /// be done for internal engine usage (like the physics pipeline).
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ModifiedObjects<Handle, Object>(Vec<Handle>, PhantomData<Object>);
 
 impl<Handle, Object> Default for ModifiedObjects<Handle, Object> {

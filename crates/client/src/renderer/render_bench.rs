@@ -21,23 +21,24 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 
 use super::bridge::{RegionRoots, SimTarget};
 use super::config::TerrainRenderConfig;
-use crate::world_scale::WorldScale;
 use super::lod_rings::LodRings;
-use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
-use super::meshing::queue::{ChunkKey, RemeshQueue};
 use super::meshing::MeshingTask;
 use super::meshing::TerrainQuadCount;
-use super::voxel_pull::gpu::{ActiveNearMode, ForwardCullSource};
+use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
+use super::meshing::queue::{ChunkKey, RemeshQueue};
 use super::voxel_pull::ChunkQuads;
+use super::voxel_pull::gpu::{ActiveNearMode, ForwardCullSource};
 use super::{ClientUpdates, GameEvents};
+use crate::world_scale::WorldScale;
 use metrics::{CountSummary, FloatSummary, RenderDiagnosticSamples};
 use output::{
-    write_result_atomic, AdapterMetadata, BenchmarkMetadata, BenchmarkMetrics, BenchmarkResult,
-    DrawMetrics, DrawScopeMetrics, GeometryMetrics, GeometryScopeMetrics, Instrumentation,
-    MemoryMetrics, MemoryScopeMetrics, PipelineStatistics, SerializableReadiness, TimingMetrics,
+    AdapterMetadata, BenchmarkMetadata, BenchmarkMetrics, BenchmarkResult, DrawMetrics,
+    DrawScopeMetrics, GeometryMetrics, GeometryScopeMetrics, Instrumentation, MemoryMetrics,
+    MemoryScopeMetrics, PipelineStatistics, SerializableReadiness, TimingMetrics,
     UnavailableMetric, UnavailableReason, VisibilityMetrics, VisibilityScopeMetrics,
+    write_result_atomic,
 };
-use telemetry::{capture_render_thread_snapshot, translate_snapshot, SharedRenderThreadSnapshot};
+use telemetry::{SharedRenderThreadSnapshot, capture_render_thread_snapshot, translate_snapshot};
 
 pub const BENCHMARK_WIDTH: u32 = 1920;
 pub const BENCHMARK_HEIGHT: u32 = 1080;
@@ -99,11 +100,18 @@ impl BenchmarkRunSettings {
                 )),
             })
             .transpose()?;
-        let instrumentation = match get("RENDER_BENCH_INSTRUMENTATION").as_deref().unwrap_or("normal") {
+        let instrumentation = match get("RENDER_BENCH_INSTRUMENTATION")
+            .as_deref()
+            .unwrap_or("normal")
+        {
             "normal" => Instrumentation::Normal,
             "chrome_trace" => Instrumentation::ChromeTrace,
             "tracy" => Instrumentation::Tracy,
-            value => return Err(format!("invalid RENDER_BENCH_INSTRUMENTATION value `{value}` (expected normal, chrome_trace, or tracy)")),
+            value => {
+                return Err(format!(
+                    "invalid RENDER_BENCH_INSTRUMENTATION value `{value}` (expected normal, chrome_trace, or tracy)"
+                ));
+            }
         };
         Ok(Self {
             output: get("RENDER_BENCH_OUTPUT")
@@ -133,7 +141,9 @@ impl BenchmarkRunSettings {
                 "RENDER_BENCH_LOAD_TIMEOUT_SECS",
                 get("RENDER_BENCH_LOAD_TIMEOUT_SECS"),
             )?
-            .map_or(LOAD_TIMEOUT, |seconds| Duration::from_secs(u64::from(seconds))),
+            .map_or(LOAD_TIMEOUT, |seconds| {
+                Duration::from_secs(u64::from(seconds))
+            }),
         })
     }
 }
@@ -169,10 +179,10 @@ impl BenchmarkReadiness {
             .iter()
             .filter(|&&(bound, _)| bound > scale.near_radius)
             .all(|&(_, factor)| {
-            self.ready_lod_counts
-                .get(&factor)
-                .is_some_and(|&count| count > 0)
-        });
+                self.ready_lod_counts
+                    .get(&factor)
+                    .is_some_and(|&count| count > 0)
+            });
         self.near_regions >= scale.near_region_count()
             && self.remesh_queue_len == 0
             && self.lod_build_queue_len == 0
@@ -331,7 +341,11 @@ const fn classify_far_runtime(raster_cells: usize) -> FarRuntimeBackend {
     }
 }
 
-const fn far_runtime_ready(far_expected: bool, total_cells: usize, raster_ready_cells: usize) -> bool {
+const fn far_runtime_ready(
+    far_expected: bool,
+    total_cells: usize,
+    raster_ready_cells: usize,
+) -> bool {
     if !far_expected {
         // No LOD rings subscribed (`VOXEL_LOD_RINGS=off` / the tiny world):
         // there is no far backend to wait for, and stray cells are not ready.
@@ -580,7 +594,10 @@ impl Plugin for RenderBenchmarkPlugin {
         let shared = SharedRenderThreadSnapshot::default();
         // The binary inserts the env-resolved scale before this plugin; a bare
         // app (tests) falls back to the production scale.
-        let scale = *app.init_resource::<WorldScale>().world().resource::<WorldScale>();
+        let scale = *app
+            .init_resource::<WorldScale>()
+            .world()
+            .resource::<WorldScale>();
         info!("render benchmark world scale: {scale}");
         app.insert_resource(BenchmarkSettingsResource(self.settings.clone()))
             .insert_resource(shared.clone())
@@ -723,7 +740,12 @@ fn run_benchmark(
     {
         // In the frame the LOD keys are asked in (`WrapFrame`).
         let frame = scene.frame.as_deref().copied().unwrap_or_default();
-        let near_regions = scene.roots.0.keys().filter_map(|rc| scene.roots.alias(*rc)).collect::<BTreeSet<_>>();
+        let near_regions = scene
+            .roots
+            .0
+            .keys()
+            .filter_map(|rc| scene.roots.alias(*rc))
+            .collect::<BTreeSet<_>>();
         if snapshot_has_all_lod_keys(
             scene.hud_status.viewer_region.map(|v| frame.alias(v)),
             &near_regions,
@@ -1293,4 +1315,3 @@ fn populate_metric_unavailability(
         );
     }
 }
-

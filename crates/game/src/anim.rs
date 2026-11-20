@@ -53,7 +53,9 @@ pub const REST_CLIP: u16 = u16::MAX;
 // --- Rigs ---------------------------------------------------------------
 
 /// The compiled-in rigs. Append only: the discriminant is serialized.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub enum RigId {
     #[default]
     Dwarf,
@@ -134,7 +136,11 @@ impl Rig {
                 if half_extents.iter().any(|h| *h <= 0.0) {
                     return None;
                 }
-                Some(Hitbox { node, center, half_extents })
+                Some(Hitbox {
+                    node,
+                    center,
+                    half_extents,
+                })
             })
             .collect();
         Rig {
@@ -172,12 +178,18 @@ pub struct ClipPlay {
 
 impl Default for ClipPlay {
     fn default() -> Self {
-        Self { clip: REST_CLIP, time: 0.0, speed: 1.0 }
+        Self {
+            clip: REST_CLIP,
+            time: 0.0,
+            speed: 1.0,
+        }
     }
 }
 
 /// A clip fading out under the current one.
-#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub struct Fade {
     pub from: ClipPlay,
     /// Seconds since the fade began, of `length`.
@@ -188,7 +200,9 @@ pub struct Fade {
 /// An entity's animation state. Rollback state (`Ecs::animator`), sent to the
 /// renderer as `SetAnimator` whenever it changes (every tick while a clip
 /// plays).
-#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub struct Animator {
     pub rig: RigId,
     /// Model y = 0 (the feet) in body-local units: a body's origin is its
@@ -202,15 +216,31 @@ pub struct Animator {
 impl Animator {
     pub fn idle(rig_id: RigId) -> Self {
         let clip = rig(rig_id).idle;
-        Self { rig: rig_id, foot_y: 0.0, current: ClipPlay { clip, ..ClipPlay::default() }, fade: None }
+        Self {
+            rig: rig_id,
+            foot_y: 0.0,
+            current: ClipPlay {
+                clip,
+                ..ClipPlay::default()
+            },
+            fade: None,
+        }
     }
 
     /// Switch to `clip` (crossfading from the current one) unless it already
     /// plays, then set its playback speed.
     pub fn play(&mut self, clip: u16, speed: f32) {
         if clip != self.current.clip {
-            self.fade = Some(Fade { from: self.current, elapsed: 0.0, length: ANIM_CROSSFADE_SECS });
-            self.current = ClipPlay { clip, time: 0.0, speed };
+            self.fade = Some(Fade {
+                from: self.current,
+                elapsed: 0.0,
+                length: ANIM_CROSSFADE_SECS,
+            });
+            self.current = ClipPlay {
+                clip,
+                time: 0.0,
+                speed,
+            };
         } else {
             self.current.speed = speed;
         }
@@ -240,7 +270,9 @@ pub struct BoneColliders {
 // --- Pose ---------------------------------------------------------------
 
 fn sample_clip(rig: &Rig, play: &ClipPlay, ahead: f32) -> Vec<(usize, BonePose)> {
-    let Some(anim) = rig.model.animations.get(play.clip as usize) else { return Vec::new() };
+    let Some(anim) = rig.model.animations.get(play.clip as usize) else {
+        return Vec::new();
+    };
     let t = anim.local_time(play.time + ahead * play.speed);
     anim.sample(t, &Default::default())
 }
@@ -323,19 +355,29 @@ impl Rollback {
     /// (stored as [`Animator::foot_y`]).
     pub fn attach_rig_safe(&mut self, e: EntityKey, mut animator: Animator, foot_y: f32) {
         animator.foot_y = foot_y;
-        let Some(body) = *self.data.ecs.rigidbody.try_get(e) else { return };
+        let Some(body) = *self.data.ecs.rigidbody.try_get(e) else {
+            return;
+        };
         let upright = self.upright_of(e);
         let rig = rig(animator.rig);
         let mut colliders = Vec::with_capacity(rig.hitboxes.len());
-        for (h, pose) in rig.hitboxes.iter().zip(hitbox_poses(rig, &animator, foot_y, upright)) {
-            let c = ColliderBuilder::cuboid(h.half_extents[0], h.half_extents[1], h.half_extents[2])
-                .position(pose)
-                .density(0.0)
-                .user_data(e.data().as_ffi() as u128)
-                .build();
+        for (h, pose) in rig
+            .hitboxes
+            .iter()
+            .zip(hitbox_poses(rig, &animator, foot_y, upright))
+        {
+            let c =
+                ColliderBuilder::cuboid(h.half_extents[0], h.half_extents[1], h.half_extents[2])
+                    .position(pose)
+                    .density(0.0)
+                    .user_data(e.data().as_ffi() as u128)
+                    .build();
             colliders.push(self.attach_collider_safe(body, c));
         }
-        self.data.ecs.bones.set_safe(e, Some(BoneColliders { colliders }));
+        self.data
+            .ecs
+            .bones
+            .set_safe(e, Some(BoneColliders { colliders }));
         self.set_animator_safe(e, animator);
     }
 
@@ -375,23 +417,38 @@ impl Rollback {
             .filter_map(|(k, a)| a.map(|_| k))
             .collect();
         for e in keys {
-            let Some(mut animator) = *self.data.ecs.animator.try_get(e) else { continue };
-            let Some(body) = *self.data.ecs.rigidbody.try_get(e) else { continue };
-            let Some(b) = self.data.physics.bodies.get(body) else { continue };
+            let Some(mut animator) = *self.data.ecs.animator.try_get(e) else {
+                continue;
+            };
+            let Some(body) = *self.data.ecs.rigidbody.try_get(e) else {
+                continue;
+            };
+            let Some(b) = self.data.physics.bodies.get(body) else {
+                continue;
+            };
             let v = b.linvel();
             let horizontal = libm::sqrtf(v.x * v.x + v.z * v.z);
-            let grounded = self.data.ecs.motion.try_get(e).map_or(true, |m| m.grounded && !m.flying);
+            let grounded = self
+                .data
+                .ecs
+                .motion
+                .try_get(e)
+                .map_or(true, |m| m.grounded && !m.flying);
             let rig = rig(animator.rig);
             let (clip, speed) = gait(rig, horizontal, grounded);
             animator.play(clip, speed);
             animator.advance(TICK_DT);
             self.set_animator_safe(e, animator);
 
-            let Some(bones) = self.data.ecs.bones.try_get(e).clone() else { continue };
+            let Some(bones) = self.data.ecs.bones.try_get(e).clone() else {
+                continue;
+            };
             let upright = self.upright_of(e);
             let poses = hitbox_poses(rig, &animator, animator.foot_y, upright);
             for (handle, pose) in bones.colliders.iter().zip(poses) {
-                let Some(c) = self.data.physics.colliders.get(*handle) else { continue };
+                let Some(c) = self.data.physics.colliders.get(*handle) else {
+                    continue;
+                };
                 if c.position_wrt_parent() == Some(&pose) {
                     continue;
                 }

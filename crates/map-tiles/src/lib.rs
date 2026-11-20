@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, RwLock};
 
-use game::map_tile::{sample_flags, MapTile, MapTileKey, MAP_TILE_SAMPLES};
-use game::{BlockId, MapExtent, RegionCoords, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS};
+use game::map_tile::{MAP_TILE_SAMPLES, MapTile, MapTileKey, sample_flags};
+use game::{BLOCK_VOXELS, BlockId, CHUNK_BLOCKS, MapExtent, REGION_BLOCKS, RegionCoords};
 use world_store::{StoreError, StoreHandle};
 use worldgen::forged::ForgedWorld;
 use worldgen::material::Materials;
@@ -44,10 +44,14 @@ pub struct TileSourceConfig {
 }
 
 impl TileSourceConfig {
-    pub const SERVER: TileSourceConfig =
-        TileSourceConfig { cache_bytes: MAP_TILE_CACHE_BYTES_SERVER, region_tops_cache: MAP_REGION_TOPS_CACHE_SERVER };
-    pub const CLIENT: TileSourceConfig =
-        TileSourceConfig { cache_bytes: MAP_TILE_CACHE_BYTES_CLIENT, region_tops_cache: MAP_REGION_TOPS_CACHE };
+    pub const SERVER: TileSourceConfig = TileSourceConfig {
+        cache_bytes: MAP_TILE_CACHE_BYTES_SERVER,
+        region_tops_cache: MAP_REGION_TOPS_CACHE_SERVER,
+    };
+    pub const CLIENT: TileSourceConfig = TileSourceConfig {
+        cache_bytes: MAP_TILE_CACHE_BYTES_CLIENT,
+        region_tops_cache: MAP_REGION_TOPS_CACHE,
+    };
 }
 
 /// What [`TileSource::tile`] answers.
@@ -101,24 +105,59 @@ pub struct TileSource {
 
 impl TileSource {
     /// Over a forged world (the store opened `OpenMode::ReadOnly` by a reader beside a server).
-    pub fn forged(store: StoreHandle, world: Arc<ForgedWorld>, mats: Materials, cfg: TileSourceConfig) -> TileSource {
+    pub fn forged(
+        store: StoreHandle,
+        world: Arc<ForgedWorld>,
+        mats: Materials,
+        cfg: TileSourceConfig,
+    ) -> TileSource {
         let extent = worldgen::surface::map_extent(&world);
-        TileSource::new(store, Terrain::Forged { world: WorldRef::Owned(world), extent }, mats, cfg)
+        TileSource::new(
+            store,
+            Terrain::Forged {
+                world: WorldRef::Owned(world),
+                extent,
+            },
+            mats,
+            cfg,
+        )
     }
 
     /// Over the process's installed forged world (`worldgen::forged::active()`).
-    pub fn forged_installed(store: StoreHandle, world: &'static ForgedWorld, mats: Materials, cfg: TileSourceConfig) -> TileSource {
+    pub fn forged_installed(
+        store: StoreHandle,
+        world: &'static ForgedWorld,
+        mats: Materials,
+        cfg: TileSourceConfig,
+    ) -> TileSource {
         let extent = worldgen::surface::map_extent(world);
-        TileSource::new(store, Terrain::Forged { world: WorldRef::Installed(world), extent }, mats, cfg)
+        TileSource::new(
+            store,
+            Terrain::Forged {
+                world: WorldRef::Installed(world),
+                extent,
+            },
+            mats,
+            cfg,
+        )
     }
 
-
     /// Over the procedural world of `seed`.
-    pub fn procedural(store: StoreHandle, seed: u64, mats: Materials, cfg: TileSourceConfig) -> TileSource {
+    pub fn procedural(
+        store: StoreHandle,
+        seed: u64,
+        mats: Materials,
+        cfg: TileSourceConfig,
+    ) -> TileSource {
         TileSource::new(store, Terrain::Procedural(seed), mats, cfg)
     }
 
-    fn new(store: StoreHandle, terrain: Terrain, mats: Materials, cfg: TileSourceConfig) -> TileSource {
+    fn new(
+        store: StoreHandle,
+        terrain: Terrain,
+        mats: Materials,
+        cfg: TileSourceConfig,
+    ) -> TileSource {
         let tag = match &terrain {
             Terrain::Forged { world, .. } => u64::from(world.content_crc()),
             Terrain::Procedural(seed) => *seed,
@@ -157,8 +196,14 @@ impl TileSource {
         let rb = RB as i128;
         let span = MAP_TILE_SAMPLES as i128 * (1i128 << key.level);
         let (ox, oz) = (key.x as i128 * span, key.z as i128 * span);
-        let (z0, z1) = (e.origin.z as i128 * rb, (e.origin.z as i128 + e.height as i128) * rb);
-        let (mut x0, mut x1) = (e.origin.x as i128 * rb, (e.origin.x as i128 + e.width as i128) * rb);
+        let (z0, z1) = (
+            e.origin.z as i128 * rb,
+            (e.origin.z as i128 + e.height as i128) * rb,
+        );
+        let (mut x0, mut x1) = (
+            e.origin.x as i128 * rb,
+            (e.origin.x as i128 + e.width as i128) * rb,
+        );
         if e.wraps() {
             let period = x1 - x0;
             (x0, x1) = (x0 - period, x1 + period);
@@ -176,12 +221,19 @@ impl TileSource {
         }
         if let Some((cached, bytes)) = self.tiles.lock().expect("map tile cache").get(&key) {
             if *cached == etag {
-                return Ok(Fetched::Tile { etag, bytes: bytes.clone() });
+                return Ok(Fetched::Tile {
+                    etag,
+                    bytes: bytes.clone(),
+                });
             }
         }
         let mut tile = match &self.terrain {
-            Terrain::Forged { world, .. } => worldgen::surface::surface_tile_forged(world, key, &self.mats),
-            Terrain::Procedural(seed) => worldgen::surface::surface_tile_procedural(*seed, key, &self.mats),
+            Terrain::Forged { world, .. } => {
+                worldgen::surface::surface_tile_forged(world, key, &self.mats)
+            }
+            Terrain::Procedural(seed) => {
+                worldgen::surface::surface_tile_procedural(*seed, key, &self.mats)
+            }
         };
         for &(unwrapped, canonical, version) in &stored {
             let top = self.region_top(canonical, version)?;
@@ -189,7 +241,10 @@ impl TileSource {
         }
         let bytes = Arc::new(tile.encode());
         let cost = bytes.len();
-        self.tiles.lock().expect("map tile cache").put(key, (etag, bytes.clone()), cost);
+        self.tiles
+            .lock()
+            .expect("map tile cache")
+            .put(key, (etag, bytes.clone()), cost);
         Ok(Fetched::Tile { etag, bytes })
     }
 
@@ -200,8 +255,11 @@ impl TileSource {
         let fresh = Arc::new(self.store.stored_regions()?);
         let mut slot = self.versions.write().expect("map versions");
         if let Some(old) = slot.as_ref() {
-            let moved: Vec<RegionCoords> =
-                fresh.iter().filter(|(rc, v)| old.get(rc) != Some(v)).map(|(rc, _)| *rc).collect();
+            let moved: Vec<RegionCoords> = fresh
+                .iter()
+                .filter(|(rc, v)| old.get(rc) != Some(v))
+                .map(|(rc, _)| *rc)
+                .collect();
             if !moved.is_empty() {
                 let mut tops = self.tops.lock().expect("map region tops");
                 tops.retain(|(rc, _), _| !moved.contains(rc));
@@ -221,7 +279,12 @@ impl TileSource {
             return Ok(v.clone());
         }
         self.refresh_versions()?;
-        Ok(self.versions.read().expect("map versions").clone().expect("just read"))
+        Ok(self
+            .versions
+            .read()
+            .expect("map versions")
+            .clone()
+            .expect("just read"))
     }
 
     /// The stored regions under `key` (none above [`MAP_EDIT_MAX_LEVEL`]): each as the tile sees it
@@ -244,7 +307,12 @@ impl TileSource {
     }
 
     fn region_top(&self, rc: RegionCoords, version: u64) -> Result<Arc<RegionTop>, StoreError> {
-        if let Some(top) = self.tops.lock().expect("map region tops").get(&(rc, version)) {
+        if let Some(top) = self
+            .tops
+            .lock()
+            .expect("map region tops")
+            .get(&(rc, version))
+        {
             return Ok(top.clone());
         }
         let mut top: RegionTop = vec![None; RB * RB];
@@ -270,7 +338,10 @@ impl TileSource {
             }
         }
         let top = Arc::new(top);
-        self.tops.lock().expect("map region tops").put((rc, read_version), top.clone(), 1);
+        self.tops
+            .lock()
+            .expect("map region tops")
+            .put((rc, read_version), top.clone(), 1);
         Ok(top)
     }
 }
@@ -308,7 +379,8 @@ fn overlay(tile: &mut MapTile, rc: RegionCoords, top: &RegionTop) {
     let (rx0, rz0) = (rc.x as i64 * rb, rc.z as i64 * rb);
     // Sample index range whose centre block `o + i·sm + sm/2` lies in [r0, r0 + rb).
     let range = |o: i64, r0: i64| {
-        let first = (r0 - o - sm / 2).div_euclid(sm) + i64::from((r0 - o - sm / 2).rem_euclid(sm) != 0);
+        let first =
+            (r0 - o - sm / 2).div_euclid(sm) + i64::from((r0 - o - sm / 2).rem_euclid(sm) != 0);
         let last = (r0 + rb - 1 - o - sm / 2).div_euclid(sm);
         (first.max(0), last.min(EDGE as i64 - 1))
     };
@@ -316,7 +388,9 @@ fn overlay(tile: &mut MapTile, rc: RegionCoords, top: &RegionTop) {
     for sz in sz0..=sz1 {
         for sx in sx0..=sx1 {
             let (bx, bz) = (ox + sx * sm + sm / 2, oz + sz * sm + sm / 2);
-            let Some((height, block)) = top[(bx - rx0) as usize + RB * (bz - rz0) as usize] else { continue };
+            let Some((height, block)) = top[(bx - rx0) as usize + RB * (bz - rz0) as usize] else {
+                continue;
+            };
             let s = &mut tile.samples[sx as usize + EDGE * sz as usize];
             let surface = s.height as i32 + s.water as i32;
             s.water = (surface - height as i32).clamp(0, u8::MAX as i32) as u8;
@@ -341,7 +415,13 @@ struct Lru<K, V> {
 
 impl<K: Clone + Eq + Hash, V> Lru<K, V> {
     fn new(max: usize) -> Self {
-        Lru { map: HashMap::new(), order: BTreeMap::new(), stamp: 0, cost: 0, max }
+        Lru {
+            map: HashMap::new(),
+            order: BTreeMap::new(),
+            stamp: 0,
+            cost: 0,
+            max,
+        }
     }
 
     fn get(&mut self, k: &K) -> Option<&V> {
@@ -364,7 +444,9 @@ impl<K: Clone + Eq + Hash, V> Lru<K, V> {
         self.order.insert(self.stamp, k);
         self.cost += cost;
         while self.cost > self.max {
-            let Some((_, oldest)) = self.order.pop_first() else { break };
+            let Some((_, oldest)) = self.order.pop_first() else {
+                break;
+            };
             if let Some((_, _, c)) = self.map.remove(&oldest) {
                 self.cost -= c;
             }
@@ -372,7 +454,12 @@ impl<K: Clone + Eq + Hash, V> Lru<K, V> {
     }
 
     fn retain(&mut self, keep: impl Fn(&K, &V) -> bool) {
-        let gone: Vec<K> = self.map.iter().filter(|(k, (v, _, _))| !keep(k, v)).map(|(k, _)| k.clone()).collect();
+        let gone: Vec<K> = self
+            .map
+            .iter()
+            .filter(|(k, (v, _, _))| !keep(k, v))
+            .map(|(k, _)| k.clone())
+            .collect();
         for k in gone {
             if let Some((_, stamp, c)) = self.map.remove(&k) {
                 self.order.remove(&stamp);

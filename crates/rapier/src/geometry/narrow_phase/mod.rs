@@ -28,8 +28,7 @@ use alloc::sync::Arc;
 use parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, state_hash::StateHash)] // mmo-fork: StateHash
 struct ColliderGraphIndices {
     contact_graph_index: ColliderGraphIndex,
     intersection_graph_index: ColliderGraphIndex,
@@ -325,14 +324,14 @@ fn collect_pairs_to_update<E>(
 ///
 /// **For spatial queries** (raycasts, shape casts), use [`QueryPipeline`](crate::pipeline::QueryPipeline) instead.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct NarrowPhase {
     #[cfg_attr(
         feature = "serde-serialize",
         serde(skip, default = "crate::geometry::default_persistent_query_dispatcher")
     )]
-    #[state_hash(skip)] // mmo-fork: StateHash — configuration (a trait object), not state; serde-skipped.
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — configuration (a trait object), not state; serde-skipped.
     query_dispatcher: Arc<dyn PersistentQueryDispatcher<ContactManifoldData, ContactData>>,
     contact_graph: InteractionGraph<ColliderHandle, ContactPair>,
     intersection_graph: InteractionGraph<ColliderHandle, IntersectionPair>,
@@ -410,7 +409,8 @@ pub struct NarrowPhase {
     /// The self contact detection of the soft collision meshes (by collider), rebuilt by
     /// every update for the awake bodies (see `soft_contacts`).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — soft-body self contacts; the game has none (serde-skipped).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — soft-body self contacts; the game has none (serde-skipped).
     soft_self: parry::utils::hashmap::HashMap<ColliderHandle, soft_contacts::SoftSelfContacts>,
     /// Pool of retired [`ContactPair`]s, reused by [`Self::add_pair`] so
     /// pair-churn-heavy scenes (hundreds of broad-phase add/delete events per

@@ -5,9 +5,9 @@
 //! conservation across hosts ([`MultiRig::assert_conserved_world`]); a failure names a
 //! replayable `(mode, seed, delay)`. Its tests are tagged slow: `just test-full`.
 use crate::common::h;
-use game::{HostId, InlineSchedule, RegionCoords, FLIP_HYSTERESIS, REGION_SIZE};
+use game::{FLIP_HYSTERESIS, HostId, InlineSchedule, REGION_SIZE, RegionCoords};
 
-use crate::common::multi_rig::{host_ids, host_seam, MultiRig};
+use crate::common::multi_rig::{MultiRig, host_ids, host_seam};
 
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;
@@ -21,8 +21,11 @@ const WAIT_ROUNDS: usize = 20;
 const PAST_SEAM: f32 = FLIP_HYSTERESIS + 2.0;
 
 type Mode = (&'static str, fn(u64) -> InlineSchedule);
-const MODES: [Mode; 3] =
-    [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
+const MODES: [Mode; 3] = [
+    ("shuffled", InlineSchedule::shuffled),
+    ("late", InlineSchedule::late),
+    ("jittery", InlineSchedule::jittery),
+];
 
 /// Run `scenario` on a fresh `hosts`-host rig (`s` regions per super-region side) in
 /// lockstep at every link delay, then under every mode for every seed.
@@ -41,7 +44,12 @@ fn sweep(name: &str, hosts: u32, s: u32, seeds: u64, scenario: fn(&mut MultiRig)
     }
     for (mode, schedule) in MODES {
         for seed in 0..seeds {
-            run(mode, Some(schedule), seed, (seed % u64::from(MAX_LINK_DELAY + 1)) as u32);
+            run(
+                mode,
+                Some(schedule),
+                seed,
+                (seed % u64::from(MAX_LINK_DELAY + 1)) as u32,
+            );
         }
     }
 }
@@ -108,10 +116,15 @@ fn until_body(rig: &mut MultiRig) -> (HostId, RegionCoords, game::EntityId) {
 
 /// The packets host `h` sent the test player since recording began.
 fn packets_to(rig: &MultiRig, h: HostId) -> Vec<&game::ServerPacket> {
-    let seen = rig.hosts[h.0 as usize].packets_seen.as_ref().expect("recording packets");
-    seen.iter().filter(|(to, _)| *to == Some(P_CLIENT)).map(|(_, p)| p).collect()
+    let seen = rig.hosts[h.0 as usize]
+        .packets_seen
+        .as_ref()
+        .expect("recording packets");
+    seen.iter()
+        .filter(|(to, _)| *to == Some(P_CLIENT))
+        .map(|(_, p)| p)
+        .collect()
 }
-
 
 // --- Fix round 1: a hand-off never loses or doubles a player ------------------------
 
@@ -139,7 +152,11 @@ const WORLD_CUT_ROUNDS: usize = 600;
 /// A history with nobody in it, on the rig's map.
 fn quiet_history() -> game::history::History {
     use game::history::{History, SocietyGrid};
-    History::new(9, crate::history_handover::start(), SocietyGrid::from_world_map(&rig_world_map()))
+    History::new(
+        9,
+        crate::history_handover::start(),
+        SocietyGrid::from_world_map(&rig_world_map()),
+    )
 }
 
 /// The rig's shared coordinator over `history`, world cuts every [`WORLD_CUT_EVERY_MS`].
@@ -166,7 +183,11 @@ fn until_committed(rig: &mut MultiRig, more: usize) {
         }
         rig.cut_round();
     }
-    panic!("{} world cuts committed of {goal}; decisions {:?}", committed(rig), rig.decided);
+    panic!(
+        "{} world cuts committed of {goal}; decisions {:?}",
+        committed(rig),
+        rig.decided
+    );
 }
 
 // --- Every host leaving (Task 14b) ---------------------------------------------------
@@ -174,7 +195,6 @@ fn until_committed(rig: &mut MultiRig, more: usize) {
 // --- Login placement across hosts (Task 15) ------------------------------------------
 
 // --- Task 15 fix round 1 -----------------------------------------------------------
-
 
 // --- R4 Task 4: a super-region with no owner this host knows ---------------------------
 
@@ -212,18 +232,25 @@ fn sr_of(rig: &MultiRig, rc: RegionCoords) -> game::SuperRegion {
 /// the live hosts that are not draining, the fewest players, then the fewest regions (the rig's
 /// [`MultiRig::loads`]), then the rendezvous weight (`pick_assignee`).
 fn least_loaded(rig: &MultiRig, sr: game::SuperRegion) -> HostId {
-    let candidates: Vec<HostId> =
-        host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h) && !rig.draining.contains(h)).collect();
+    let candidates: Vec<HostId> = host_ids(rig.hosts.len() as u32)
+        .filter(|h| !rig.dead.contains(h) && !rig.draining.contains(h))
+        .collect();
     let key = |h: &HostId| {
         let l = rig.loads.get(h).cloned().unwrap_or_default();
         (l.players, l.regions)
     };
     let least = candidates.iter().map(key).min().expect("a candidate");
-    game::rendezvous_among(sr, candidates.iter().copied().filter(|h| key(h) == least)).expect("a candidate")
+    game::rendezvous_among(sr, candidates.iter().copied().filter(|h| key(h) == least))
+        .expect("a candidate")
 }
 
 /// A load that makes a host the busiest of the rig's.
-const BUSY: game::HostLoad = game::HostLoad { players: 5, regions: 5, tick_permille: 0, land: Vec::new() };
+const BUSY: game::HostLoad = game::HostLoad {
+    players: 5,
+    regions: 5,
+    tick_permille: 0,
+    land: Vec::new(),
+};
 
 /// A rig whose free land is assigned by a coordinator: the directory `rows`, the rig's
 /// `super_regions` table behind it, the coordinator over a quiet history.
@@ -249,7 +276,12 @@ fn told_where_its_body_went(rig: &mut MultiRig) {
     let owner = least_loaded(rig, sr);
     assert_ne!(owner, ha);
     rig.run(a);
-    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    rig.connect_home(
+        ha,
+        P_CLIENT,
+        P_PLAYER,
+        record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]),
+    );
     until_body(rig);
     rig.record_packets();
     rig.hosts[ha.0 as usize].event(subscribe_packet(b));
@@ -270,8 +302,16 @@ fn told_where_its_body_went(rig: &mut MultiRig) {
         }
         rig.round();
     }
-    assert!(handed, "the body was never handed to host {owner}: {:?}, parked {:?}", rig.player_body(P_CLIENT), rig.parked_on(P_PLAYER));
-    let named: Vec<HostId> = elsewhere_for(rig, ha, b).into_iter().map(|(o, _)| o).collect();
+    assert!(
+        handed,
+        "the body was never handed to host {owner}: {:?}, parked {:?}",
+        rig.player_body(P_CLIENT),
+        rig.parked_on(P_PLAYER)
+    );
+    let named: Vec<HostId> = elsewhere_for(rig, ha, b)
+        .into_iter()
+        .map(|(o, _)| o)
+        .collect();
     assert!(
         named.contains(&owner),
         "host {ha} handed the body to host {owner} and never named it for {b:?} (named: {named:?}; seed {}, link delay {})",
@@ -285,7 +325,13 @@ fn told_where_its_body_went(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_client_whose_body_is_handed_into_just_claimed_land_is_told_the_host() {
     for hosts in [2, 3] {
-        sweep("a_client_whose_body_is_handed_into_just_claimed_land_is_told_the_host", hosts, 1, SEEDS / 4, told_where_its_body_went);
+        sweep(
+            "a_client_whose_body_is_handed_into_just_claimed_land_is_told_the_host",
+            hosts,
+            1,
+            SEEDS / 4,
+            told_where_its_body_went,
+        );
     }
 }
 
@@ -304,7 +350,9 @@ fn host_chain(hosts: u32) -> Vec<RegionCoords> {
     }
     let owner = |rc: RegionCoords| crate::common::fixed(HostId::SOLO, hosts).owner_of(rc, 1);
     for (x, y) in [(a, b), (b, a)] {
-        for c in [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| RegionCoords::new(y.x + dx, y.z + dz)) {
+        for c in
+            [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| RegionCoords::new(y.x + dx, y.z + dz))
+        {
             if owner(c) != owner(x) && owner(c) != owner(y) {
                 return vec![x, y, c];
             }
@@ -338,7 +386,13 @@ const HEIR_SWEEP_SEEDS: u64 = SEEDS / 2;
 /// [`sweep`] over 2 and 3 hosts.
 fn sweep_hosts(name: &str, scenario: fn(&mut MultiRig)) {
     for hosts in [2, 3] {
-        sweep(&format!("{name} ({hosts} hosts)"), hosts, 1, HEIR_SWEEP_SEEDS, scenario);
+        sweep(
+            &format!("{name} ({hosts} hosts)"),
+            hosts,
+            1,
+            HEIR_SWEEP_SEEDS,
+            scenario,
+        );
     }
 }
 
@@ -356,13 +410,19 @@ fn sweep_hosts(name: &str, scenario: fn(&mut MultiRig)) {
 
 /// The `RegionElsewhere`s host `h` sent the test player for `rc` since recording began:
 /// the host each names, and its ticket.
-fn elsewhere_for(rig: &MultiRig, h: HostId, rc: RegionCoords) -> Vec<(HostId, game::ObserverTicket)> {
+fn elsewhere_for(
+    rig: &MultiRig,
+    h: HostId,
+    rc: RegionCoords,
+) -> Vec<(HostId, game::ObserverTicket)> {
     packets_to(rig, h)
         .into_iter()
         .filter_map(|p| match p {
-            game::ServerPacket::RegionElsewhere { region, endpoint, ticket } if *region == rc => {
-                Some((endpoint.id, ticket.clone()))
-            }
+            game::ServerPacket::RegionElsewhere {
+                region,
+                endpoint,
+                ticket,
+            } if *region == rc => Some((endpoint.id, ticket.clone())),
             _ => None,
         })
         .collect()
@@ -399,25 +459,45 @@ fn absent_peer_forgotten(rig: &mut MultiRig) {
     for _ in 0..WAIT_ROUNDS {
         rig.cut_round();
     }
-    assert!(!rig.hosts[gate.0 as usize].manager.peers_synced(), "a dead peer the gate still keeps is never synced");
+    assert!(
+        !rig.hosts[gate.0 as usize].manager.peers_synced(),
+        "a dead peer the gate still keeps is never synced"
+    );
     // A read issued before `x` registered: absent, but at the read's next id — kept.
     let before: std::collections::BTreeSet<HostId> = host_ids(x.0 as u32).collect();
-    rig.hosts[gate.0 as usize].manager.forget_absent_hosts(&before, x.0);
-    assert!(!rig.hosts[gate.0 as usize].manager.is_forgotten(x), "an id at the read's next id may have registered after it");
+    rig.hosts[gate.0 as usize]
+        .manager
+        .forget_absent_hosts(&before, x.0);
+    assert!(
+        !rig.hosts[gate.0 as usize].manager.is_forgotten(x),
+        "an id at the read's next id may have registered after it"
+    );
     // The gate's next read: `x` is absent below its next id — pruned, forgotten.
     rig.read_directory(gate);
     let m = &rig.hosts[gate.0 as usize].manager;
-    assert!(m.is_forgotten(x), "the pruned peer is forgotten (seed {}, link delay {})", rig.seed, rig.link_delay);
+    assert!(
+        m.is_forgotten(x),
+        "the pruned peer is forgotten (seed {}, link delay {})",
+        rig.seed,
+        rig.link_delay
+    );
     assert_eq!(m.mentions(x), Vec::<&str>::new(), "nothing of it is left");
     assert!(m.peers_synced(), "the gate awaits nobody's sync any more");
-    assert_eq!(m.peer_state_to_forgotten(), 0, "no state message was owed to it");
+    assert_eq!(
+        m.peer_state_to_forgotten(),
+        0,
+        "no state message was owed to it"
+    );
 }
 
 /// Regression: pruned peer row never forgotten, gate refused every join; seen in the k3d twin's phase 7 run (twin_check on a deployed world, fix b58d2379 message)
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn an_absent_peer_below_the_next_host_id_is_forgotten_and_the_gate_places_again() {
-    sweep_hosts("an_absent_peer_below_the_next_host_id_is_forgotten_and_the_gate_places_again", absent_peer_forgotten);
+    sweep_hosts(
+        "an_absent_peer_below_the_next_host_id_is_forgotten_and_the_gate_places_again",
+        absent_peer_forgotten,
+    );
 }
 
 // --- Task 4 fix round 1: what makes a cut without the newcomer safe ------------------------
@@ -429,4 +509,3 @@ fn an_absent_peer_below_the_next_host_id_is_forgotten_and_the_gate_places_again(
 // --- Elastic 2a: recipients own land; a landless death is ended ----------------------------
 
 // --- Elastic 3 Task 6: idle land is released in a committed cut --------------------------------
-

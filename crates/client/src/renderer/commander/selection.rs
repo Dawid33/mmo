@@ -15,13 +15,13 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::{EntityKey, EntityKind, RegionId};
 
+use super::CommanderView;
+use super::adventure::ClientPlayMode;
 use super::cut_entities::CutHidden;
 use super::height::HeightGrid;
 use super::level::WorkingLevel;
 use super::minimap::{self, MinimapPointer};
 use super::tiles::TileMirror;
-use super::CommanderView;
-use super::adventure::ClientPlayMode;
 use crate::renderer::bridge::{LocalBody, SimEntity, SimEntityMap, SimKind};
 use crate::renderer::cursor::CursorPolicy;
 
@@ -102,13 +102,22 @@ pub struct ScreenBody {
 impl ScreenBody {
     /// A point-sized body (no extent).
     pub fn point(at: Vec2) -> Self {
-        Self { centre: at, feet: at, head: at, half_width: 0.0 }
+        Self {
+            centre: at,
+            feet: at,
+            head: at,
+            half_width: 0.0,
+        }
     }
 
     /// Pixels from `p` to the body's outline (0 inside it).
     pub fn distance(&self, p: Vec2) -> f32 {
         let axis = self.head - self.feet;
-        let t = if axis.length_squared() > 0.0 { ((p - self.feet).dot(axis) / axis.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+        let t = if axis.length_squared() > 0.0 {
+            ((p - self.feet).dot(axis) / axis.length_squared()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         (p.distance(self.feet + axis * t) - self.half_width).max(0.0)
     }
 }
@@ -122,16 +131,34 @@ pub fn click_pick<K: Copy>(
 ) -> Option<K> {
     candidates
         .into_iter()
-        .map(|(k, b)| (k, b.distance(cursor), ScreenBody { half_width: 0.0, ..b }.distance(cursor)))
+        .map(|(k, b)| {
+            (
+                k,
+                b.distance(cursor),
+                ScreenBody {
+                    half_width: 0.0,
+                    ..b
+                }
+                .distance(cursor),
+            )
+        })
         .filter(|&(_, d, _)| d <= slack)
         .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)))
         .map(|(k, _, _)| k)
 }
 
 /// Every candidate inside the box spanned by two corners.
-pub fn box_pick<K: Copy>(a: Vec2, b: Vec2, candidates: impl IntoIterator<Item = (K, Vec2)>) -> Vec<K> {
+pub fn box_pick<K: Copy>(
+    a: Vec2,
+    b: Vec2,
+    candidates: impl IntoIterator<Item = (K, Vec2)>,
+) -> Vec<K> {
     let rect = Rect::from_corners(a, b);
-    candidates.into_iter().filter(|(_, p)| rect.contains(*p)).map(|(k, _)| k).collect()
+    candidates
+        .into_iter()
+        .filter(|(_, p)| rect.contains(*p))
+        .map(|(k, _)| k)
+        .collect()
 }
 
 /// March a ray over a height field: the first point where it dips to the
@@ -191,7 +218,9 @@ pub fn update_ground_pick(
         let (camera, tf) = view.single().ok()?;
         // The camera has no parent, so its Transform is its global pose —
         // this frame's, not last frame's propagated one.
-        let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), cursor).ok()?;
+        let ray = camera
+            .viewport_to_world(&GlobalTransform::from(*tf), cursor)
+            .ok()?;
         let hit = super::visible::visible_ground(
             ray.origin,
             *ray.direction,
@@ -233,7 +262,9 @@ pub fn fallback_ground_pick(
     pick.0 = (|| {
         let cursor = window.single().ok()?.cursor_position()?;
         let (camera, tf) = view.single().ok()?;
-        let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), cursor).ok()?;
+        let ray = camera
+            .viewport_to_world(&GlobalTransform::from(*tf), cursor)
+            .ok()?;
         let hit = plane_hit(ray.origin, *ray.direction, cam.ground_y)?;
         let region = frame.region_at_world(hit.x, hit.z);
         Some((region, hit - Vec3::from_array(frame.offset(region))))
@@ -274,7 +305,15 @@ fn projected(
             let feet = to_screen(at - Vec3::Y * half_height).unwrap_or(centre);
             let head = to_screen(at + Vec3::Y * half_height).unwrap_or(centre);
             let half_width = to_screen(at + right * half_width).map_or(0.0, |p| p.distance(centre));
-            Some(((sim.region, sim.key), ScreenBody { centre, feet, head, half_width }))
+            Some((
+                (sim.region, sim.key),
+                ScreenBody {
+                    centre,
+                    feet,
+                    head,
+                    half_width,
+                },
+            ))
         })
         .collect()
 }
@@ -309,20 +348,32 @@ pub fn select_input(
     }
     let dragging = |start: Vec2, now: Vec2| start.distance(now) > DRAG_THRESHOLD_PX;
 
-    band.set_if_neq(SelectionBand(band_rect(*press, cursor, buttons.pressed(MouseButton::Left))));
+    band.set_if_neq(SelectionBand(band_rect(
+        *press,
+        cursor,
+        buttons.pressed(MouseButton::Left),
+    )));
 
     if !buttons.just_released(MouseButton::Left) {
         return;
     }
     let Some(start) = press.take() else { return };
     let Some(end) = cursor else { return };
-    let Ok((camera, tf)) = view.single() else { return };
+    let Ok((camera, tf)) = view.single() else {
+        return;
+    };
     let gt = GlobalTransform::from(*tf);
     let candidates = projected(camera, &gt, &entities, mode.adventure());
     let picked: Vec<_> = if dragging(start, end) {
-        box_pick(start, end, candidates.into_iter().map(|(k, b)| (k, b.centre)))
+        box_pick(
+            start,
+            end,
+            candidates.into_iter().map(|(k, b)| (k, b.centre)),
+        )
     } else {
-        click_pick(end, candidates, CLICK_SELECT_RADIUS_PX).into_iter().collect()
+        click_pick(end, candidates, CLICK_SELECT_RADIUS_PX)
+            .into_iter()
+            .collect()
     };
     let add = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
     if !add {
@@ -348,7 +399,9 @@ pub fn draw_selection_rings(
 ) {
     for key in &selection.0 {
         let Some(&e) = map.0.get(key) else { continue };
-        let Ok((kind, gt)) = entities.get(e) else { continue };
+        let Ok((kind, gt)) = entities.get(e) else {
+            continue;
+        };
         let (edge, centre_height) = match kind.0 {
             EntityKind::Slime { size } => {
                 let edge = game::slime::slime_edge_units(size);
@@ -374,4 +427,3 @@ pub fn draw_selection_rings(
         );
     }
 }
-

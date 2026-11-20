@@ -8,11 +8,13 @@ export component GameMenu {
     callback main-menu();
     // End the adventure; the arrival map opens again.
     callback end-adventure();
+    // The settings window (settings.slint), the one the menu column opens.
+    callback open-settings();
     // Whether the player is on an adventure (shown beside World Map).
     in property <bool> can-end-adventure;
     // Whether this client can leave to a main menu (not on wasm).
     in property <bool> can-leave: true;
-    // Before the first Play (the arrival map is modal): only Main menu.
+    // Not in play yet (the arrival map is modal): only Main menu.
     in property <bool> leave-only;
     out property <length> main-menu-button-x: main-slot.absolute-position.x + main-slot.width / 2;
     out property <length> main-menu-button-y: main-slot.absolute-position.y + main-slot.height / 2;
@@ -36,6 +38,10 @@ export component GameMenu {
             if !root.leave-only: Button {
                 text: "World Map";
                 clicked => { root.open-map(); }
+            }
+            if !root.leave-only: Button {
+                text: "Settings";
+                clicked => { root.open-settings(); }
             }
             end-slot := VerticalLayout {
                 if !root.leave-only && root.can-end-adventure: Button {

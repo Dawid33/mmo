@@ -1,7 +1,7 @@
 use bevy::math::{Quat, Vec3, Vec4};
 use bevy::prelude::{PerspectiveProjection, Transform};
-use game::camera::Perspective3;
 use game::Pose;
+use game::camera::Perspective3;
 
 /// Sim pose (right-handed, Y-up — same convention as bevy) → bevy Transform.
 /// The sim's glam (0.33, through rapier's glamx) is not Bevy's (0.32): the
@@ -24,4 +24,3 @@ pub fn perspective_to_projection(p: &Perspective3) -> PerspectiveProjection {
         near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -near),
     }
 }
-

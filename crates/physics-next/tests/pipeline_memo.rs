@@ -68,30 +68,57 @@ struct Scene {
 }
 
 fn scene(case: Case) -> Scene {
-    let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
+    let mut w = PhysicsWorld {
+        gravity: Vector::new(0.0, -9.81, 0.0),
+        ..Default::default()
+    };
     w.params.dt = 0.05;
-    let floor = w.bodies.insert(RigidBodyBuilder::fixed().translation(Vector::new(0.0, -1.0, 0.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::cuboid(16.0, 1.0, 16.0), floor, &mut w.bodies);
+    let floor = w
+        .bodies
+        .insert(RigidBodyBuilder::fixed().translation(Vector::new(0.0, -1.0, 0.0)));
+    w.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(16.0, 1.0, 16.0),
+        floor,
+        &mut w.bodies,
+    );
     let pair_can_sleep = matches!(case, Case::PairSleeps);
     let mut ball = |x: f32, can_sleep: bool| {
-        let rb = RigidBodyBuilder::dynamic().translation(Vector::new(x, 0.4, 0.0)).angular_damping(2.0).can_sleep(can_sleep);
+        let rb = RigidBodyBuilder::dynamic()
+            .translation(Vector::new(x, 0.4, 0.0))
+            .angular_damping(2.0)
+            .can_sleep(can_sleep);
         let b = w.bodies.insert(rb);
-        w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+        w.colliders
+            .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
         b
     };
     let pair = [ball(-0.6, pair_can_sleep), ball(0.6, pair_can_sleep)];
     let lone = ball(-6.0, true);
-    let joint = SphericalJointBuilder::new().local_anchor1(Vector::new(0.6, 0.0, 0.0)).local_anchor2(Vector::new(-0.6, 0.0, 0.0));
+    let joint = SphericalJointBuilder::new()
+        .local_anchor1(Vector::new(0.6, 0.0, 0.0))
+        .local_anchor2(Vector::new(-0.6, 0.0, 0.0));
     w.impulse_joints.insert(pair[0], pair[1], joint, true);
     let drifter = w.bodies.insert(
-        RigidBodyBuilder::dynamic().translation(Vector::new(8.0, 5.0, 0.0)).linvel(Vector::new(0.0, 0.0, 0.5)).gravity_scale(0.0),
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(8.0, 5.0, 0.0))
+            .linvel(Vector::new(0.0, 0.0, 0.5))
+            .gravity_scale(0.0),
     );
-    w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), drifter, &mut w.bodies);
-    let mut s = Scene { w, p: PhysicsPipeline::new(), pair, lone };
+    w.colliders
+        .insert_with_parent(ColliderBuilder::ball(0.4), drifter, &mut w.bodies);
+    let mut s = Scene {
+        w,
+        p: PhysicsPipeline::new(),
+        pair,
+        lone,
+    };
     for _ in 0..SETTLE {
         s.w.step(&mut s.p);
     }
-    assert!(s.w.bodies[s.lone].is_sleeping(), "setup: the lone ball must be asleep");
+    assert!(
+        s.w.bodies[s.lone].is_sleeping(),
+        "setup: the lone ball must be asleep"
+    );
     assert!(
         s.pair.iter().all(|b| s.w.bodies[*b].is_sleeping()) == pair_can_sleep,
         "setup: the pair must be asleep iff {case:?} is PairSleeps"
@@ -124,11 +151,17 @@ fn rollback(case: Case, wrong_input: bool) -> Scene {
     let pre = s.w.bodies[target].clone();
     let was_modified = s.w.bodies.is_marked_modified(target);
     if wrong_input {
-        s.w.bodies.get_mut(target).unwrap().apply_impulse(Vector::new(0.0, 1.5, 0.0), true);
+        s.w.bodies
+            .get_mut(target)
+            .unwrap()
+            .apply_impulse(Vector::new(0.0, 1.5, 0.0), true);
     }
     let j = s.w.step_journaled(&mut s.p);
     if wrong_input {
-        assert!(!s.w.bodies[target].is_sleeping(), "the wrong input must wake {target:?}");
+        assert!(
+            !s.w.bodies[target].is_sleeping(),
+            "the wrong input must wake {target:?}"
+        );
     }
     s.w.revert(j);
     if wrong_input {
@@ -138,7 +171,11 @@ fn rollback(case: Case, wrong_input: bool) -> Scene {
         }
     }
     let got = s.w.state_bytes();
-    assert!(got == before, "rollback must land on the pre-step state: {:?}", differing_parts(&before, &got));
+    assert!(
+        got == before,
+        "rollback must land on the pre-step state: {:?}",
+        differing_parts(&before, &got)
+    );
     s
 }
 
@@ -153,8 +190,15 @@ fn advance(mut s: Scene) -> Vec<[Vec<u8>; 8]> {
 }
 
 /// First tick (after the rollback) whose state differs from the reference.
-fn first_divergence(got: &[[Vec<u8>; 8]], expect: &[[Vec<u8>; 8]]) -> Option<(usize, Vec<&'static str>)> {
-    got.iter().zip(expect).enumerate().find(|(_, (g, e))| g != e).map(|(t, (g, e))| (t, differing_parts(e, g)))
+fn first_divergence(
+    got: &[[Vec<u8>; 8]],
+    expect: &[[Vec<u8>; 8]],
+) -> Option<(usize, Vec<&'static str>)> {
+    got.iter()
+        .zip(expect)
+        .enumerate()
+        .find(|(_, (g, e))| g != e)
+        .map(|(t, (g, e))| (t, differing_parts(e, g)))
 }
 
 /// Gate: mmo-fork hunks IslandManager::journal_reverts (manager.rs:54/59) + PhysicsPipeline seen_journal_reverts self-invalidate (physics_pipeline mod.rs:85/129/227); fix 271c9ee3: re-step diverged at first tick (observed)
@@ -170,7 +214,11 @@ fn same_pipeline_after_a_corrected_input_matches_a_never_reverted_run() {
         let s = rollback(case, true);
         let got = catch_unwind(AssertUnwindSafe(|| advance(s)));
         let got = got.unwrap_or_else(|_| panic!("{case:?}: same-pipeline re-step panicked"));
-        assert_eq!(first_divergence(&got, &expect), None, "{case:?}, same pipeline after a corrected input");
+        assert_eq!(
+            first_divergence(&got, &expect),
+            None,
+            "{case:?}, same pipeline after a corrected input"
+        );
     }
 }
 
@@ -188,9 +236,12 @@ fn ccd_after_an_undone_fixed_collider_insert_matches_a_never_inserted_run() {
         let ball = w.bodies.insert(
             // A fast dynamic body WITHOUT `ccd_enabled` is a non-bullet CCD
             // origin in 0.36: it sweeps the cached fixed-target list.
-            RigidBodyBuilder::dynamic().translation(Vector::new(-6.0, 0.0, 0.0)).linvel(Vector::new(60.0, 0.0, 0.0)),
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::new(-6.0, 0.0, 0.0))
+                .linvel(Vector::new(60.0, 0.0, 0.0)),
         );
-        w.colliders.insert_with_parent(ColliderBuilder::ball(0.2), ball, &mut w.bodies);
+        w.colliders
+            .insert_with_parent(ColliderBuilder::ball(0.2), ball, &mut w.bodies);
         let mut p = PhysicsPipeline::new();
         for _ in 0..2 {
             w.step(&mut p);
@@ -207,9 +258,14 @@ fn ccd_after_an_undone_fixed_collider_insert_matches_a_never_inserted_run() {
 
     let (mut w, mut p, _) = world();
     let (head, len) = w.colliders.alloc_state();
-    let wall = w.colliders.insert(ColliderBuilder::cuboid(0.1, 5.0, 5.0).translation(Vector::new(2.0, 0.0, 0.0)));
+    let wall = w
+        .colliders
+        .insert(ColliderBuilder::cuboid(0.1, 5.0, 5.0).translation(Vector::new(2.0, 0.0, 0.0)));
     let j = w.step_journaled(&mut p);
-    assert!(w.bodies[ball].translation().x < 2.0, "setup: CCD must stop the ball at the wall");
+    assert!(
+        w.bodies[ball].translation().x < 2.0,
+        "setup: CCD must stop the ball at the wall"
+    );
     w.revert(j);
     w.colliders.revert_insert(wall, head, len);
     let got = catch_unwind(AssertUnwindSafe(|| {
@@ -231,11 +287,19 @@ fn ccd_after_an_undone_fixed_collider_insert_matches_a_never_inserted_run() {
 #[test]
 fn invalidate_caches_after_a_zero_dt_step_keeps_the_broad_phase() {
     fn run(invalidate: bool) -> Vec<u8> {
-        let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
-        let floor = w.colliders.insert(ColliderBuilder::cuboid(16.0, 1.0, 16.0).translation(Vector::new(0.0, -1.0, 0.0)));
+        let mut w = PhysicsWorld {
+            gravity: Vector::new(0.0, -9.81, 0.0),
+            ..Default::default()
+        };
+        let floor = w.colliders.insert(
+            ColliderBuilder::cuboid(16.0, 1.0, 16.0).translation(Vector::new(0.0, -1.0, 0.0)),
+        );
         let _ = floor;
-        let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
-        w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+        let b = w
+            .bodies
+            .insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
+        w.colliders
+            .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
         let mut p = PhysicsPipeline::new();
         // Past the first broad-phase pass (which never defers), then a zero-dt
         // step whose update has enough changed leaves to defer an optimization.
@@ -243,7 +307,10 @@ fn invalidate_caches_after_a_zero_dt_step_keeps_the_broad_phase() {
         for _ in 0..3 {
             w.step(&mut p);
         }
-        w.bodies.get_mut(b).unwrap().set_translation(Vector::new(0.0, 1.5, 0.0), true);
+        w.bodies
+            .get_mut(b)
+            .unwrap()
+            .set_translation(Vector::new(0.0, 1.5, 0.0), true);
         w.params.dt = 0.0;
         w.step(&mut p);
         if invalidate {
@@ -253,10 +320,16 @@ fn invalidate_caches_after_a_zero_dt_step_keeps_the_broad_phase() {
         for _ in 0..40 {
             w.step(&mut p);
         }
-        assert!(w.bodies[b].translation().y > 0.0, "invalidate={invalidate}: the ball fell through the floor");
+        assert!(
+            w.bodies[b].translation().y > 0.0,
+            "invalidate={invalidate}: the ball fell through the floor"
+        );
         bincode::serialize(&w.bodies).unwrap()
     }
-    assert!(run(true) == run(false), "invalidate_caches changed the simulation");
+    assert!(
+        run(true) == run(false),
+        "invalidate_caches changed the simulation"
+    );
 }
 
 /// Gate: mmo-fork hunk step_journaled joins the deferred BVH optimization after a zero-dt step (staged_island_solver/mod.rs:312, physics_pipeline:297); fix 271c9ee3 M1
@@ -267,10 +340,18 @@ fn invalidate_caches_after_a_zero_dt_step_keeps_the_broad_phase() {
 #[test]
 fn reverted_zero_dt_step_steps_on_like_a_run_that_never_took_it() {
     fn scene() -> (PhysicsWorld, PhysicsPipeline, RigidBodyHandle) {
-        let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
-        w.colliders.insert(ColliderBuilder::cuboid(16.0, 1.0, 16.0).translation(Vector::new(0.0, -1.0, 0.0)));
-        let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
-        w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+        let mut w = PhysicsWorld {
+            gravity: Vector::new(0.0, -9.81, 0.0),
+            ..Default::default()
+        };
+        w.colliders.insert(
+            ColliderBuilder::cuboid(16.0, 1.0, 16.0).translation(Vector::new(0.0, -1.0, 0.0)),
+        );
+        let b = w
+            .bodies
+            .insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
+        w.colliders
+            .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
         let mut p = PhysicsPipeline::new();
         w.params.dt = 0.05;
         for _ in 0..3 {
@@ -284,7 +365,10 @@ fn reverted_zero_dt_step_steps_on_like_a_run_that_never_took_it() {
         let was_modified = w.bodies.is_marked_modified(b);
         if zero_dt_rollback {
             // A user move makes the zero-dt update defer an optimization.
-            w.bodies.get_mut(b).unwrap().set_translation(Vector::new(0.0, 1.5, 0.0), true);
+            w.bodies
+                .get_mut(b)
+                .unwrap()
+                .set_translation(Vector::new(0.0, 1.5, 0.0), true);
             w.params.dt = 0.0;
             let j = w.step_journaled(&mut p);
             w.revert(j);

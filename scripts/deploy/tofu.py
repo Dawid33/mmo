@@ -44,7 +44,9 @@ class Plan:
 
 
 def env_for(target: Target, root: Root) -> dict[str, str]:
-    env = {"TF_PLUGIN_CACHE_DIR": str(REPO / "target/tofu-plugin-cache")}
+    cache = REPO / "target/tofu-plugin-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    env = {"TF_PLUGIN_CACHE_DIR": str(cache)}
     if target.state == "local":
         # The twin's state lives next to this checkout, never in the root dir.
         env["TF_DATA_DIR"] = str(REPO / "target/twin" / root.name / ".terraform")
@@ -129,4 +131,11 @@ def has_state(r: Runner, target: Target, root: Root) -> bool:
         capture=True,
         env=env_for(target, root),
     )
-    return result.rc == 0 and bool(result.out.strip())
+    if result.rc != 0:
+        detail = (result.err or result.out).strip()
+        if "No state file was found" in detail:
+            return False
+        raise DeployError(
+            f"{root.name}: cannot read OpenTofu state\n{detail}"
+        )
+    return bool(result.out.strip())

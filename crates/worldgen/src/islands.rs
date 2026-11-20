@@ -54,12 +54,17 @@ pub const SPAWN_ISLAND_CELLS_MAX: u32 =
     (ISLAND_MAX_CELLS as f64 / (2.0 * ISLAND_REACH * (1.0 + ISLAND_COAST_WARP))) as u32;
 
 const fn parse_island_cells(var: Option<&str>) -> u32 {
-    let Some(text) = var else { return SPAWN_ISLAND_CELLS_DEFAULT };
+    let Some(text) = var else {
+        return SPAWN_ISLAND_CELLS_DEFAULT;
+    };
     let bytes = text.as_bytes();
     let mut value = 0u32;
     let mut i = 0;
     while i < bytes.len() {
-        assert!(bytes[i].is_ascii_digit(), "VOXEL_ISLAND_CELLS must be a number");
+        assert!(
+            bytes[i].is_ascii_digit(),
+            "VOXEL_ISLAND_CELLS must be a number"
+        );
         value = value * 10 + (bytes[i] - b'0') as u32;
         i += 1;
     }
@@ -123,7 +128,10 @@ impl IslandField {
     }
 
     pub fn with_spawn_cells(seed: u64, cells: u32) -> Self {
-        assert!((1..=SPAWN_ISLAND_CELLS_MAX).contains(&cells), "spawn island of {cells} cells");
+        assert!(
+            (1..=SPAWN_ISLAND_CELLS_MAX).contains(&cells),
+            "spawn island of {cells} cells"
+        );
         let c = home_centre_m();
         Self {
             seed,
@@ -134,7 +142,11 @@ impl IslandField {
 
     pub fn spawn_island(&self) -> Island {
         Island {
-            id: IslandId { level: 0, x: 0, z: 0 },
+            id: IslandId {
+                level: 0,
+                x: 0,
+                z: 0,
+            },
             centre: home_centre_m(),
             radius: self.spawn_radius,
             slot_min: self.root_origin,
@@ -177,7 +189,17 @@ impl IslandField {
                 slot_min[0] + size / 2.0 + (unit(h, 3) * 2.0 - 1.0) * slack,
                 slot_min[1] + size / 2.0 + (unit(h, 4) * 2.0 - 1.0) * slack,
             ];
-            return Some(Island { id: IslandId { level, x: ix, z: iz }, centre, radius, slot_min, slot_size: size });
+            return Some(Island {
+                id: IslandId {
+                    level,
+                    x: ix,
+                    z: iz,
+                },
+                centre,
+                radius,
+                slot_min,
+                slot_size: size,
+            });
         }
     }
 }
@@ -253,7 +275,9 @@ pub fn island_info(seed: u64, rc: game::RegionCoords) -> Option<IslandInfo> {
     if !inside(spawn[0], origin[0]) || !inside(spawn[1], origin[1]) {
         // The island outgrows the region (e.g. `region_chunks=128` with the
         // default 1 km island): its coast is out of reach, the centre is not.
-        log::warn!("[islands] coastal spawn {spawn:?} lies outside region {rc:?}; spawning at the island centre");
+        log::warn!(
+            "[islands] coastal spawn {spawn:?} lies outside region {rc:?}; spawning at the island centre"
+        );
         spawn = island.centre;
     }
     let bv = game::BLOCK_VOXELS as f64;
@@ -286,4 +310,3 @@ fn slot_hash(seed: u64, level: u8, x: i64, z: i64) -> u64 {
 fn unit(h: u64, k: u64) -> f64 {
     (splitmix(h ^ k.wrapping_mul(0xA24B_AED4_963E_E407)) >> 11) as f64 / (1u64 << 53) as f64
 }
-

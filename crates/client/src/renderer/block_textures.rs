@@ -33,7 +33,12 @@ impl BlockTextureLayers {
     /// ~10 blocks away at the body camera's wide field of view (seen in play,
     /// 2026-11-19: every trunk past that wrapped in the ring texture).
     pub fn side_to_top(&self) -> Vec<u32> {
-        let len = self.0.values().flatten().max().map_or(1, |&max| max as usize + 1);
+        let len = self
+            .0
+            .values()
+            .flatten()
+            .max()
+            .map_or(1, |&max| max as usize + 1);
         let mut lut: Vec<u32> = (0..len as u32).collect();
         for &[top, side, bottom] in self.0.values() {
             if top != bottom {
@@ -51,7 +56,11 @@ pub fn missing_texture_image(size: u32) -> RgbaImage {
     let magenta = Rgba([255, 0, 255, 255]);
     let black = Rgba([0, 0, 0, 255]);
     RgbaImage::from_fn(size, size, |x, y| {
-        if (x / cell + y / cell) % 2 == 0 { magenta } else { black }
+        if (x / cell + y / cell) % 2 == 0 {
+            magenta
+        } else {
+            black
+        }
     })
 }
 
@@ -193,4 +202,3 @@ fn linear_to_srgb(c: f32) -> u8 {
     };
     (v * 255.0).round() as u8
 }
-

@@ -134,28 +134,48 @@ pub struct KickIn {
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoginOut {
     /// `endpoint`: the host that took the order (`None` when refused).
-    SpawnAck { player_token: String, session_epoch: u64, ok: bool, endpoint: Option<crate::HostEndpoint> },
-    KickAck { player_token: String, session_epoch: u64 },
-    SessionEnded { player_token: String, session_epoch: u64 },
+    SpawnAck {
+        player_token: String,
+        session_epoch: u64,
+        ok: bool,
+        endpoint: Option<crate::HostEndpoint>,
+    },
+    KickAck {
+        player_token: String,
+        session_epoch: u64,
+    },
+    SessionEnded {
+        player_token: String,
+        session_epoch: u64,
+    },
 }
 
 impl std::fmt::Debug for LoginOut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         const HIDDEN: &str = "<redacted>";
         match self {
-            LoginOut::SpawnAck { session_epoch, ok, endpoint, .. } => f
+            LoginOut::SpawnAck {
+                session_epoch,
+                ok,
+                endpoint,
+                ..
+            } => f
                 .debug_struct("SpawnAck")
                 .field("player_token", &HIDDEN)
                 .field("session_epoch", session_epoch)
                 .field("ok", ok)
                 .field("endpoint", endpoint)
                 .finish(),
-            LoginOut::KickAck { session_epoch, .. } => {
-                f.debug_struct("KickAck").field("player_token", &HIDDEN).field("session_epoch", session_epoch).finish()
-            }
-            LoginOut::SessionEnded { session_epoch, .. } => {
-                f.debug_struct("SessionEnded").field("player_token", &HIDDEN).field("session_epoch", session_epoch).finish()
-            }
+            LoginOut::KickAck { session_epoch, .. } => f
+                .debug_struct("KickAck")
+                .field("player_token", &HIDDEN)
+                .field("session_epoch", session_epoch)
+                .finish(),
+            LoginOut::SessionEnded { session_epoch, .. } => f
+                .debug_struct("SessionEnded")
+                .field("player_token", &HIDDEN)
+                .field("session_epoch", session_epoch)
+                .finish(),
         }
     }
 }
@@ -166,15 +186,32 @@ impl std::fmt::Debug for LoginOut {
 /// never shows the player token.
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoginOrder {
-    Spawn { player_token: String, session_epoch: u64 },
-    Kick { player_token: String, session_epoch: u64, reason: String },
+    Spawn {
+        player_token: String,
+        session_epoch: u64,
+    },
+    Kick {
+        player_token: String,
+        session_epoch: u64,
+        reason: String,
+    },
+}
+
+/// A login order as it leaves the coordinator message for process-local
+/// resolution. The trace carrier is transient and is never hashed or saved.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TracedLoginOrder {
+    pub order: LoginOrder,
+    pub trace: Option<crate::coordinator::TraceCarrier>,
 }
 
 impl LoginOrder {
     /// The order's session epoch.
     pub fn session_epoch(&self) -> u64 {
         match self {
-            LoginOrder::Spawn { session_epoch, .. } | LoginOrder::Kick { session_epoch, .. } => *session_epoch,
+            LoginOrder::Spawn { session_epoch, .. } | LoginOrder::Kick { session_epoch, .. } => {
+                *session_epoch
+            }
         }
     }
 }
@@ -183,10 +220,16 @@ impl std::fmt::Debug for LoginOrder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         const HIDDEN: &str = "<redacted>";
         match self {
-            LoginOrder::Spawn { session_epoch, .. } => {
-                f.debug_struct("Spawn").field("player_token", &HIDDEN).field("session_epoch", session_epoch).finish()
-            }
-            LoginOrder::Kick { session_epoch, reason, .. } => f
+            LoginOrder::Spawn { session_epoch, .. } => f
+                .debug_struct("Spawn")
+                .field("player_token", &HIDDEN)
+                .field("session_epoch", session_epoch)
+                .finish(),
+            LoginOrder::Kick {
+                session_epoch,
+                reason,
+                ..
+            } => f
                 .debug_struct("Kick")
                 .field("player_token", &HIDDEN)
                 .field("session_epoch", session_epoch)
@@ -267,7 +310,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// connection (its `Running`, behind its backlog). A peer that left in a committed cut
     /// holds nobody.
     pub fn peers_synced(&self) -> bool {
-        self.peers.keys().all(|o| self.peer_synced.contains(o) || self.left_peers.contains_key(o) || self.peer_succeeded(*o))
+        self.peers.keys().all(|o| {
+            self.peer_synced.contains(o)
+                || self.left_peers.contains_key(o)
+                || self.peer_succeeded(*o)
+        })
     }
 
     /// Spawn orders this host takes, for the server to record ([`Self::spawn_answered`]).
@@ -299,13 +346,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// login service is told so ([`LoginOut::SpawnAck`] `ok: false`; a kick is never refused —
     /// unapplied, it is not answered and the login service resends it).
     pub fn login_order_refused(&mut self, player_token: String, session_epoch: u64) {
-        self.login_out.push(LoginOut::SpawnAck { player_token, session_epoch, ok: false, endpoint: None });
+        self.login_out.push(LoginOut::SpawnAck {
+            player_token,
+            session_epoch,
+            ok: false,
+            endpoint: None,
+        });
     }
 
     /// The login service's orders the coordinator gave this host (the gate host), in order,
     /// for the server to resolve (its player store and admission state) into
     /// [`ServerEvent::SpawnOrder`] (origin: this host) / [`ServerEvent::Kick`].
-    pub fn take_login_orders(&mut self) -> Vec<LoginOrder> {
+    pub fn take_login_orders(&mut self) -> Vec<TracedLoginOrder> {
         std::mem::take(&mut self.login_orders)
     }
 
@@ -317,12 +369,23 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The server recorded (`ok`) or refused a spawn order this host took: its origin is
     /// told, with this host's endpoint.
     pub fn spawn_answered(&mut self, order: SpawnRequest, ok: bool) {
-        if !ok && self.spawn_pins.get(&order.player).is_some_and(|p| p.epoch == order.session_epoch) {
+        if !ok
+            && self
+                .spawn_pins
+                .get(&order.player)
+                .is_some_and(|p| p.epoch == order.session_epoch)
+        {
             // No session comes for a refused order: the player is free to move on.
             self.spawn_pins.remove(&order.player);
         }
         let endpoint = ok.then(|| self.endpoint.clone());
-        self.spawn_answer(order.origin, order.player_token, order.session_epoch, ok, endpoint);
+        self.spawn_answer(
+            order.origin,
+            order.player_token,
+            order.session_epoch,
+            ok,
+            endpoint,
+        );
     }
 
     /// The server applied (`applied`) a kick another host relayed: that host is told. Not
@@ -330,9 +393,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// resends it.
     pub fn kick_applied(&mut self, kick: KickIn, applied: bool) {
         if applied {
-            self.queue_to_peer(kick.from, Reliable::KickAck { player_token: kick.player_token, session_epoch: kick.session_epoch });
+            self.queue_to_peer(
+                kick.from,
+                Reliable::KickAck {
+                    player_token: kick.player_token,
+                    session_epoch: kick.session_epoch,
+                },
+            );
         } else {
-            log::warn!("[server] a kick from host {} could not be applied here; not acknowledged", kick.from);
+            log::warn!(
+                "[server] a kick from host {} could not be applied here; not acknowledged",
+                kick.from
+            );
         }
     }
 
@@ -346,17 +418,26 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn spawn_order_since(&mut self, req: SpawnRequest, since_ms: u64) {
         let live = self.holds_player(req.player) || self.departed.contains_key(&req.player);
         if self.leave_requested || self.leave_parked {
-            log::warn!("[server] spawn order for player {}: this host is leaving; refused", req.player.0);
+            log::warn!(
+                "[server] spawn order for player {}: this host is leaving; refused",
+                req.player.0
+            );
             return self.spawn_refused(req);
         }
         if self.heir_not_adopted() {
             // R4: until every report is in and resolved, this host cannot know which players
             // a survivor's journal holds a newer record of — placing any from the store could
             // pick the stale copy ("wait, never guess"). Retried at the adoption.
-            return self.hold_spawn(req, since_ms, "this host inherits land it has not adopted yet");
+            return self.hold_spawn(
+                req,
+                since_ms,
+                "this host inherits land it has not adopted yet",
+            );
         }
         match self.place_spawn(req.player, req.record_region) {
-            Placement::Here if !live && !self.peers_synced() => self.hold_spawn(req, since_ms, "a peer has not synced"),
+            Placement::Here if !live && !self.peers_synced() => {
+                self.hold_spawn(req, since_ms, "a peer has not synced")
+            }
             Placement::Wait => {
                 // Wanted for a claim: the order is placed once an owner is known (a record
                 // parked here is placed by its own region).
@@ -365,15 +446,30 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.hold_spawn(req, since_ms, "its region has no owner this host knows")
             }
             Placement::Here => {
-                log::info!("[server] spawn order for player {} (epoch {}) placed here", req.player.0, req.session_epoch);
+                log::info!(
+                    "[server] spawn order for player {} (epoch {}) placed here",
+                    req.player.0,
+                    req.session_epoch
+                );
                 // Its session connects here: the player stays here until it does.
                 let now = self.clock_ms;
-                self.spawn_pins.retain(|_, p| now.saturating_sub(p.at_ms) < SPAWN_PIN_MS);
+                self.spawn_pins
+                    .retain(|_, p| now.saturating_sub(p.at_ms) < SPAWN_PIN_MS);
                 let region = self.placed_region(req.player, req.record_region);
-                self.spawn_pins.insert(req.player, Pin { at_ms: now, epoch: req.session_epoch, told: false, region });
+                self.spawn_pins.insert(
+                    req.player,
+                    Pin {
+                        at_ms: now,
+                        epoch: req.session_epoch,
+                        told: false,
+                        region,
+                    },
+                );
                 self.spawn_here.push(req);
             }
-            Placement::Host(owner) if self.leave_blocks(owner) && self.ownership.0.directory().is_some() => {
+            Placement::Host(owner)
+                if self.leave_blocks(owner) && self.ownership.0.directory().is_some() =>
+            {
                 // R4 drain: the owner left cleanly (or is leaving in a cut not decided here
                 // yet). Its land is asked for (`LandNeeded`, once it left); the order waits
                 // like one for an unknown owner — placed once the heir holds the land (the
@@ -382,16 +478,25 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // Asked at the next pass of `ask_for_land` (`land.rs`).
                 let region = self.spawn_region(req.record_region);
                 self.note_land_needed(region);
-                self.hold_spawn(req, since_ms, "its region's host left the world; its land is asked for")
+                self.hold_spawn(
+                    req,
+                    since_ms,
+                    "its region's host left the world; its land is asked for",
+                )
             }
             Placement::Host(owner) => {
                 if req.hops < SPAWN_RELAY_MAX_HOPS && self.peer_reachable(owner) {
-                    log::info!("[server] spawn order for player {} (epoch {}): to host {owner}", req.player.0, req.session_epoch);
+                    log::info!(
+                        "[server] spawn order for player {} (epoch {}): to host {owner}",
+                        req.player.0,
+                        req.session_epoch
+                    );
                     if self.departed.get(&req.player) == Some(&owner) {
                         // Sent on by the pointer (the player is not held here, `place_spawn`):
                         // remembered, in case that host sends it back (`departed_denied`).
                         let now = self.clock_ms;
-                        self.spawn_sent_on.retain(|_, s| now.saturating_sub(s.at_ms) < SPAWN_SENT_ON_MS);
+                        self.spawn_sent_on
+                            .retain(|_, s| now.saturating_sub(s.at_ms) < SPAWN_SENT_ON_MS);
                         let sent = SentOn {
                             to: owner,
                             origin: req.origin,
@@ -403,8 +508,22 @@ impl<S: RegionSpawner> WorldManager<S> {
                         };
                         self.spawn_sent_on.insert(req.player, sent);
                     }
-                    let SpawnRequest { origin, hops, player_token, session_epoch, player, record_region } = req;
-                    let order = Reliable::SpawnOrder { origin, hops: hops + 1, player_token, session_epoch, player, record_region };
+                    let SpawnRequest {
+                        origin,
+                        hops,
+                        player_token,
+                        session_epoch,
+                        player,
+                        record_region,
+                    } = req;
+                    let order = Reliable::SpawnOrder {
+                        origin,
+                        hops: hops + 1,
+                        player_token,
+                        session_epoch,
+                        player,
+                        record_region,
+                    };
                     self.queue_to_peer(owner, order);
                 } else {
                     log::warn!(
@@ -423,7 +542,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// is refused.
     fn hold_spawn(&mut self, req: SpawnRequest, since_ms: u64, why: &str) {
         if self.clock_ms.saturating_sub(since_ms) >= SPAWN_SYNC_WAIT_MS {
-            log::warn!("[server] spawn order for player {}: {why} within {SPAWN_SYNC_WAIT_MS} ms; refused", req.player.0);
+            log::warn!(
+                "[server] spawn order for player {}: {why} within {SPAWN_SYNC_WAIT_MS} ms; refused",
+                req.player.0
+            );
             return self.spawn_refused(req);
         }
         self.spawn_held.push((since_ms, req));
@@ -453,7 +575,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// naming the host it was sent to, and this host's hop of the player unchanged (the player
     /// was not handed or placed here, and so not handed on again, since).
     fn departed_denied(&mut self, from: HostId, req: &SpawnRequest) {
-        let Some(sent) = self.spawn_sent_on.remove(&req.player) else { return };
+        let Some(sent) = self.spawn_sent_on.remove(&req.player) else {
+            return;
+        };
         let same_order = sent.origin == req.origin
             && sent.player_token == req.player_token
             && sent.session_epoch == req.session_epoch
@@ -478,11 +602,31 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The answer to a spawn order, to its `origin` (here: for the login service).
-    pub(super) fn spawn_answer(&mut self, origin: HostId, player_token: String, session_epoch: u64, ok: bool, endpoint: Option<crate::HostEndpoint>) {
+    pub(super) fn spawn_answer(
+        &mut self,
+        origin: HostId,
+        player_token: String,
+        session_epoch: u64,
+        ok: bool,
+        endpoint: Option<crate::HostEndpoint>,
+    ) {
         if origin == self.ordinal() {
-            self.login_out.push(LoginOut::SpawnAck { player_token, session_epoch, ok, endpoint });
+            self.login_out.push(LoginOut::SpawnAck {
+                player_token,
+                session_epoch,
+                ok,
+                endpoint,
+            });
         } else {
-            self.queue_to_peer(origin, Reliable::SpawnAck { player_token, session_epoch, ok, endpoint });
+            self.queue_to_peer(
+                origin,
+                Reliable::SpawnAck {
+                    player_token,
+                    session_epoch,
+                    ok,
+                    endpoint,
+                },
+            );
         }
     }
 
@@ -504,13 +648,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// expired): busy land (`land.rs`).
     pub(super) fn pinned_regions(&self) -> impl Iterator<Item = RegionCoords> + '_ {
         let now = self.clock_ms;
-        self.spawn_pins.values().filter(move |p| now.saturating_sub(p.at_ms) < SPAWN_PIN_MS).map(|p| p.region)
+        self.spawn_pins
+            .values()
+            .filter(move |p| now.saturating_sub(p.at_ms) < SPAWN_PIN_MS)
+            .map(|p| p.region)
     }
 
     /// Whether a spawn order this host took for `player` waits for its session: the player
     /// is not handed to another host meanwhile (its body is clamped back at a host seam).
     pub(super) fn spawn_pinned(&self, player: PlayerId) -> bool {
-        self.spawn_pins.get(&player).is_some_and(|p| self.clock_ms.saturating_sub(p.at_ms) < SPAWN_PIN_MS)
+        self.spawn_pins
+            .get(&player)
+            .is_some_and(|p| self.clock_ms.saturating_sub(p.at_ms) < SPAWN_PIN_MS)
     }
 
     /// Whether a spawn order for `player` is held, taken or placed here and its session has
@@ -524,14 +673,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `client`'s body was clamped back at a host seam: whether its pin did it (online and
     /// pinned) — logged once per pin, not at every bounce.
     pub(super) fn note_pinned_clamp(&mut self, client: ClientId) -> bool {
-        let Some(&player) = self.player_of.get(&client) else { return false };
+        let Some(&player) = self.player_of.get(&client) else {
+            return false;
+        };
         if !self.spawn_pinned(player) {
             return false;
         }
         let pin = self.spawn_pins.get_mut(&player).expect("pinned");
         if !pin.told {
             pin.told = true;
-            log::info!("client {client}: player {} stays on this host until its new login connects", player.0);
+            log::info!(
+                "client {client}: player {} stays on this host until its new login connects",
+                player.0
+            );
         }
         true
     }
@@ -559,11 +713,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.kick_here(&player_token, session_epoch, &reason);
         let mut waiting = BTreeSet::new();
         let mut complete = true;
-        let ordinals: Vec<HostId> =
-            self.peers.keys().copied().filter(|o| !self.left_peers.contains_key(o) && !self.peer_succeeded(*o)).collect();
+        let ordinals: Vec<HostId> = self
+            .peers
+            .keys()
+            .copied()
+            .filter(|o| !self.left_peers.contains_key(o) && !self.peer_succeeded(*o))
+            .collect();
         for o in ordinals {
             if self.peer_reachable(o) {
-                let kick = Reliable::Kick { player_token: player_token.clone(), session_epoch, reason: reason.clone() };
+                let kick = Reliable::Kick {
+                    player_token: player_token.clone(),
+                    session_epoch,
+                    reason: reason.clone(),
+                };
                 self.queue_to_peer(o, kick);
                 waiting.insert(o);
             } else {
@@ -574,13 +736,21 @@ impl<S: RegionSpawner> WorldManager<S> {
         if !complete {
             // Resent by the login service every few seconds while the host is away.
             let now = self.clock_ms;
-            if self.kick_warned_ms.is_none_or(|at| now.saturating_sub(at) >= KICK_UNACKED_WARN_MS) {
+            if self
+                .kick_warned_ms
+                .is_none_or(|at| now.saturating_sub(at) >= KICK_UNACKED_WARN_MS)
+            {
                 self.kick_warned_ms = Some(now);
-                log::warn!("[server] kick up to epoch {session_epoch}: a host is out of reach; not acknowledged (resent later)");
+                log::warn!(
+                    "[server] kick up to epoch {session_epoch}: a host is out of reach; not acknowledged (resent later)"
+                );
             }
             self.kicks_pending.remove(&key);
         } else if waiting.is_empty() {
-            self.login_out.push(LoginOut::KickAck { player_token: key.0, session_epoch });
+            self.login_out.push(LoginOut::KickAck {
+                player_token: key.0,
+                session_epoch,
+            });
         } else {
             self.kicks_pending.insert(key, waiting);
         }
@@ -591,14 +761,28 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// kick is remembered for a hand-off still on its way.
     fn kick_here(&mut self, token: &str, up_to: u64, reason: &str) {
         let now = self.clock_ms;
-        self.kicked.retain(|_, k| now.saturating_sub(k.at_ms) < KICK_MEMORY_MS);
+        self.kicked
+            .retain(|_, k| now.saturating_sub(k.at_ms) < KICK_MEMORY_MS);
         let ceiling = self.kicked.get(token).map_or(up_to, |k| k.up_to.max(up_to));
-        self.kicked.insert(token.to_string(), Kicked { up_to: ceiling, reason: reason.to_string(), at_ms: now });
-        let revoked: Vec<ClientId> =
-            self.logins.iter().filter(|(_, (t, e))| t == token && *e <= up_to).map(|(c, _)| *c).collect();
+        self.kicked.insert(
+            token.to_string(),
+            Kicked {
+                up_to: ceiling,
+                reason: reason.to_string(),
+                at_ms: now,
+            },
+        );
+        let revoked: Vec<ClientId> = self
+            .logins
+            .iter()
+            .filter(|(_, (t, e))| t == token && *e <= up_to)
+            .map(|(c, _)| *c)
+            .collect();
         for c in revoked {
             log::info!("client {c}: its login was revoked ({reason}); parked");
-            let _ = self.out.send((Some(c), ServerPacket::Refused(reason.to_string())));
+            let _ = self
+                .out
+                .send((Some(c), ServerPacket::Refused(reason.to_string())));
             self.client_disconnected(c, now);
         }
     }
@@ -633,7 +817,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// its own coordinator link; never through a peer — [`Reliable::SessionEnded`] is no
     /// longer sent).
     pub(super) fn login_session_ended(&mut self, player_token: String, session_epoch: u64) {
-        self.login_out.push(LoginOut::SessionEnded { player_token, session_epoch });
+        self.login_out.push(LoginOut::SessionEnded {
+            player_token,
+            session_epoch,
+        });
     }
 
     /// `client`'s session leaves the world: its login (if any) ends.
@@ -646,19 +833,55 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A login message host `from` relayed (`peers.rs`).
     pub(super) fn peer_login_msg(&mut self, from: HostId, msg: Reliable) {
         match msg {
-            Reliable::SpawnOrder { origin, hops, player_token, session_epoch, player, record_region } => {
-                let req = SpawnRequest { origin, hops, player_token, session_epoch, player, record_region };
+            Reliable::SpawnOrder {
+                origin,
+                hops,
+                player_token,
+                session_epoch,
+                player,
+                record_region,
+            } => {
+                let req = SpawnRequest {
+                    origin,
+                    hops,
+                    player_token,
+                    session_epoch,
+                    player,
+                    record_region,
+                };
                 self.departed_denied(from, &req);
                 self.spawn_order(req);
             }
-            Reliable::SpawnAck { player_token, session_epoch, ok, endpoint } => {
-                self.login_out.push(LoginOut::SpawnAck { player_token, session_epoch, ok, endpoint });
+            Reliable::SpawnAck {
+                player_token,
+                session_epoch,
+                ok,
+                endpoint,
+            } => {
+                self.login_out.push(LoginOut::SpawnAck {
+                    player_token,
+                    session_epoch,
+                    ok,
+                    endpoint,
+                });
             }
-            Reliable::Kick { player_token, session_epoch, reason } => {
+            Reliable::Kick {
+                player_token,
+                session_epoch,
+                reason,
+            } => {
                 self.kick_here(&player_token, session_epoch, &reason);
-                self.kicks_in.push(KickIn { from, player_token, session_epoch, reason });
+                self.kicks_in.push(KickIn {
+                    from,
+                    player_token,
+                    session_epoch,
+                    reason,
+                });
             }
-            Reliable::KickAck { player_token, session_epoch } => {
+            Reliable::KickAck {
+                player_token,
+                session_epoch,
+            } => {
                 let key = (player_token, session_epoch);
                 let done = self.kicks_pending.get_mut(&key).is_some_and(|waiting| {
                     waiting.remove(&from);
@@ -666,16 +889,28 @@ impl<S: RegionSpawner> WorldManager<S> {
                 });
                 if done {
                     self.kicks_pending.remove(&key);
-                    self.login_out.push(LoginOut::KickAck { player_token: key.0, session_epoch });
+                    self.login_out.push(LoginOut::KickAck {
+                        player_token: key.0,
+                        session_epoch,
+                    });
                 }
             }
             // No longer sent (Elastic 1: each host tells its own coordinator link): kept only
             // because `Reliable` is append-only.
-            Reliable::SessionEnded { player_token, session_epoch } => {
-                self.login_out.push(LoginOut::SessionEnded { player_token, session_epoch });
+            Reliable::SessionEnded {
+                player_token,
+                session_epoch,
+            } => {
+                self.login_out.push(LoginOut::SessionEnded {
+                    player_token,
+                    session_epoch,
+                });
             }
             // Redacted: a transfer or move may carry a login's player token.
-            other => log::error!("[server] host {from}: {:?} is not a login message", other.redacted()),
+            other => log::error!(
+                "[server] host {from}: {:?} is not a login message",
+                other.redacted()
+            ),
         }
     }
 }

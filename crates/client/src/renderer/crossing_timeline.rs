@@ -31,9 +31,9 @@ use super::bridge::{LocalBody, PendingSnapshotVoxels, RegionRoots, RetiredRegion
 use super::hud::HudStatus;
 use super::join_timeline::WorldReady;
 use super::lod_rings::LodRings;
+use super::meshing::MeshingTask;
 use super::meshing::lod::{LodBuildQueue, LodMeshTask};
 use super::meshing::queue::RemeshQueue;
-use super::meshing::MeshingTask;
 
 /// All-quiet frames before a crossing is declared done (as `world_ready`).
 pub const SETTLED_FRAMES: u32 = 30;
@@ -149,7 +149,10 @@ impl Depths {
     }
 
     pub fn lod_busy(&self) -> bool {
-        self.lod_events > 0 || self.lod_build_queue > 0 || self.lod_tasks > 0 || self.lod_retired > 0
+        self.lod_events > 0
+            || self.lod_build_queue > 0
+            || self.lod_tasks > 0
+            || self.lod_retired > 0
     }
 
     /// Nothing of a crossing is still in flight.
@@ -172,8 +175,16 @@ impl Depths {
             (self.lod_busy(), "lod"),
             (self.gpu_active, "gpu"),
         ];
-        let red: Vec<&str> = gates.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect();
-        if red.is_empty() { "none".to_string() } else { red.join("+") }
+        let red: Vec<&str> = gates
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| *name)
+            .collect();
+        if red.is_empty() {
+            "none".to_string()
+        } else {
+            red.join("+")
+        }
     }
 }
 
@@ -232,7 +243,14 @@ impl Open {
             return;
         }
         self.step_lines += 1;
-        game::perf_event!("crossing_step", "id={} ms={} step={} {}", self.id, self.ms(now), step, detail);
+        game::perf_event!(
+            "crossing_step",
+            "id={} ms={} step={} {}",
+            self.id,
+            self.ms(now),
+            step,
+            detail
+        );
     }
 }
 
@@ -324,7 +342,8 @@ pub fn track_crossing_timeline(
     let gpu = GPU.snapshot();
     let gpu_frame = gpu.since(&s.gpu);
     s.gpu = gpu;
-    let gpu_active = gpu_frame != GpuSnapshot::default() || mesh_added + mesh_modified + mesh_removed > 0;
+    let gpu_active =
+        gpu_frame != GpuSnapshot::default() || mesh_added + mesh_modified + mesh_removed > 0;
 
     // Diff the bridge's maps against last frame's.
     let mut changes = Changes::default();
@@ -343,8 +362,12 @@ pub fn track_crossing_timeline(
     }
     if !retired.0.iter().eq(s.retired.iter()) {
         let live: Vec<(game::RegionCoords, Entity)> = retired.0.iter().copied().collect();
-        changes.regions_despawned =
-            s.retired.iter().filter(|entry| !live.contains(entry)).map(|(region, _)| *region).collect();
+        changes.regions_despawned = s
+            .retired
+            .iter()
+            .filter(|entry| !live.contains(entry))
+            .map(|(region, _)| *region)
+            .collect();
         s.retired = live;
     }
     if !rings.roots.keys().eq(s.lod_keys.iter()) {
@@ -373,9 +396,12 @@ pub fn track_crossing_timeline(
         || lod_build_queue.pending_count() > 0
         || !lod_tasks.is_empty()
         || !rings.retired.is_empty();
-    let near_busy_now = !remesh_queue.dirty.is_empty() || !near_tasks.is_empty() || !pending_voxels.is_empty();
+    let near_busy_now =
+        !remesh_queue.dirty.is_empty() || !near_tasks.is_empty() || !pending_voxels.is_empty();
     if s.open.is_none() {
-        let Some(trigger) = changes.trigger(world_ready.0) else { return };
+        let Some(trigger) = changes.trigger(world_ready.0) else {
+            return;
+        };
         // The join's own first region is not a crossing.
         if trigger == "window_shift" && roots.0.len() == changes.regions_added.len() {
             return;
@@ -441,30 +467,49 @@ pub fn track_crossing_timeline(
     // Steps: what changed this frame.
     if let Some((from, to)) = changes.home_flip {
         o.home_flips += 1;
-        o.step(now, "home_flip", format_args!("from={} to={}", rc(from), rc(to)));
+        o.step(
+            now,
+            "home_flip",
+            format_args!("from={} to={}", rc(from), rc(to)),
+        );
     }
     if changes.body_gone {
         o.body_gone_at = Some(now);
         o.step(now, "body_gone", format_args!(""));
     }
     if changes.body_back {
-        let gap = o.body_gone_at.take().map_or(0.0, |at| game::perf::ms(now.duration_since(at)));
+        let gap = o
+            .body_gone_at
+            .take()
+            .map_or(0.0, |at| game::perf::ms(now.duration_since(at)));
         o.body_gap_ms += gap;
         o.step(now, "body_back", format_args!("gap_ms={gap}"));
     }
     for region in &changes.regions_removed {
         o.regions_removed += 1;
         o.filling.remove(region);
-        o.step(now, "region_removed", format_args!("region={} retired={}", rc(*region), retired.0.len()));
+        o.step(
+            now,
+            "region_removed",
+            format_args!("region={} retired={}", rc(*region), retired.0.len()),
+        );
     }
     for region in &changes.regions_despawned {
         o.regions_despawned += 1;
-        o.step(now, "region_despawned", format_args!("region={} retired={}", rc(*region), retired.0.len()));
+        o.step(
+            now,
+            "region_despawned",
+            format_args!("region={} retired={}", rc(*region), retired.0.len()),
+        );
     }
     for region in &changes.regions_added {
         o.regions_added += 1;
         o.filling.insert(*region);
-        o.step(now, "region_added", format_args!("region={} regions={}", rc(*region), roots.0.len()));
+        o.step(
+            now,
+            "region_added",
+            format_args!("region={} regions={}", rc(*region), roots.0.len()),
+        );
     }
     if changes.lod_added > 0 || changes.lod_removed > 0 {
         o.lod_roots_added += changes.lod_added;
@@ -493,7 +538,11 @@ pub fn track_crossing_timeline(
         .collect();
     for region in landed {
         o.filling.remove(&region);
-        o.step(now, "region_voxels_landed", format_args!("region={}", rc(region)));
+        o.step(
+            now,
+            "region_voxels_landed",
+            format_args!("region={}", rc(region)),
+        );
     }
 
     let depths = Depths {
@@ -540,7 +589,11 @@ pub fn track_crossing_timeline(
         ),
         (true, false) => {
             let (added, removed) = (o.lod_roots_added, o.lod_roots_removed);
-            o.step(now, "lod_idle", format_args!("roots_added={added} roots_removed={removed}"));
+            o.step(
+                now,
+                "lod_idle",
+                format_args!("roots_added={added} roots_removed={removed}"),
+            );
         }
         _ => {}
     }
@@ -569,7 +622,10 @@ pub fn track_crossing_timeline(
             o.step(
                 now,
                 "gpu_regrow",
-                format_args!("mib={:.1}", gpu_frame.pull_regrow_bytes as f64 / (1024.0 * 1024.0)),
+                format_args!(
+                    "mib={:.1}",
+                    gpu_frame.pull_regrow_bytes as f64 / (1024.0 * 1024.0)
+                ),
             );
         }
         o.last_gpu_ms = ms;
@@ -631,7 +687,11 @@ pub fn track_crossing_timeline(
     }
 
     // Done: quiet for a while (reported from when the quiet began), or late.
-    let quiet = if o.lod_busy_at_start { depths.quiet_but_lod() } else { depths.quiet() };
+    let quiet = if o.lod_busy_at_start {
+        depths.quiet_but_lod()
+    } else {
+        depths.quiet()
+    };
     if quiet && changes.trigger(world_ready.0).is_none() {
         if o.quiet_frames == 0 {
             o.quiet_since_ms = ms;
@@ -657,7 +717,11 @@ pub fn track_crossing_timeline(
         if timeout { ms } else { o.quiet_since_ms },
         ms,
         u8::from(timeout),
-        if timeout { depths.red() } else { "none".to_string() },
+        if timeout {
+            depths.red()
+        } else {
+            "none".to_string()
+        },
         u8::from(o.lod_busy_at_start),
         o.home_flips,
         o.body_gap_ms,
@@ -687,4 +751,3 @@ pub fn track_crossing_timeline(
     );
     s.open = None;
 }
-

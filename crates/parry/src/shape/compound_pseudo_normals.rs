@@ -19,8 +19,7 @@ pub(crate) fn turns_clockwise(from: Vector, to: Vector) -> bool {
 /// which leaves no range to share, or where the surface simply ends against a cut.
 #[cfg(all(feature = "alloc", feature = "dim2"))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Copy, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Copy, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundEdgeCone {
     /// The edge's outward normal.
     pub face: Vector,
@@ -63,8 +62,7 @@ impl CompoundEdgeCone {
 /// single face; a compound part is a whole polygon, so it carries one cone per boundary edge.
 #[cfg(all(feature = "alloc", feature = "dim2"))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Default)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, Default, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundPseudoNormals {
     /// One cone per boundary edge, in the part's local frame. Cut edges are absent.
     pub boundary_edges: Vec<CompoundEdgeCone>,
@@ -108,8 +106,7 @@ impl NormalConstraints for CompoundPseudoNormals {
 /// cut.
 #[cfg(all(feature = "alloc", feature = "dim3"))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundFaceCone {
     /// The face's outward normal.
     pub face: Vector,
@@ -124,8 +121,7 @@ pub struct CompoundFaceCone {
 /// contact normal can be clamped onto one.
 #[cfg(all(feature = "alloc", feature = "dim3"))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Default)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, Default, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundPseudoNormals {
     /// One cone per boundary face of the part, in the part's local frame.
     pub boundary_faces: Vec<CompoundFaceCone>,

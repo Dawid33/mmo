@@ -15,6 +15,7 @@ variable "names" {
   type        = map(string)
   default = {
     keycloak = "keycloak.keycloak.svc.cluster.local"
+    grafana  = "kube-prometheus-stack-grafana.monitoring.svc.cluster.local"
   }
 }
 

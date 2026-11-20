@@ -41,6 +41,13 @@ variable "tenants" {
         world-backups = {}
       }
     }
+    # Login and Keycloak's logical dumps (../pg-management). This is separate
+    # from the region/world backup key and bucket.
+    management = {
+      buckets = {
+        management-backups = {}
+      }
+    }
   }
 }
 
@@ -70,6 +77,16 @@ output "world_backup" {
     bucket     = "world-backups"
     access_key = module.buckets.tenants["world"].access_key
     secret_key = module.buckets.tenants["world"].secret_key
+  }
+  sensitive = true
+}
+
+output "management_backup" {
+  value = {
+    endpoint   = "http://${data.terraform_remote_state.garage.outputs.s3_endpoint}"
+    bucket     = "management-backups"
+    access_key = module.buckets.tenants["management"].access_key
+    secret_key = module.buckets.tenants["management"].secret_key
   }
   sensitive = true
 }

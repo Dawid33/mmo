@@ -1,6 +1,7 @@
 # Keycloak (identity provider) at https://<host>: where player accounts live
 # (sign-up, email verification, password reset) and what Zulip and the game
-# log in against over OpenID Connect. One pod + its own PostgreSQL (postgres.tf).
+# log in against over OpenID Connect. The old PostgreSQL lifecycle is in
+# postgres.tf; production can move to the separate pg-management cluster.
 # Realms, clients and mail are configured by the keycloak-realm root, through
 # the admin API.
 #
@@ -32,9 +33,11 @@ locals {
   admin_tls_dir    = "/opt/keycloak/conf/admin-tls"
 
   env = merge({
-    KC_DB          = "postgres"
-    KC_DB_URL      = "jdbc:postgresql://${kubernetes_service_v1.postgres.metadata[0].name}:5432/keycloak"
-    KC_DB_USERNAME = "keycloak"
+    KC_DB               = "postgres"
+    KC_DB_URL           = "jdbc:postgresql://${local.db_host}:${local.db_port}/${local.db_name}"
+    KC_DB_USERNAME      = local.db_user
+    KC_DB_POOL_MIN_SIZE = "2"
+    KC_DB_POOL_MAX_SIZE = "20"
     # The address tokens are issued for, and the one the admin console insists on.
     KC_HOSTNAME       = "https://${var.host}"
     KC_HOSTNAME_ADMIN = local.admin_url
@@ -245,7 +248,7 @@ resource "kubernetes_deployment_v1" "keycloak" {
     create = "15m"
     update = "15m"
   }
-  depends_on = [kubernetes_stateful_set_v1.postgres, helm_release.admin_certificate]
+  depends_on = [helm_release.admin_certificate]
 }
 
 # The VPN-only admin name's certificate (a custom resource: a tiny local chart). The pod

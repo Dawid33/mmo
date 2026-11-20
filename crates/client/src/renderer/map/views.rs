@@ -6,7 +6,7 @@
 use bevy::math::DVec2;
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
-use game::map_tile::{MapTileKey, MAP_TILE_SAMPLES};
+use game::map_tile::{MAP_TILE_SAMPLES, MapTileKey};
 use game::{MapExtent, REGION_BLOCKS};
 use worldgen::tile_map::MapLayer;
 
@@ -39,7 +39,13 @@ pub struct MapView {
 
 impl Default for MapView {
     fn default() -> Self {
-        MapView { centre: DVec2::ZERO, m_per_px: 1.0, rect: Rect::default(), layer: MapLayerKind::Surface, visible: false }
+        MapView {
+            centre: DVec2::ZERO,
+            m_per_px: 1.0,
+            rect: Rect::default(),
+            layer: MapLayerKind::Surface,
+            visible: false,
+        }
     }
 }
 
@@ -63,15 +69,27 @@ impl MapView {
     /// The keys of level `level` the rect covers, widened by `ring` tiles, nearest the centre first.
     /// Outside `extent` (z off the map, or x off a map that does not wrap) nothing is wanted.
     fn keys(&self, level: u8, ring: i32, extent: Option<MapExtent>) -> Vec<MapTileKey> {
-        let (a, b) = (self.screen_to_world(self.rect.min), self.screen_to_world(self.rect.max));
+        let (a, b) = (
+            self.screen_to_world(self.rect.min),
+            self.screen_to_world(self.rect.max),
+        );
         let k0 = MapTileKey::containing(level, a.x.floor() as i64, a.y.floor() as i64);
         let k1 = MapTileKey::containing(level, b.x.floor() as i64, b.y.floor() as i64);
-        let c = MapTileKey::containing(level, self.centre.x.floor() as i64, self.centre.y.floor() as i64);
+        let c = MapTileKey::containing(
+            level,
+            self.centre.x.floor() as i64,
+            self.centre.y.floor() as i64,
+        );
         let mut keys: Vec<MapTileKey> = (k0.z - ring..=k1.z + ring)
             .flat_map(|z| (k0.x - ring..=k1.x + ring).map(move |x| MapTileKey { level, x, z }))
             .filter(|k| extent.is_none_or(|e| key_in_extent(*k, e)))
             .collect();
-        keys.sort_by_key(|k| ((k.x - c.x).abs().max((k.z - c.z).abs()), (k.x - c.x).abs() + (k.z - c.z).abs()));
+        keys.sort_by_key(|k| {
+            (
+                (k.x - c.x).abs().max((k.z - c.z).abs()),
+                (k.x - c.x).abs() + (k.z - c.z).abs(),
+            )
+        });
         keys
     }
 
@@ -86,8 +104,14 @@ pub fn key_in_extent(key: MapTileKey, e: MapExtent) -> bool {
     let rb = REGION_BLOCKS as i64;
     let (ox, oz) = key.origin_block();
     let span = key.span_blocks();
-    let (z0, z1) = (e.origin.z as i64 * rb, (e.origin.z as i64 + e.height as i64) * rb);
-    let (x0, x1) = (e.origin.x as i64 * rb, (e.origin.x as i64 + e.width as i64) * rb);
+    let (z0, z1) = (
+        e.origin.z as i64 * rb,
+        (e.origin.z as i64 + e.height as i64) * rb,
+    );
+    let (x0, x1) = (
+        e.origin.x as i64 * rb,
+        (e.origin.x as i64 + e.width as i64) * rb,
+    );
     oz < z1 && oz + span > z0 && (e.wraps() || (ox < x1 && ox + span > x0))
 }
 
@@ -132,12 +156,17 @@ pub(super) fn collect_map_draws(
     draws.0.clear();
     let Some(top) = top_level(&state) else { return };
     let extent = state.map.as_ref().map(|m| m.extent());
-    for view in views.iter().filter(|v| v.visible && v.rect.width() > 0.0 && v.rect.height() > 0.0) {
+    for view in views
+        .iter()
+        .filter(|v| v.visible && v.rect.width() > 0.0 && v.rect.height() > 0.0)
+    {
         tiles.want(view.wanted(top, extent));
         let level = view.level(top);
         let mut quads = Vec::new();
         for key in view.keys(level, 0, extent) {
-            let Some((at, gpu)) = tiles.best(key) else { continue };
+            let Some((at, gpu)) = tiles.best(key) else {
+                continue;
+            };
             let (ox, oz) = key.origin_block();
             let span = key.span_blocks() as f64;
             let (ax, az) = at.origin_block();
@@ -159,6 +188,11 @@ pub(super) fn collect_map_draws(
                 origin: Vec2::new(ax as f32, az as f32),
             });
         }
-        draws.0.push(MapViewDraw { scissor: view.rect, layer: view.layer, m_per_px: view.m_per_px, quads });
+        draws.0.push(MapViewDraw {
+            scissor: view.rect,
+            layer: view.layer,
+            m_per_px: view.m_per_px,
+            quads,
+        });
     }
 }

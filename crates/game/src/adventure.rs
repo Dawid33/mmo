@@ -8,14 +8,19 @@
 use rapier3d::math::{Pose, Vector};
 use state_hash::StateHash;
 
-use crate::movement::{MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, UNITS_PER_METER};
+use crate::movement::{
+    MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, UNITS_PER_METER,
+};
 use crate::{
-    nearest_standable, standable, walk_ups, ClientId, PathPlan, RouteMap, RegionCoords, Rollback, TilePos, TileSource,
-    WorldBlockPos, BLOCK_VOXELS, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
+    BLOCK_VOXELS, ClientId, MAX_PATH_NODES, PathPlan, REGION_BLOCKS, RegionCoords, Rollback,
+    RouteMap, TICK_RATE, TilePos, TileSource, WorldBlockPos, nearest_standable, standable,
+    walk_ups,
 };
 
 /// How a client plays: the overview (commander camera, a debug view) or one walking body, the default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub enum PlayMode {
     Overview,
     #[default]
@@ -25,7 +30,9 @@ pub enum PlayMode {
 /// Where an adventurer is asked to walk: a WORLD block column, any number
 /// of regions away, optionally at a level `y` (the air tile the feet
 /// occupy). `path_plan.rs` plans the walk.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash,
+)]
 pub struct Goal {
     /// World block `[x, z]` ([`WorldBlockPos`]'s frame).
     pub column: [i64; 2],
@@ -35,14 +42,20 @@ pub struct Goal {
 impl Goal {
     /// The goal at world block `p`, at its level.
     pub fn at(p: WorldBlockPos) -> Self {
-        Goal { column: [p.x, p.z], y: Some(p.y) }
+        Goal {
+            column: [p.x, p.z],
+            y: Some(p.y),
+        }
     }
 
     /// The goal at block column `column` of region `rc` (region-local; it may
     /// lie past the region's edge).
     pub fn local(rc: RegionCoords, column: [i32; 2], y: Option<i32>) -> Self {
         let w = WorldBlockPos::from_local(rc, crate::BlockPos::new(column[0], 0, column[1]));
-        Goal { column: [w.x, w.z], y }
+        Goal {
+            column: [w.x, w.z],
+            y,
+        }
     }
 
     /// The region the goal's column lies in; `None` past the `i32` region
@@ -76,7 +89,10 @@ pub fn body_on_tile(at: TilePos) -> Vector {
     let bv = BLOCK_VOXELS as f32;
     Vector::new(
         (at[0] as f32 + 0.5) * bv,
-        at[1] as f32 * bv + PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS + ADVENTURE_PLACE_CLEARANCE_UNITS,
+        at[1] as f32 * bv
+            + PLAYER_CAPSULE_HALF_HEIGHT
+            + PLAYER_CAPSULE_RADIUS
+            + ADVENTURE_PLACE_CLEARANCE_UNITS,
         (at[2] as f32 + 0.5) * bv,
     )
 }
@@ -92,7 +108,12 @@ impl Rollback {
     /// is. Overview leaves the body where it stands and closes the survival
     /// state ([`crate::Client::leave_survival`]: inventory, chest, mining;
     /// a cursor stack that no longer fits is dropped at the feet).
-    pub fn set_play_mode_safe(&mut self, client: ClientId, mode: PlayMode, at: Option<TilePos>) -> bool {
+    pub fn set_play_mode_safe(
+        &mut self,
+        client: ClientId,
+        mode: PlayMode,
+        at: Option<TilePos>,
+    ) -> bool {
         // `at` comes off the wire: a tile outside the region is refused
         // before anything changes; its level is clamped to the scan range.
         let at = match at {
@@ -102,7 +123,9 @@ impl Rollback {
             },
             None => None,
         };
-        let Some(old) = self.data.clients.get(&client).map(|c| c.mode) else { return false };
+        let Some(old) = self.data.clients.get(&client).map(|c| c.mode) else {
+            return false;
+        };
         if old == mode {
             return true;
         }
@@ -143,7 +166,9 @@ impl Rollback {
     /// ends. `false` with no change for an unknown client or a tile outside
     /// the region; its level is clamped to the column's scan range.
     pub fn place_body_at_safe(&mut self, client: ClientId, at: TilePos) -> bool {
-        let Some(at) = clamp_tile(self, at) else { return false };
+        let Some(at) = clamp_tile(self, at) else {
+            return false;
+        };
         if !self.data.clients.contains_key(&client) {
             return false;
         }
@@ -160,9 +185,15 @@ impl Rollback {
     /// its column, else over the region's spawn column (`CreateClient`'s
     /// spawn rule). Keeps the body's rotation.
     fn place_body_safe(&mut self, client: ClientId, at: TilePos) {
-        let Some(key) = self.data.player_entites.get(&client).copied() else { return };
-        let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { return };
-        let Some(body) = self.data.physics.bodies.get(handle) else { return };
+        let Some(key) = self.data.player_entites.get(&client).copied() else {
+            return;
+        };
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else {
+            return;
+        };
+        let Some(body) = self.data.physics.bodies.get(handle) else {
+            return;
+        };
         let rotation = body.position().rotation;
         let translation = match nearest_standable(self, [at[0], at[2]], Some(at[1])) {
             Some(tile) => body_on_tile(tile),
@@ -175,8 +206,15 @@ impl Rollback {
         // A teleport ends any fall or jump: no stale vertical velocity (or
         // flight) carries over onto the new tile.
         if let Some(m) = *self.data.ecs.motion.try_get(key) {
-            if m.vel_y != 0.0 || m.flying {
-                self.data.ecs.motion.set_safe(key, Some(crate::Motion { vel_y: 0.0, flying: false, ..m }));
+            if m.vel_y != 0.0 || m.vel_x != 0.0 || m.vel_z != 0.0 || m.flying {
+                let still = crate::Motion {
+                    vel_x: 0.0,
+                    vel_y: 0.0,
+                    vel_z: 0.0,
+                    flying: false,
+                    ..m
+                };
+                self.data.ecs.motion.set_safe(key, Some(still));
             }
         }
     }
@@ -188,11 +226,19 @@ impl Rollback {
     /// coarse route toward it; a goal off `map` — past the world's outer seam
     /// — is walked to the nearest column inside it). Replaces any walk in
     /// progress.
-    pub fn move_to_safe(&mut self, client: ClientId, goal: Goal, here: RegionCoords, map: Option<&RouteMap>) -> bool {
+    pub fn move_to_safe(
+        &mut self,
+        client: ClientId,
+        goal: Goal,
+        here: RegionCoords,
+        map: Option<&RouteMap>,
+    ) -> bool {
         if self.data.clients.get(&client).map(|c| c.mode) != Some(PlayMode::Adventure) {
             return false;
         }
-        let Some(key) = self.data.player_entites.get(&client).copied() else { return false };
+        let Some(key) = self.data.player_entites.get(&client).copied() else {
+            return false;
+        };
         self.walk_entity_safe(key, goal, here, map)
     }
 
@@ -200,7 +246,13 @@ impl Rollback {
     /// goal rules), undo-safely: the part of `MoveTo` after the entity is
     /// resolved, shared with people. `false` with no change when it has no
     /// body or there is no path.
-    pub fn walk_entity_safe(&mut self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<&RouteMap>) -> bool {
+    pub fn walk_entity_safe(
+        &mut self,
+        e: crate::EntityKey,
+        goal: Goal,
+        here: RegionCoords,
+        map: Option<&RouteMap>,
+    ) -> bool {
         self.walk_entity_within_safe(e, goal, here, map, MAX_PATH_NODES)
     }
 
@@ -215,7 +267,9 @@ impl Rollback {
         map: Option<&RouteMap>,
         max_nodes: u32,
     ) -> bool {
-        let Some(walker) = self.plan_walker(e, goal, here, map, max_nodes) else { return false };
+        let Some(walker) = self.plan_walker(e, goal, here, map, max_nodes) else {
+            return false;
+        };
         self.data.ecs.walker.set_safe(e, Some(walker));
         true
     }
@@ -258,18 +312,30 @@ impl Rollback {
             .data
             .player_entites
             .iter()
-            .filter(|(c, _)| self.data.clients.get(c).is_some_and(|c| c.mode == PlayMode::Adventure))
+            .filter(|(c, _)| {
+                self.data
+                    .clients
+                    .get(c)
+                    .is_some_and(|c| c.mode == PlayMode::Adventure)
+            })
             .map(|(_, &e)| e)
             .chain(self.data.person_entities.values().copied())
             .filter(|&e| self.data.ecs.walker.try_get(e).is_some())
             .collect();
         for key in walking {
-            let Some(old) = self.data.ecs.walker.try_get(key).clone() else { continue };
-            let Some(feet) = self.body_feet(key) else { continue };
+            let Some(old) = self.data.ecs.walker.try_get(key).clone() else {
+                continue;
+            };
+            let Some(feet) = self.body_feet(key) else {
+                continue;
+            };
             let mut w = old.clone();
             let last = w.path.len().saturating_sub(1) as u32;
             let mut at_end = false;
-            while w.waypoint(w.next, here, self.data.map()).is_some_and(|p| reached(p, feet)) {
+            while w
+                .waypoint(w.next, here, self.data.map())
+                .is_some_and(|p| reached(p, feet))
+            {
                 if w.next < last {
                     w.next += 1;
                 } else {
@@ -304,7 +370,10 @@ impl Rollback {
                 // path the old one is kept: a body still stuck after
                 // another STUCK_TICKS gives up.
                 if let Some(fresh) = self.plan_walker(key, w.goal, here, map, MAX_PATH_NODES) {
-                    w = Walker { replanned: w.replanned, ..fresh };
+                    w = Walker {
+                        replanned: w.replanned,
+                        ..fresh
+                    };
                 }
                 w.replanned = true;
                 w.stalled = 0;
@@ -387,7 +456,12 @@ impl Walker {
 
     /// Path tile `i` in `here`'s block frame (outside the region for a tile
     /// in its halo; across a wrapped seam of `map`, the nearest image).
-    pub fn waypoint(&self, i: u32, here: RegionCoords, map: Option<crate::MapExtent>) -> Option<TilePos> {
+    pub fn waypoint(
+        &self,
+        i: u32,
+        here: RegionCoords,
+        map: Option<crate::MapExtent>,
+    ) -> Option<TilePos> {
         self.path.get(i as usize).map(|&p| local_tile(p, here, map))
     }
 }
@@ -408,7 +482,11 @@ pub fn feet_of(t: Vector) -> Vector {
 /// them, at the level nearest the feet.
 pub fn feet_tile(feet: Vector) -> TilePos {
     let bv = BLOCK_VOXELS as f32;
-    [(feet.x / bv).floor() as i32, (feet.y / bv + 0.5).floor() as i32, (feet.z / bv).floor() as i32]
+    [
+        (feet.x / bv).floor() as i32,
+        (feet.y / bv + 0.5).floor() as i32,
+        (feet.z / bv).floor() as i32,
+    ]
 }
 
 /// The standable tile a body with feet at `feet` walks from: its own tile,
@@ -462,13 +540,23 @@ pub fn steer(
     map: Option<crate::MapExtent>,
 ) -> (MoveKeys, f32) {
     let bv = BLOCK_VOXELS as f32;
-    let Some(wp) = walker.waypoint(walker.next, here, map) else { return (MoveKeys::default(), 0.0) };
+    let Some(wp) = walker.waypoint(walker.next, here, map) else {
+        return (MoveKeys::default(), 0.0);
+    };
     let (cx, cz) = ((wp[0] as f32 + 0.5) * bv, (wp[2] as f32 + 0.5) * bv);
     let (dx, dz) = (cx - feet.x, cz - feet.z);
     let yaw = libm::atan2f(-dx, -dz);
-    let walk_up = walker.walk_up.get(walker.next as usize).copied().unwrap_or(false);
+    let walk_up = walker
+        .walk_up
+        .get(walker.next as usize)
+        .copied()
+        .unwrap_or(false);
     let walk_up = walk_up && walker.stalled < WALK_UP_JUMP_AFTER_STALL_TICKS;
     let climb = grounded && !walk_up && wp[1] as f32 * bv - feet.y > STEP_HEIGHT * UNITS_PER_METER;
-    let keys = MoveKeys { forward: true, jump_held: climb, ..MoveKeys::default() };
+    let keys = MoveKeys {
+        forward: true,
+        jump_held: climb,
+        ..MoveKeys::default()
+    };
     (keys, yaw)
 }

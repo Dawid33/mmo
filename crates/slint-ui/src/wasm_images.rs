@@ -28,7 +28,9 @@ pub(crate) fn load_embedded(data: Slice<'static, u8>, format: Slice<'_, u8>) -> 
     if let Some(image) = DECODED.with(|d| d.borrow().get(&key).cloned()) {
         return image;
     }
-    let format = std::str::from_utf8(format.as_slice()).ok().and_then(image::ImageFormat::from_extension);
+    let format = std::str::from_utf8(format.as_slice())
+        .ok()
+        .and_then(image::ImageFormat::from_extension);
     let decoded = match format {
         Some(format) => image::load_from_memory_with_format(bytes, format),
         None => image::load_from_memory(bytes),
@@ -37,7 +39,11 @@ pub(crate) fn load_embedded(data: Slice<'static, u8>, format: Slice<'_, u8>) -> 
         Ok(decoded) => {
             let rgba = decoded.into_rgba8();
             let (width, height) = rgba.dimensions();
-            Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba.as_raw(), width, height))
+            Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                rgba.as_raw(),
+                width,
+                height,
+            ))
         }
         // Slint returns an empty image for undecodable data too.
         Err(err) => {

@@ -584,8 +584,9 @@ pub trait QueryDispatcher: Send + Sync {
 /// This creates a chain of three dispatchers: `custom1` -> `custom2` -> `DefaultQueryDispatcher`.
 pub struct QueryDispatcherChain<T, U>(T, U);
 
+// mmo-fork: rustfmt removes the final comma from macro call arguments; accept either form.
 macro_rules! chain_method {
-    ($name:ident ( $( $arg:ident : $ty:ty,)*) -> $result:ty) => {
+    ($name:ident ( $( $arg:ident : $ty:ty ),* $(,)? ) -> $result:ty) => {
         fn $name(&self, $($arg : $ty,)*
         ) -> Result<$result, Unsupported> {
             (self.0).$name($($arg,)*)
@@ -599,45 +600,46 @@ where
     T: QueryDispatcher,
     U: QueryDispatcher,
 {
-    chain_method!(intersection_test(
-        pos12: &Pose,
-        g1: &dyn Shape,
-        g2: &dyn Shape,
-    ) -> ShapeIntersection);
+    chain_method!(
+        intersection_test(pos12: &Pose, g1: &dyn Shape, g2: &dyn Shape) -> ShapeIntersection
+    );
 
-    chain_method!(distance(pos12: &Pose, g1: &dyn Shape, g2: &dyn Shape,) -> ShapeDistance);
+    chain_method!(distance(pos12: &Pose, g1: &dyn Shape, g2: &dyn Shape) -> ShapeDistance);
 
-    chain_method!(contact(
-        pos12: &Pose,
-        g1: &dyn Shape,
-        g2: &dyn Shape,
-        prediction: Real,
-    ) -> Option<Contact>);
+    chain_method!(
+        contact(pos12: &Pose, g1: &dyn Shape, g2: &dyn Shape, prediction: Real) -> Option<Contact>
+    );
 
-    chain_method!(closest_points(
-        pos12: &Pose,
-        g1: &dyn Shape,
-        g2: &dyn Shape,
-        max_dist: Real,
-    ) -> ClosestPoints);
+    chain_method!(
+        closest_points(
+            pos12: &Pose,
+            g1: &dyn Shape,
+            g2: &dyn Shape,
+            max_dist: Real,
+        ) -> ClosestPoints
+    );
 
-    chain_method!(cast_shapes(
-        pos12: &Pose,
-        vel12: Vector,
-        g1: &dyn Shape,
-        g2: &dyn Shape,
-        options: ShapeCastOptions,
-    ) -> Option<ShapeCastHit>);
+    chain_method!(
+        cast_shapes(
+            pos12: &Pose,
+            vel12: Vector,
+            g1: &dyn Shape,
+            g2: &dyn Shape,
+            options: ShapeCastOptions,
+        ) -> Option<ShapeCastHit>
+    );
 
-    chain_method!(cast_shapes_nonlinear(
-        motion1: &NonlinearRigidMotion,
-        g1: &dyn Shape,
-        motion2: &NonlinearRigidMotion,
-        g2: &dyn Shape,
-        start_time: Real,
-        end_time: Real,
-        stop_at_penetration: bool,
-    ) -> Option<ShapeCastHit>);
+    chain_method!(
+        cast_shapes_nonlinear(
+            motion1: &NonlinearRigidMotion,
+            g1: &dyn Shape,
+            motion2: &NonlinearRigidMotion,
+            g2: &dyn Shape,
+            start_time: Real,
+            end_time: Real,
+            stop_at_penetration: bool,
+        ) -> Option<ShapeCastHit>
+    );
 }
 
 #[cfg(feature = "alloc")]
@@ -647,22 +649,26 @@ where
     T: PersistentQueryDispatcher<ManifoldData, ContactData>,
     U: PersistentQueryDispatcher<ManifoldData, ContactData>,
 {
-    chain_method!(contact_manifolds(
-        pos12: &Pose,
-        g1: &dyn Shape,
-        g2: &dyn Shape,
-        prediction: Real,
-        manifolds: &mut Vec<ContactManifold<ManifoldData, ContactData>>,
-        workspace: &mut Option<ContactManifoldsWorkspace>,
-    ) -> ());
+    chain_method!(
+        contact_manifolds(
+            pos12: &Pose,
+            g1: &dyn Shape,
+            g2: &dyn Shape,
+            prediction: Real,
+            manifolds: &mut Vec<ContactManifold<ManifoldData, ContactData>>,
+            workspace: &mut Option<ContactManifoldsWorkspace>,
+        ) -> ()
+    );
 
-    chain_method!(contact_manifold_convex_convex(
-        pos12: &Pose,
-        g1: &dyn Shape,
-        g2: &dyn Shape,
-        normal_constraints1: Option<&dyn NormalConstraints>,
-        normal_constraints2: Option<&dyn NormalConstraints>,
-        prediction: Real,
-        manifold: &mut ContactManifold<ManifoldData, ContactData>,
-    ) -> ());
+    chain_method!(
+        contact_manifold_convex_convex(
+            pos12: &Pose,
+            g1: &dyn Shape,
+            g2: &dyn Shape,
+            normal_constraints1: Option<&dyn NormalConstraints>,
+            normal_constraints2: Option<&dyn NormalConstraints>,
+            prediction: Real,
+            manifold: &mut ContactManifold<ManifoldData, ContactData>,
+        ) -> ()
+    );
 }

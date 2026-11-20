@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use worldgen::forge::{forge, ForgeParams};
-use worldgen::forged::ForgedWorld;
 use world_store::{StoreHandle, StoreUrl};
+use worldgen::forge::{ForgeParams, forge};
+use worldgen::forged::ForgedWorld;
 
 /// The default world, relative to the repo root.
 pub const DEFAULT_WORLD_PATH: &str = "worlds/default.world";
@@ -24,8 +24,7 @@ pub const PROCEDURAL_KEYWORD: &str = worldgen::forged::PROCEDURAL_KEYWORD;
 pub const WORLD_DB_ENV: &str = "VOXEL_WORLD_DB";
 
 /// Why a world with save files from before the world store is not started.
-pub const LEGACY_SAVES_REFUSAL: &str =
-    "this world has file saves from before the world store; delete them with: just clean-old-worlds";
+pub const LEGACY_SAVES_REFUSAL: &str = "this world has file saves from before the world store; delete them with: just clean-old-worlds";
 
 /// What a process does when its world store holds no world, no archive and has no
 /// import file: `forge` (default) forges a default world itself; `wait` — a pod whose
@@ -50,7 +49,9 @@ pub fn empty_store_from(value: Option<&str>) -> Result<EmptyStore, String> {
     match value.map(str::trim) {
         None | Some("") | Some("forge") => Ok(EmptyStore::Forge),
         Some("wait") => Ok(EmptyStore::Wait),
-        Some(other) => Err(format!("{EMPTY_STORE_ENV}={other}: expected `forge` or `wait`")),
+        Some(other) => Err(format!(
+            "{EMPTY_STORE_ENV}={other}: expected `forge` or `wait`"
+        )),
     }
 }
 
@@ -66,7 +67,10 @@ pub enum WorldSource {
     /// A forged world in the store at `url`. `import`: the world file (forge
     /// file) the store takes its world from when it has none yet — it may not
     /// exist — and next to which old file saves would sit.
-    Store { url: StoreUrl, import: Option<PathBuf> },
+    Store {
+        url: StoreUrl,
+        import: Option<PathBuf>,
+    },
 }
 
 /// `VOXEL_WORLD_FILE` + `VOXEL_WORLD_DB` -> the world to serve. A world file
@@ -79,7 +83,9 @@ pub fn resolve(world_file: Option<&str>, world_db: Option<&str>) -> Result<World
     let world_file = match world_file.map(str::trim) {
         Some(PROCEDURAL_KEYWORD) => {
             if world_db.is_some() {
-                log::warn!("[server] {WORLD_DB_ENV} is ignored: the procedural world keeps nothing");
+                log::warn!(
+                    "[server] {WORLD_DB_ENV} is ignored: the procedural world keeps nothing"
+                );
             }
             return Ok(WorldSource::Procedural);
         }
@@ -88,14 +94,19 @@ pub fn resolve(world_file: Option<&str>, world_db: Option<&str>) -> Result<World
         Some(path) => Some(from_repo_root(Path::new(path))),
     };
     let url = match (world_db, &world_file) {
-        (Some(db), _) => match StoreUrl::parse(db).map_err(|e| format!("{WORLD_DB_ENV}={}: {e}", world_store::redact_url(db)))? {
+        (Some(db), _) => match StoreUrl::parse(db)
+            .map_err(|e| format!("{WORLD_DB_ENV}={}: {e}", world_store::redact_url(db)))?
+        {
             StoreUrl::Sqlite(path) => StoreUrl::Sqlite(from_repo_root(&path)),
             other => other,
         },
         (None, Some(file)) => store_url_for(file),
         (None, None) => unreachable!("no store named means the default world file"),
     };
-    Ok(WorldSource::Store { url, import: world_file })
+    Ok(WorldSource::Store {
+        url,
+        import: world_file,
+    })
 }
 
 /// The store of a world file when `VOXEL_WORLD_DB` is unset: the `.sqlite`
@@ -124,7 +135,9 @@ pub fn legacy_saves(world_file: &Path) -> Vec<PathBuf> {
 /// world: starting would silently play its pristine terrain while the saves
 /// sit there ([`LEGACY_SAVES_REFUSAL`]).
 pub fn check_legacy_saves(store: &StoreHandle, world_file: Option<&Path>) -> Result<(), String> {
-    let Some(world_file) = world_file else { return Ok(()) };
+    let Some(world_file) = world_file else {
+        return Ok(());
+    };
     let legacy = legacy_saves(world_file);
     if legacy.is_empty() {
         return Ok(());
@@ -182,9 +195,15 @@ pub fn ensure_world(
         Ok(None) => {}
         Err(e @ world_store::StoreError::OtherFormat { kind, .. }) if kind.retileable() => {
             log::warn!("[server] {e}");
-            log::info!("[server] re-tiling the world from its archived forge file (saves are kept)");
+            log::info!(
+                "[server] re-tiling the world from its archived forge file (saves are kept)"
+            );
             tile_from_archive(store)?;
-            game::perf_event!("world_retiled", "ms={} kind={kind:?}", game::perf::ms(started.elapsed()));
+            game::perf_event!(
+                "world_retiled",
+                "ms={} kind={kind:?}",
+                game::perf::ms(started.elapsed())
+            );
             forget_imported_file(store, import);
             return load_written(store).map(Some);
         }
@@ -195,7 +214,11 @@ pub fn ensure_world(
         // Imported before tiling (Plan A): the archive is the forge file.
         log::info!("[server] the world store holds its forge file but no tiles: tiling it (once)");
         tile_from_archive(store)?;
-        game::perf_event!("world_tiled", "ms={} from=archive", game::perf::ms(started.elapsed()));
+        game::perf_event!(
+            "world_tiled",
+            "ms={} from=archive",
+            game::perf::ms(started.elapsed())
+        );
         forget_imported_file(store, import);
     } else if let Some(path) = import.filter(|p| p.exists()) {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -218,7 +241,10 @@ pub fn ensure_world(
         })?;
         // In the store now: the file is not read again.
         if let Err(e) = std::fs::remove_file(path) {
-            log::error!("[server] cannot delete the imported world file {}: {e}", path.display());
+            log::error!(
+                "[server] cannot delete the imported world file {}: {e}",
+                path.display()
+            );
         }
         log::info!("[server] imported {} into the world store", path.display());
         game::perf_event!(
@@ -234,10 +260,16 @@ pub fn ensure_world(
         // Something is there now: read it the usual way (tiled or not, imported or not).
         return ensure_world(store, import, params, empty, stop);
     } else {
-        log::info!("[server] the world store has no world: forging a default world (this takes a while)");
+        log::info!(
+            "[server] the world store has no world: forging a default world (this takes a while)"
+        );
         let bytes = forge(params).artifact(params).to_bytes();
         world_store::write_tiled(store, bytes).map_err(|e| format!("the forged world: {e}"))?;
-        game::perf_event!("world_forged", "ms={} into=store", game::perf::ms(started.elapsed()));
+        game::perf_event!(
+            "world_forged",
+            "ms={} into=store",
+            game::perf::ms(started.elapsed())
+        );
     }
     load_written(store).map(Some)
 }
@@ -254,7 +286,11 @@ fn wait_for_forge(store: &StoreHandle, import: Option<&Path>, stop: Option<&Atom
 }
 
 /// [`wait_for_forge`]'s polling.
-fn wait_for_forge_polling(store: &StoreHandle, import: Option<&Path>, stop: Option<&AtomicBool>) -> bool {
+fn wait_for_forge_polling(
+    store: &StoreHandle,
+    import: Option<&Path>,
+    stop: Option<&AtomicBool>,
+) -> bool {
     let mut logged_at: Option<Instant> = None;
     loop {
         let looked = store.world_info().map(|info| info.has_artifact);
@@ -265,8 +301,12 @@ fn wait_for_forge_polling(store: &StoreHandle, import: Option<&Path>, stop: Opti
         if logged_at.is_none_or(|at| now >= at + EMPTY_STORE_LOG) {
             logged_at = Some(now);
             match looked {
-                Err(e) => log::warn!("[server] the world store cannot be read ({e}): still waiting for 'worldctl forge'"),
-                Ok(_) => log::warn!("[server] the world store has no world: waiting for 'worldctl forge'"),
+                Err(e) => log::warn!(
+                    "[server] the world store cannot be read ({e}): still waiting for 'worldctl forge'"
+                ),
+                Ok(_) => log::warn!(
+                    "[server] the world store has no world: waiting for 'worldctl forge'"
+                ),
             }
         }
         let until = now + EMPTY_STORE_POLL;
@@ -289,8 +329,13 @@ fn load_written(store: &StoreHandle) -> Result<(ForgedWorld, game::WorldMap), St
 /// Re-writes the store's tiles and world map from its archived forge file
 /// (`write_tiled`, one transaction; nothing else in the store is touched).
 fn tile_from_archive(store: &StoreHandle) -> Result<(), String> {
-    let archive = store.forged_archive().map_err(|e| e.to_string())?.ok_or("the world store lost its world")?;
-    world_store::write_tiled(store, archive).map(drop).map_err(archive_tiling_error)
+    let archive = store
+        .forged_archive()
+        .map_err(|e| e.to_string())?
+        .ok_or("the world store lost its world")?;
+    world_store::write_tiled(store, archive)
+        .map(drop)
+        .map_err(archive_tiling_error)
 }
 
 /// What to do when the store's own archive cannot be tiled: a backend error
@@ -299,7 +344,8 @@ fn tile_from_archive(store: &StoreHandle) -> Result<(), String> {
 /// throws away what the store has saved — said in so many words.
 fn archive_tiling_error(e: world_store::StoreError) -> String {
     match e {
-        e @ (world_store::StoreError::Backend(_) | world_store::StoreError::LockConflict { .. }) => {
+        e
+        @ (world_store::StoreError::Backend(_) | world_store::StoreError::LockConflict { .. }) => {
             format!("tiling the world store's forge file: {e} — retry; the store is untouched")
         }
         e => format!(
@@ -314,22 +360,34 @@ fn archive_tiling_error(e: world_store::StoreError) -> String {
 /// between the import's commit and the delete): deleted when its bytes are
 /// the stored archive's, else left alone with a warning.
 fn forget_imported_file(store: &StoreHandle, import: Option<&Path>) {
-    let Some(path) = import.filter(|p| p.exists()) else { return };
+    let Some(path) = import.filter(|p| p.exists()) else {
+        return;
+    };
     let archive = match store.forged_archive() {
         Ok(archive) => archive,
         Err(e) => {
-            log::warn!("[server] {} is ignored: cannot read the stored forge file to compare ({e})", path.display());
+            log::warn!(
+                "[server] {} is ignored: cannot read the stored forge file to compare ({e})",
+                path.display()
+            );
             return;
         }
     };
-    let same = archive.is_some_and(|archive| std::fs::read(path).ok().is_some_and(|b| b == archive));
+    let same =
+        archive.is_some_and(|archive| std::fs::read(path).ok().is_some_and(|b| b == archive));
     if same {
         match std::fs::remove_file(path) {
             Ok(()) => log::info!("[server] {} was already imported: deleted", path.display()),
-            Err(e) => log::error!("[server] cannot delete the imported world file {}: {e}", path.display()),
+            Err(e) => log::error!(
+                "[server] cannot delete the imported world file {}: {e}",
+                path.display()
+            ),
         }
     } else {
-        log::warn!("[server] {} is ignored: the world store already holds another world file", path.display());
+        log::warn!(
+            "[server] {} is ignored: the world store already holds another world file",
+            path.display()
+        );
     }
 }
 
@@ -430,7 +488,9 @@ pub fn ensure_coordinator_state_at(
     sqlite_db: Option<&Path>,
     addr: &str,
 ) -> Result<Option<CoordinatorStart>, String> {
-    let registered = store.register_replica(addr).map_err(|e| format!("registering the coordinator replica: {e}"))?;
+    let registered = store
+        .register_replica(addr)
+        .map_err(|e| format!("registering the coordinator replica: {e}"))?;
     start_from_row(store, map, sqlite_db, registered)
 }
 
@@ -441,23 +501,48 @@ fn start_from_row(
     sqlite_db: Option<&Path>,
     registered: world_store::ReplicaRegistered,
 ) -> Result<Option<CoordinatorStart>, String> {
-    use game::history::persist::{self, HistoryLoadError};
     use game::history::SocietyGrid;
+    use game::history::persist::{self, HistoryLoadError};
     let grid = SocietyGrid::from_world_map(map);
-    let replaceable = |e: &HistoryLoadError| matches!(e, HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. });
+    let replaceable = |e: &HistoryLoadError| {
+        matches!(
+            e,
+            HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. }
+        )
+    };
     let process = registered.replica;
     let saved_regions = || -> Result<bool, String> {
-        store.stored_regions().map(|r| !r.is_empty()).map_err(|e| format!("reading the world's saved regions: {e}"))
+        store
+            .stored_regions()
+            .map(|r| !r.is_empty())
+            .map_err(|e| format!("reading the world's saved regions: {e}"))
     };
     // The core's clock is the store's: sampled once the row is read.
-    let store_ms = || store.db_now_ms().map_err(|e| format!("reading the world store's clock: {e}"));
-    let started = |coordinator: game::Coordinator, store_ms: u64, source: CoordinatorSource, version: u64, history_version: u64| {
-        CoordinatorStart { coordinator, store_time: (store_ms, Instant::now()), source, version, alone: registered.alone, history_version }
+    let store_ms = || {
+        store
+            .db_now_ms()
+            .map_err(|e| format!("reading the world store's clock: {e}"))
+    };
+    let started = |coordinator: game::Coordinator,
+                   store_ms: u64,
+                   source: CoordinatorSource,
+                   version: u64,
+                   history_version: u64| {
+        CoordinatorStart {
+            coordinator,
+            store_time: (store_ms, Instant::now()),
+            source,
+            version,
+            alone: registered.alone,
+            history_version,
+        }
     };
     // A new core (migrated or bootstrapped): the row's first version, unless one is there (a
     // replaced state: the first transition writes over it at its version), or another replica
     // bootstrapped it meanwhile (`None`: load that instead).
-    let first = |mut coordinator: game::Coordinator, replacing: Option<u64>| -> Result<Option<(game::Coordinator, u64)>, String> {
+    let first = |mut coordinator: game::Coordinator,
+                 replacing: Option<u64>|
+     -> Result<Option<(game::Coordinator, u64)>, String> {
         if let Some(version) = replacing {
             // Final review T3: its cut ids' high half past every one the replaced core made (a
             // reused cut id would be answered from that core's stored decision, unchecked).
@@ -465,13 +550,18 @@ fn start_from_row(
                 .raise_coordinator_epoch()
                 .map_err(|e| format!("raising the replaced coordinator row's epoch: {e}"))?
                 .ok_or_else(|| "the coordinator row being replaced is gone".to_string())?;
-            log::info!("[coordinator] replacing the stored coordinator state: its cut ids' high half is now {epoch}");
+            log::info!(
+                "[coordinator] replacing the stored coordinator state: its cut ids' high half is now {epoch}"
+            );
             coordinator.set_cut_epoch(epoch);
             return Ok(Some((coordinator, version)));
         }
         coordinator.set_cut_epoch(1);
         let (core, history) = coordinator.encode_projection();
-        match store.bootstrap_coordinator(core, history).map_err(|e| format!("bootstrapping the world coordinator's row: {e}"))? {
+        match store
+            .bootstrap_coordinator(core, history)
+            .map_err(|e| format!("bootstrapping the world coordinator's row: {e}"))?
+        {
             world_store::Bootstrapped::Written { version, epoch } => {
                 // Its cut ids' high half, once: the row's epoch (1, or past a row an older build
                 // claimed and never wrote — then its first transition writes the raised one).
@@ -481,7 +571,9 @@ fn start_from_row(
                     coordinator.set_cut_epoch(epoch);
                     coordinator.set_version(version);
                 }
-                log::info!("[coordinator] bootstrapped the world coordinator's row (version {version}, epoch {epoch})");
+                log::info!(
+                    "[coordinator] bootstrapped the world coordinator's row (version {version}, epoch {epoch})"
+                );
                 Ok(Some((coordinator, version)))
             }
             world_store::Bootstrapped::Exists => Ok(None),
@@ -493,44 +585,79 @@ fn start_from_row(
         let now = store_ms()?;
         match game::Coordinator::load(&row.core, &row.history, grid.clone(), process, now) {
             Ok(coordinator) => {
-                return Ok(Some(started(coordinator, now, CoordinatorSource::Stored, row.version, row.history_version)));
+                return Ok(Some(started(
+                    coordinator,
+                    now,
+                    CoordinatorSource::Stored,
+                    row.version,
+                    row.history_version,
+                )));
             }
             Err(e) if replaceable(&e) => {
                 if saved_regions()? {
                     return Err(refuse_old_world(&format!("does not load ({e})")));
                 }
-                keep_replaced("coordinator state", &e, &row.history, sqlite_db.map(coordinator_backup_path))?
+                keep_replaced(
+                    "coordinator state",
+                    &e,
+                    &row.history,
+                    sqlite_db.map(coordinator_backup_path),
+                )?
             }
-            Err(e) => return Err(format!("the world store's coordinator state does not load: {e}")),
+            Err(e) => {
+                return Err(format!(
+                    "the world store's coordinator state does not load: {e}"
+                ));
+            }
         }
     } else if saved_regions()? {
         // A world saved before Elastic 2a (its old state dropped by migration 0016), or one
         // whose coordinator never wrote while its hosts saved: nothing to run its people from.
-        return Err(refuse_old_world("is missing (a world saved by an older build, or a coordinator that never wrote)"));
+        return Err(refuse_old_world(
+            "is missing (a world saved by an older build, or a coordinator that never wrote)",
+        ));
     } else if let Some(bytes) = store.load_history().map_err(|e| e.to_string())? {
         match persist::decode(&bytes, grid.clone()) {
             Ok(history) => {
-                log::info!("[server] migrating the world's history row into the coordinator's state");
+                log::info!(
+                    "[server] migrating the world's history row into the coordinator's state"
+                );
                 let now = store_ms()?;
                 return match first(game::Coordinator::new_for(history, now, process), replacing)? {
                     Some((coordinator, version)) => {
                         let written = if replacing.is_some() { 0 } else { version };
-                        Ok(Some(started(coordinator, now, CoordinatorSource::Migrated, version, written)))
+                        Ok(Some(started(
+                            coordinator,
+                            now,
+                            CoordinatorSource::Migrated,
+                            version,
+                            written,
+                        )))
                     }
                     None => start_from_row(store, map, sqlite_db, registered),
                 };
             }
-            Err(e) if replaceable(&e) => keep_replaced("history", &e, &bytes, sqlite_db.map(history_backup_path))?,
+            Err(e) if replaceable(&e) => {
+                keep_replaced("history", &e, &bytes, sqlite_db.map(history_backup_path))?
+            }
             Err(e) => return Err(format!("the world store's history does not load: {e}")),
         }
     }
-    let Some(history) = bootstrap_history(map, grid) else { return Ok(None) };
+    let Some(history) = bootstrap_history(map, grid) else {
+        return Ok(None);
+    };
     let now = store_ms()?;
     match first(game::Coordinator::new_for(history, now, process), replacing)? {
         Some((coordinator, version)) => {
             // A replaced state's history is written by the first transition (0: read it whole).
             let written = if replacing.is_some() { 0 } else { version };
-            Ok(Some(started(coordinator, now, CoordinatorSource::Bootstrapped, version, written)))
+            Ok(Some(started(
+                coordinator,
+                now,
+                CoordinatorSource::Bootstrapped,
+                version,
+                written,
+            )))
         }
         // Another replica bootstrapped the row since this one read it: load it.
         None => start_from_row(store, map, sqlite_db, registered),
@@ -547,8 +674,12 @@ fn keep_replaced(
 ) -> Result<(), String> {
     match backup {
         Some(bak) => {
-            std::fs::write(&bak, bytes)
-                .map_err(|io| format!("the stored {what}: {why}; cannot keep a copy in {}: {io}", bak.display()))?;
+            std::fs::write(&bak, bytes).map_err(|io| {
+                format!(
+                    "the stored {what}: {why}; cannot keep a copy in {}: {io}",
+                    bak.display()
+                )
+            })?;
             log::warn!(
                 "[server] the stored {what}: {why} — kept as {}; bootstrapping a new history (saved at once)",
                 bak.display()
@@ -561,12 +692,47 @@ fn keep_replaced(
     Ok(())
 }
 
+/// `VOXEL_HISTORY_FOUNDERS`: founders per civ of a new history (unset = [`BootstrapParams`]'s
+/// default). Read only when a history is bootstrapped (a new world, `just run --reset`).
+pub const HISTORY_FOUNDERS_ENV: &str = "VOXEL_HISTORY_FOUNDERS";
+/// `VOXEL_HISTORY_YEARS`: years a new history runs before play starts (unset = the default).
+pub const HISTORY_YEARS_ENV: &str = "VOXEL_HISTORY_YEARS";
+
+/// `name` as a number; unset or empty = `None`, anything else unparsable is warned about and ignored.
+fn env_u32(name: &str) -> Option<u32> {
+    let v = std::env::var(name).ok().filter(|v| !v.trim().is_empty())?;
+    match v.trim().parse() {
+        Ok(n) => Some(n),
+        Err(e) => {
+            log::warn!("[server] {name}={v:?}: {e}; using the default");
+            None
+        }
+    }
+}
+
 /// A new history for `map`; `None` for a world nobody can live in (still
 /// playable: no history).
-fn bootstrap_history(map: &game::WorldMap, grid: game::history::SocietyGrid) -> Option<game::history::History> {
+fn bootstrap_history(
+    map: &game::WorldMap,
+    grid: game::history::SocietyGrid,
+) -> Option<game::history::History> {
     use game::history::bootstrap::{self, BootstrapParams};
     let started = Instant::now();
-    let params = BootstrapParams { seed: u64::from(grid.world_id()), ..BootstrapParams::default() };
+    let mut params = BootstrapParams {
+        seed: u64::from(grid.world_id()),
+        ..BootstrapParams::default()
+    };
+    if let Some(n) = env_u32(HISTORY_FOUNDERS_ENV) {
+        params.founders_per_civ = n;
+    }
+    if let Some(n) = env_u32(HISTORY_YEARS_ENV) {
+        params.years = n;
+    }
+    log::info!(
+        "[server] bootstrapping history: {} founders per civ, {} years",
+        params.founders_per_civ,
+        params.years
+    );
     let history = match bootstrap::bootstrap(map, &params) {
         Ok(h) => h,
         Err(e) => {
@@ -604,7 +770,8 @@ pub struct OpenedWorld {
 /// ([`check_legacy_saves`]), and its world taken from the store, imported or
 /// forged ([`ensure_world`]). The store is shut down again on an error.
 pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWorld, String> {
-    open_world_with(source, params, EmptyStore::Forge, None).map(|opened| opened.expect("no stop flag, no stop"))
+    open_world_with(source, params, EmptyStore::Forge, None)
+        .map(|opened| opened.expect("no stop flag, no stop"))
 }
 
 /// [`open_world`] with what an empty store does and the flag that ends a wait
@@ -616,11 +783,22 @@ pub fn open_world_with(
     stop: Option<&AtomicBool>,
 ) -> Result<Option<OpenedWorld>, String> {
     let (url, import) = match source {
-        WorldSource::Procedural => return Ok(Some(OpenedWorld { store: None, world: None, map: None, world_tick: 0 })),
+        WorldSource::Procedural => {
+            return Ok(Some(OpenedWorld {
+                store: None,
+                world: None,
+                map: None,
+                world_tick: 0,
+            }));
+        }
         WorldSource::Store { url, import } => (url, import.as_deref()),
     };
-    let store = StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer)
-        .map_err(|e| format!("world store {url}: {e}"))?;
+    let store = StoreHandle::open(
+        url,
+        world_store::Dials::BUILT,
+        world_store::OpenMode::Writer,
+    )
+    .map_err(|e| format!("world store {url}: {e}"))?;
     let opened = check_legacy_saves(&store, import).and_then(|()| {
         let Some((world, map)) = ensure_world(&store, import, params, empty, stop)? else {
             return Ok(None);
@@ -629,9 +807,12 @@ pub fn open_world_with(
         Ok(Some((world, map, world_tick)))
     });
     match opened {
-        Ok(Some((world, map, world_tick))) => {
-            Ok(Some(OpenedWorld { store: Some(store), world: Some(world), map: Some(map), world_tick }))
-        }
+        Ok(Some((world, map, world_tick))) => Ok(Some(OpenedWorld {
+            store: Some(store),
+            world: Some(world),
+            map: Some(map),
+            world_tick,
+        })),
         Ok(None) => {
             store.shutdown();
             Ok(None)
@@ -650,7 +831,11 @@ pub fn open_world_with(
 pub fn install_world(opened: &mut OpenedWorld) -> Option<game::WorldMap> {
     worldgen::forged::install(opened.world.take());
     let map = opened.map.take()?;
-    game::perf_event!("world_map", "source=store width={} height={}", map.width, map.height);
+    game::perf_event!(
+        "world_map",
+        "source=store width={} height={}",
+        map.width,
+        map.height
+    );
     Some(map)
 }
-

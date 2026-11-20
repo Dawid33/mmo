@@ -13,12 +13,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use bevy::prelude::*;
-use slint_ui::slint::{Image as SlintImage, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint_ui::slint::{
+    Image as SlintImage, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
+};
 use slint_ui::{FrontendUi, WorldRow};
 use worldgen::forge::knobs::{Knobs, SPECS};
 use worldgen::forge::presets::{self, PRESETS};
-use worldgen::world_store::{self, WorldEntry, WorldMeta};
 use worldgen::forged;
+use worldgen::world_store::{self, WorldEntry, WorldMeta};
 
 use super::generator::format_seed;
 use crate::renderer::slint_overlay::SlintLayer;
@@ -42,7 +44,12 @@ pub enum LoadAction {
 /// "seed 0x…, 16 × 16 km, 2026-10-30" (`world_store::size_text`).
 pub fn detail_line(meta: &WorldMeta) -> String {
     let date = meta.created_utc.get(..10).unwrap_or(&meta.created_utc);
-    format!("seed {}, {}, {}", format_seed(meta.seed), world_store::size_text(meta.width_m, meta.height_m), date)
+    format!(
+        "seed {}, {}, {}",
+        format_seed(meta.seed),
+        world_store::size_text(meta.width_m, meta.height_m),
+        date
+    )
 }
 
 fn short(v: f64) -> String {
@@ -57,13 +64,24 @@ fn short(v: f64) -> String {
 /// The preset the world was made from, then each knob that differs from it
 /// ("Custom" and unknown presets compare against the defaults).
 pub fn settings_lines(meta: &WorldMeta) -> Vec<String> {
-    let base = PRESETS.iter().find(|p| p.name == meta.preset).map(presets::apply).unwrap_or_else(Knobs::default);
+    let base = PRESETS
+        .iter()
+        .find(|p| p.name == meta.preset)
+        .map(presets::apply)
+        .unwrap_or_else(Knobs::default);
     let mut lines = vec![format!("Preset: {}", meta.preset)];
     let mut changed = Vec::new();
     for spec in SPECS {
-        let (Some(&value), Some(was)) = (meta.knobs.get(spec.key), base.get(spec.key)) else { continue };
+        let (Some(&value), Some(was)) = (meta.knobs.get(spec.key), base.get(spec.key)) else {
+            continue;
+        };
         if value != was {
-            changed.push(format!("{}: {} (preset {})", spec.label, short(value), short(was)));
+            changed.push(format!(
+                "{}: {} (preset {})",
+                spec.label,
+                short(value),
+                short(was)
+            ));
         }
     }
     let more = changed.len().saturating_sub(MAX_SETTINGS_LINES - 1);
@@ -79,9 +97,16 @@ pub fn settings_lines(meta: &WorldMeta) -> Vec<String> {
 pub fn row_parts(entry: &WorldEntry) -> (String, String, bool, String, bool) {
     let (name, detail) = match &entry.meta {
         Some(meta) => (meta.name.clone(), detail_line(meta)),
-        None if entry.legacy => ("Legacy world (default.world)".to_string(), "no details".to_string()),
+        None if entry.legacy => (
+            "Legacy world (default.world)".to_string(),
+            "no details".to_string(),
+        ),
         None => (
-            entry.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            entry
+                .dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             "no details".to_string(),
         ),
     };
@@ -92,15 +117,25 @@ pub fn row_parts(entry: &WorldEntry) -> (String, String, bool, String, bool) {
     (name, detail, loadable, reason, entry.legacy)
 }
 
-
 fn decode_preview(path: &Path) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     let image = image::open(path).ok()?.to_rgba8();
-    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(image.as_raw(), image.width(), image.height()))
+    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+    ))
 }
 
 fn decode_thumb(path: &Path) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
-    let image = image::open(path).ok()?.thumbnail(THUMB_PX, THUMB_PX).to_rgba8();
-    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(image.as_raw(), image.width(), image.height()))
+    let image = image::open(path)
+        .ok()?
+        .thumbnail(THUMB_PX, THUMB_PX)
+        .to_rgba8();
+    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+    ))
 }
 
 /// The screen's state; the systems push it into the UI on change.
@@ -138,7 +173,11 @@ impl LoadState {
     /// Re-read `worlds/`, keeping the selection at the same index (clamped).
     pub fn refresh(&mut self) {
         self.entries = world_store::list(&self.root);
-        self.thumbs = self.entries.iter().map(|e| e.preview.as_deref().and_then(decode_thumb)).collect();
+        self.thumbs = self
+            .entries
+            .iter()
+            .map(|e| e.preview.as_deref().and_then(decode_thumb))
+            .collect();
         self.selected = match (self.selected, self.entries.len()) {
             (_, 0) => None,
             (Some(i), n) => Some(i.min(n - 1)),
@@ -179,7 +218,11 @@ impl LoadState {
                 }
                 let entry = self.selected_entry().filter(|e| e.loadable.is_ok())?;
                 let (name, ..) = row_parts(entry);
-                Some(PendingWorld { entry_dir: entry.dir.clone(), terrain: entry.terrain.clone(), name })
+                Some(PendingWorld {
+                    entry_dir: entry.dir.clone(),
+                    terrain: entry.terrain.clone(),
+                    name,
+                })
             }
             LoadAction::Delete => {
                 if self.selected_entry().is_some_and(|e| !e.legacy) {
@@ -228,7 +271,11 @@ pub fn connect(ui: &FrontendUi, world: &mut World) {
     ui.on_load_confirm_delete_yes(queue(|| LoadAction::ConfirmYes));
     ui.on_load_confirm_delete_no(queue(|| LoadAction::ConfirmNo));
     let select = actions.clone();
-    ui.on_load_select(move |i| select.borrow_mut().push(LoadAction::Select(i.max(0) as usize)));
+    ui.on_load_select(move |i| {
+        select
+            .borrow_mut()
+            .push(LoadAction::Select(i.max(0) as usize))
+    });
     world.insert_non_send(LoadUi { actions, worlds });
 }
 
@@ -240,7 +287,9 @@ impl Plugin for LoadWorldPlugin {
             .add_systems(OnEnter(AppState::LoadWorld), enter_load_world)
             .add_systems(
                 Update,
-                (apply_load_actions, push_load_state).chain().run_if(in_state(AppState::LoadWorld)),
+                (apply_load_actions, push_load_state)
+                    .chain()
+                    .run_if(in_state(AppState::LoadWorld)),
             );
     }
 }
@@ -273,7 +322,9 @@ fn push_load_state(
     layer: Option<NonSend<SlintLayer<FrontendUi>>>,
     mut state: ResMut<LoadState>,
 ) {
-    let (Some(models), Some(layer)) = (ui, layer) else { return };
+    let (Some(models), Some(layer)) = (ui, layer) else {
+        return;
+    };
     let ui = layer.overlay.ui();
     if std::mem::take(&mut state.dirty) {
         let rows: Vec<WorldRow> = state
@@ -282,8 +333,21 @@ fn push_load_state(
             .enumerate()
             .map(|(i, e)| {
                 let (name, detail, loadable, reason, legacy) = row_parts(e);
-                let thumb = state.thumbs.get(i).cloned().flatten().map(SlintImage::from_rgba8).unwrap_or_default();
-                WorldRow { name: name.into(), detail: detail.into(), thumb, loadable, reason: reason.into(), legacy }
+                let thumb = state
+                    .thumbs
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .map(SlintImage::from_rgba8)
+                    .unwrap_or_default();
+                WorldRow {
+                    name: name.into(),
+                    detail: detail.into(),
+                    thumb,
+                    loadable,
+                    reason: reason.into(),
+                    legacy,
+                }
             })
             .collect();
         models.worlds.set_vec(rows);
@@ -291,7 +355,13 @@ fn push_load_state(
         if ui.get_load_selected() != selected {
             ui.set_load_selected(selected);
         }
-        ui.set_load_big_preview(state.big.clone().map(SlintImage::from_rgba8).unwrap_or_default());
+        ui.set_load_big_preview(
+            state
+                .big
+                .clone()
+                .map(SlintImage::from_rgba8)
+                .unwrap_or_default(),
+        );
         let mut lines = state
             .selected_entry()
             .and_then(|e| e.meta.as_ref())
@@ -301,11 +371,13 @@ fn push_load_state(
             lines.insert(0, error.clone());
         }
         ui.set_load_settings_lines(ModelRc::new(VecModel::from(
-            lines.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+            lines
+                .into_iter()
+                .map(SharedString::from)
+                .collect::<Vec<_>>(),
         )));
     }
     if ui.get_load_confirm_delete() != state.confirm_delete {
         ui.set_load_confirm_delete(state.confirm_delete);
     }
 }
-

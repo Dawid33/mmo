@@ -21,7 +21,12 @@ pub fn load_refresh() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
         let storage = web_sys::window()?.local_storage().ok().flatten()?;
-        storage.get_item(REFRESH_STORAGE_KEY).ok().flatten().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+        storage
+            .get_item(REFRESH_STORAGE_KEY)
+            .ok()
+            .flatten()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
     }
 }
 
@@ -82,7 +87,11 @@ pub fn refresh_path_from(
     xdg_data_home: Option<&str>,
     home: Option<&str>,
 ) -> Option<std::path::PathBuf> {
-    let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    let set = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
     if let Some(file) = set(refresh_override) {
         return Some(file);
     }
@@ -143,6 +152,4 @@ pub fn clear_at(path: &std::path::Path) {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    
-}
+mod tests {}

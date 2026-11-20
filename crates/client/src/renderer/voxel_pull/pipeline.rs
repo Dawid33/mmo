@@ -61,9 +61,11 @@ impl FromWorld for VoxelPullPipeline {
         );
         let chunk_layout = device.create_bind_group_layout("voxel_pull_chunk_layout", &entries);
         let chunk_layout_desc = BindGroupLayoutDescriptor::new("voxel_pull_chunk_layout", &entries);
-        let xray_entries = BindGroupLayoutEntries::single(ShaderStages::FRAGMENT, bt::texture_depth_2d());
+        let xray_entries =
+            BindGroupLayoutEntries::single(ShaderStages::FRAGMENT, bt::texture_depth_2d());
         let xray_layout = device.create_bind_group_layout("voxel_pull_xray_layout", &xray_entries);
-        let xray_layout_desc = BindGroupLayoutDescriptor::new("voxel_pull_xray_layout", &xray_entries);
+        let xray_layout_desc =
+            BindGroupLayoutDescriptor::new("voxel_pull_xray_layout", &xray_entries);
         Self {
             chunk_layout,
             chunk_layout_desc,
@@ -169,8 +171,19 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
             return self.interior_pass_descriptor(view_layout, key);
         }
         RenderPipelineDescriptor {
-            label: Some(if key.cutout { "voxel_pull_forward_cutout" } else { "voxel_pull_forward" }.into()),
-            layout: vec![view_layout, self.chunk_layout_desc.clone(), self.xray_layout_desc.clone()],
+            label: Some(
+                if key.cutout {
+                    "voxel_pull_forward_cutout"
+                } else {
+                    "voxel_pull_forward"
+                }
+                .into(),
+            ),
+            layout: vec![
+                view_layout,
+                self.chunk_layout_desc.clone(),
+                self.xray_layout_desc.clone(),
+            ],
             vertex: VertexState {
                 shader: self.forward_shader.clone(),
                 entry_point: Some("vertex".into()),
@@ -214,7 +227,11 @@ impl VoxelPullPipeline {
     /// (collapsing every non-interior quad), no fragment stage, back faces
     /// culled, into a single-sampled `CORE_3D_DEPTH_FORMAT` target. Its layout
     /// stops at group(1): group(2) samples the very texture it renders into.
-    fn interior_pass_descriptor(&self, view_layout: BindGroupLayoutDescriptor, key: VoxelPullPipelineKey) -> RenderPipelineDescriptor {
+    fn interior_pass_descriptor(
+        &self,
+        view_layout: BindGroupLayoutDescriptor,
+        key: VoxelPullPipelineKey,
+    ) -> RenderPipelineDescriptor {
         RenderPipelineDescriptor {
             label: Some("voxel_pull_xray_interior".into()),
             layout: vec![view_layout, self.chunk_layout_desc.clone()],
@@ -237,7 +254,10 @@ impl VoxelPullPipeline {
                 stencil: default(),
                 bias: default(),
             }),
-            multisample: MultisampleState { count: 1, ..default() },
+            multisample: MultisampleState {
+                count: 1,
+                ..default()
+            },
             ..default()
         }
     }
@@ -342,16 +362,24 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
         // texels; otherwise the pass stays depth-only with no color targets —
         // matching `PrepassPipeline::specialize` when all prepass targets are
         // absent.
-        let fragment = (emulate_unclipped_depth || key.cutaway || key.cutout).then(|| FragmentState {
-            shader: self.depth_shader.clone(),
-            entry_point: Some("fragment".into()),
-            shader_defs: shader_defs.clone(),
-            targets: vec![],
-            ..default()
-        });
+        let fragment =
+            (emulate_unclipped_depth || key.cutaway || key.cutout).then(|| FragmentState {
+                shader: self.depth_shader.clone(),
+                entry_point: Some("fragment".into()),
+                shader_defs: shader_defs.clone(),
+                targets: vec![],
+                ..default()
+            });
 
         RenderPipelineDescriptor {
-            label: Some(if key.cutout { "voxel_pull_depth_cutout" } else { "voxel_pull_depth" }.into()),
+            label: Some(
+                if key.cutout {
+                    "voxel_pull_depth_cutout"
+                } else {
+                    "voxel_pull_depth"
+                }
+                .into(),
+            ),
             layout: vec![
                 self.prepass_view_layout.clone(),
                 self.chunk_layout_desc.clone(),
@@ -395,4 +423,3 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
         }
     }
 }
-

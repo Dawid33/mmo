@@ -20,14 +20,27 @@ pub struct NoiseSet(pub Vec<OctaveNoise>);
 pub enum DensityFn {
     Const(f64),
     /// 2D noise `idx`, sampled at `(x, z) * xz_scale` (meters).
-    Noise { idx: usize, xz_scale: f64 },
+    Noise {
+        idx: usize,
+        xz_scale: f64,
+    },
     /// 2D noise `idx` sampled at `((x + shift_x) * xz_scale, (z + shift_z) *
     /// xz_scale)`: a domain warp, shifts in meters. Shifting by another
     /// low-frequency noise bends round noise blobs into long coherent lines
     /// (the pipeline's mountain ranges).
-    WarpedNoise { idx: usize, xz_scale: f64, shift_x: Box<DensityFn>, shift_z: Box<DensityFn> },
+    WarpedNoise {
+        idx: usize,
+        xz_scale: f64,
+        shift_x: Box<DensityFn>,
+        shift_z: Box<DensityFn>,
+    },
     /// Linear ramp in `y` from `from_v` at `from_y` to `to_v` at `to_y`, clamped.
-    YGradient { from_y: f64, to_y: f64, from_v: f64, to_v: f64 },
+    YGradient {
+        from_y: f64,
+        to_y: f64,
+        from_v: f64,
+        to_v: f64,
+    },
     Add(Box<DensityFn>, Box<DensityFn>),
     Mul(Box<DensityFn>, Box<DensityFn>),
     // `Min`/`Max`/`RangeChoice` are engine vocabulary the v1 pipeline doesn't use
@@ -39,8 +52,15 @@ pub enum DensityFn {
     #[allow(dead_code)]
     Max(Box<DensityFn>, Box<DensityFn>),
     Abs(Box<DensityFn>),
-    Clamp { input: Box<DensityFn>, min: f64, max: f64 },
-    SplineOf { coord: Box<DensityFn>, spline: Spline },
+    Clamp {
+        input: Box<DensityFn>,
+        min: f64,
+        max: f64,
+    },
+    SplineOf {
+        coord: Box<DensityFn>,
+        spline: Spline,
+    },
     #[allow(dead_code)]
     RangeChoice {
         input: Box<DensityFn>,
@@ -52,7 +72,10 @@ pub enum DensityFn {
     /// The island layer (`pipeline::island_terms`) at the point: sampled at
     /// sample coordinates minus the pipeline's sample offsets, exactly as
     /// `TerrainPipeline::column` computes them.
-    Island { field: std::sync::Arc<crate::islands::IslandField>, value: IslandValue },
+    Island {
+        field: std::sync::Arc<crate::islands::IslandField>,
+        value: IslandValue,
+    },
 }
 
 /// Which island term a `DensityFn::Island` yields (test oracle only, like
@@ -70,35 +93,63 @@ impl Clone for DensityFn {
     fn clone(&self) -> Self {
         match self {
             DensityFn::Const(v) => DensityFn::Const(*v),
-            DensityFn::Noise { idx, xz_scale } => DensityFn::Noise { idx: *idx, xz_scale: *xz_scale },
-            DensityFn::WarpedNoise { idx, xz_scale, shift_x, shift_z } => DensityFn::WarpedNoise {
+            DensityFn::Noise { idx, xz_scale } => DensityFn::Noise {
+                idx: *idx,
+                xz_scale: *xz_scale,
+            },
+            DensityFn::WarpedNoise {
+                idx,
+                xz_scale,
+                shift_x,
+                shift_z,
+            } => DensityFn::WarpedNoise {
                 idx: *idx,
                 xz_scale: *xz_scale,
                 shift_x: shift_x.clone(),
                 shift_z: shift_z.clone(),
             },
-            DensityFn::YGradient { from_y, to_y, from_v, to_v } => {
-                DensityFn::YGradient { from_y: *from_y, to_y: *to_y, from_v: *from_v, to_v: *to_v }
-            }
+            DensityFn::YGradient {
+                from_y,
+                to_y,
+                from_v,
+                to_v,
+            } => DensityFn::YGradient {
+                from_y: *from_y,
+                to_y: *to_y,
+                from_v: *from_v,
+                to_v: *to_v,
+            },
             DensityFn::Add(a, b) => DensityFn::Add(a.clone(), b.clone()),
             DensityFn::Mul(a, b) => DensityFn::Mul(a.clone(), b.clone()),
             DensityFn::Min(a, b) => DensityFn::Min(a.clone(), b.clone()),
             DensityFn::Max(a, b) => DensityFn::Max(a.clone(), b.clone()),
             DensityFn::Abs(a) => DensityFn::Abs(a.clone()),
-            DensityFn::Clamp { input, min, max } => {
-                DensityFn::Clamp { input: input.clone(), min: *min, max: *max }
-            }
-            DensityFn::SplineOf { coord, spline } => {
-                DensityFn::SplineOf { coord: coord.clone(), spline: spline.clone() }
-            }
-            DensityFn::RangeChoice { input, min, max, in_range, out_range } => DensityFn::RangeChoice {
+            DensityFn::Clamp { input, min, max } => DensityFn::Clamp {
+                input: input.clone(),
+                min: *min,
+                max: *max,
+            },
+            DensityFn::SplineOf { coord, spline } => DensityFn::SplineOf {
+                coord: coord.clone(),
+                spline: spline.clone(),
+            },
+            DensityFn::RangeChoice {
+                input,
+                min,
+                max,
+                in_range,
+                out_range,
+            } => DensityFn::RangeChoice {
                 input: input.clone(),
                 min: *min,
                 max: *max,
                 in_range: in_range.clone(),
                 out_range: out_range.clone(),
             },
-            DensityFn::Island { field, value } => DensityFn::Island { field: field.clone(), value: *value },
+            DensityFn::Island { field, value } => DensityFn::Island {
+                field: field.clone(),
+                value: *value,
+            },
         }
     }
 }
@@ -108,21 +159,44 @@ impl Clone for DensityFn {
 // module's own unit tests.
 #[allow(dead_code)]
 impl DensityFn {
-    pub fn add(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Add(Box::new(a), Box::new(b)) }
-    pub fn mul(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Mul(Box::new(a), Box::new(b)) }
+    pub fn add(a: DensityFn, b: DensityFn) -> DensityFn {
+        DensityFn::Add(Box::new(a), Box::new(b))
+    }
+    pub fn mul(a: DensityFn, b: DensityFn) -> DensityFn {
+        DensityFn::Mul(Box::new(a), Box::new(b))
+    }
     #[allow(dead_code)] // see the Min/Max/RangeChoice note on the enum
-    pub fn min(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Min(Box::new(a), Box::new(b)) }
+    pub fn min(a: DensityFn, b: DensityFn) -> DensityFn {
+        DensityFn::Min(Box::new(a), Box::new(b))
+    }
     #[allow(dead_code)] // see the Min/Max/RangeChoice note on the enum
-    pub fn max(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Max(Box::new(a), Box::new(b)) }
-    pub fn abs(a: DensityFn) -> DensityFn { DensityFn::Abs(Box::new(a)) }
+    pub fn max(a: DensityFn, b: DensityFn) -> DensityFn {
+        DensityFn::Max(Box::new(a), Box::new(b))
+    }
+    pub fn abs(a: DensityFn) -> DensityFn {
+        DensityFn::Abs(Box::new(a))
+    }
     pub fn clamp(a: DensityFn, min: f64, max: f64) -> DensityFn {
-        DensityFn::Clamp { input: Box::new(a), min, max }
+        DensityFn::Clamp {
+            input: Box::new(a),
+            min,
+            max,
+        }
     }
     pub fn spline_of(coord: DensityFn, spline: Spline) -> DensityFn {
-        DensityFn::SplineOf { coord: Box::new(coord), spline }
+        DensityFn::SplineOf {
+            coord: Box::new(coord),
+            spline,
+        }
     }
     #[allow(dead_code)] // see the Min/Max/RangeChoice note on the enum
-    pub fn range_choice(input: DensityFn, min: f64, max: f64, in_range: DensityFn, out_range: DensityFn) -> DensityFn {
+    pub fn range_choice(
+        input: DensityFn,
+        min: f64,
+        max: f64,
+        in_range: DensityFn,
+        out_range: DensityFn,
+    ) -> DensityFn {
         DensityFn::RangeChoice {
             input: Box::new(input),
             min,
@@ -135,13 +209,25 @@ impl DensityFn {
     pub fn eval(&self, x: f64, y: f64, z: f64, noises: &NoiseSet) -> f64 {
         match self {
             DensityFn::Const(v) => *v,
-            DensityFn::Noise { idx, xz_scale } => noises.0[*idx].sample2(x * xz_scale, z * xz_scale),
-            DensityFn::WarpedNoise { idx, xz_scale, shift_x, shift_z } => {
+            DensityFn::Noise { idx, xz_scale } => {
+                noises.0[*idx].sample2(x * xz_scale, z * xz_scale)
+            }
+            DensityFn::WarpedNoise {
+                idx,
+                xz_scale,
+                shift_x,
+                shift_z,
+            } => {
                 let wx = x + shift_x.eval(x, y, z, noises);
                 let wz = z + shift_z.eval(x, y, z, noises);
                 noises.0[*idx].sample2(wx * xz_scale, wz * xz_scale)
             }
-            DensityFn::YGradient { from_y, to_y, from_v, to_v } => {
+            DensityFn::YGradient {
+                from_y,
+                to_y,
+                from_v,
+                to_v,
+            } => {
                 let t = ((y - from_y) / (to_y - from_y)).clamp(0.0, 1.0);
                 from_v + t * (to_v - from_v)
             }
@@ -152,7 +238,13 @@ impl DensityFn {
             DensityFn::Abs(a) => a.eval(x, y, z, noises).abs(),
             DensityFn::Clamp { input, min, max } => input.eval(x, y, z, noises).clamp(*min, *max),
             DensityFn::SplineOf { coord, spline } => spline.eval(coord.eval(x, y, z, noises)),
-            DensityFn::RangeChoice { input, min, max, in_range, out_range } => {
+            DensityFn::RangeChoice {
+                input,
+                min,
+                max,
+                in_range,
+                out_range,
+            } => {
                 let v = input.eval(x, y, z, noises);
                 if v >= *min && v < *max {
                     in_range.eval(x, y, z, noises)
@@ -170,4 +262,3 @@ impl DensityFn {
         }
     }
 }
-

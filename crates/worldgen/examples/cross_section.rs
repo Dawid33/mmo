@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use game::{Block, BlockId, BlockPos, Column, ReadVol, RegionCoords, CHUNK_BLOCKS, REGION_BLOCKS};
+use game::{Block, BlockId, BlockPos, CHUNK_BLOCKS, Column, REGION_BLOCKS, ReadVol, RegionCoords};
 use image::{ImageBuffer, Rgb};
 use worldgen::forge::geology::ROCKS;
 use worldgen::material::Materials;
@@ -59,9 +59,13 @@ fn main() {
             "--out" => out = Some(PathBuf::from(value())),
             "--seed" => {
                 let v = value();
-                seed = u64::from_str_radix(v.trim_start_matches("0x").replace('_', "").as_str(), 16).expect("--seed <hex>");
+                seed =
+                    u64::from_str_radix(v.trim_start_matches("0x").replace('_', "").as_str(), 16)
+                        .expect("--seed <hex>");
             }
-            other => panic!("unknown argument {other}; flags: --world --region --axis --at --out --seed"),
+            other => {
+                panic!("unknown argument {other}; flags: --world --region --axis --at --out --seed")
+            }
         }
     }
     let world = match world {
@@ -80,24 +84,37 @@ fn main() {
 
     let manifest = include_str!("../../../assets/blocks/blocks.ron");
     let reg = game::BlockRegistry::from_ron(manifest).expect("valid block manifest");
-    let mats = Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")));
-    let coords = RegionCoords { x: region.0, z: region.1 };
-    let forged = world
-        .as_ref()
-        .map(|path| worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
+    let mats =
+        Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")));
+    let coords = RegionCoords {
+        x: region.0,
+        z: region.1,
+    };
+    let forged = world.as_ref().map(|path| {
+        worldgen::forged::ForgedWorld::load(path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    });
     let (label, columns) = match (&world, &forged) {
         (Some(path), Some(w)) => {
-            let stem = path.file_stem().map_or("world".into(), |s| s.to_string_lossy().into_owned());
+            let stem = path
+                .file_stem()
+                .map_or("world".into(), |s| s.to_string_lossy().into_owned());
             (stem, worldgen::generate_region_forged(w, coords, mats))
         }
-        _ => ("procedural".to_string(), worldgen::generate_region(coords, seed, mats)),
+        _ => (
+            "procedural".to_string(),
+            worldgen::generate_region(coords, seed, mats),
+        ),
     };
-    let by_coords: BTreeMap<(usize, usize), &Column> = columns.iter().map(|(c, col)| ((c.x, c.z), col)).collect();
+    let by_coords: BTreeMap<(usize, usize), &Column> =
+        columns.iter().map(|(c, col)| ((c.x, c.z), col)).collect();
 
     let n = REGION_BLOCKS; // blocks along an edge
     let at = at.unwrap_or(n / 2);
     if at >= n {
-        eprintln!("--at {at} is outside the region: blocks run 0..{n} (REGION_BLOCKS = {REGION_BLOCKS})");
+        eprintln!(
+            "--at {at} is outside the region: blocks run 0..{n} (REGION_BLOCKS = {REGION_BLOCKS})"
+        );
         std::process::exit(2);
     }
     // Block (u, v) of the region -> (x, z) by axis.
@@ -116,7 +133,9 @@ fn main() {
     let (mut top, mut bottom) = (i32::MIN, i32::MAX);
     for u in 0..n {
         let (bx, bz) = block_xz(u);
-        let g = by_coords[&(bx / CHUNK_BLOCKS, bz / CHUNK_BLOCKS)].ground().expect("generated column has ground");
+        let g = by_coords[&(bx / CHUNK_BLOCKS, bz / CHUNK_BLOCKS)]
+            .ground()
+            .expect("generated column has ground");
         let i = (bx % CHUNK_BLOCKS) * CHUNK_BLOCKS + bz % CHUNK_BLOCKS;
         let s = i32::from(g.surface[i]);
         top = top.max(s);
@@ -167,13 +186,21 @@ fn main() {
     });
     std::fs::create_dir_all(out.parent().unwrap_or(".".as_ref())).ok();
     img.save(&out).expect("write png");
-    println!("{} ({}x{} px, y {bottom}..={top})", out.display(), n, height);
+    println!(
+        "{} ({}x{} px, y {bottom}..={top})",
+        out.display(),
+        n,
+        height
+    );
 
     // Stratum sequence of the centre block column of the slice.
     let u = n / 2;
     if let Some(w) = &forged {
         let (bx, bz) = block_xz(u);
-        let (x, z) = ((coords.x * n as i32 + bx as i32) as f64 + 0.5, (coords.z * n as i32 + bz as i32) as f64 + 0.5);
+        let (x, z) = (
+            (coords.x * n as i32 + bx as i32) as f64 + 0.5,
+            (coords.z * n as i32 + bz as i32) as f64 + 0.5,
+        );
         let c = w.column_climate(x, z);
         println!(
             "centre column biome {} ({:.1} C, snow line {:.0} m); region biomes: {}",
@@ -184,7 +211,8 @@ fn main() {
         );
     }
     let name = |id: BlockId| -> String {
-        reg.def(id).map_or_else(|| format!("#{}", id.0), |d| d.name.to_string())
+        reg.def(id)
+            .map_or_else(|| format!("#{}", id.0), |d| d.name.to_string())
     };
     let mut run: Option<(BlockId, i32)> = None; // (block, top y)
     println!("centre column u={u} (block, top y, bottom y):");
@@ -219,7 +247,10 @@ fn biome_colour(b: &worldgen::material::BiomeBlocks, id: BlockId) -> Option<[u8;
         (b.frozen_dirt, [132, 120, 112]),
         (b.salt, [236, 236, 228]),
     ];
-    table.iter().find(|(block, _)| *block == id && id != BlockId::AIR).map(|&(_, rgb)| rgb)
+    table
+        .iter()
+        .find(|(block, _)| *block == id && id != BlockId::AIR)
+        .map(|&(_, rgb)| rgb)
 }
 
 /// The dithered biomes of region `coords` (every 8th block column), by share.
@@ -228,20 +259,29 @@ fn region_biomes(w: &worldgen::forged::ForgedWorld, coords: RegionCoords, n: usi
     let mut total = 0;
     for bx in (0..n).step_by(8) {
         for bz in (0..n).step_by(8) {
-            let (x, z) = ((coords.x * n as i32 + bx as i32) as f64 + 0.5, (coords.z * n as i32 + bz as i32) as f64 + 0.5);
+            let (x, z) = (
+                (coords.x * n as i32 + bx as i32) as f64 + 0.5,
+                (coords.z * n as i32 + bz as i32) as f64 + 0.5,
+            );
             *count.entry(w.biome_at(x, z).name()).or_default() += 1;
             total += 1;
         }
     }
     let mut v: Vec<_> = count.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
-    v.iter().map(|(name, k)| format!("{name} {:.0}%", 100.0 * *k as f64 / total as f64)).collect::<Vec<_>>().join(", ")
+    v.iter()
+        .map(|(name, k)| format!("{name} {:.0}%", 100.0 * *k as f64 / total as f64))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Tree blocks: wood brown, leaves green; a one-block (leafless) species
 /// such as the cactus is its own green.
 fn tree_colour(trees: &worldgen::material::TreeBlocks, id: BlockId) -> Option<[u8; 3]> {
-    let s = trees.species.iter().find(|s| [s.log, s.branch, s.leaves].contains(&id))?;
+    let s = trees
+        .species
+        .iter()
+        .find(|s| [s.log, s.branch, s.leaves].contains(&id))?;
     Some(if s.log == s.leaves {
         [70, 130, 60]
     } else if id == s.leaves {

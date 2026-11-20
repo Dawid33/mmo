@@ -5,7 +5,10 @@ use crate::HostId;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::{CallStamp, CoordMsg, Coordinator, HostMsg, Input, MailboxDrop, OutboxMsg, ReplicaId, StoreDecision, Target};
+use super::{
+    CallStamp, CoordMsg, Coordinator, HostMsg, Input, MailboxDrop, OutboxMsg, ReplicaId,
+    StoreDecision, Target,
+};
 
 /// The host's end of the link to the world coordinator: messages out, messages in, in
 /// order (FIFO each way while the link is up).
@@ -94,7 +97,13 @@ pub struct RigWrite {
 
 impl RigWrite {
     /// A transition with no mailbox row or login answer.
-    pub fn of(version: u64, core: Vec<u8>, history: Option<Vec<u8>>, decisions: Vec<StoreDecision>, replica: ReplicaId) -> RigWrite {
+    pub fn of(
+        version: u64,
+        core: Vec<u8>,
+        history: Option<Vec<u8>>,
+        decisions: Vec<StoreDecision>,
+        replica: ReplicaId,
+    ) -> RigWrite {
         RigWrite {
             version,
             core: Some(core),
@@ -142,13 +151,22 @@ impl RigStore {
         let version = current + 1;
         let old = self.row.take().unwrap_or_default();
         self.row = Some(match w.core {
-            Some(core) => RigRow { version, core, history: w.history.unwrap_or(old.history) },
+            Some(core) => RigRow {
+                version,
+                core,
+                history: w.history.unwrap_or(old.history),
+            },
             None => RigRow { version, ..old },
         });
         self.writes += 1;
-        let stamp = CallStamp { replica: w.replica, version };
-        self.committed.extend(w.decisions.into_iter().map(|d| (stamp, d)));
-        self.outbox.retain(|r| !w.outbox_drop.iter().any(|d| d.covers(r.host, r.boot)));
+        let stamp = CallStamp {
+            replica: w.replica,
+            version,
+        };
+        self.committed
+            .extend(w.decisions.into_iter().map(|d| (stamp, d)));
+        self.outbox
+            .retain(|r| !w.outbox_drop.iter().any(|d| d.covers(r.host, r.boot)));
         for m in w.outbox {
             self.push_outbox(version, m.host, m.boot, m.msg, w.at_ms);
         }
@@ -160,7 +178,11 @@ impl RigStore {
     /// deleted (delivered), then its rows of `boot` with `seq > after`, in order.
     pub fn mailbox_read(&mut self, host: HostId, boot: u64, after: u64) -> Vec<RigOutboxRow> {
         self.outbox.retain(|r| !(r.host == host && r.seq <= after));
-        self.outbox.iter().filter(|r| r.host == host && r.boot == boot && r.seq > after).cloned().collect()
+        self.outbox
+            .iter()
+            .filter(|r| r.host == host && r.boot == boot && r.seq > after)
+            .cloned()
+            .collect()
     }
 
     /// Per host and boot, the store time of its oldest row (`world_store`'s `mailbox_oldest`).
@@ -193,9 +215,23 @@ impl RigStore {
     }
 
     /// Leave a message in the mailbox, numbered in order; its `seq`.
-    pub fn push_outbox(&mut self, version: u64, host: HostId, boot: u64, msg: CoordMsg, at_ms: u64) -> u64 {
+    pub fn push_outbox(
+        &mut self,
+        version: u64,
+        host: HostId,
+        boot: u64,
+        msg: CoordMsg,
+        at_ms: u64,
+    ) -> u64 {
         self.seq += 1;
-        self.outbox.push(RigOutboxRow { seq: self.seq, version, host, boot, msg, at_ms });
+        self.outbox.push(RigOutboxRow {
+            seq: self.seq,
+            version,
+            host,
+            boot,
+            msg,
+            at_ms,
+        });
         self.seq
     }
 
@@ -217,7 +253,12 @@ pub struct RigReplica {
 
 impl RigReplica {
     fn of(core: Coordinator) -> RigReplica {
-        RigReplica { core, hosts: BTreeSet::new(), boots: BTreeMap::new(), dead: false }
+        RigReplica {
+            core,
+            hosts: BTreeSet::new(),
+            boots: BTreeMap::new(),
+            dead: false,
+        }
     }
 }
 
@@ -230,10 +271,21 @@ pub enum RigEvent {
     Tick(crate::Tick),
     /// A transition of `replica` committed as `version`: the inputs it holds, in order, the store
     /// decisions it issued, and the hosts linked to `replica` (its `Every`s reach them).
-    Commit { replica: ReplicaId, version: u64, inputs: Vec<(u64, Input)>, decisions: Vec<StoreDecision>, linked: BTreeSet<HostId> },
+    Commit {
+        replica: ReplicaId,
+        version: u64,
+        inputs: Vec<(u64, Input)>,
+        decisions: Vec<StoreDecision>,
+        linked: BTreeSet<HostId>,
+    },
     /// `replica` released what it decided with nothing durable pending, at `version`: the inputs
     /// that left its log.
-    Release { replica: ReplicaId, version: u64, inputs: Vec<(u64, Input)>, linked: BTreeSet<HostId> },
+    Release {
+        replica: ReplicaId,
+        version: u64,
+        inputs: Vec<(u64, Input)>,
+        linked: BTreeSet<HostId>,
+    },
 }
 
 /// Most passes of one replica's route ([`RigCluster::route`]): writes, refreshes.
@@ -373,12 +425,19 @@ impl RigCluster {
     /// The projection as the store holds it: `(core, history)` of the last transition (`None`
     /// without a store, or before the first transition).
     pub fn stored(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        self.store.as_ref()?.row().filter(|r| !r.core.is_empty()).map(|r| (r.core.clone(), r.history.clone()))
+        self.store
+            .as_ref()?
+            .row()
+            .filter(|r| !r.core.is_empty())
+            .map(|r| (r.core.clone(), r.history.clone()))
     }
 
     /// The row's version (0: none).
     pub fn row_version(&self) -> u64 {
-        self.store.as_ref().and_then(|s| s.row()).map_or(0, |r| r.version)
+        self.store
+            .as_ref()
+            .and_then(|s| s.row())
+            .map_or(0, |r| r.version)
     }
 
     /// Transitions written so far (with a store).
@@ -410,7 +469,10 @@ impl RigCluster {
     /// yet), the first live process (whose core then hands nothing out).
     pub fn ticker_index(&self) -> usize {
         let alive = || self.replicas.iter().enumerate().filter(|(_, r)| !r.dead);
-        alive().find(|(_, r)| r.core.is_ticker()).or_else(|| alive().next()).map_or(0, |(i, _)| i)
+        alive()
+            .find(|(_, r)| r.core.is_ticker())
+            .or_else(|| alive().next())
+            .map_or(0, |(i, _)| i)
     }
 
     /// Test hook (Elastic 2b Task 6): replica `r`'s process dies — it handles, writes and sends
@@ -432,7 +494,13 @@ impl RigCluster {
     /// on that replica as an input at `now_ms` — none if its process died (the answer dies with
     /// it: its successor looks the mark up). Whether a live replica took it.
     pub fn answer(&mut self, replica: ReplicaId, a: super::DecisionAnswer, now_ms: u64) -> bool {
-        let Some(r) = self.replicas.iter_mut().find(|r| !r.dead && r.core.replica() == replica) else { return false };
+        let Some(r) = self
+            .replicas
+            .iter_mut()
+            .find(|r| !r.dead && r.core.replica() == replica)
+        else {
+            return false;
+        };
         r.core.apply(Input::Decision(a), now_ms);
         true
     }
@@ -440,7 +508,10 @@ impl RigCluster {
     /// The store decisions committed with transitions since the last call (Elastic 2b Task 3):
     /// for the test's simulated world store to execute and answer.
     pub fn take_committed(&mut self) -> Vec<(CallStamp, StoreDecision)> {
-        self.store.as_mut().map(RigStore::take_committed).unwrap_or_default()
+        self.store
+            .as_mut()
+            .map(RigStore::take_committed)
+            .unwrap_or_default()
     }
 
     /// A restart of replica 0's process: the core is replaced by `coordinator` (loaded
@@ -503,16 +574,26 @@ impl RigCluster {
     /// been read is lost, and the host is linked to `to` (its next `Attach` goes there). The
     /// replica it left.
     pub fn move_host(&mut self, host: HostId, to: usize, now_ms: u64) -> usize {
-        let from = self.replicas.iter().position(|r| r.hosts.contains(&host)).expect("the host is linked");
+        let from = self
+            .replicas
+            .iter()
+            .position(|r| r.hosts.contains(&host))
+            .expect("the host is linked");
         self.replicas[from].hosts.remove(&host);
         let boot = self.replicas[from].boots.remove(&host);
         self.replicas[to].hosts.insert(host);
         if let Some(b) = self.boxes.get_mut(&host) {
             b.clear();
         }
-        let epoch = self.replicas[from].core.newest_attach(host).filter(|(b, _)| Some(*b) == boot).map(|(_, e)| e);
+        let epoch = self.replicas[from]
+            .core
+            .newest_attach(host)
+            .filter(|(b, _)| Some(*b) == boot)
+            .map(|(_, e)| e);
         if let (Some(boot), Some(epoch)) = (boot, epoch) {
-            self.replicas[from].core.apply(Input::HostStalled { host, boot, epoch }, now_ms);
+            self.replicas[from]
+                .core
+                .apply(Input::HostStalled { host, boot, epoch }, now_ms);
         }
         self.route(from);
         from
@@ -549,12 +630,16 @@ impl RigCluster {
     /// Replica `r` refreshed from the row if the row is newer and its core may be rebased (as
     /// the runtime does on a notice or a stale finding); whether it did.
     fn refresh(&mut self, r: usize) -> bool {
-        let Some(row) = self.store.as_ref().and_then(|s| s.row()).cloned() else { return false };
+        let Some(row) = self.store.as_ref().and_then(|s| s.row()).cloned() else {
+            return false;
+        };
         let core = &mut self.replicas[r].core;
         if row.version <= core.version() {
             return false;
         }
-        let moved = core.refresh(&row.core, Some(&row.history), row.version).expect("the row loads");
+        let moved = core
+            .refresh(&row.core, Some(&row.history), row.version)
+            .expect("the row loads");
         if moved {
             self.refreshes += 1;
         }
@@ -606,7 +691,12 @@ impl RigCluster {
                 let inputs = core.take_recorded();
                 if let Some(events) = self.events.as_mut() {
                     if !inputs.is_empty() || !free.is_empty() {
-                        events.push(RigEvent::Release { replica, version, inputs, linked: self.replicas[r].hosts.clone() });
+                        events.push(RigEvent::Release {
+                            replica,
+                            version,
+                            inputs,
+                            linked: self.replicas[r].hosts.clone(),
+                        });
                     }
                 }
                 out.extend(free.into_iter().map(|(to, m)| (version, to, m)));
@@ -629,8 +719,11 @@ impl RigCluster {
             if self.foreign_armed {
                 if let Some(row) = store.row().cloned() {
                     self.foreign_armed = false;
-                    let foreign = RigWrite::of(row.version, row.core, None, Vec::new(), ReplicaId(u64::MAX));
-                    store.write(foreign).expect("the foreign writer writes at the row's version");
+                    let foreign =
+                        RigWrite::of(row.version, row.core, None, Vec::new(), ReplicaId(u64::MAX));
+                    store
+                        .write(foreign)
+                        .expect("the foreign writer writes at the row's version");
                 }
             }
             let decisions = t.decisions.clone();
@@ -653,7 +746,13 @@ impl RigCluster {
                     let inputs = core.take_recorded();
                     let replica = core.replica();
                     if let Some(events) = self.events.as_mut() {
-                        events.push(RigEvent::Commit { replica, version, inputs, decisions, linked: self.replicas[r].hosts.clone() });
+                        events.push(RigEvent::Commit {
+                            replica,
+                            version,
+                            inputs,
+                            decisions,
+                            linked: self.replicas[r].hosts.clone(),
+                        });
                     }
                     out.extend(t.out.into_iter().map(|(to, m)| (version, to, m)));
                     next = self.replicas[r].core.take_transition();
@@ -661,7 +760,8 @@ impl RigCluster {
                 Err(RigConflict) => {
                     // The row moved: rebased onto it, the log replayed, written again.
                     let row = store.row().cloned().expect("a conflict is with a row");
-                    core.rebase(&row.core, Some(&row.history), row.version).expect("the row loads");
+                    core.rebase(&row.core, Some(&row.history), row.version)
+                        .expect("the row loads");
                     self.rebases += 1;
                     next = core.take_transition();
                 }
@@ -672,16 +772,23 @@ impl RigCluster {
     /// Every linked host's mailbox read from its cursor on (at the boot its link attached as),
     /// into its box, in order.
     fn read_mailboxes(&mut self) {
-        let Some(store) = self.store.as_mut() else { return };
+        let Some(store) = self.store.as_mut() else {
+            return;
+        };
         let recording = self.events.is_some();
         for (&host, &boot) in &self.link_boots {
-            let Some(b) = self.boxes.get_mut(&host) else { continue };
+            let Some(b) = self.boxes.get_mut(&host) else {
+                continue;
+            };
             let cursor = self.cursors.entry(host).or_default();
             for row in store.mailbox_read(host, boot, *cursor) {
                 *cursor = row.seq;
                 b.push_back((row.version, row.msg.clone()));
                 if recording {
-                    self.delivered.entry(host).or_default().push((row.version, row.msg));
+                    self.delivered
+                        .entry(host)
+                        .or_default()
+                        .push((row.version, row.msg));
                 }
             }
         }
@@ -694,7 +801,9 @@ impl RigCluster {
         let hosts: Vec<HostId> = match to {
             Target::Host(h) if self.replicas[r].hosts.contains(&h) => vec![h],
             Target::Host(h) => {
-                log::debug!("shared inline coordinator: host {h} is not linked to replica {r}; {msg:?} lost");
+                log::debug!(
+                    "shared inline coordinator: host {h} is not linked to replica {r}; {msg:?} lost"
+                );
                 Vec::new()
             }
             Target::Every => self.replicas[r].hosts.iter().copied().collect(),
@@ -704,10 +813,15 @@ impl RigCluster {
                 Some(b) => {
                     b.push_back((version, msg.clone()));
                     if recording {
-                        self.delivered.entry(h).or_default().push((version, msg.clone()));
+                        self.delivered
+                            .entry(h)
+                            .or_default()
+                            .push((version, msg.clone()));
                     }
                 }
-                None => log::debug!("shared inline coordinator: no link for host {h}; {msg:?} lost"),
+                None => {
+                    log::debug!("shared inline coordinator: no link for host {h}; {msg:?} lost")
+                }
             }
         }
     }
@@ -724,7 +838,9 @@ impl RigCluster {
         let version = self.replicas[r].core.version();
         match self.boxes.get_mut(&gate) {
             Some(b) => b.push_back((version, msg)),
-            None => log::debug!("shared inline coordinator: no link for gate host {gate}; a login order lost"),
+            None => log::debug!(
+                "shared inline coordinator: no link for gate host {gate}; a login order lost"
+            ),
         }
         Some(gate)
     }
@@ -818,7 +934,9 @@ impl InlineWorldLink {
             c.boxes.entry(host).or_default();
             c.replicas
                 .get_mut(replica)
-                .unwrap_or_else(|| panic!("replica {replica} of a cluster of {replicas}: no such replica"))
+                .unwrap_or_else(|| {
+                    panic!("replica {replica} of a cluster of {replicas}: no such replica")
+                })
                 .hosts
                 .insert(host);
         }
@@ -892,7 +1010,9 @@ impl InlineWorldLink {
     /// down there at `now_ms` ([`RigCluster::move_host`]), and whatever was on it, either way, is
     /// lost. The link is down until [`Self::set_up`]; the host then attaches to `to`.
     pub fn move_to(&mut self, to: usize, now_ms: u64) {
-        let Core::Shared(core) = &self.core else { panic!("only a shared link moves between replicas") };
+        let Core::Shared(core) = &self.core else {
+            panic!("only a shared link moves between replicas")
+        };
         lock(core).move_host(self.host, to, now_ms);
         self.replica = to;
         self.in_q.clear();
@@ -904,7 +1024,9 @@ impl InlineWorldLink {
     /// a batch posted to another replica: nothing is lost, the link stays up, the host stays
     /// attached (`Mailbox`: it reads its mailbox from the store, whatever replica it posts to).
     pub fn switch_to(&mut self, to: usize) {
-        let Core::Shared(core) = &self.core else { panic!("only a shared link switches replicas") };
+        let Core::Shared(core) = &self.core else {
+            panic!("only a shared link switches replicas")
+        };
         lock(core).switch_host(self.host, to, self.attach);
         self.replica = to;
     }
@@ -913,7 +1035,9 @@ impl InlineWorldLink {
     /// ([`RigCluster::kill_replica`]), dials replica `to` instead — what was on it is lost, and it
     /// is down until [`Self::set_up`]; the host then attaches to `to`.
     pub fn relink_to(&mut self, to: usize) {
-        let Core::Shared(core) = &self.core else { panic!("only a shared link moves between replicas") };
+        let Core::Shared(core) = &self.core else {
+            panic!("only a shared link moves between replicas")
+        };
         lock(core).relink_host(self.host, to);
         self.replica = to;
         self.in_q.clear();
@@ -969,7 +1093,9 @@ impl WorldLink for InlineWorldLink {
         if self.up {
             // A shared link's message waits 0..=max pumps (order kept); otherwise none.
             let lag = match (&self.core, self.delay) {
-                (Core::Shared(_), Some((seed, max))) => mix(seed ^ INPUT_DELAY_SALT, self.sent) % (u64::from(max) + 1),
+                (Core::Shared(_), Some((seed, max))) => {
+                    mix(seed ^ INPUT_DELAY_SALT, self.sent) % (u64::from(max) + 1)
+                }
                 _ => 0,
             };
             self.sent += 1;
@@ -984,7 +1110,11 @@ impl WorldLink for InlineWorldLink {
         if !self.up {
             return None;
         }
-        if self.out_q.front().is_some_and(|(due, _, _)| *due <= self.step) {
+        if self
+            .out_q
+            .front()
+            .is_some_and(|(due, _, _)| *due <= self.step)
+        {
             self.out_q.pop_front().map(|(_, version, m)| {
                 self.read_versions.push(version);
                 m
@@ -1007,7 +1137,13 @@ impl WorldLink for InlineWorldLink {
                     if let HostMsg::Attach { host, .. } = &msg {
                         self.host = *host;
                     }
-                    coord.apply(Input::Host { host: self.host, msg }, now_ms);
+                    coord.apply(
+                        Input::Host {
+                            host: self.host,
+                            msg,
+                        },
+                        now_ms,
+                    );
                 }
                 coord.apply(Input::Maintain, now_ms);
                 coord.commit_unstored();
@@ -1030,7 +1166,13 @@ impl WorldLink for InlineWorldLink {
                         cluster.link_boots.insert(self.host, *boot);
                         self.attach = Some((*boot, *epoch));
                     }
-                    cluster.replicas[r].core.apply(Input::Host { host: self.host, msg }, now_ms);
+                    cluster.replicas[r].core.apply(
+                        Input::Host {
+                            host: self.host,
+                            msg,
+                        },
+                        now_ms,
+                    );
                 }
                 // Timed work runs on the ticker only (Elastic 2b decision 2, Task 6): the core
                 // says whether it is the one.
@@ -1038,13 +1180,22 @@ impl WorldLink for InlineWorldLink {
                     cluster.replicas[r].core.apply(Input::Maintain, now_ms);
                 }
                 cluster.route(r);
-                cluster.boxes.get_mut(&self.host).map(|b| b.drain(..).collect()).unwrap_or_default()
+                cluster
+                    .boxes
+                    .get_mut(&self.host)
+                    .map(|b| b.drain(..).collect())
+                    .unwrap_or_default()
             }
         };
         // Never before the output ahead of it: the order is kept.
-        let mut floor = self.out_q.back().map_or(self.step, |(due, _, _)| (*due).max(self.step));
+        let mut floor = self
+            .out_q
+            .back()
+            .map_or(self.step, |(due, _, _)| (*due).max(self.step));
         for (version, msg) in outs {
-            let lag = self.delay.map_or(0, |(seed, max)| mix(seed, self.released) % (u64::from(max) + 1));
+            let lag = self.delay.map_or(0, |(seed, max)| {
+                mix(seed, self.released) % (u64::from(max) + 1)
+            });
             self.released += 1;
             floor = floor.max(self.step + lag);
             self.out_q.push_back((floor, version, msg));

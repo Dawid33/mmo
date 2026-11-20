@@ -3,15 +3,15 @@
 //! Plan: docs/superpowers/plans/2026-11-20-plates-and-aged-relief-2.md.
 
 use crate::forge::planet::{
-    planet_step, OrogenyKind, Planet, OLD_MIN_MY, PLANET_CELLS, YOUNG_MAX_MY,
+    OLD_MIN_MY, OrogenyKind, PLANET_CELLS, Planet, YOUNG_MAX_MY, planet_step,
 };
-use crate::forge::plate_sim::{self, root_keep};
 pub use crate::forge::plate_sim::BELT_MIN_REL;
+use crate::forge::plate_sim::{self, root_keep};
 
 /// A land component holds at least this share of planet cells to count as a continent.
 pub const CONTINENT_MIN_SHARE: f64 = 0.03;
-/// A belt holds at least this many cells (about 5 square degrees).
-pub const BELT_MIN_CELLS: usize = 10;
+/// A belt holds at least this many cells (about 25 square degrees).
+pub const BELT_MIN_CELLS: usize = 50;
 /// Sentinel for a cell belonging to no continent.
 pub const NO_LABEL: u8 = 255;
 /// Sentinel for a cell belonging to no belt.
@@ -57,7 +57,10 @@ pub struct PlanetScore {
 impl PlanetScore {
     /// Whether this planet passes all three plate-stage criteria.
     pub fn ok(&self) -> bool {
-        self.continents >= 2 && self.continents_without_belt == 0 && self.young_belts >= 1 && self.old_belts >= 1
+        self.continents >= 2
+            && self.continents_without_belt == 0
+            && self.young_belts >= 1
+            && self.old_belts >= 1
     }
 
     /// Number of criteria met (`0..=3`), used to pick the best failing attempt.
@@ -91,7 +94,16 @@ where
     F: Fn(usize, usize) -> bool,
 {
     const D4: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-    const D8: [(i32, i32); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
+    const D8: [(i32, i32); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
 
     let mut seen = vec![false; PLANET_CELLS];
     let mut comps = Vec::new();
@@ -107,7 +119,9 @@ where
             head += 1;
             let nbrs: &[(i32, i32)] = if EIGHT { &D8 } else { &D4 };
             for &(dx, dz) in nbrs {
-                let Some(n) = planet_step(c, dx, dz) else { continue };
+                let Some(n) = planet_step(c, dx, dz) else {
+                    continue;
+                };
                 if !seen[n] && include(start, n) {
                     seen[n] = true;
                     comp.push(n);
@@ -161,7 +175,11 @@ fn build_belt(planet: &Planet, class: AgeClass, cells: &[usize], depth: &[f64]) 
     }
     ages.sort_by(f32::total_cmp);
     let mid = ages.len() / 2;
-    let median_age_my = if ages.len().is_multiple_of(2) { 0.5 * (ages[mid - 1] + ages[mid]) } else { ages[mid] };
+    let median_age_my = if ages.len().is_multiple_of(2) {
+        0.5 * (ages[mid - 1] + ages[mid])
+    } else {
+        ages[mid]
+    };
 
     Belt {
         class,
@@ -180,23 +198,32 @@ pub fn label(planet: &mut Planet) {
     planet.continent.fill(NO_LABEL);
     planet.continents = Vec::with_capacity(cont_comps.len());
     for (idx, comp) in cont_comps.iter().enumerate() {
-        assert!(idx < usize::from(NO_LABEL), "more continents than label slots");
+        assert!(
+            idx < usize::from(NO_LABEL),
+            "more continents than label slots"
+        );
         for &c in comp {
             planet.continent[c] = idx as u8;
         }
-        planet.continents.push(Continent { cells: comp.len() as u32, belts: Vec::new() });
+        planet.continents.push(Continent {
+            cells: comp.len() as u32,
+            belts: Vec::new(),
+        });
     }
 
     let cell_class: Vec<Option<AgeClass>> = (0..PLANET_CELLS)
         .map(|c| {
             let active = planet.land[c]
                 && is_orogenic_kind(planet.kind[c])
-                && f64::from(planet.strength[c]) * root_keep(f64::from(planet.orogeny_age_my[c])) >= BELT_MIN_REL;
+                && f64::from(planet.strength[c]) * root_keep(f64::from(planet.orogeny_age_my[c]))
+                    >= BELT_MIN_REL;
             active.then(|| age_class(planet.orogeny_age_my[c]))
         })
         .collect();
 
-    let mut belt_comps = flood_components::<true, _>(|start, c| cell_class[c].is_some() && cell_class[c] == cell_class[start]);
+    let mut belt_comps = flood_components::<true, _>(|start, c| {
+        cell_class[c].is_some() && cell_class[c] == cell_class[start]
+    });
     belt_comps.retain(|comp| comp.len() >= BELT_MIN_CELLS);
     belt_comps.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a[0].cmp(&b[0])));
 
@@ -220,7 +247,9 @@ pub fn label(planet: &mut Planet) {
         }
         let belt = build_belt(planet, class, comp, &depth);
         if belt.continent != NO_LABEL {
-            planet.continents[usize::from(belt.continent)].belts.push(idx as u16);
+            planet.continents[usize::from(belt.continent)]
+                .belts
+                .push(idx as u16);
         }
         planet.belts.push(belt);
     }
@@ -231,11 +260,19 @@ pub fn label(planet: &mut Planet) {
         .filter(|b| matches!(b.class, AgeClass::Young | AgeClass::Middle))
         .map(|b| f64::from(b.depth_deg))
         .reduce(f64::max);
-    let any_belt = planet.belts.iter().map(|b| f64::from(b.depth_deg)).reduce(f64::max);
+    let any_belt = planet
+        .belts
+        .iter()
+        .map(|b| f64::from(b.depth_deg))
+        .reduce(f64::max);
     planet.belt_depth_deg = young_mid.or(any_belt).unwrap_or(4.0);
 
     let land_cells = planet.land.iter().filter(|&&b| b).count();
-    let continents_without_belt = planet.continents.iter().filter(|c| c.belts.is_empty()).count() as u32;
+    let continents_without_belt = planet
+        .continents
+        .iter()
+        .filter(|c| c.belts.is_empty())
+        .count() as u32;
     planet.score = PlanetScore {
         continents: planet.continents.len() as u32,
         continents_without_belt,

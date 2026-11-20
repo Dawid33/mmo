@@ -57,8 +57,8 @@
 //! the rule reads the same at the first apply and at a replay — a batch posted to a replica whose
 //! cache had not seen the detach is dropped where the replay meets it.
 
-use crate::{CutId, HostId, Succession, Tick};
 use crate::history::persist::HistoryLoadError;
+use crate::{CutId, HostId, Succession, Tick};
 
 use super::state::{decode_core, raw_core};
 use super::{Coordinator, DecisionAnswer, HostMsg, HostSeen, Projection, ReplicaId};
@@ -124,18 +124,28 @@ pub enum Input {
     /// version `issued_at_version` ([`Coordinator::take_successions_reread`]): a run it does not
     /// list is abandoned only if it opened at or before that version (audit H5). Ticker only;
     /// never logged nor replayed.
-    SuccessionsOpen { list: Vec<Succession>, issued_at_version: u64 },
+    SuccessionsOpen {
+        list: Vec<Succession>,
+        issued_at_version: u64,
+    },
     /// The ticker's owners read for the super-regions hosts asked for
     /// ([`Coordinator::take_land_lookups`]): `asked`, each with its askers, as handed out, and
     /// the `super_regions` rows read of them — `(super-region, owner or NO_OWNER, epoch)`; an
     /// asked super-region with no row is absent (free). Answered by
     /// [`Coordinator::on_land_read`] (Elastic 3: an assignment, a named owner, or a departed
     /// owner's land given away). Ticker only; never logged nor replayed (the hosts ask again).
-    LandOwners { asked: Vec<(crate::SuperRegion, Vec<HostId>)>, rows: Vec<(crate::SuperRegion, i64, u64)> },
+    LandOwners {
+        asked: Vec<(crate::SuperRegion, Vec<HostId>)>,
+        rows: Vec<(crate::SuperRegion, i64, u64)>,
+    },
     /// A world cut's decision as the store holds it, read back (a lookup: its answer was lost,
     /// or a host named a cut this core does not remember): for host `host`, or (`None`) the
     /// running cut's own decision. Logged and replayed — a recorded decision never changes.
-    CutLookedUp { host: Option<HostId>, cut: CutId, committed: bool },
+    CutLookedUp {
+        host: Option<HostId>,
+        cut: CutId,
+        committed: bool,
+    },
     /// A login order found no host taking logins ([`super::Gate::Nobody`],
     /// Elastic 4 Task 8) and the fleet's dials are set: the world's first host is asked for,
     /// `AddHost { max, expect_wanted: 0 }` ([`Coordinator::login_gate`], `fleet.rs`), at most
@@ -163,7 +173,10 @@ impl Input {
     /// Whether this input is the ticker's store-read answer: refused on a non-ticker, never
     /// logged, never replayed.
     fn is_ticker_read(&self) -> bool {
-        matches!(self, Input::HostsRead { .. } | Input::SuccessionsOpen { .. } | Input::LandOwners { .. })
+        matches!(
+            self,
+            Input::HostsRead { .. } | Input::SuccessionsOpen { .. } | Input::LandOwners { .. }
+        )
     }
 }
 
@@ -176,13 +189,19 @@ impl Coordinator {
     pub fn apply(&mut self, input: Input, now_ms: u64) {
         let ticker_work = matches!(input, Input::Maintain) || input.is_ticker_read();
         if ticker_work && !self.ticking_now() {
-            log::trace!("coordinator: replica {} is not the ticker: {input:?} refused", self.replica);
+            log::trace!(
+                "coordinator: replica {} is not the ticker: {input:?} refused",
+                self.replica
+            );
             return;
         }
         // The link a host's message came on: the `Attach` it opened with here (an `Attach` opens
         // one). Messages of one link arrive in order, its `Attach` first.
         let link = match &input {
-            Input::Host { host, msg: HostMsg::Attach { boot, epoch, .. } } => {
+            Input::Host {
+                host,
+                msg: HostMsg::Attach { boot, epoch, .. },
+            } => {
                 self.link_attach.insert(*host, (*boot, *epoch));
                 Some((*boot, *epoch))
             }
@@ -202,7 +221,11 @@ impl Coordinator {
         self.clean_checked = false;
         if !self.unstored && !input.is_ticker_read() {
             // No store, no row to move under it (the inline link): nothing to replay.
-            self.log.push(Logged { now: now_ms, input: input.clone(), link });
+            self.log.push(Logged {
+                now: now_ms,
+                input: input.clone(),
+                link,
+            });
         }
         self.apply_logged(input, now_ms, link);
     }
@@ -223,8 +246,12 @@ impl Coordinator {
     /// dropped here (host ids are never reused: only the solo host's process restarts under one
     /// id, with one replica).
     pub(super) fn superseded(&self, input: &Input, link: Option<LinkStamp>) -> bool {
-        let Input::Host { host, msg } = input else { return false };
-        let Some((boot, newest)) = self.newest_attach(*host) else { return false };
+        let Input::Host { host, msg } = input else {
+            return false;
+        };
+        let Some((boot, newest)) = self.newest_attach(*host) else {
+            return false;
+        };
         let older = match msg {
             HostMsg::Attach { boot: b, epoch, .. } => *b == boot && *epoch < newest,
             _ => link.is_some_and(|(b, e)| b == boot && e < newest),
@@ -240,7 +267,9 @@ impl Coordinator {
             && link == Some((boot, newest))
             && self.attachment(*host) != Some(boot);
         if detached {
-            log::debug!("coordinator: host {host}'s message of its attach {newest} (boot {boot:#x}): that attachment is detached: dropped");
+            log::debug!(
+                "coordinator: host {host}'s message of its attach {newest} (boot {boot:#x}): that attachment is detached: dropped"
+            );
         }
         detached
     }
@@ -257,7 +286,9 @@ impl Coordinator {
         match input {
             Input::Host { host, msg } => self.on_host(host, msg, now),
             Input::HostStalled { host, boot, epoch } => {
-                if self.attachment(host) == Some(boot) && self.newest_attach(host) == Some((boot, epoch)) {
+                if self.attachment(host) == Some(boot)
+                    && self.newest_attach(host) == Some((boot, epoch))
+                {
                     log::warn!(
                         "coordinator: host {host} (boot {boot:#x}, attach {epoch}) stalled (its mailbox unread, or its link down): detached"
                     );
@@ -274,13 +305,35 @@ impl Coordinator {
             Input::Decision(answer) => self.on_decision(answer, now),
             Input::ReplicaJoined { me, alone } => self.on_replica_joined(me, alone),
             Input::ReplicaLapsed(r) => self.on_replica_lapsed(r),
-            Input::HostsRead { rows, desired, mailbox_oldest, next_host_id, issued_mono, received_mono, world_tick } => {
-                self.on_hosts_read(&rows, desired, next_host_id, issued_mono, received_mono, world_tick);
+            Input::HostsRead {
+                rows,
+                desired,
+                mailbox_oldest,
+                next_host_id,
+                issued_mono,
+                received_mono,
+                world_tick,
+            } => {
+                self.on_hosts_read(
+                    &rows,
+                    desired,
+                    next_host_id,
+                    issued_mono,
+                    received_mono,
+                    world_tick,
+                );
                 self.stalled_mailboxes(&mailbox_oldest, now);
             }
-            Input::SuccessionsOpen { list, issued_at_version } => self.on_successions_open(list, issued_at_version, now),
+            Input::SuccessionsOpen {
+                list,
+                issued_at_version,
+            } => self.on_successions_open(list, issued_at_version, now),
             Input::LandOwners { asked, rows } => self.on_land_read(asked, &rows, now),
-            Input::CutLookedUp { host, cut, committed } => self.on_cut_looked_up(host, cut, committed),
+            Input::CutLookedUp {
+                host,
+                cut,
+                committed,
+            } => self.on_cut_looked_up(host, cut, committed),
             Input::StartWanted => self.on_start_wanted(now),
         }
         true
@@ -319,9 +372,16 @@ impl Coordinator {
                 self.drop_orphan_mailbox(host, boot);
                 continue;
             }
-            let Some((b, epoch)) = self.newest_attach(host).filter(|(b, _)| *b == boot) else { continue };
-            let current = self.attached_at_ms(host).is_some_and(|since| at_ms + super::ATTACH_CLOCK_SLACK_MS >= since);
-            if self.attachment(host) == Some(b) && current && now_ms.saturating_sub(at_ms) > super::MAILBOX_STALL_MS {
+            let Some((b, epoch)) = self.newest_attach(host).filter(|(b, _)| *b == boot) else {
+                continue;
+            };
+            let current = self
+                .attached_at_ms(host)
+                .is_some_and(|since| at_ms + super::ATTACH_CLOCK_SLACK_MS >= since);
+            if self.attachment(host) == Some(b)
+                && current
+                && now_ms.saturating_sub(at_ms) > super::MAILBOX_STALL_MS
+            {
                 log::warn!(
                     "coordinator: host {host}'s mailbox has a row unread for {} ms (over {} ms): it is stalled",
                     now_ms.saturating_sub(at_ms),
@@ -360,10 +420,18 @@ impl Coordinator {
     /// make it one); otherwise it leaves the log. A ticker whose rebase dropped a successions read
     /// it applied since its last commit owes one again ([`Self::take_successions_reread`]); the
     /// configuration the runtime set (the cut period) holds.
-    pub fn rebase(&mut self, core: &[u8], history: Option<&[u8]>, version: u64) -> Result<(), HistoryLoadError> {
+    pub fn rebase(
+        &mut self,
+        core: &[u8],
+        history: Option<&[u8]>,
+        version: u64,
+    ) -> Result<(), HistoryLoadError> {
         let mut p: Projection = decode_core(core)?;
         let history = match history {
-            Some(bytes) => Some(crate::history::persist::decode(bytes, self.history.grid().clone())?),
+            Some(bytes) => Some(crate::history::persist::decode(
+                bytes,
+                self.history.grid().clone(),
+            )?),
             None => None,
         };
         p.cuts.carry_process_fields(&mut self.cuts);
@@ -389,11 +457,17 @@ impl Coordinator {
             self.reads_committed = self.reads_applied;
         }
         let log = std::mem::take(&mut self.log);
-        log::info!("coordinator: rebased onto version {version}; {} logged input(s) applied again", log.len());
+        log::info!(
+            "coordinator: rebased onto version {version}; {} logged input(s) applied again",
+            log.len()
+        );
         let mut kept = Vec::with_capacity(log.len());
         for entry in log {
             if matches!(entry.input, Input::Maintain) && !self.ticking_now() {
-                log::debug!("coordinator: replica {} is not the ticker of the rebased core: its upkeep is dropped", self.replica);
+                log::debug!(
+                    "coordinator: replica {} is not the ticker of the rebased core: its upkeep is dropped",
+                    self.replica
+                );
                 continue;
             }
             // A host's message of a link the row holds superseded (G-I1) leaves the log too.
@@ -419,9 +493,17 @@ impl Coordinator {
     /// at `version` only if it is NEWER than this cache's — a row read before this cache's own
     /// later commit is older, and rebasing onto it would regress the projection (Task 4 fix round
     /// 1). Whether it rebased.
-    pub fn refresh(&mut self, core: &[u8], history: Option<&[u8]>, version: u64) -> Result<bool, HistoryLoadError> {
+    pub fn refresh(
+        &mut self,
+        core: &[u8],
+        history: Option<&[u8]>,
+        version: u64,
+    ) -> Result<bool, HistoryLoadError> {
         if version <= self.version {
-            log::debug!("coordinator: a refresh read version {version}, this cache holds {}: nothing to do", self.version);
+            log::debug!(
+                "coordinator: a refresh read version {version}, this cache holds {}: nothing to do",
+                self.version
+            );
             return Ok(false);
         }
         self.rebase(core, history, version).map(|()| true)
@@ -448,7 +530,10 @@ impl Coordinator {
             self.successions_owed();
             self.fleet_unread();
         } else if !ticker && self.ticking {
-            log::info!("coordinator: replica {} is no longer the ticker", self.replica);
+            log::info!(
+                "coordinator: replica {} is no longer the ticker",
+                self.replica
+            );
             self.fleet_unread();
         }
         self.ticking = ticker;

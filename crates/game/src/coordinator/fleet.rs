@@ -78,8 +78,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{AddHost, Coordinator, DecisionAnswer, DrainHost, HostAdded, HostDrained, HostRemoved, HostSeen, RemoveHost, StoreDecision};
-use crate::{CrashPolicy, HostId, DRAIN_WARNING_SECS, HOST_LIVE};
+use super::{
+    AddHost, Coordinator, DecisionAnswer, DrainHost, HostAdded, HostDrained, HostRemoved, HostSeen,
+    RemoveHost, StoreDecision,
+};
+use crate::{CrashPolicy, DRAIN_WARNING_SECS, HOST_LIVE, HostId};
 
 /// One `desired_hosts` row: a host the coordinator wants to exist.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,10 +180,17 @@ struct Serving<'a> {
 
 impl Serving<'_> {
     fn least(&self) -> u32 {
-        self.hosts.iter().map(|h| h.load.tick_permille).min().unwrap_or(0)
+        self.hosts
+            .iter()
+            .map(|h| h.load.tick_permille)
+            .min()
+            .unwrap_or(0)
     }
     fn sum(&self) -> u64 {
-        self.hosts.iter().map(|h| u64::from(h.load.tick_permille)).sum()
+        self.hosts
+            .iter()
+            .map(|h| u64::from(h.load.tick_permille))
+            .sum()
     }
     /// `(n − 1) · (1000 − SCALE_DOWN_SPARE_PERMILLE)`: the summed load that fits in one host fewer.
     fn fits_fewer(&self) -> u64 {
@@ -191,7 +201,12 @@ impl Serving<'_> {
         let parts: Vec<String> = self
             .hosts
             .iter()
-            .map(|h| format!("{} (host {}) {}‰ {}p {}r", h.name, h.ordinal, h.load.tick_permille, h.load.players, h.load.regions))
+            .map(|h| {
+                format!(
+                    "{} (host {}) {}‰ {}p {}r",
+                    h.name, h.ordinal, h.load.tick_permille, h.load.players, h.load.regions
+                )
+            })
             .collect();
         parts.join(", ")
     }
@@ -241,16 +256,26 @@ impl Coordinator {
     /// The upkeep's fleet rules (the module docs): at most one decision handed out, with the
     /// next transition.
     pub(super) fn maintain_fleet(&mut self, now_ms: u64) {
-        let Some(dials) = self.fleet_dials else { return };
+        let Some(dials) = self.fleet_dials else {
+            return;
+        };
         if self.fleet_pending || !self.ticking_now() {
             return;
         }
         // Cloned: the evacuation step below changes the core (a handful of rows).
-        let Some(desired) = self.fleet_desired.clone() else { return };
-        if self.fleet_read_after.is_some_and(|n| self.leases.reads() <= n) {
+        let Some(desired) = self.fleet_desired.clone() else {
+            return;
+        };
+        if self
+            .fleet_read_after
+            .is_some_and(|n| self.leases.reads() <= n)
+        {
             return;
         }
-        if self.fleet_last_ms.is_some_and(|at| now_ms.saturating_sub(at) < SCALE_DECISION_EVERY_MS) {
+        if self
+            .fleet_last_ms
+            .is_some_and(|at| now_ms.saturating_sub(at) < SCALE_DECISION_EVERY_MS)
+        {
             return;
         }
         // Elastic 5, rule 6b (ahead of rules 4–7, no scale gates): an evacuating host's next step.
@@ -265,17 +290,32 @@ impl Coordinator {
             // One move at a time, and no other fleet decision under it but the marks' rules.
             return;
         }
-        let Some((why, decision)) = self.fleet_rule(dials, &desired) else { return };
+        let Some((why, decision)) = self.fleet_rule(dials, &desired) else {
+            return;
+        };
         // Elastic 5, rule 6 with players: the victim is emptied by moves first, drained after.
-        if let (FleetWhy::ScaleDown, StoreDecision::DrainHost(DrainHost { name, host: Some((victim, boot)), .. })) = (&why, &decision) {
+        if let (
+            FleetWhy::ScaleDown,
+            StoreDecision::DrainHost(DrainHost {
+                name,
+                host: Some((victim, boot)),
+                ..
+            }),
+        ) = (&why, &decision)
+        {
             if self.leases.row(*victim).is_some_and(|r| r.load.players > 0) {
-                log::info!("coordinator: fleet: scale down: host {victim} ({name}) holds players: its occupied land moves first");
+                log::info!(
+                    "coordinator: fleet: scale down: host {victim} ({name}) holds players: its occupied land moves first"
+                );
                 self.start_evacuation(*victim, *boot, name.clone(), now_ms);
                 return;
             }
         }
         // Rules 2b, 5, 6 and 7 logged their evidence already, with the decision.
-        if !matches!(why, FleetWhy::LeftMarked | FleetWhy::ScaleUp | FleetWhy::ScaleDown | FleetWhy::ToZero) {
+        if !matches!(
+            why,
+            FleetWhy::LeftMarked | FleetWhy::ScaleUp | FleetWhy::ScaleDown | FleetWhy::ToZero
+        ) {
             log::info!("coordinator: fleet: {why:?}: {decision:?}");
         }
         self.fleet_pending = true;
@@ -285,19 +325,34 @@ impl Coordinator {
 
     /// The first of rules 1–7 that applies to the latest read's `desired` rows and `hosts` rows
     /// (the lease watch's), if any, with the rule it came from.
-    fn fleet_rule(&self, dials: FleetDials, desired: &[DesiredHost]) -> Option<(FleetWhy, StoreDecision)> {
+    fn fleet_rule(
+        &self,
+        dials: FleetDials,
+        desired: &[DesiredHost],
+    ) -> Option<(FleetWhy, StoreDecision)> {
         if self.crash_policy() == CrashPolicy::Succession {
             // 1. A draining name whose live host carries no mark: that host is marked.
             for d in desired.iter().filter(|d| d.draining) {
                 if let Some(live) = self.live_host_of(&d.name).filter(|r| !r.draining) {
-                    let drain = DrainHost { name: d.name.clone(), host: Some((live.ordinal, live.boot)), in_ms: drain_notice_ms(live) };
+                    let drain = DrainHost {
+                        name: d.name.clone(),
+                        host: Some((live.ordinal, live.boot)),
+                        in_ms: drain_notice_ms(live),
+                    };
                     return Some((FleetWhy::MarkHost, StoreDecision::DrainHost(drain)));
                 }
             }
             // 2. A wanted name whose live host carries a mark: the row follows it.
             for d in desired.iter().filter(|d| !d.draining) {
                 if self.live_host_of(&d.name).is_some_and(|r| r.draining) {
-                    return Some((FleetWhy::FollowMark, StoreDecision::DrainHost(DrainHost { name: d.name.clone(), host: None, in_ms: 0 })));
+                    return Some((
+                        FleetWhy::FollowMark,
+                        StoreDecision::DrainHost(DrainHost {
+                            name: d.name.clone(),
+                            host: None,
+                            in_ms: 0,
+                        }),
+                    ));
                 }
             }
             // 2b. A wanted name with no live host whose newest row left clean WITH a mark (a
@@ -310,14 +365,25 @@ impl Coordinator {
                 if self.live_host_of(&d.name).is_some() {
                     continue;
                 }
-                let newest = self.leases.rows().filter(|r| r.name == d.name).max_by_key(|r| r.ordinal);
+                let newest = self
+                    .leases
+                    .rows()
+                    .filter(|r| r.name == d.name)
+                    .max_by_key(|r| r.ordinal);
                 if let Some(r) = newest.filter(|r| r.clean && r.draining) {
                     log::info!(
                         "[coordinator] fleet: host {} has no live host and its newest host {} left drained: its row drains too",
                         d.name,
                         r.ordinal
                     );
-                    return Some((FleetWhy::LeftMarked, StoreDecision::DrainHost(DrainHost { name: d.name.clone(), host: None, in_ms: 0 })));
+                    return Some((
+                        FleetWhy::LeftMarked,
+                        StoreDecision::DrainHost(DrainHost {
+                            name: d.name.clone(),
+                            host: None,
+                            in_ms: 0,
+                        }),
+                    ));
                 }
             }
             // 3. A draining name nothing of which runs any more: removed — whether or not its
@@ -325,16 +391,31 @@ impl Coordinator {
             // needs the clean `hosts` row only (never this row or the drained pod), and its heir
             // can exist only once this slot is free (final review, A-I1).
             for d in desired.iter().filter(|d| d.draining) {
-                let runs = self.leases.rows().any(|r| r.name == d.name && !r.clean && r.state == HOST_LIVE);
+                let runs = self
+                    .leases
+                    .rows()
+                    .any(|r| r.name == d.name && !r.clean && r.state == HOST_LIVE);
                 if !runs {
-                    return Some((FleetWhy::Remove, StoreDecision::RemoveHost(RemoveHost { name: d.name.clone() })));
+                    return Some((
+                        FleetWhy::Remove,
+                        StoreDecision::RemoveHost(RemoveHost {
+                            name: d.name.clone(),
+                        }),
+                    ));
                 }
             }
         }
         // 4. Below the minimum.
-        let wanted = u32::try_from(desired.iter().filter(|d| !d.draining).count()).unwrap_or(u32::MAX);
+        let wanted =
+            u32::try_from(desired.iter().filter(|d| !d.draining).count()).unwrap_or(u32::MAX);
         if wanted < dials.min {
-            return Some((FleetWhy::Minimum, StoreDecision::AddHost(AddHost { max: dials.max, expect_wanted: wanted })));
+            return Some((
+                FleetWhy::Minimum,
+                StoreDecision::AddHost(AddHost {
+                    max: dials.max,
+                    expect_wanted: wanted,
+                }),
+            ));
         }
         // 5, 6 and 7 need the scale gates (and `Succession`, checked by `fleet_serving`), checked
         // again here: the attachments and the succession runs may have moved since the read.
@@ -343,7 +424,10 @@ impl Coordinator {
         // 5. Scale up: the least-loaded serving host stayed loaded for `up_after_ms`.
         if let Some(since) = self.fleet_up_since {
             let held = watch_now.saturating_sub(since);
-            if wanted < dials.max && serving.least() >= SCALE_UP_LOAD_PERMILLE && held >= dials.up_after_ms {
+            if wanted < dials.max
+                && serving.least() >= SCALE_UP_LOAD_PERMILLE
+                && held >= dials.up_after_ms
+            {
                 log::info!(
                     "[coordinator] fleet: scale up: the least-loaded serving host stayed at ≥ {SCALE_UP_LOAD_PERMILLE}‰ for {held} ms \
                      (now {}‰; wanted {wanted} < max {}): {}",
@@ -351,7 +435,13 @@ impl Coordinator {
                     dials.max,
                     serving.describe()
                 );
-                return Some((FleetWhy::ScaleUp, StoreDecision::AddHost(AddHost { max: dials.max, expect_wanted: wanted })));
+                return Some((
+                    FleetWhy::ScaleUp,
+                    StoreDecision::AddHost(AddHost {
+                        max: dials.max,
+                        expect_wanted: wanted,
+                    }),
+                ));
             }
         }
         // 6. Scale down: the load fit in one host fewer for `down_after_ms`, every serving host
@@ -359,8 +449,15 @@ impl Coordinator {
         if let Some(since) = self.fleet_down_since {
             let held = watch_now.saturating_sub(since);
             let floor = dials.min.max(1);
-            let old_enough = serving.hosts.iter().all(|h| self.leases.known_for(h.ordinal, watch_now) >= dials.min_lifetime_ms);
-            if wanted > floor && serving.sum() <= serving.fits_fewer() && held >= dials.down_after_ms && old_enough {
+            let old_enough = serving
+                .hosts
+                .iter()
+                .all(|h| self.leases.known_for(h.ordinal, watch_now) >= dials.min_lifetime_ms);
+            if wanted > floor
+                && serving.sum() <= serving.fits_fewer()
+                && held >= dials.down_after_ms
+                && old_enough
+            {
                 // The victim: fewest players, then fewest running regions, then the youngest.
                 let victim = serving
                     .hosts
@@ -380,7 +477,11 @@ impl Coordinator {
                     victim.load.regions,
                     serving.describe()
                 );
-                let drain = DrainHost { name: victim.name.clone(), host: Some((victim.ordinal, victim.boot)), in_ms };
+                let drain = DrainHost {
+                    name: victim.name.clone(),
+                    host: Some((victim.ordinal, victim.boot)),
+                    in_ms,
+                };
                 return Some((FleetWhy::ScaleDown, StoreDecision::DrainHost(drain)));
             }
         }
@@ -390,14 +491,23 @@ impl Coordinator {
             let held = watch_now.saturating_sub(since);
             if let [last] = serving.hosts[..] {
                 let known = self.leases.known_for(last.ordinal, watch_now);
-                if dials.min == 0 && wanted == 1 && idle(last) && held >= dials.down_after_ms && known >= dials.min_lifetime_ms {
+                if dials.min == 0
+                    && wanted == 1
+                    && idle(last)
+                    && held >= dials.down_after_ms
+                    && known >= dials.min_lifetime_ms
+                {
                     log::info!(
                         "[coordinator] fleet: to zero: the last host {} (host {}) had 0 players and 0 running regions for {held} ms \
                          (known for {known} ms, min 0): it drains",
                         last.name,
                         last.ordinal
                     );
-                    let drain = DrainHost { name: last.name.clone(), host: Some((last.ordinal, last.boot)), in_ms: drain_notice_ms(last) };
+                    let drain = DrainHost {
+                        name: last.name.clone(),
+                        host: Some((last.ordinal, last.boot)),
+                        in_ms: drain_notice_ms(last),
+                    };
                     return Some((FleetWhy::ToZero, StoreDecision::DrainHost(drain)));
                 }
             }
@@ -422,17 +532,29 @@ impl Coordinator {
     /// `NotNeeded` once a wanted row exists). Nothing without fleet dials, or once a
     /// host serves again (a replay after the first host attached).
     pub(super) fn on_start_wanted(&mut self, now_ms: u64) {
-        let Some(dials) = self.fleet_dials else { return };
+        let Some(dials) = self.fleet_dials else {
+            return;
+        };
         if self.login_gate() != Gate::Nobody {
-            log::debug!("coordinator: a start was wanted, and a host takes logins now: nothing asked");
+            log::debug!(
+                "coordinator: a start was wanted, and a host takes logins now: nothing asked"
+            );
             return;
         }
-        if self.start_asked_ms.is_some_and(|at| now_ms.saturating_sub(at) < WORLD_START_ASK_EVERY_MS) {
+        if self
+            .start_asked_ms
+            .is_some_and(|at| now_ms.saturating_sub(at) < WORLD_START_ASK_EVERY_MS)
+        {
             return;
         }
         self.start_asked_ms = Some(now_ms);
-        let add = AddHost { max: dials.max, expect_wanted: 0 };
-        log::info!("[coordinator] fleet: a login found no host taking logins on any replica: the world starts ({add:?})");
+        let add = AddHost {
+            max: dials.max,
+            expect_wanted: 0,
+        };
+        log::info!(
+            "[coordinator] fleet: a login found no host taking logins on any replica: the world starts ({add:?})"
+        );
         self.push_decision(StoreDecision::AddHost(add));
     }
 
@@ -468,22 +590,42 @@ impl Coordinator {
     /// rule's condition starts its count (on the watch's clock, the read's receive stamp) if none
     /// runs; a read that breaks it clears it.
     pub(super) fn fleet_observe_load(&mut self) {
-        let Some(dials) = self.fleet_dials else { return };
-        let (up, down, zero) = match self.fleet_desired.as_deref().and_then(|d| self.fleet_serving(d).map(|s| (d, s))) {
+        let Some(dials) = self.fleet_dials else {
+            return;
+        };
+        let (up, down, zero) = match self
+            .fleet_desired
+            .as_deref()
+            .and_then(|d| self.fleet_serving(d).map(|s| (d, s)))
+        {
             Some((desired, serving)) => {
                 let wanted = u32::try_from(desired.len()).unwrap_or(u32::MAX);
                 (
                     wanted < dials.max && serving.least() >= SCALE_UP_LOAD_PERMILLE,
                     wanted > dials.min.max(1) && serving.sum() <= serving.fits_fewer(),
-                    dials.min == 0 && wanted == 1 && matches!(serving.hosts[..], [last] if idle(last)),
+                    dials.min == 0
+                        && wanted == 1
+                        && matches!(serving.hosts[..], [last] if idle(last)),
                 )
             }
             None => (false, false, false),
         };
         let at = self.leases.latest_received_ms();
-        self.fleet_up_since = if up { Some(self.fleet_up_since.unwrap_or(at)) } else { None };
-        self.fleet_down_since = if down { Some(self.fleet_down_since.unwrap_or(at)) } else { None };
-        self.fleet_zero_since = if zero { Some(self.fleet_zero_since.unwrap_or(at)) } else { None };
+        self.fleet_up_since = if up {
+            Some(self.fleet_up_since.unwrap_or(at))
+        } else {
+            None
+        };
+        self.fleet_down_since = if down {
+            Some(self.fleet_down_since.unwrap_or(at))
+        } else {
+            None
+        };
+        self.fleet_zero_since = if zero {
+            Some(self.fleet_zero_since.unwrap_or(at))
+        } else {
+            None
+        };
     }
 
     /// The rule of the fleet decision handed out and not answered yet (the runtime reads it
@@ -510,23 +652,56 @@ impl Coordinator {
     pub(super) fn fleet_answered(&mut self, answer: &DecisionAnswer, now_ms: u64) {
         match answer {
             DecisionAnswer::HostAdded { add, outcome, .. } => match outcome {
-                Ok(HostAdded::Done { name, slot }) => log::info!("coordinator: fleet: host {name} added at slot {slot}"),
-                Ok(HostAdded::NotNeeded) => log::info!("coordinator: fleet: no host added ({add:?}): the wanted rows moved"),
-                Ok(HostAdded::Full) => {
-                    log::warn!("coordinator: fleet: no host added: all {} slots are taken (a draining host holds one until removed)", add.max)
+                Ok(HostAdded::Done { name, slot }) => {
+                    log::info!("coordinator: fleet: host {name} added at slot {slot}")
                 }
-                Err(e) => log::warn!("coordinator: fleet: adding a host failed ({e}); decided again after the next read"),
+                Ok(HostAdded::NotNeeded) => {
+                    log::info!("coordinator: fleet: no host added ({add:?}): the wanted rows moved")
+                }
+                Ok(HostAdded::Full) => {
+                    log::warn!(
+                        "coordinator: fleet: no host added: all {} slots are taken (a draining host holds one until removed)",
+                        add.max
+                    )
+                }
+                Err(e) => log::warn!(
+                    "coordinator: fleet: adding a host failed ({e}); decided again after the next read"
+                ),
             },
             DecisionAnswer::HostDrained { drain, outcome, .. } => match outcome {
-                Ok(HostDrained::Marked) => log::info!("coordinator: fleet: host {} drains (its host {:?} marked, in {} ms)", drain.name, drain.host, drain.in_ms),
-                Ok(HostDrained::RowOnly) => log::info!("coordinator: fleet: host {} drains (its row only)", drain.name),
-                Ok(HostDrained::Unknown) => log::info!("coordinator: fleet: host {} is not a desired row: nothing drained", drain.name),
-                Err(e) => log::warn!("coordinator: fleet: draining host {} failed ({e}); decided again after the next read", drain.name),
+                Ok(HostDrained::Marked) => log::info!(
+                    "coordinator: fleet: host {} drains (its host {:?} marked, in {} ms)",
+                    drain.name,
+                    drain.host,
+                    drain.in_ms
+                ),
+                Ok(HostDrained::RowOnly) => log::info!(
+                    "coordinator: fleet: host {} drains (its row only)",
+                    drain.name
+                ),
+                Ok(HostDrained::Unknown) => log::info!(
+                    "coordinator: fleet: host {} is not a desired row: nothing drained",
+                    drain.name
+                ),
+                Err(e) => log::warn!(
+                    "coordinator: fleet: draining host {} failed ({e}); decided again after the next read",
+                    drain.name
+                ),
             },
-            DecisionAnswer::HostRemoved { remove, outcome, .. } => match outcome {
-                Ok(HostRemoved::Done) => log::info!("coordinator: fleet: host {} removed", remove.name),
-                Ok(HostRemoved::Gone) => log::info!("coordinator: fleet: host {} was removed already", remove.name),
-                Err(e) => log::warn!("coordinator: fleet: removing host {} failed ({e}); decided again after the next read", remove.name),
+            DecisionAnswer::HostRemoved {
+                remove, outcome, ..
+            } => match outcome {
+                Ok(HostRemoved::Done) => {
+                    log::info!("coordinator: fleet: host {} removed", remove.name)
+                }
+                Ok(HostRemoved::Gone) => log::info!(
+                    "coordinator: fleet: host {} was removed already",
+                    remove.name
+                ),
+                Err(e) => log::warn!(
+                    "coordinator: fleet: removing host {} failed ({e}); decided again after the next read",
+                    remove.name
+                ),
             },
             _ => return,
         }
@@ -564,5 +739,9 @@ fn idle(host: &HostSeen) -> bool {
 
 /// A drain's notice for `host`: none when it reports no players, else [`DRAIN_WARNING_SECS`].
 fn drain_notice_ms(host: &HostSeen) -> u64 {
-    if host.load.players == 0 { 0 } else { DRAIN_WARNING_SECS * 1000 }
+    if host.load.players == 0 {
+        0
+    } else {
+        DRAIN_WARNING_SECS * 1000
+    }
 }

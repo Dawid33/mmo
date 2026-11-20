@@ -54,7 +54,9 @@ fn shadow_override<T: std::str::FromStr>(name: &str) -> Option<T> {
 }
 
 fn shadow_cascades() -> usize {
-    shadow_override("VOXEL_SHADOW_CASCADES").unwrap_or(SHADOW_CASCADES).max(1)
+    shadow_override("VOXEL_SHADOW_CASCADES")
+        .unwrap_or(SHADOW_CASCADES)
+        .max(1)
 }
 
 fn shadow_max_distance_m() -> f32 {
@@ -152,8 +154,25 @@ pub struct ViewDistance {
 impl ViewDistance {
     /// The defaults for a world scale.
     pub fn for_scale(scale: &crate::world_scale::WorldScale) -> Self {
-        let reach = scale.lod_reach_units().max(MIN_DEFAULT_REACH_M * game::movement::UNITS_PER_METER);
-        Self { visibility: VISIBILITY_SHARE_OF_REACH * reach, far: reach }
+        let reach = scale
+            .lod_reach_units()
+            .max(MIN_DEFAULT_REACH_M * game::movement::UNITS_PER_METER);
+        Self {
+            visibility: VISIBILITY_SHARE_OF_REACH * reach,
+            far: reach,
+        }
+    }
+
+    /// The view a render distance of `metres` gives (the Settings window's
+    /// slider, `graphics_settings`): the far plane there, the haze at
+    /// [`VISIBILITY_SHARE_OF_REACH`] of it, so it is opaque by the far plane
+    /// (~0.75 % contrast left) and nothing past it is drawn at all.
+    pub fn for_reach_m(metres: f32) -> Self {
+        let reach = metres * game::movement::UNITS_PER_METER;
+        Self {
+            visibility: VISIBILITY_SHARE_OF_REACH * reach,
+            far: reach,
+        }
     }
 
     /// [`Self::for_scale`] with `VOXEL_FOG_VISIBILITY_M` (unset or empty =
@@ -161,7 +180,9 @@ impl ViewDistance {
     pub fn from_env(scale: &crate::world_scale::WorldScale) -> Result<Self, String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let v = std::env::var("VOXEL_FOG_VISIBILITY_M").ok().filter(|v| !v.is_empty());
+            let v = std::env::var("VOXEL_FOG_VISIBILITY_M")
+                .ok()
+                .filter(|v| !v.is_empty());
             Self::resolve(scale, v.as_deref())
         }
         #[cfg(target_arch = "wasm32")]
@@ -172,15 +193,25 @@ impl ViewDistance {
 
     /// An explicit visibility keeps the far plane at least where the haze
     /// would have hidden the ring edge, so a clearer day is never clipped.
-    pub fn resolve(scale: &crate::world_scale::WorldScale, visibility_m: Option<&str>) -> Result<Self, String> {
+    pub fn resolve(
+        scale: &crate::world_scale::WorldScale,
+        visibility_m: Option<&str>,
+    ) -> Result<Self, String> {
         let defaults = Self::for_scale(scale);
-        let Some(v) = visibility_m else { return Ok(defaults) };
+        let Some(v) = visibility_m else {
+            return Ok(defaults);
+        };
         match v.trim().parse::<f32>() {
             Ok(m) if m > 0.0 && m.is_finite() => {
                 let visibility = m * game::movement::UNITS_PER_METER;
-                Ok(Self { visibility, far: defaults.far.max(visibility / VISIBILITY_SHARE_OF_REACH) })
+                Ok(Self {
+                    visibility,
+                    far: defaults.far.max(visibility / VISIBILITY_SHARE_OF_REACH),
+                })
             }
-            _ => Err(format!("invalid VOXEL_FOG_VISIBILITY_M value `{v}` (expected metres > 0)")),
+            _ => Err(format!(
+                "invalid VOXEL_FOG_VISIBILITY_M value `{v}` (expected metres > 0)"
+            )),
         }
     }
 }
@@ -201,7 +232,11 @@ fn horizon_fog_color() -> Color {
         skybox::HORIZON[2],
     ));
     let scale = skybox::BRIGHTNESS * Exposure::default().exposure();
-    Color::LinearRgba(LinearRgba::rgb(horizon.red * scale, horizon.green * scale, horizon.blue * scale))
+    Color::LinearRgba(LinearRgba::rgb(
+        horizon.red * scale,
+        horizon.green * scale,
+        horizon.blue * scale,
+    ))
 }
 
 /// The fog every terrain path renders with outdoors: exponential-squared
@@ -209,7 +244,9 @@ fn horizon_fog_color() -> Color {
 pub fn distance_fog(view: &ViewDistance) -> DistanceFog {
     DistanceFog {
         color: horizon_fog_color(),
-        falloff: FogFalloff::ExponentialSquared { density: squared_haze_density(view.visibility) },
+        falloff: FogFalloff::ExponentialSquared {
+            density: squared_haze_density(view.visibility),
+        },
         ..Default::default()
     }
 }
@@ -227,7 +264,10 @@ pub fn squared_haze_density(visibility: f32) -> f32 {
 /// cameras are created with the default horizon (`commander_perspective`,
 /// the first person body camera, the top-down view switching back), and
 /// nothing is drawn past the rings anyway. Runs before Bevy derives the frusta.
-pub fn sync_far_plane(view: Option<Res<ViewDistance>>, mut cameras: Query<&mut Projection, With<Camera3d>>) {
+pub fn sync_far_plane(
+    view: Option<Res<ViewDistance>>,
+    mut cameras: Query<&mut Projection, With<Camera3d>>,
+) {
     let far = view.as_deref().copied().unwrap_or_default().far;
     for mut projection in &mut cameras {
         if let Projection::Perspective(p) = &*projection {
@@ -256,8 +296,15 @@ pub fn underground_fog() -> DistanceFog {
     let scale = skybox::BRIGHTNESS * Exposure::default().exposure();
     let unit = game::movement::UNITS_PER_METER;
     DistanceFog {
-        color: Color::LinearRgba(LinearRgba::rgb(backdrop.red * scale, backdrop.green * scale, backdrop.blue * scale)),
-        falloff: FogFalloff::Linear { start: UNDERGROUND_FOG_START_M * unit, end: UNDERGROUND_FOG_END_M * unit },
+        color: Color::LinearRgba(LinearRgba::rgb(
+            backdrop.red * scale,
+            backdrop.green * scale,
+            backdrop.blue * scale,
+        )),
+        falloff: FogFalloff::Linear {
+            start: UNDERGROUND_FOG_START_M * unit,
+            end: UNDERGROUND_FOG_END_M * unit,
+        },
         ..Default::default()
     }
 }
@@ -271,12 +318,23 @@ pub const UNDERWATER_FOG_COLOR: [f32; 3] = [0.06, 0.22, 0.30];
 
 /// The fog while the eye is in water ([`UNDERWATER_FOG_COLOR`], linear over `START..END`).
 pub fn underwater_fog() -> DistanceFog {
-    let c = LinearRgba::from(Color::srgb(UNDERWATER_FOG_COLOR[0], UNDERWATER_FOG_COLOR[1], UNDERWATER_FOG_COLOR[2]));
+    let c = LinearRgba::from(Color::srgb(
+        UNDERWATER_FOG_COLOR[0],
+        UNDERWATER_FOG_COLOR[1],
+        UNDERWATER_FOG_COLOR[2],
+    ));
     let scale = skybox::BRIGHTNESS * Exposure::default().exposure();
     let unit = game::movement::UNITS_PER_METER;
     DistanceFog {
-        color: Color::LinearRgba(LinearRgba::rgb(c.red * scale, c.green * scale, c.blue * scale)),
-        falloff: FogFalloff::Linear { start: UNDERWATER_FOG_START_M * unit, end: UNDERWATER_FOG_END_M * unit },
+        color: Color::LinearRgba(LinearRgba::rgb(
+            c.red * scale,
+            c.green * scale,
+            c.blue * scale,
+        )),
+        falloff: FogFalloff::Linear {
+            start: UNDERWATER_FOG_START_M * unit,
+            end: UNDERWATER_FOG_END_M * unit,
+        },
         ..Default::default()
     }
 }
@@ -291,7 +349,10 @@ pub fn top_down_fog() -> DistanceFog {
     let far = (TOP_DOWN_EYE_HEIGHT_M + TOP_DOWN_DEPTH_M) * game::movement::UNITS_PER_METER;
     DistanceFog {
         color: horizon_fog_color(),
-        falloff: FogFalloff::Linear { start: far + 1.0, end: far + 2.0 },
+        falloff: FogFalloff::Linear {
+            start: far + 1.0,
+            end: far + 2.0,
+        },
         ..Default::default()
     }
 }
@@ -328,4 +389,3 @@ pub fn attach_fog(
         commands.entity(e).try_insert(distance_fog(&view));
     }
 }
-

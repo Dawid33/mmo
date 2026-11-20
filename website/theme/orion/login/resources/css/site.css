@@ -738,6 +738,17 @@ hr {
     0.06em 0.06em 0 var(--accent-side);
 }
 
+.hero-subtitle {
+  display: block;
+  margin-top: 0.35em;
+  color: var(--accent-text);
+  font-family: var(--font);
+  font-size: clamp(1.25rem, 3.2vw, 2rem);
+  font-weight: 600;
+  line-height: 1.15;
+  text-shadow: none;
+}
+
 .hero-lead {
   max-width: 26ch;
   margin-bottom: var(--space-6);

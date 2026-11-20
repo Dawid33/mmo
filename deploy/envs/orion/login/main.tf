@@ -27,6 +27,18 @@ variable "image_tag" {
   default     = "latest"
 }
 
+variable "use_management_db" {
+  description = "Login's data lives in pg-management. Keep true: switching it off would point a normal deploy at the retired StatefulSet."
+  type        = bool
+  default     = true
+}
+
+variable "own_postgres" {
+  description = "The retired login PostgreSQL is absent after the completed move. stopped is a pre-cleanup rehearsal state; running is a rollback-only override."
+  type        = string
+  default     = "absent"
+}
+
 data "terraform_remote_state" "registry" {
   backend = "s3"
   config = {
@@ -54,6 +66,15 @@ data "terraform_remote_state" "keycloak_realm" {
   }
 }
 
+data "terraform_remote_state" "pg_management" {
+  backend = "s3"
+  config = {
+    bucket = var.state_bucket
+    region = var.aws_region
+    key    = "orion/pg-management.tfstate"
+  }
+}
+
 module "login" {
   source = "../../../modules/login"
   providers = {
@@ -71,6 +92,12 @@ module "login" {
   }
 
   issuer_host_alias_ip = var.issuer_host_alias_ip
+  database             = var.use_management_db ? data.terraform_remote_state.pg_management.outputs.databases["login"] : null
+  own_postgres         = var.own_postgres
+  telemetry = {
+    environment = "production"
+    cluster     = "orion"
+  }
 }
 
 output "url" {

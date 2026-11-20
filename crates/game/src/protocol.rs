@@ -3,8 +3,8 @@ use std::time::Duration;
 use crate::input::InputEvent;
 use crate::lod::LodKey;
 use crate::{
-    BLOCK_VOXELS, BRICK_BLOCKS, CHUNK_BLOCKS, Chunk, ChunkCoords, Client, ClientId, Column, ColumnCoords, EntityKey, EntityKind,
-    Pose, Rollback,
+    BLOCK_VOXELS, BRICK_BLOCKS, CHUNK_BLOCKS, Chunk, ChunkCoords, Client, ClientId, Column,
+    ColumnCoords, EntityKey, EntityKind, Pose, Rollback,
 };
 use derive_more::Debug;
 use rapier3d::math::Vector;
@@ -48,7 +48,10 @@ pub type EventId = usize;
 pub const REGION_BLOCKS: usize = parse_region_blocks(option_env!("VOXEL_REGION_BLOCKS"));
 /// Region edge in sim chunks (derived: the sim-chunk columns of a region).
 pub const REGION_CHUNKS: usize = REGION_BLOCKS / CHUNK_BLOCKS;
-const _: () = assert!(REGION_BLOCKS % CHUNK_BLOCKS == 0, "a region must be a whole number of sim chunks");
+const _: () = assert!(
+    REGION_BLOCKS % CHUNK_BLOCKS == 0,
+    "a region must be a whole number of sim chunks"
+);
 /// Region edge in 32-voxel bricks (the LOD / render-brick grid unit).
 pub const REGION_BRICKS: usize = REGION_BLOCKS / BRICK_BLOCKS;
 /// Region edge in world units; a power of two, so exact in f32.
@@ -89,7 +92,10 @@ const fn parse_region_blocks(var: Option<&str>) -> usize {
     let mut value = 0usize;
     let mut i = 0;
     while i < bytes.len() {
-        assert!(bytes[i].is_ascii_digit(), "VOXEL_REGION_BLOCKS must be a number");
+        assert!(
+            bytes[i].is_ascii_digit(),
+            "VOXEL_REGION_BLOCKS must be a number"
+        );
         value = value * 10 + (bytes[i] - b'0') as usize;
         i += 1;
     }
@@ -109,8 +115,18 @@ const fn parse_region_blocks(var: Option<&str>) -> usize {
 pub const TERRAIN_HASH_INTERVAL_TICKS: usize = 25;
 
 #[derive(
-    Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
-    Ord, Hash, state_hash::StateHash,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    state_hash::StateHash,
 )]
 pub struct RegionCoords {
     pub x: i32,
@@ -125,7 +141,11 @@ impl RegionCoords {
     /// World-space origin of this region: `(x, 0, z) * REGION_SIZE`. Exactly
     /// representable in f32, so render offsets are lossless.
     pub fn world_offset(&self) -> [f32; 3] {
-        [self.x as f32 * REGION_SIZE, 0.0, self.z as f32 * REGION_SIZE]
+        [
+            self.x as f32 * REGION_SIZE,
+            0.0,
+            self.z as f32 * REGION_SIZE,
+        ]
     }
 
     /// Which region owns a world-space point (floor division, so the
@@ -148,7 +168,11 @@ impl RegionCoords {
         let Some(prev) = prev else { return owner };
         let [ox, _, oz] = prev.world_offset();
         let near = |p: f32, o: f32| p >= o - margin && p < o + REGION_SIZE + margin;
-        if near(x, ox) && near(z, oz) { prev } else { owner }
+        if near(x, ox) && near(z, oz) {
+            prev
+        } else {
+            owner
+        }
     }
 
     /// The 3×3 window of regions centered on `self` — the client's desired
@@ -178,7 +202,17 @@ impl RegionCoords {
 /// tile only the plane). The seam-translation harness compares outcomes in
 /// this frame.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
     state_hash::StateHash,
 )]
 pub struct WorldBlockPos {
@@ -196,7 +230,11 @@ impl WorldBlockPos {
     /// inside the region: a block past its edge maps to the neighbour's.
     pub fn from_local(rc: RegionCoords, pos: crate::volume::BlockPos) -> Self {
         let n = REGION_BLOCKS as i64;
-        Self { x: rc.x as i64 * n + pos.x as i64, y: pos.y, z: rc.z as i64 * n + pos.z as i64 }
+        Self {
+            x: rc.x as i64 * n + pos.x as i64,
+            y: pos.y,
+            z: rc.z as i64 * n + pos.z as i64,
+        }
     }
 
     /// The region owning this block and the block in its frame
@@ -205,7 +243,14 @@ impl WorldBlockPos {
     pub fn to_local(self) -> (RegionCoords, crate::volume::BlockPos) {
         let n = REGION_BLOCKS as i64;
         let rc = RegionCoords::new(self.x.div_euclid(n) as i32, self.z.div_euclid(n) as i32);
-        (rc, crate::volume::BlockPos::new(self.x.rem_euclid(n) as i32, self.y, self.z.rem_euclid(n) as i32))
+        (
+            rc,
+            crate::volume::BlockPos::new(
+                self.x.rem_euclid(n) as i32,
+                self.y,
+                self.z.rem_euclid(n) as i32,
+            ),
+        )
     }
 }
 
@@ -213,7 +258,20 @@ impl WorldBlockPos {
 /// x and z; `y` is the region-local chunk y — regions tile only the plane).
 /// The chunk counterpart of [`WorldBlockPos`]; keys the terrain halo
 /// (`halo.rs`), whose chunks lie in neighbouring regions.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub struct WorldChunkPos {
     pub x: i64,
     pub y: i32,
@@ -230,7 +288,11 @@ impl WorldChunkPos {
     /// the neighbour's.
     pub fn from_local(rc: RegionCoords, [x, y, z]: [i32; 3]) -> Self {
         let n = crate::REGION_CHUNKS as i64;
-        Self { x: rc.x as i64 * n + x as i64, y, z: rc.z as i64 * n + z as i64 }
+        Self {
+            x: rc.x as i64 * n + x as i64,
+            y,
+            z: rc.z as i64 * n + z as i64,
+        }
     }
 
     /// The region owning this chunk and the chunk in its frame (floor
@@ -238,7 +300,14 @@ impl WorldChunkPos {
     pub fn to_local(self) -> (RegionCoords, ChunkCoords) {
         let n = crate::REGION_CHUNKS as i64;
         let rc = RegionCoords::new(self.x.div_euclid(n) as i32, self.z.div_euclid(n) as i32);
-        (rc, ChunkCoords::new(self.x.rem_euclid(n) as usize, self.y, self.z.rem_euclid(n) as usize))
+        (
+            rc,
+            ChunkCoords::new(
+                self.x.rem_euclid(n) as usize,
+                self.y,
+                self.z.rem_euclid(n) as usize,
+            ),
+        )
     }
 }
 
@@ -271,12 +340,30 @@ pub fn departure_offset(x: f32, z: f32) -> Option<(i32, i32)> {
 /// determinism requires a stable order.
 pub fn halo_offsets(x: f32, z: f32) -> Vec<(i32, i32)> {
     let m = crate::halo::HALO_UNITS;
-    let dx = if x < m { -1 } else if x > REGION_SIZE - m { 1 } else { 0 };
-    let dz = if z < m { -1 } else if z > REGION_SIZE - m { 1 } else { 0 };
+    let dx = if x < m {
+        -1
+    } else if x > REGION_SIZE - m {
+        1
+    } else {
+        0
+    };
+    let dz = if z < m {
+        -1
+    } else if z > REGION_SIZE - m {
+        1
+    } else {
+        0
+    };
     let mut out = Vec::new();
-    if dx != 0 { out.push((dx, 0)); }
-    if dz != 0 { out.push((0, dz)); }
-    if dx != 0 && dz != 0 { out.push((dx, dz)); }
+    if dx != 0 {
+        out.push((dx, 0));
+    }
+    if dz != 0 {
+        out.push((0, dz));
+    }
+    if dx != 0 && dz != 0 {
+        out.push((dx, dz));
+    }
     out
 }
 
@@ -307,8 +394,18 @@ pub fn rebase_isometry_by(iso: &Pose, delta: (i32, i32)) -> Pose {
 /// so a client's prediction and the server allocate the same id. Halo
 /// mirrors carry their source entity's id.
 #[derive(
-    Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
-    Ord, Hash, state_hash::StateHash,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    state_hash::StateHash,
 )]
 pub struct EntityId {
     pub birth_region: RegionCoords,
@@ -320,7 +417,10 @@ impl EntityId {
     /// settling voxel body's drops, a chest's spill). Never allocated (serials
     /// count up from 0), never replied to (`intents.rs`).
     pub const fn of_region(rc: RegionCoords) -> Self {
-        EntityId { birth_region: rc, serial: u64::MAX }
+        EntityId {
+            birth_region: rc,
+            serial: u64::MAX,
+        }
     }
 
     /// Whether this is [`EntityId::of_region`].
@@ -337,9 +437,16 @@ impl EntityId {
 /// saved regions, via halo mirrors).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, state_hash::StateHash)]
 pub enum ColliderSpec {
-    CapsuleY { half_height: f32, radius: f32 },
-    Cuboid { half_extents: Vector },
-    Ball { radius: f32 },
+    CapsuleY {
+        half_height: f32,
+        radius: f32,
+    },
+    Cuboid {
+        half_extents: Vector,
+    },
+    Ball {
+        radius: f32,
+    },
     /// Primitive parts only (no nested compounds), in the order given.
     Compound(Vec<(Pose, ColliderSpec)>),
 }
@@ -352,8 +459,13 @@ impl ColliderSpec {
     pub fn shared_shape(&self) -> parry3d::shape::SharedShape {
         use parry3d::shape::SharedShape;
         match self {
-            ColliderSpec::CapsuleY { half_height, radius } => SharedShape::capsule_y(*half_height, *radius),
-            ColliderSpec::Cuboid { half_extents } => SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z),
+            ColliderSpec::CapsuleY {
+                half_height,
+                radius,
+            } => SharedShape::capsule_y(*half_height, *radius),
+            ColliderSpec::Cuboid { half_extents } => {
+                SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z)
+            }
             ColliderSpec::Ball { radius } => SharedShape::ball(*radius),
             ColliderSpec::Compound(parts) => SharedShape::compound(
                 parts
@@ -378,7 +490,10 @@ impl ColliderSpec {
         const PI: f32 = core::f32::consts::PI;
         let m = |units: f32| units / crate::movement::UNITS_PER_METER;
         match self {
-            ColliderSpec::CapsuleY { half_height, radius } => {
+            ColliderSpec::CapsuleY {
+                half_height,
+                radius,
+            } => {
                 let (h, r) = (m(*half_height), m(*radius));
                 PI * r * r * 2.0 * h + 4.0 / 3.0 * PI * r * r * r
             }
@@ -397,10 +512,15 @@ impl ColliderSpec {
     /// [`Self::shared_shape`] builds); `None` for any other shape.
     pub fn of_shape(shape: &dyn parry3d::shape::Shape) -> Option<Self> {
         if let Some(cap) = shape.as_capsule() {
-            return Some(ColliderSpec::CapsuleY { half_height: cap.half_height(), radius: cap.radius });
+            return Some(ColliderSpec::CapsuleY {
+                half_height: cap.half_height(),
+                radius: cap.radius,
+            });
         }
         if let Some(c) = shape.as_cuboid() {
-            return Some(ColliderSpec::Cuboid { half_extents: c.half_extents });
+            return Some(ColliderSpec::Cuboid {
+                half_extents: c.half_extents,
+            });
         }
         if let Some(b) = shape.as_ball() {
             return Some(ColliderSpec::Ball { radius: b.radius });
@@ -484,7 +604,11 @@ impl BodyState {
     pub fn of(body: &rapier3d::dynamics::RigidBody) -> Self {
         let dynamic = body.body_type() == rapier3d::dynamics::RigidBodyType::Dynamic;
         BodyState {
-            kind: if dynamic { BodyKind::Dynamic } else { BodyKind::KinematicPosition },
+            kind: if dynamic {
+                BodyKind::Dynamic
+            } else {
+                BodyKind::KinematicPosition
+            },
             pose: *body.position(),
             linvel: body.linvel(),
             angvel: body.angvel(),
@@ -507,7 +631,9 @@ impl BodyState {
     /// body given no explicit mass (collider density only) carries its
     /// total, which the receiver rebuilds as explicit mass over massless
     /// colliders.
-    fn explicit_mass(body: &rapier3d::dynamics::RigidBody) -> parry3d::mass_properties::MassProperties {
+    fn explicit_mass(
+        body: &rapier3d::dynamics::RigidBody,
+    ) -> parry3d::mass_properties::MassProperties {
         use rapier3d::dynamics::RigidBodyAdditionalMassProps;
         let mprops = body.mass_properties();
         match mprops.additional_local_mprops.as_deref() {
@@ -521,7 +647,9 @@ impl BodyState {
         use slotmapd::Key;
         let mut b = match self.kind {
             BodyKind::Dynamic => rapier3d::dynamics::RigidBodyBuilder::dynamic(),
-            BodyKind::KinematicPosition => rapier3d::dynamics::RigidBodyBuilder::kinematic_position_based(),
+            BodyKind::KinematicPosition => {
+                rapier3d::dynamics::RigidBodyBuilder::kinematic_position_based()
+            }
         }
         .pose(self.pose)
         .gravity_scale(self.gravity_scale)
@@ -548,7 +676,8 @@ impl BodyState {
 
     /// Whether a live body is of this state's [`BodyKind`].
     pub fn same_kind_as(&self, body: &rapier3d::dynamics::RigidBody) -> bool {
-        (body.body_type() == rapier3d::dynamics::RigidBodyType::Dynamic) == (self.kind == BodyKind::Dynamic)
+        (body.body_type() == rapier3d::dynamics::RigidBodyType::Dynamic)
+            == (self.kind == BodyKind::Dynamic)
     }
 
     /// Re-apply this state to an existing body OF THE SAME KIND (a halo
@@ -557,7 +686,10 @@ impl BodyState {
     /// (`Rollback::restate_body_safe`), because rapier's type-change mass
     /// recompute is the path explicit mass avoids.
     pub fn apply_to(&self, body: &mut rapier3d::dynamics::RigidBody) {
-        debug_assert!(self.same_kind_as(body), "BodyState::apply_to across body kinds");
+        debug_assert!(
+            self.same_kind_as(body),
+            "BodyState::apply_to across body kinds"
+        );
         body.set_position(self.pose, true);
         body.set_linear_damping(self.linear_damping);
         body.set_angular_damping(self.angular_damping);
@@ -719,7 +851,10 @@ impl TerrainSnapshot {
     /// Materialize worldgen columns into the same `(ChunkCoords, Chunk)` form
     /// `Region::from_columns` uses — how never-run regions are served.
     pub fn from_columns(columns: Vec<(ColumnCoords, Column)>) -> Self {
-        let mut ground: Vec<_> = columns.iter().filter_map(|(c, col)| Some((*c, col.ground()?.clone()))).collect();
+        let mut ground: Vec<_> = columns
+            .iter()
+            .filter_map(|(c, col)| Some((*c, col.ground()?.clone())))
+            .collect();
         ground.sort_by_key(|(c, _)| (c.x, c.z));
         let mut chunks: Vec<_> = columns
             .into_iter()
@@ -754,7 +889,9 @@ pub enum ClientPacket {
     /// exists; any other first packet, or an invalid token, is refused
     /// (`ServerPacket::Refused`) and the connection closed. Never reaches the
     /// `WorldManager` from a real edge.
-    Hello { credential: crate::Credential },
+    Hello {
+        credential: crate::Credential,
+    },
     /// Game event generated by client that needs to be processed by the server.
     GameEvent(GameEvent),
     /// [`ClientPacket::GameEvent`] that the client predicted right after its
@@ -872,7 +1009,11 @@ pub enum ServerPacket {
     /// it unasked for a region it sent the client elsewhere for, after that host's
     /// succession (R4): naming the heir, or naming the home itself (the region is served on
     /// the home connection from now on; `ticket` is then never presented).
-    RegionElsewhere { region: RegionId, endpoint: crate::HostEndpoint, ticket: ObserverTicket },
+    RegionElsewhere {
+        region: RegionId,
+        endpoint: crate::HostEndpoint,
+        ticket: ObserverTicket,
+    },
     /// The player's hop on this host (its placement count across hosts,
     /// `PlayerHandoff::hop`), sent right before the `PlayerRegion` that makes this
     /// session the player's home after its body or record came from another host. A
@@ -887,7 +1028,9 @@ pub enum ServerPacket {
     /// the drain is first known, to each that becomes home here later, and again when the
     /// deadline moves earlier; never to an observer session. A hand-off away (`HomeHop` on
     /// another connection) ends what it says.
-    HostDraining { at_tick: u64 },
+    HostDraining {
+        at_tick: u64,
+    },
     /// Elastic 5: the land under the player's body (`super_region`) moves to another host at
     /// world tick `at_tick` (`None`: the move is off, or the body left that land): a notice, then
     /// a pause of seconds; `standby`: that host's endpoint and a ticket for an observer connection
@@ -910,7 +1053,11 @@ pub struct ObserverTicket {
 
 impl std::fmt::Debug for ObserverTicket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ObserverTicket {{ client: {}, nonce: <secret> }}", self.client)
+        write!(
+            f,
+            "ObserverTicket {{ client: {}, nonce: <secret> }}",
+            self.client
+        )
     }
 }
 
@@ -1019,7 +1166,10 @@ pub enum SpawnAt {
     NearPerson(crate::history::PersonId),
     /// On the region edge facing `from`, `along_per_mille` along it
     /// (0 = the lower x / z end), at the nearest standable column.
-    Edge { from: RegionCoords, along_per_mille: u32 },
+    Edge {
+        from: RegionCoords,
+        along_per_mille: u32,
+    },
 }
 
 /// A [`GameEventKind::SpawnPerson`] payload.
@@ -1036,9 +1186,9 @@ impl GameEventKind {
     /// follow the client's body across a seam.
     pub fn input_client(&self) -> Option<ClientId> {
         match self {
-            GameEventKind::PlayerInput(id, _) | GameEventKind::UiAction(id, _) | GameEventKind::Order(id, _) => {
-                Some(*id)
-            }
+            GameEventKind::PlayerInput(id, _)
+            | GameEventKind::UiAction(id, _)
+            | GameEventKind::Order(id, _) => Some(*id),
             _ => None,
         }
     }
@@ -1109,7 +1259,11 @@ pub const fn max_decompressed_packet_bytes(region_blocks: usize) -> usize {
     let scaled = 256 * 1024 * 1024 * r * r;
     let cap: u64 = 2 * 1024 * 1024 * 1024;
     let v = if scaled > cap { cap } else { scaled };
-    if v > usize::MAX as u64 { usize::MAX } else { v as usize }
+    if v > usize::MAX as u64 {
+        usize::MAX
+    } else {
+        v as usize
+    }
 }
 
 const FRAME_RAW: u8 = 0;
@@ -1133,7 +1287,10 @@ impl std::fmt::Display for PacketError {
             PacketError::Empty => write!(f, "empty packet"),
             PacketError::UnknownFormat(tag) => write!(f, "unknown packet format tag {tag}"),
             PacketError::Truncated => write!(f, "compressed packet shorter than its header"),
-            PacketError::TooLarge(n) => write!(f, "packet claims {n} decompressed bytes (cap {MAX_DECOMPRESSED_PACKET_BYTES})"),
+            PacketError::TooLarge(n) => write!(
+                f,
+                "packet claims {n} decompressed bytes (cap {MAX_DECOMPRESSED_PACKET_BYTES})"
+            ),
             PacketError::Decompress(e) => write!(f, "lz4: {e}"),
             PacketError::Decode(e) => write!(f, "bincode: {e}"),
         }
@@ -1191,4 +1348,3 @@ pub fn decode_packet<T: serde::de::DeserializeOwned>(frame: &[u8]) -> Result<T, 
         other => Err(PacketError::UnknownFormat(other)),
     }
 }
-

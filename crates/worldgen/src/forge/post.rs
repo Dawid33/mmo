@@ -1,9 +1,9 @@
 //! Shaping passes applied once, after the landscape evolution: valley floors
 //! and lake basins — features the erosion law does not make on its own.
 
-use crate::forge::erosion::{discharge, route, FLOOD_EPSILON};
+use crate::forge::erosion::{FLOOD_EPSILON, discharge, route};
 use crate::forge::knobs::Knobs;
-use crate::forge::world::{hash01, smoothstep, World};
+use crate::forge::world::{World, hash01, smoothstep};
 
 // Valley floors: half-width `floodplain_m_per_sqrt_km2` per sqrt(km^2) of
 // discharge (a river draining 16 km^2 gets a ~110 m wide flat floor), capped
@@ -128,7 +128,11 @@ pub fn carve_lake_basins(w: &mut World, rain: &[f64], seed: u64, k: &Knobs) -> u
         let far_enough = sites.iter().all(|&s| {
             let (sx, sz) = w.center(s);
             // The shorter way round on a wrapping world.
-            let ex = if w.wrap_x { (sx - x).abs().min(width - (sx - x).abs()) } else { sx - x };
+            let ex = if w.wrap_x {
+                (sx - x).abs().min(width - (sx - x).abs())
+            } else {
+                sx - x
+            };
             (ex.powi(2) + (sz - z).powi(2)).sqrt() >= k.lake_spacing_m
         });
         if far_enough {
@@ -140,9 +144,11 @@ pub fn carve_lake_basins(w: &mut World, rain: &[f64], seed: u64, k: &Knobs) -> u
     }
     for (n_site, &site) in sites.iter().enumerate() {
         let t = hash01(seed, n_site as u64, 0x1A4E);
-        let radius = LAKE_BASIN_MIN_RADIUS_M + t * (k.lake_radius_max_m - LAKE_BASIN_MIN_RADIUS_M).max(0.0);
+        let radius =
+            LAKE_BASIN_MIN_RADIUS_M + t * (k.lake_radius_max_m - LAKE_BASIN_MIN_RADIUS_M).max(0.0);
         let depth = LAKE_BASIN_MIN_DEPTH_M
-            + hash01(seed, n_site as u64, 0x1A4F) * (k.lake_depth_max_m - LAKE_BASIN_MIN_DEPTH_M).max(0.0);
+            + hash01(seed, n_site as u64, 0x1A4F)
+                * (k.lake_depth_max_m - LAKE_BASIN_MIN_DEPTH_M).max(0.0);
         let (cx, cz) = ((site % nx) as i64, (site / nx) as i64);
         let r_cells = (radius / w.dx).ceil() as i64;
         for oz in -r_cells..=r_cells {

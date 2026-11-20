@@ -1,7 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    state_hash::StateHash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum Key {
     KeyW,
     KeyA,
@@ -22,6 +34,11 @@ pub enum Key {
     Digit8,
     Digit9,
     KeyQ,
+    /// Not a physical key: the client's Minecraft-style sprint latch (W
+    /// double-tapped and still held). Sprints like a held Ctrl, but is not
+    /// Ctrl for anything else (Ctrl+Q throws the whole stack). Last, so the
+    /// other variants keep their wire indices.
+    Sprint,
 }
 
 impl Key {
@@ -55,7 +72,19 @@ impl Key {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    state_hash::StateHash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MouseButton {
     Left,
     Right,
@@ -67,13 +96,28 @@ pub enum MouseButton {
 /// it must never contain types from a windowing library.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InputEvent {
-    Resized { width: u32, height: u32 },
-    Key { key: Key, pressed: bool },
-    MouseButton { button: MouseButton, pressed: bool },
+    Resized {
+        width: u32,
+        height: u32,
+    },
+    Key {
+        key: Key,
+        pressed: bool,
+    },
+    MouseButton {
+        button: MouseButton,
+        pressed: bool,
+    },
     /// Line-based wheel scrolling, in lines.
-    MouseWheel { x: f32, y: f32 },
+    MouseWheel {
+        x: f32,
+        y: f32,
+    },
     /// Accumulated raw mouse motion for one frame.
-    MouseMotion { dx: f32, dy: f32 },
+    MouseMotion {
+        dx: f32,
+        dy: f32,
+    },
     Focused(bool),
     /// Set the fps-camera mode (the client drives its body) to exactly this
     /// value — idempotent, unlike the E toggle — WITHOUT asking the window
@@ -137,7 +181,11 @@ where
                     let old = k.clone();
                     // An unconsumed press survives its release until the
                     // next tick has seen it.
-                    *k = if old == KeyState::Pressed { KeyState::Tapped } else { KeyState::Released };
+                    *k = if old == KeyState::Pressed {
+                        KeyState::Tapped
+                    } else {
+                        KeyState::Released
+                    };
                     Some(Box::new(move |s| {
                         *map(s).get_mut(&button).unwrap() = old.clone();
                     }))
@@ -145,7 +193,11 @@ where
             }
         }
     } else {
-        let state = if pressed { KeyState::Pressed } else { KeyState::Released };
+        let state = if pressed {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
         map(s).insert(button, state);
         Some(Box::new(move |s| {
             map(s).remove(&button);
@@ -255,4 +307,3 @@ impl InputState {
         false
     }
 }
-

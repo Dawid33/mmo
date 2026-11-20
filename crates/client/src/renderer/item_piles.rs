@@ -25,13 +25,13 @@ use std::collections::BTreeMap;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use game::edit::BlockPos;
-use game::{BlockRegistry, ItemId, PileView, RegionId, BLOCK_VOXELS};
+use game::{BLOCK_VOXELS, BlockRegistry, ItemId, PileView, RegionId};
 
-use super::commander::cut_entities::{home_rect, hidden_by_cut};
-use super::commander::level::{camera_cut, WorkingLevel};
+use super::commander::cut_entities::{hidden_by_cut, home_rect};
+use super::commander::level::{WorkingLevel, camera_cut};
 use super::commander::tiles::TileMirror;
 use crate::session::{SessionResetExt, SessionScoped};
 use crate::wrap_frame::WrapFrame;
@@ -56,8 +56,17 @@ pub fn cubes_for(count: u32) -> u32 {
 
 /// The fixed little offset table (x, z in cube spreads from the cell centre),
 /// indexed by a pile's running cube number.
-const OFFSETS: [[f32; 2]; 9] =
-    [[0.0, 0.0], [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0], [1.0, 1.0], [-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0]];
+const OFFSETS: [[f32; 2]; 9] = [
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [-1.0, 0.0],
+    [0.0, 1.0],
+    [0.0, -1.0],
+    [1.0, 1.0],
+    [-1.0, -1.0],
+    [1.0, -1.0],
+    [-1.0, 1.0],
+];
 
 /// Texture for a non-block item, relative to the assets root.
 pub fn extra_item_texture(item: ItemId) -> String {
@@ -71,22 +80,37 @@ pub fn extra_item_texture(item: ItemId) -> String {
 #[derive(Message, Debug, Clone)]
 pub enum ItemPileMsg {
     /// Per cell: the new pile (`None` = gone), applied in order.
-    Set { region: RegionId, changes: Vec<(BlockPos, Option<PileView>)> },
+    Set {
+        region: RegionId,
+        changes: Vec<(BlockPos, Option<PileView>)>,
+    },
     /// The same for the region's halo mirrors of its neighbours' piles.
-    SetMirrors { region: RegionId, changes: Vec<(BlockPos, Option<PileView>)> },
+    SetMirrors {
+        region: RegionId,
+        changes: Vec<(BlockPos, Option<PileView>)>,
+    },
     /// The region was removed (or replaced): drop all its piles.
     RemoveRegion(RegionId),
     /// Pickups this tick (`GameDataUpdateKind::ItemsPickedUp`), animated by
     /// `item_flights`.
-    PickedUp { region: RegionId, picks: Vec<game::PickupView> },
+    PickedUp {
+        region: RegionId,
+        picks: Vec<game::PickupView>,
+    },
     /// Items that moved without physics (`ItemsLanded`), animated by
     /// `item_flights`.
-    Landed { region: RegionId, flights: Vec<game::PileFlight> },
+    Landed {
+        region: RegionId,
+        flights: Vec<game::PileFlight>,
+    },
 }
 
 /// The piles drawn now: the regions' own, then their halo mirrors.
 #[derive(Resource, Default)]
-pub struct ItemPileRoots(pub BTreeMap<(RegionId, BlockPos), Entity>, pub BTreeMap<(RegionId, BlockPos), Entity>);
+pub struct ItemPileRoots(
+    pub BTreeMap<(RegionId, BlockPos), Entity>,
+    pub BTreeMap<(RegionId, BlockPos), Entity>,
+);
 
 /// A pile's root: `cell` in `region`'s frame; `mirror` for a halo mirror
 /// (the cell is a neighbour's).
@@ -105,7 +129,11 @@ impl ItemPileRoot {
 }
 
 /// `cell` of `region`'s frame as a canonical world cell on `map`.
-pub fn world_cell(map: Option<game::MapExtent>, region: RegionId, cell: BlockPos) -> game::WorldBlockPos {
+pub fn world_cell(
+    map: Option<game::MapExtent>,
+    region: RegionId,
+    cell: BlockPos,
+) -> game::WorldBlockPos {
     game::world_block(map, region, cell)
 }
 
@@ -127,10 +155,20 @@ pub(crate) struct ItemPileAssets {
 impl FromWorld for ItemPileAssets {
     fn from_world(world: &mut World) -> Self {
         let size = ITEM_CUBE_SIZE_M * game::movement::UNITS_PER_METER;
-        let cube = world.resource_mut::<Assets<Mesh>>().add(Cuboid::new(size, size, size));
-        let quad = world.resource_mut::<Assets<Mesh>>().add(Rectangle::new(size, size));
-        let registry = BlockRegistry::from_ron(&crate::blocks::manifest_src()).expect("invalid block manifest");
-        Self { registry, cube, quad, materials: BTreeMap::new() }
+        let cube = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(size, size, size));
+        let quad = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Rectangle::new(size, size));
+        let registry = BlockRegistry::from_ron(&crate::blocks::manifest_src())
+            .expect("invalid block manifest");
+        Self {
+            registry,
+            cube,
+            quad,
+            materials: BTreeMap::new(),
+        }
     }
 }
 
@@ -139,11 +177,20 @@ impl FromWorld for ItemPileAssets {
 /// wasm). Never through the asset server: Bevy is built without its `png`
 /// feature, so a `load("blocks/x.png")` never arrives and a material waiting
 /// on it is never drawn.
-fn texture_for(registry: &BlockRegistry, images: &mut Assets<Image>, item: ItemId) -> Option<Handle<Image>> {
-    let rgba = super::item_icons::texture_path(registry, item).and_then(|p| super::load_block_texture(&p))?;
+fn texture_for(
+    registry: &BlockRegistry,
+    images: &mut Assets<Image>,
+    item: ItemId,
+) -> Option<Handle<Image>> {
+    let rgba = super::item_icons::texture_path(registry, item)
+        .and_then(|p| super::load_block_texture(&p))?;
     let (w, h) = rgba.dimensions();
     let mut image = Image::new(
-        Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         rgba.into_raw(),
         TextureFormat::Rgba8UnormSrgb,
@@ -171,10 +218,16 @@ pub(crate) fn material_for(
         reflectance: 0.0,
         double_sided: true,
         cull_mode: None,
-        alpha_mode: if flat { AlphaMode::Mask(0.5) } else { AlphaMode::Opaque },
+        alpha_mode: if flat {
+            AlphaMode::Mask(0.5)
+        } else {
+            AlphaMode::Opaque
+        },
         ..default()
     });
-    world_assets.materials.insert(item, (material.clone(), flat));
+    world_assets
+        .materials
+        .insert(item, (material.clone(), flat));
     (material, flat)
 }
 
@@ -182,7 +235,11 @@ pub(crate) fn material_for(
 pub fn pile_world_position(frame: &WrapFrame, region: RegionId, cell: BlockPos) -> Vec3 {
     let o = frame.offset(region);
     let b = BLOCK_VOXELS as f32;
-    Vec3::new(o[0] + (cell[0] as f32 + 0.5) * b, o[1] + cell[1] as f32 * b, o[2] + (cell[2] as f32 + 0.5) * b)
+    Vec3::new(
+        o[0] + (cell[0] as f32 + 0.5) * b,
+        o[1] + cell[1] as f32 * b,
+        o[2] + (cell[2] as f32 + 0.5) * b,
+    )
 }
 
 /// The cubes `stacks` are drawn with: running number, offset from the cell's
@@ -202,7 +259,11 @@ pub(crate) fn cube_layout(
             let n = out.len();
             let [ox, oz] = OFFSETS[n % OFFSETS.len()];
             let base = Vec3::new(ox * SPREAD_M * unit, half, oz * SPREAD_M * unit);
-            let mesh = if flat { assets.quad.clone() } else { assets.cube.clone() };
+            let mesh = if flat {
+                assets.quad.clone()
+            } else {
+                assets.cube.clone()
+            };
             out.push((n, base, mesh, material.clone()));
         }
     }
@@ -226,7 +287,10 @@ fn spawn_pile(
         children.push(
             commands
                 .spawn((
-                    ItemCube { base, phase: n as f32 * 1.3 },
+                    ItemCube {
+                        base,
+                        phase: n as f32 * 1.3,
+                    },
                     Mesh3d(mesh),
                     MeshMaterial3d(material),
                     Transform::from_translation(base),
@@ -236,7 +300,11 @@ fn spawn_pile(
     }
     commands
         .spawn((
-            ItemPileRoot { region, cell, mirror },
+            ItemPileRoot {
+                region,
+                cell,
+                mirror,
+            },
             SessionScoped,
             Transform::from_translation(pile_world_position(frame, region, cell)),
             Visibility::default(),
@@ -264,8 +332,10 @@ fn apply_pile_msgs(
             ItemPileMsg::RemoveRegion(region) => {
                 let all: &mut ItemPileRoots = &mut roots;
                 for map in [&mut all.0, &mut all.1] {
-                    let keys: Vec<_> =
-                        map.range((*region, [i32::MIN; 3])..=(*region, [i32::MAX; 3])).map(|(k, _)| *k).collect();
+                    let keys: Vec<_> = map
+                        .range((*region, [i32::MIN; 3])..=(*region, [i32::MAX; 3]))
+                        .map(|(k, _)| *k)
+                        .collect();
                     for k in keys {
                         if let Some(e) = map.remove(&k) {
                             commands.entity(e).despawn();
@@ -281,7 +351,17 @@ fn apply_pile_msgs(
                 commands.entity(old).despawn();
             }
             if let Some(view) = view.as_ref().filter(|v| !v.stacks.is_empty()) {
-                let e = spawn_pile(&mut commands, &mut assets, &mut images, &mut mats, &frame, *region, *cell, mirror, view);
+                let e = spawn_pile(
+                    &mut commands,
+                    &mut assets,
+                    &mut images,
+                    &mut mats,
+                    &frame,
+                    *region,
+                    *cell,
+                    mirror,
+                    view,
+                );
                 map.insert((*region, *cell), e);
             }
         }
@@ -301,9 +381,15 @@ fn animate_cubes(time: Res<Time>, mut cubes: Query<(&ItemCube, &mut Transform)>)
 /// Which halo mirror roots draw: one per (canonical) world cell on `map` no
 /// region here owns (a pile drawn by its owner hides every mirror of it), the
 /// lowest hosting region's (a corner pile is mirrored into up to 3 regions).
-pub fn shown_mirrors(roots: &ItemPileRoots, map: Option<game::MapExtent>) -> std::collections::BTreeSet<(RegionId, BlockPos)> {
-    let owned: std::collections::BTreeSet<game::WorldBlockPos> =
-        roots.0.keys().map(|(r, c)| world_cell(map, *r, *c)).collect();
+pub fn shown_mirrors(
+    roots: &ItemPileRoots,
+    map: Option<game::MapExtent>,
+) -> std::collections::BTreeSet<(RegionId, BlockPos)> {
+    let owned: std::collections::BTreeSet<game::WorldBlockPos> = roots
+        .0
+        .keys()
+        .map(|(r, c)| world_cell(map, *r, *c))
+        .collect();
     let mut drawn: BTreeMap<game::WorldBlockPos, (RegionId, BlockPos)> = BTreeMap::new();
     for &(region, cell) in roots.1.keys() {
         let w = world_cell(map, region, cell);
@@ -324,7 +410,11 @@ fn hide_cut_piles(
     tiles: Res<TileMirror>,
     pile_roots: Res<ItemPileRoots>,
     regions: Option<Res<super::bridge::RegionRoots>>,
-    mut roots: Query<(&ItemPileRoot, &mut Visibility, Option<&super::item_flights::LandingHold>)>,
+    mut roots: Query<(
+        &ItemPileRoot,
+        &mut Visibility,
+        Option<&super::item_flights::LandingHold>,
+    )>,
 ) {
     let cut = camera_cut(&level, &tiles);
     let frame = tiles.frame();
@@ -333,12 +423,22 @@ fn hide_cut_piles(
     for (root, mut vis, hold) in &mut roots {
         let duplicate = root.mirror && !shown.contains(&(root.region, root.cell));
         // A region whose tree the frame moved away from shows none of its piles.
-        let stale = regions.as_ref().is_some_and(|r| r.0.contains_key(&root.region) && !r.drawn(root.region));
+        let stale = regions
+            .as_ref()
+            .is_some_and(|r| r.0.contains_key(&root.region) && !r.drawn(root.region));
         let hide = duplicate
             || stale
             || hold.is_some()
-            || hidden_by_cut(pile_world_position(&frame, root.region, root.cell), cut, home);
-        vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited });
+            || hidden_by_cut(
+                pile_world_position(&frame, root.region, root.cell),
+                cut,
+                home,
+            );
+        vis.set_if_neq(if hide {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        });
     }
 }
 
@@ -354,7 +454,13 @@ impl Plugin for ItemPilesPlugin {
             .init_resource::<TileMirror>()
             .add_systems(
                 Update,
-                (apply_pile_msgs, super::item_flights::start_flights, super::item_flights::fly, animate_cubes, hide_cut_piles)
+                (
+                    apply_pile_msgs,
+                    super::item_flights::start_flights,
+                    super::item_flights::fly,
+                    animate_cubes,
+                    hide_cut_piles,
+                )
                     .chain(),
             )
             .add_session_reset::<super::item_flights::RecentFlights>();
@@ -368,11 +474,18 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, AssetPlugin { file_path: "../../assets".into(), ..default() }, bevy::transform::TransformPlugin))
-            .init_asset::<Mesh>()
-            .init_asset::<Image>()
-            .init_asset::<StandardMaterial>()
-            .add_plugins(ItemPilesPlugin);
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin {
+                file_path: "../../assets".into(),
+                ..default()
+            },
+            bevy::transform::TransformPlugin,
+        ))
+        .init_asset::<Mesh>()
+        .init_asset::<Image>()
+        .init_asset::<StandardMaterial>()
+        .add_plugins(ItemPilesPlugin);
         app
     }
 
@@ -381,7 +494,12 @@ mod tests {
     }
 
     fn view(count: u32) -> PileView {
-        PileView { stacks: vec![ItemStack { item: dirt(), count }] }
+        PileView {
+            stacks: vec![ItemStack {
+                item: dirt(),
+                count,
+            }],
+        }
     }
 
     /// Regression: item piles invisible, seen LIVE 2026-11-05/06 (5a976918 "live: piles spawned at the right place, invisible"; memory bevy-no-png-feature)
@@ -395,9 +513,20 @@ mod tests {
         let stick = ItemId::extra_named("stick").expect("stick item");
         let changes = vec![
             ([0, 0, 0], Some(view(5))),
-            ([2, 0, 0], Some(PileView { stacks: vec![ItemStack { item: stick, count: 3 }] })),
+            (
+                [2, 0, 0],
+                Some(PileView {
+                    stacks: vec![ItemStack {
+                        item: stick,
+                        count: 3,
+                    }],
+                }),
+            ),
         ];
-        app.world_mut().write_message(ItemPileMsg::Set { region: RegionId::new(0, 0), changes });
+        app.world_mut().write_message(ItemPileMsg::Set {
+            region: RegionId::new(0, 0),
+            changes,
+        });
         app.update();
         app.update();
         let mut q = app.world_mut().query::<&MeshMaterial3d<StandardMaterial>>();
@@ -406,8 +535,14 @@ mod tests {
         let mats = app.world().resource::<Assets<StandardMaterial>>();
         let images = app.world().resource::<Assets<Image>>();
         for h in handles {
-            let tex = mats.get(&h).and_then(|m| m.base_color_texture.clone()).expect("cube material has a texture");
-            assert!(images.get(&tex).is_some(), "cube texture must be an Image asset at spawn, not a pending load");
+            let tex = mats
+                .get(&h)
+                .and_then(|m| m.base_color_texture.clone())
+                .expect("cube material has a texture");
+            assert!(
+                images.get(&tex).is_some(),
+                "cube texture must be an Image asset at spawn, not a pending load"
+            );
         }
     }
 }

@@ -80,7 +80,11 @@ fn equal_content_hashes_equal_whatever_the_history() {
     let mut b = cube(4);
     b.set_voxel(IVector::new(200, 0, 0), true);
     assert_eq!(vhash(&a), vhash(&b));
-    let coords: Vec<_> = b.voxels().filter(|v| !v.state.is_empty()).map(|v| v.grid_coords).collect();
+    let coords: Vec<_> = b
+        .voxels()
+        .filter(|v| !v.state.is_empty())
+        .map(|v| v.grid_coords)
+        .collect();
     assert_eq!(vhash(&Voxels::new(Vector::splat(1.0), &coords)), vhash(&b));
 }
 
@@ -93,9 +97,23 @@ fn neighbour_state_merges_change_the_hash() {
     let mut b = cube(2);
     let (ha, hb) = (vhash(&a), vhash(&b));
     a.combine_voxel_states(&mut b, IVector::new(2, 0, 0));
-    assert_ne!(vhash(&a), ha, "combine_voxel_states must refresh self's content hash");
-    assert_ne!(vhash(&b), hb, "combine_voxel_states must refresh other's content hash");
-    let fresh_a = Voxels::new(Vector::splat(1.0), &a.voxels().filter(|v| !v.state.is_empty()).map(|v| v.grid_coords).collect::<Vec<_>>());
+    assert_ne!(
+        vhash(&a),
+        ha,
+        "combine_voxel_states must refresh self's content hash"
+    );
+    assert_ne!(
+        vhash(&b),
+        hb,
+        "combine_voxel_states must refresh other's content hash"
+    );
+    let fresh_a = Voxels::new(
+        Vector::splat(1.0),
+        &a.voxels()
+            .filter(|v| !v.state.is_empty())
+            .map(|v| v.grid_coords)
+            .collect::<Vec<_>>(),
+    );
     assert_ne!(vhash(&a), vhash(&fresh_a), "the neighbour bits are content");
 
     let mut c = cube(2);
@@ -108,8 +126,16 @@ fn neighbour_state_merges_change_the_hash() {
     let hc_edited = vhash(&c);
     assert_ne!(hc_edited, hc);
     c.propagate_voxel_change(&mut d, IVector::new(2, 0, 0), IVector::new(2, 0, 0));
-    assert_ne!(vhash(&d), hd_edited, "propagate_voxel_change must refresh other's content hash");
-    assert_ne!(vhash(&c), hc_edited, "propagate_voxel_change must refresh self's content hash");
+    assert_ne!(
+        vhash(&d),
+        hd_edited,
+        "propagate_voxel_change must refresh other's content hash"
+    );
+    assert_ne!(
+        vhash(&c),
+        hc_edited,
+        "propagate_voxel_change must refresh self's content hash"
+    );
 }
 
 /// Gate: mmo-fork hunk parry voxels.rs:690 leaves in chunk-id order, not hash-map order (native vs wasm32) (3bf6295b)

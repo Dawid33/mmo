@@ -26,7 +26,10 @@ impl Extent {
 
     #[inline]
     fn from_min_and_lub(minimum: UVec3, lub: UVec3) -> Self {
-        Self { minimum, shape: lub.saturating_sub(minimum) }
+        Self {
+            minimum,
+            shape: lub.saturating_sub(minimum),
+        }
     }
 
     /// `min..=max` shrunk by one voxel on every side (room for a 3×3×3
@@ -37,7 +40,10 @@ impl Extent {
         let min = UVec3::from(min).as_ivec3();
         let max = UVec3::from(max).as_ivec3();
         let shape = (max + IVec3::ONE - min).max(IVec3::ZERO);
-        Self::from_min_and_shape((min + IVec3::ONE).as_uvec3(), (shape - IVec3::splat(2)).as_uvec3())
+        Self::from_min_and_shape(
+            (min + IVec3::ONE).as_uvec3(),
+            (shape - IVec3::splat(2)).as_uvec3(),
+        )
     }
 
     #[inline]
@@ -65,7 +71,9 @@ impl Extent {
     /// Every point, z outermost and x innermost.
     pub fn iter3(&self) -> impl Iterator<Item = UVec3> {
         let (min, lub) = (self.minimum, self.least_upper_bound());
-        (min.z..lub.z).flat_map(move |z| (min.y..lub.y).flat_map(move |y| (min.x..lub.x).map(move |x| UVec3::new(x, y, z))))
+        (min.z..lub.z).flat_map(move |z| {
+            (min.y..lub.y).flat_map(move |y| (min.x..lub.x).map(move |x| UVec3::new(x, y, z)))
+        })
     }
 }
 
@@ -74,7 +82,9 @@ impl Add<UVec3> for Extent {
 
     #[inline]
     fn add(self, rhs: UVec3) -> Self {
-        Self { minimum: self.minimum + rhs, shape: self.shape }
+        Self {
+            minimum: self.minimum + rhs,
+            shape: self.shape,
+        }
     }
 }
-

@@ -20,7 +20,10 @@
 use std::collections::BTreeMap;
 
 use crossbeam::channel::Sender;
-use game::{ClientPacket, Credential, HostEndpoint, HostId, MapExtent, ObserverTicket, RegionId, ServerPacket};
+use game::{
+    ClientPacket, Credential, HostEndpoint, HostId, MapExtent, ObserverTicket, RegionId,
+    ServerPacket,
+};
 
 /// How long after an observer connection closed its regions are asked for again,
 /// through the home (which answers with a fresh `RegionElsewhere`), the first time in
@@ -52,7 +55,11 @@ pub const LOGIN_CONN: u32 = 0;
 /// region soon).
 pub fn observer_retry_delay_ms(failures: u32, near: bool) -> u64 {
     let doublings = failures.saturating_sub(1).min(16);
-    let cap = if near { OBSERVER_RETRY_NEAR_MAX_MS } else { OBSERVER_RETRY_MAX_MS };
+    let cap = if near {
+        OBSERVER_RETRY_NEAR_MAX_MS
+    } else {
+        OBSERVER_RETRY_MAX_MS
+    };
     (OBSERVER_RETRY_MS << doublings).min(cap)
 }
 
@@ -147,7 +154,14 @@ impl ConnectionSet {
     /// is learned from `ServerPacket::Host` ([`Self::on_host`]).
     pub fn new(first: ConnHandle) -> Self {
         Self {
-            conns: BTreeMap::from([(LOGIN_CONN, Conn { handle: first, ordinal: None, idle_since: None })]),
+            conns: BTreeMap::from([(
+                LOGIN_CONN,
+                Conn {
+                    handle: first,
+                    ordinal: None,
+                    idle_since: None,
+                },
+            )]),
             next_key: LOGIN_CONN + 1,
             home: LOGIN_CONN,
             region_conn: BTreeMap::new(),
@@ -162,7 +176,13 @@ impl ConnectionSet {
     /// is open (it serves no region until the move makes that host the home), spared by
     /// [`Self::close_idle`] until `until_ms` (session time). `false`: no opener, or the host is
     /// the home's.
-    pub fn open_standby(&mut self, endpoint: &HostEndpoint, ticket: ObserverTicket, opener: Option<&mut dyn ConnOpener>, until_ms: u64) -> bool {
+    pub fn open_standby(
+        &mut self,
+        endpoint: &HostEndpoint,
+        ticket: ObserverTicket,
+        opener: Option<&mut dyn ConnOpener>,
+        until_ms: u64,
+    ) -> bool {
         let ordinal = endpoint.id;
         if self.home_ordinal() == Some(ordinal) {
             return false;
@@ -173,10 +193,22 @@ impl ConnectionSet {
                 let Some(opener) = opener else { return false };
                 let key = self.next_key;
                 self.next_key += 1;
-                log::info!("[client] opening a standby connection to host {ordinal} ahead of a move (connection {key})");
-                let credential = Credential::Observer { client: ticket.client, nonce: ticket.nonce };
+                log::info!(
+                    "[client] opening a standby connection to host {ordinal} ahead of a move (connection {key})"
+                );
+                let credential = Credential::Observer {
+                    client: ticket.client,
+                    nonce: ticket.nonce,
+                };
                 let handle = opener.open(key, endpoint, credential);
-                self.conns.insert(key, Conn { handle, ordinal: Some(ordinal), idle_since: None });
+                self.conns.insert(
+                    key,
+                    Conn {
+                        handle,
+                        ordinal: Some(ordinal),
+                        idle_since: None,
+                    },
+                );
                 key
             }
         };
@@ -232,7 +264,10 @@ impl ConnectionSet {
 
     /// The open connection to host `ordinal`, if any.
     pub fn conn_to(&self, ordinal: HostId) -> Option<u32> {
-        self.conns.iter().find(|(_, c)| c.ordinal == Some(ordinal)).map(|(key, _)| *key)
+        self.conns
+            .iter()
+            .find(|(_, c)| c.ordinal == Some(ordinal))
+            .map(|(key, _)| *key)
     }
 
     /// Every open connection's key.
@@ -242,7 +277,10 @@ impl ConnectionSet {
 
     /// The connection that serves `region` (the home unless another does).
     pub fn connection_of(&self, region: RegionId) -> u32 {
-        self.region_conn.get(&self.key(region)).copied().unwrap_or(self.home)
+        self.region_conn
+            .get(&self.key(region))
+            .copied()
+            .unwrap_or(self.home)
     }
 
     /// Connection `conn`'s `Host` packet named host `ordinal`: the login connection learns
@@ -250,7 +288,9 @@ impl ConnectionSet {
     /// one dialled, or a host another open connection is to): the caller closes it.
     pub fn on_host(&mut self, conn: u32, ordinal: HostId) -> bool {
         let taken = self.conn_to(ordinal).is_some_and(|other| other != conn);
-        let Some(c) = self.conns.get_mut(&conn) else { return false };
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return false;
+        };
         match c.ordinal {
             Some(known) if known == ordinal => true,
             Some(known) => {
@@ -288,7 +328,9 @@ impl ConnectionSet {
             Some(c) => {
                 let _ = c.handle.send.send(packet);
             }
-            None => log::debug!("[client] a packet for connection {conn}, which is closed: dropped"),
+            None => {
+                log::debug!("[client] a packet for connection {conn}, which is closed: dropped")
+            }
         }
     }
 
@@ -326,36 +368,61 @@ impl ConnectionSet {
         let region = self.key(region);
         let ordinal = endpoint.id;
         let Some(home) = self.home_ordinal() else {
-            log::warn!("[client] {region:?} is said to be host {ordinal}'s before the home named itself: ignored");
+            log::warn!(
+                "[client] {region:?} is said to be host {ordinal}'s before the home named itself: ignored"
+            );
             return Named::Unrouted;
         };
         if ordinal == home {
             self.remap_to_home(region);
-            self.route(Outgoing::Conn(self.home, ClientPacket::RequestRegionConnection(region)));
+            self.route(Outgoing::Conn(
+                self.home,
+                ClientPacket::RequestRegionConnection(region),
+            ));
             return Named::Home;
         }
         let key = match self.conn_to(ordinal) {
             Some(key) => key,
             None => {
                 let Some(opener) = opener else {
-                    log::warn!("[client] {region:?} is served by host {ordinal}, which this transport cannot connect to");
+                    log::warn!(
+                        "[client] {region:?} is served by host {ordinal}, which this transport cannot connect to"
+                    );
                     return Named::Unrouted;
                 };
                 let key = self.next_key;
                 self.next_key += 1;
-                log::info!("[client] connecting to host {ordinal} for {region:?} (connection {key})");
-                let credential = Credential::Observer { client: ticket.client, nonce: ticket.nonce };
+                log::info!(
+                    "[client] connecting to host {ordinal} for {region:?} (connection {key})"
+                );
+                let credential = Credential::Observer {
+                    client: ticket.client,
+                    nonce: ticket.nonce,
+                };
                 let handle = opener.open(key, &endpoint, credential);
-                self.conns.insert(key, Conn { handle, ordinal: Some(ordinal), idle_since: None });
+                self.conns.insert(
+                    key,
+                    Conn {
+                        handle,
+                        ordinal: Some(ordinal),
+                        idle_since: None,
+                    },
+                );
                 key
             }
         };
         let old = self.region_conn.insert(region, key);
         if let Some(old) = old.filter(|old| *old != key && *old != self.home) {
             // It moved hosts: the one that served it lets it go.
-            self.route(Outgoing::Conn(old, ClientPacket::ReleaseRegionConnection(region)));
+            self.route(Outgoing::Conn(
+                old,
+                ClientPacket::ReleaseRegionConnection(region),
+            ));
         }
-        self.route(Outgoing::Conn(key, ClientPacket::RequestRegionConnection(region)));
+        self.route(Outgoing::Conn(
+            key,
+            ClientPacket::RequestRegionConnection(region),
+        ));
         Named::Observer(key)
     }
 
@@ -365,8 +432,15 @@ impl ConnectionSet {
     fn remap_to_home(&mut self, region: RegionId) {
         let region = self.key(region);
         let home = self.home;
-        if let Some(old) = self.region_conn.insert(region, home).filter(|old| *old != home) {
-            self.route(Outgoing::Conn(old, ClientPacket::ReleaseRegionConnection(region)));
+        if let Some(old) = self
+            .region_conn
+            .insert(region, home)
+            .filter(|old| *old != home)
+        {
+            self.route(Outgoing::Conn(
+                old,
+                ClientPacket::ReleaseRegionConnection(region),
+            ));
         }
     }
 
@@ -429,8 +503,12 @@ impl ConnectionSet {
         if conn == self.home {
             return Closed::Home;
         }
-        let regions: Vec<RegionId> =
-            self.region_conn.iter().filter(|(_, c)| **c == conn).map(|(region, _)| *region).collect();
+        let regions: Vec<RegionId> = self
+            .region_conn
+            .iter()
+            .filter(|(_, c)| **c == conn)
+            .map(|(region, _)| *region)
+            .collect();
         for region in &regions {
             self.region_conn.remove(region);
         }
@@ -450,7 +528,10 @@ impl ConnectionSet {
         let mut closed = Vec::new();
         self.standby.retain(|_, until| now_ms < *until);
         for (key, conn) in self.conns.iter_mut() {
-            if *key == self.home || self.region_conn.values().any(|c| c == key) || self.standby.contains_key(key) {
+            if *key == self.home
+                || self.region_conn.values().any(|c| c == key)
+                || self.standby.contains_key(key)
+            {
                 conn.idle_since = None;
                 continue;
             }
@@ -466,4 +547,3 @@ impl ConnectionSet {
         closed
     }
 }
-

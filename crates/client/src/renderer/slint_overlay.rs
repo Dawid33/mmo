@@ -25,9 +25,9 @@ use std::rc::Rc;
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
 use bevy::image::ImageSampler;
+use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
-use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -41,25 +41,27 @@ use slint_ui::wheel::{self, WheelInput, WheelPhase};
 use slint_ui::{GameUi, HudConfig, HudUi, Overlay};
 use worldgen::tile_map::tile_info_lines;
 
+use super::ClientRequests;
+use super::arrival_tabs;
 use super::bridge::{LocalBody, SimEntity, SimKind};
-use super::commander::designate::{DesignateState, DragReadout, Tool, TOOL_KEYS};
+use super::commander::CommanderCamera;
+use super::commander::adventure::ClientPlayMode;
+use super::commander::designate::{DesignateState, DragReadout, TOOL_KEYS, Tool};
+use super::commander::follow::{Follow, FollowTarget};
 use super::commander::height::HeightGrid;
-use super::commander::level::{focus_surface, surface_level, WorkingLevel};
+use super::commander::level::{WorkingLevel, focus_surface, surface_level};
 use super::commander::minimap;
 use super::commander::selection::{Selection, SelectionBand};
 use super::commander::tiles::TileMirror;
-use super::commander::adventure::ClientPlayMode;
-use super::commander::follow::{Follow, FollowTarget};
-use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
-use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
-use super::hud::{crosshair_visible, HudStatus};
-use super::arrival_tabs;
 use super::history_view::{self, ArrivalTab, HistoryView};
+use super::hud::{HudStatus, crosshair_visible};
+use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
 use super::world_map::WorldMapState;
-use super::ClientRequests;
 use crate::instance::ClientRequest;
-use crate::session::{arrival_map_shown, frontend_owns, world_systems_enabled, AppState, InPlay, SessionResetExt};
+use crate::session::{
+    AppState, InPlay, SessionResetExt, arrival_map_shown, frontend_owns, world_systems_enabled,
+};
 
 /// Closes the world map if it is open, else opens / closes the menu —
 /// unless a designation is in progress, which it cancels instead.
@@ -143,7 +145,9 @@ fn frontend_hides(
     if mode == FrontendHide::Always && full_map_open {
         return true;
     }
-    let Some(state) = state.map(|s| *s.get()) else { return false };
+    let Some(state) = state.map(|s| *s.get()) else {
+        return false;
+    };
     let in_play = in_play.is_some_and(|e| e.0);
     let map_arrived = world_map.is_some_and(|m| m.map.is_some());
     match mode {
@@ -158,7 +162,10 @@ fn frontend_hides(
 /// `VOXEL_UI_SCALE`, if set to a positive number: the UI scale at start,
 /// whatever the saved setting says (a slider moved afterwards still applies).
 pub fn ui_scale_pinned_by_env() -> Option<f32> {
-    std::env::var("VOXEL_UI_SCALE").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|s| *s > 0.0)
+    std::env::var("VOXEL_UI_SCALE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|s| *s > 0.0)
 }
 
 /// What a Slint callback asked the client to do.
@@ -237,44 +244,71 @@ impl Screens {
     /// then a stub window, then the map.
     pub fn escape(self) -> Self {
         if self.wheel {
-            Self { wheel: false, ..self }
+            Self {
+                wheel: false,
+                ..self
+            }
         } else if self.settings || self.encyclopedia {
-            Self { settings: false, encyclopedia: false, ..self }
+            Self {
+                settings: false,
+                encyclopedia: false,
+                ..self
+            }
         } else if self.map {
             Self { map: false, ..self }
         } else {
-            Self { menu: !self.menu, ..self }
+            Self {
+                menu: !self.menu,
+                ..self
+            }
         }
     }
 
     /// [`MAP_KEY`].
     pub fn toggle_map(self) -> Self {
         if self.map {
-            Self { map: false, wheel: false, ..self }
+            Self {
+                map: false,
+                wheel: false,
+                ..self
+            }
         } else {
             Self::open_map()
         }
     }
 
     pub fn open_map() -> Self {
-        Self { map: true, ..Self::default() }
+        Self {
+            map: true,
+            ..Self::default()
+        }
     }
 
     /// The menu column's and the Esc menu's Settings button.
     pub fn open_settings() -> Self {
-        Self { settings: true, ..Self::default() }
+        Self {
+            settings: true,
+            ..Self::default()
+        }
     }
 
     /// The menu column's Encyclopedia button.
     pub fn open_encyclopedia() -> Self {
-        Self { encyclopedia: true, ..Self::default() }
+        Self {
+            encyclopedia: true,
+            ..Self::default()
+        }
     }
 
     /// [`MENU_KEY`] with the arrival map `modal` (not in play yet): Esc
     /// only swaps the map for the Esc menu (Main menu only) and back.
     pub fn escape_in(self, modal: bool) -> Self {
         if modal {
-            Self { menu: !self.menu, map: self.menu, ..Self::default() }
+            Self {
+                menu: !self.menu,
+                map: self.menu,
+                ..Self::default()
+            }
         } else {
             self.escape()
         }
@@ -283,18 +317,18 @@ impl Screens {
     /// [`MAP_KEY`] with the arrival map `modal`: nothing (the map is up
     /// whenever the Esc menu is not).
     pub fn toggle_map_in(self, modal: bool) -> Self {
-        if modal {
-            self
-        } else {
-            self.toggle_map()
-        }
+        if modal { self } else { self.toggle_map() }
     }
 
     /// The arrival map stays up while `modal` unless the Esc menu is over it:
     /// Close and the rest leave it open.
     pub fn held(self, modal: bool) -> Self {
         if modal && !self.menu {
-            Self { map: true, wheel: false, ..self }
+            Self {
+                map: true,
+                wheel: false,
+                ..self
+            }
         } else {
             self
         }
@@ -314,7 +348,11 @@ struct InventoryClicks(Rc<RefCell<Vec<(bool, i32, bool)>>>);
 /// the player's are `Player(i)` (hotbar `0..9`, main grid `9..36`).
 pub fn slot_ref(container: bool, index: i32) -> Option<game::SlotRef> {
     let i = u8::try_from(index).ok()?;
-    Some(if container { game::SlotRef::Container(i) } else { game::SlotRef::Player(i) })
+    Some(if container {
+        game::SlotRef::Container(i)
+    } else {
+        game::SlotRef::Player(i)
+    })
 }
 
 /// Filled by the game UI's callbacks during event dispatch (`!Send`, a
@@ -352,7 +390,14 @@ pub struct SlintLayerPlugin<C> {
 impl<C> SlintLayerPlugin<C> {
     /// `make` is the component's generated `new` (e.g. `GameUi::new`).
     pub fn new(make: fn() -> Result<C, slint_ui::slint::PlatformError>) -> Self {
-        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, hidden_by_frontend: FrontendHide::Never, session_scoped: false }
+        Self {
+            make,
+            init: |_, _| {},
+            order: GAME_LAYER_ORDER,
+            passthrough: false,
+            hidden_by_frontend: FrontendHide::Never,
+            session_scoped: false,
+        }
     }
 
     /// Draw order among the layers (higher on top); [`GAME_LAYER_ORDER`] by default.
@@ -399,8 +444,13 @@ impl<C> SlintLayerPlugin<C> {
 
 impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
     fn build(&self, app: &mut App) {
-        let (make, init, order, passthrough, hidden) =
-            (self.make, self.init, self.order, self.passthrough, self.hidden_by_frontend);
+        let (make, init, order, passthrough, hidden) = (
+            self.make,
+            self.init,
+            self.order,
+            self.passthrough,
+            self.hidden_by_frontend,
+        );
         if !app.world().contains_resource::<OverlayScale>() {
             app.insert_resource(OverlayScale(ui_scale_pinned_by_env().unwrap_or(UI_SCALE)));
         }
@@ -426,11 +476,19 @@ impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
 /// map open, the map, selection, tool, level, wheel, band, minimap…) is back
 /// at its default without listing them. The layer's texture and order stay.
 fn rebuild_slint_layer<C: ComponentHandle + 'static>(world: &mut World) {
-    let Some((make, init)) = world.get_non_send::<SlintLayer<C>>().map(|l| (l.make, l.init)) else { return };
+    let Some((make, init)) = world
+        .get_non_send::<SlintLayer<C>>()
+        .map(|l| (l.make, l.init))
+    else {
+        return;
+    };
     let overlay = match Overlay::with(make) {
         Ok(overlay) => overlay,
         Err(e) => {
-            error!("[slint] could not rebuild {}: {e}", std::any::type_name::<C>());
+            error!(
+                "[slint] could not rebuild {}: {e}",
+                std::any::type_name::<C>()
+            );
             return;
         }
     };
@@ -471,7 +529,6 @@ impl<C: 'static> SlintLayer<C> {
     pub fn ui_scale(&self) -> f32 {
         self.ui_scale
     }
-
 
     /// The texture the layer is drawn into.
     pub fn target(&self) -> &Handle<Image> {
@@ -522,29 +579,32 @@ pub struct SlintOverlayPlugin;
 impl Plugin for SlintOverlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(
-            SlintLayerPlugin::new(GameUi::new).shown_on_arrival_map().session_scoped().with_init(connect_game_ui),
+            SlintLayerPlugin::new(GameUi::new)
+                .shown_on_arrival_map()
+                .session_scoped()
+                .with_init(connect_game_ui),
         )
-            .add_systems(
-                Update,
-                (
-                    sync_inventory_screen.before(menu_keys),
-                    inventory_clicks,
-                    // Before every commander input system (the chain starts
-                    // at `minimap_pointer`, `designate_keys` is in it), so
-                    // `CursorPolicy::ui_modal` holds this frame and one Esc
-                    // press does one thing.
-                    menu_keys.before(minimap::minimap_pointer),
-                    apply_ui_actions.before(minimap::minimap_pointer),
-                    apply_adventure_result.before(minimap::minimap_pointer),
-                    arrival_map.before(minimap::minimap_pointer),
-                    // Also before the commander: the clicks the open wheel
-                    // takes must not reach the world.
-                    tool_wheel.before(minimap::minimap_pointer),
-                    push_ui_state,
-                )
-                    .chain()
-                    .run_if(world_systems_enabled()),
-            );
+        .add_systems(
+            Update,
+            (
+                sync_inventory_screen.before(menu_keys),
+                inventory_clicks,
+                // Before every commander input system (the chain starts
+                // at `minimap_pointer`, `designate_keys` is in it), so
+                // `CursorPolicy::ui_modal` holds this frame and one Esc
+                // press does one thing.
+                menu_keys.before(minimap::minimap_pointer),
+                apply_ui_actions.before(minimap::minimap_pointer),
+                apply_adventure_result.before(minimap::minimap_pointer),
+                arrival_map.before(minimap::minimap_pointer),
+                // Also before the commander: the clicks the open wheel
+                // takes must not reach the world.
+                tool_wheel.before(minimap::minimap_pointer),
+                push_ui_state,
+            )
+                .chain()
+                .run_if(world_systems_enabled()),
+        );
     }
 }
 
@@ -571,7 +631,9 @@ pub fn drain_ui_updates(
     mut cursor_policy: ResMut<CursorPolicy>,
     mut play_mode: Option<ResMut<ClientPlayMode>>,
 ) {
-    let Some(receiver) = updates.0.as_ref() else { return };
+    let Some(receiver) = updates.0.as_ref() else {
+        return;
+    };
     while let Ok(update) = receiver.try_recv() {
         match update {
             game::UiUpdate::Hotbar(hotbar) => items.hotbar = hotbar,
@@ -608,8 +670,16 @@ impl Plugin for HudLayerPlugin {
 
 fn check_hud_config(ui: &HudUi, _: &mut World) {
     let config = ui.global::<HudConfig>();
-    debug_assert_eq!(config.get_minimap_size(), minimap::MINIMAP_SIZE_PX, "HudConfig.minimap-size");
-    debug_assert_eq!(config.get_minimap_margin(), minimap::MINIMAP_MARGIN_PX, "HudConfig.minimap-margin");
+    debug_assert_eq!(
+        config.get_minimap_size(),
+        minimap::MINIMAP_SIZE_PX,
+        "HudConfig.minimap-size"
+    );
+    debug_assert_eq!(
+        config.get_minimap_margin(),
+        minimap::MINIMAP_MARGIN_PX,
+        "HudConfig.minimap-margin"
+    );
 }
 
 /// Client state → HUD properties, only where it changed.
@@ -629,14 +699,16 @@ fn push_hud_state(
     let ui = hud.overlay.ui();
 
     // The hotbar strip and the mining bar: Adventure first person only.
-    let hotbar_on = adventure.is_some_and(|m| m.adventure()) && first_person.as_ref().is_some_and(|f| f.on);
+    let hotbar_on =
+        adventure.is_some_and(|m| m.adventure()) && first_person.as_ref().is_some_and(|f| f.on);
     let third_person = first_person.as_ref().and_then(|f| f.body_view())
         == Some(super::commander::first_person::BodyView::Third);
     let hotbar_shown = hotbar_shown.get();
     match items {
         Some(items) if hotbar_on => {
             if hotbar_shown.as_ref() != Some(&items.hotbar) {
-                let slots: Vec<slint_ui::ItemSlot> = items.hotbar.slots.iter().map(item_slot).collect();
+                let slots: Vec<slint_ui::ItemSlot> =
+                    items.hotbar.slots.iter().map(item_slot).collect();
                 ui.set_hotbar(ModelRc::new(VecModel::from(slots)));
                 ui.set_hotbar_selected(items.hotbar.selected as i32);
                 *hotbar_shown = Some(items.hotbar.clone());
@@ -647,7 +719,9 @@ fn push_hud_state(
             }
         }
         _ if hotbar_shown.is_some() => {
-            ui.set_hotbar(ModelRc::new(VecModel::from(Vec::<slint_ui::ItemSlot>::new())));
+            ui.set_hotbar(ModelRc::new(VecModel::from(
+                Vec::<slint_ui::ItemSlot>::new(),
+            )));
             ui.set_mining_progress(0.0);
             *hotbar_shown = None;
         }
@@ -662,7 +736,11 @@ fn push_hud_state(
     }
     if let Some(mut pixels) = minimap_pixels {
         let image = |data: &[[u8; 4]], edge: u32| {
-            SlintImage::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(data.as_flattened(), edge, edge))
+            SlintImage::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                data.as_flattened(),
+                edge,
+                edge,
+            ))
         };
         if pixels.overlay_dirty {
             ui.set_minimap_overlay(image(&pixels.overlay, minimap::OVERLAY_PX));
@@ -670,7 +748,10 @@ fn push_hud_state(
         }
     }
 
-    let grab = cursor.iter().next().map_or(CursorGrabMode::None, |c| c.grab_mode);
+    let grab = cursor
+        .iter()
+        .next()
+        .map_or(CursorGrabMode::None, |c| c.grab_mode);
     let crosshair = crosshair_visible(grab, policy.is_some_and(|p| p.orbit), third_person);
     if ui.get_crosshair_visible() != crosshair {
         ui.set_crosshair_visible(crosshair);
@@ -711,12 +792,27 @@ fn inventory_clicks(
 ) {
     let Some(clicks) = clicks else { return };
     let pressed: Vec<_> = clicks.0.borrow_mut().drain(..).collect();
-    let (Some(Some(player)), Some(game)) = (player.map(|p| p.0), game) else { return };
+    let (Some(Some(player)), Some(game)) = (player.map(|p| p.0), game) else {
+        return;
+    };
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     for (container, index, right) in pressed {
-        let Some(slot) = slot_ref(container, index) else { continue };
-        let button = if right { game::ClickButton::Right } else { game::ClickButton::Left };
-        let _ = game.0.send(game::GameEventKind::UiAction(player, game::UiAction::Click { slot, button, shift }));
+        let Some(slot) = slot_ref(container, index) else {
+            continue;
+        };
+        let button = if right {
+            game::ClickButton::Right
+        } else {
+            game::ClickButton::Left
+        };
+        let _ = game.0.send(game::GameEventKind::UiAction(
+            player,
+            game::UiAction::Click {
+                slot,
+                button,
+                shift,
+            },
+        ));
     }
 }
 
@@ -725,16 +821,23 @@ pub fn item_slot(slot: &Option<game::SlotView>) -> slint_ui::ItemSlot {
     match slot {
         Some(s) => slint_ui::ItemSlot {
             filled: true,
-            count: if s.count > 1 { s.count.to_string().into() } else { SharedString::default() },
+            count: if s.count > 1 {
+                s.count.to_string().into()
+            } else {
+                SharedString::default()
+            },
             icon: super::item_icons::icon(game::ItemId(s.icon.0 as u16)),
-            name: super::look_target::display_name(game::item_name(game::ItemId(s.icon.0 as u16))).into(),
+            name: super::look_target::display_name(game::item_name(game::ItemId(s.icon.0 as u16)))
+                .into(),
         },
         None => slint_ui::ItemSlot::default(),
     }
 }
 
 fn item_model(slots: &[Option<game::SlotView>]) -> ModelRc<slint_ui::ItemSlot> {
-    ModelRc::new(VecModel::from(slots.iter().map(item_slot).collect::<Vec<_>>()))
+    ModelRc::new(VecModel::from(
+        slots.iter().map(item_slot).collect::<Vec<_>>(),
+    ))
 }
 
 /// The sim's inventory screen → the game UI: open state, slot models (only
@@ -825,7 +928,9 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     super::map::full::connect(ui, world);
     let clicks = Rc::new(RefCell::new(Vec::new()));
     let queue = clicks.clone();
-    ui.on_inventory_slot_pressed(move |container, index, right| queue.borrow_mut().push((container, index, right)));
+    ui.on_inventory_slot_pressed(move |container, index, right| {
+        queue.borrow_mut().push((container, index, right))
+    });
     world.insert_non_send(InventoryClicks(clicks));
     world.insert_non_send(GameUiActions(actions));
     super::chat::ui::connect(ui, world);
@@ -851,7 +956,11 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     init(overlay.ui(), world);
 
     let mut image = Image::new_fill(
-        Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         &[0, 0, 0, 0],
         TextureFormat::Rgba8UnormSrgb,
@@ -859,7 +968,10 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     );
     image.sampler = ImageSampler::nearest();
     let target = world.resource_mut::<Assets<Image>>().add(image);
-    world.get_resource_or_init::<SlintLayerTextures>().0.push((order, target.clone()));
+    world
+        .get_resource_or_init::<SlintLayerTextures>()
+        .0
+        .push((order, target.clone()));
     world.insert_non_send(SlintLayer {
         overlay,
         make,
@@ -933,16 +1045,26 @@ fn slint_input<C: ComponentHandle + 'static>(
 ) {
     let pointer = pointer.get();
     let Some(mut slint) = slint else { return };
-    let Ok((window, cursor_options)) = window.single() else { return };
+    let Ok((window, cursor_options)) = window.single() else {
+        return;
+    };
     slint.ui_scale = fitted_ui_scale(
         wish.map_or(UI_SCALE, |w| w.0),
         (window.physical_width(), window.physical_height()),
         window.scale_factor(),
     );
     let scale = window.scale_factor() * slint.ui_scale;
-    slint.overlay.resize(window.physical_width(), window.physical_height(), scale);
+    slint
+        .overlay
+        .resize(window.physical_width(), window.physical_height(), scale);
     let full_map_open = full_map.is_some_and(|m| m.0);
-    if frontend_hides(slint.hidden_by_frontend, state.as_deref(), in_play.as_deref(), world_map.as_deref(), full_map_open) {
+    if frontend_hides(
+        slint.hidden_by_frontend,
+        state.as_deref(),
+        in_play.as_deref(),
+        world_map.as_deref(),
+        full_map_open,
+    ) {
         // The frontend has the screen: nothing of ours is under the pointer.
         buttons.clear();
         wheel.clear();
@@ -978,11 +1100,17 @@ fn slint_input<C: ComponentHandle + 'static>(
     // tree; turning the camera in a debug build fell from ~160 to 11-70 fps
     // with 84 % of the main thread in Slint (2026-11-19 perf capture).
     let grabbed = cursor_options.grab_mode != bevy::window::CursorGrabMode::None;
-    let cursor = if grabbed { None } else { window.cursor_position() };
+    let cursor = if grabbed {
+        None
+    } else {
+        window.cursor_position()
+    };
     let ui_pos = cursor.map(|c| c / slint.ui_scale);
     if ui_pos != pointer.last {
         overlay.dispatch(match ui_pos {
-            Some(p) => WindowEvent::PointerMoved { position: LogicalPosition::new(p.x, p.y) },
+            Some(p) => WindowEvent::PointerMoved {
+                position: LogicalPosition::new(p.x, p.y),
+            },
             None => WindowEvent::PointerExited,
         });
         pointer.last = ui_pos;
@@ -1017,7 +1145,9 @@ fn slint_input<C: ComponentHandle + 'static>(
         pointer.captured = false;
     }
     for event in wheel.read() {
-        let (Some(p), true) = (ui_pos, over_ui) else { continue };
+        let (Some(p), true) = (ui_pos, over_ui) else {
+            continue;
+        };
         let px = match event.unit {
             MouseScrollUnit::Line => WHEEL_LINE_PX,
             MouseScrollUnit::Pixel => 1.0,
@@ -1042,7 +1172,9 @@ fn slint_input<C: ComponentHandle + 'static>(
         if !ui_has_keys {
             continue;
         }
-        let Some(text) = key_text(&event.logical_key) else { continue };
+        let Some(text) = key_text(&event.logical_key) else {
+            continue;
+        };
         overlay.dispatch(match (event.state, event.repeat) {
             (ButtonState::Pressed, false) => WindowEvent::KeyPressed { text },
             (ButtonState::Pressed, true) => WindowEvent::KeyPressRepeated { text },
@@ -1095,7 +1227,10 @@ pub fn site_color(civ: game::history::CivId) -> slint_ui::slint::Color {
 /// "Site: Name (civ), 12 dwarves" for the selected tile.
 pub fn site_line(site: &game::SiteMarker, civ_name: &str) -> String {
     let abandoned = if site.abandoned { ", abandoned" } else { "" };
-    format!("Site: {} ({civ_name}), {} dwarves{abandoned}", site.name, site.population)
+    format!(
+        "Site: {} ({civ_name}), {} dwarves{abandoned}",
+        site.name, site.population
+    )
 }
 
 /// Show `to`. Keeps `CursorPolicy::ui_modal` in step (its only writer):
@@ -1152,7 +1287,10 @@ fn menu_keys(
     status: Res<HudStatus>,
     in_play: Option<Res<InPlay>>,
     items: Res<HudItems>,
-    (player, game): (Option<Res<super::LocalPlayer>>, Option<Res<super::GameEvents>>),
+    (player, game): (
+        Option<Res<super::LocalPlayer>>,
+        Option<Res<super::GameEvents>>,
+    ),
 ) {
     let Some(slint) = slint else { return };
     // Esc closes the inventory: the sim owns it, so ask the sim to. Close,
@@ -1160,7 +1298,10 @@ fn menu_keys(
     // would reopen a screen just closed.
     if items.inventory.open && keys.just_pressed(MENU_KEY) {
         if let (Some(Some(player)), Some(game)) = (player.map(|p| p.0), game) {
-            let _ = game.0.send(game::GameEventKind::UiAction(player, game::UiAction::CloseInventory));
+            let _ = game.0.send(game::GameEventKind::UiAction(
+                player,
+                game::UiAction::CloseInventory,
+            ));
         }
         keys.clear_just_pressed(MENU_KEY);
         return;
@@ -1190,7 +1331,14 @@ fn menu_keys(
         to = to.toggle_map_in(modal);
     }
     let in_play = in_play.is_none_or(|e| e.0);
-    set_screens(ui, to.held(modal), &mut world_map, status.home_region, policy.as_mut(), in_play);
+    set_screens(
+        ui,
+        to.held(modal),
+        &mut world_map,
+        status.home_region,
+        policy.as_mut(),
+        in_play,
+    );
 }
 
 /// The arrival map: while not in play it is modal (`map-modal`) and opened
@@ -1219,7 +1367,14 @@ fn arrival_map(
         to.map = false; // in play: the world takes the screen
     }
     *was_modal = modal;
-    set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), !not_in_play);
+    set_screens(
+        ui,
+        to,
+        &mut world_map,
+        status.home_region,
+        policy.as_mut(),
+        !not_in_play,
+    );
 }
 
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
@@ -1240,7 +1395,9 @@ fn apply_ui_actions(
     mut in_play: Option<ResMut<InPlay>>,
     mut history: ResMut<HistoryView>,
 ) {
-    let (Some(actions), Some(slint)) = (actions, slint) else { return };
+    let (Some(actions), Some(slint)) = (actions, slint) else {
+        return;
+    };
     let ui = slint.overlay.ui();
     for action in actions.0.borrow_mut().drain(..) {
         let is_in_play = in_play.as_ref().is_none_or(|e| e.0);
@@ -1263,19 +1420,32 @@ fn apply_ui_actions(
                 }
             }
             UiAction::ToggleFollow => {
-                let (Some(follow), Some(selection)) = (follow.as_mut(), selection.as_ref()) else { continue };
+                let (Some(follow), Some(selection)) = (follow.as_mut(), selection.as_ref()) else {
+                    continue;
+                };
                 if follow.0.is_some() {
                     follow.0 = None;
-                } else if let (1, Some(&(region, key))) = (selection.0.len(), selection.0.iter().next()) {
-                    let is_local = local_body.iter().any(|s| s.region == region && s.key == key);
-                    follow.0 = Some(if is_local { FollowTarget::LocalPlayer } else { FollowTarget::Entity(region, key) });
+                } else if let (1, Some(&(region, key))) =
+                    (selection.0.len(), selection.0.iter().next())
+                {
+                    let is_local = local_body
+                        .iter()
+                        .any(|s| s.region == region && s.key == key);
+                    follow.0 = Some(if is_local {
+                        FollowTarget::LocalPlayer
+                    } else {
+                        FollowTarget::Entity(region, key)
+                    });
                 }
             }
             UiAction::EndAdventure => {
                 if history.adventuring.is_none() || history.adventure_pending {
                     continue;
                 }
-                if !requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::EndAdventure).is_ok()) {
+                if !requests
+                    .as_ref()
+                    .is_some_and(|r| r.0.send(ClientRequest::EndAdventure).is_ok())
+                {
                     warn!("[adventure] end not sent: no game thread");
                     continue;
                 }
@@ -1298,21 +1468,32 @@ fn apply_ui_actions(
                     history.tab = tab;
                 }
                 // The first visit to Legends asks for the newest page.
-                let unasked = history.legends.pending.is_none() && history.legends.lines.is_empty() && history.legends.total == 0;
+                let unasked = history.legends.pending.is_none()
+                    && history.legends.lines.is_empty()
+                    && history.legends.total == 0;
                 if tab == ArrivalTab::Legends && unasked {
                     let filter = history.legends.filter.clone();
                     send_legends_query(requests.as_deref(), &mut history, Some(filter));
                 }
             }
             UiAction::AdventurePickCiv(i) => {
-                if let Some(civ) = arrival_tabs::adventure_civ_at(&history.sites, &history.civs, i) {
+                if let Some(civ) = arrival_tabs::adventure_civ_at(&history.sites, &history.civs, i)
+                {
                     history.adventure.pick_civ(civ);
                 }
             }
             UiAction::AdventurePickSite(i) => {
-                let Some(site) = arrival_tabs::adventure_site_at(&history.adventure, &history.sites, i) else { continue };
+                let Some(site) =
+                    arrival_tabs::adventure_site_at(&history.adventure, &history.sites, i)
+                else {
+                    continue;
+                };
                 history.adventure.pick_site(site.site);
-                if let Some(tile) = world_map.map.as_ref().and_then(|m| map_tile(m, site.region)) {
+                if let Some(tile) = world_map
+                    .map
+                    .as_ref()
+                    .and_then(|m| map_tile(m, site.region))
+                {
                     arrival_tabs::select_map_tile(ui, tile);
                 }
             }
@@ -1320,8 +1501,13 @@ fn apply_ui_actions(
                 if history.adventure_pending {
                     continue;
                 }
-                let Some(site) = history.adventure.site else { continue };
-                if requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::StartAdventure(site)).is_ok()) {
+                let Some(site) = history.adventure.site else {
+                    continue;
+                };
+                if requests
+                    .as_ref()
+                    .is_some_and(|r| r.0.send(ClientRequest::StartAdventure(site)).is_ok())
+                {
                     // A stale result must never drive the UI.
                     history.adventure_result = None;
                     history.adventure_refusal = None;
@@ -1332,9 +1518,17 @@ fn apply_ui_actions(
             }
             UiAction::LegendsPickFilter(i) => {
                 let entries = arrival_tabs::legends_filter_entries(&history.civs, &history.sites);
-                let Some(entry) = usize::try_from(i).ok().and_then(|i| entries.into_iter().nth(i)) else { continue };
+                let Some(entry) = usize::try_from(i)
+                    .ok()
+                    .and_then(|i| entries.into_iter().nth(i))
+                else {
+                    continue;
+                };
                 if let game::history::LegendsFilter::Site(site) = entry.filter {
-                    let tile = world_map.map.as_ref().and_then(|m| arrival_tabs::site_tile(m, &history.sites, site));
+                    let tile = world_map
+                        .map
+                        .as_ref()
+                        .and_then(|m| arrival_tabs::site_tile(m, &history.sites, site));
                     if let Some(tile) = tile {
                         arrival_tabs::select_map_tile(ui, tile);
                     }
@@ -1349,9 +1543,16 @@ fn apply_ui_actions(
                 }
             }
             UiAction::LegendsLine(i) => {
-                let line = usize::try_from(i).ok().and_then(|i| history.legends.lines.get(i));
-                let Some(site) = line.and_then(arrival_tabs::legends_line_site) else { continue };
-                let tile = world_map.map.as_ref().and_then(|m| arrival_tabs::site_tile(m, &history.sites, site));
+                let line = usize::try_from(i)
+                    .ok()
+                    .and_then(|i| history.legends.lines.get(i));
+                let Some(site) = line.and_then(arrival_tabs::legends_line_site) else {
+                    continue;
+                };
+                let tile = world_map
+                    .map
+                    .as_ref()
+                    .and_then(|m| arrival_tabs::site_tile(m, &history.sites, site));
                 if let Some(tile) = tile {
                     arrival_tabs::select_map_tile(ui, tile);
                 }
@@ -1371,8 +1572,13 @@ fn apply_ui_actions(
                 if history.tab != ArrivalTab::Adventure {
                     continue;
                 }
-                let region = world_map.map.as_ref().and_then(|m| tile_region(m, col, row));
-                let site = region.and_then(|rc| arrival_tabs::adventure_site_in(&history.sites, rc)).map(|s| (s.civ, s.site));
+                let region = world_map
+                    .map
+                    .as_ref()
+                    .and_then(|m| tile_region(m, col, row));
+                let site = region
+                    .and_then(|rc| arrival_tabs::adventure_site_in(&history.sites, rc))
+                    .map(|s| (s.civ, s.site));
                 if let Some((civ, site)) = site {
                     history.adventure.pick_civ(civ);
                     history.adventure.pick_site(site);
@@ -1380,7 +1586,14 @@ fn apply_ui_actions(
             }
         }
         let modal = !is_in_play && world_map.map.is_some();
-        set_screens(ui, to.held(modal), &mut world_map, status.home_region, policy.as_mut(), is_in_play);
+        set_screens(
+            ui,
+            to.held(modal),
+            &mut world_map,
+            status.home_region,
+            policy.as_mut(),
+            is_in_play,
+        );
     }
 }
 
@@ -1421,7 +1634,9 @@ fn apply_adventure_result(
     if history.adventure_result.is_none() {
         return;
     }
-    let Some(result) = history.adventure_result.take() else { return };
+    let Some(result) = history.adventure_result.take() else {
+        return;
+    };
     history.adventure_pending = false;
     match result {
         Ok(site) => {
@@ -1435,7 +1650,14 @@ fn apply_adventure_result(
             let ui = slint.overlay.ui();
             let mut to = Screens::of(ui);
             to.map = false;
-            set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), true);
+            set_screens(
+                ui,
+                to,
+                &mut world_map,
+                status.home_region,
+                policy.as_mut(),
+                true,
+            );
         }
         Err(why) => history.adventure_refusal = Some((why, time.elapsed_secs())),
     }
@@ -1457,7 +1679,10 @@ fn selection_lines(kinds: impl IntoIterator<Item = game::EntityKind>) -> Vec<Str
     for kind in kinds {
         *counts.entry(kind_label(kind)).or_default() += 1;
     }
-    counts.into_iter().map(|(label, n)| format!("{label} ×{n}")).collect()
+    counts
+        .into_iter()
+        .map(|(label, n)| format!("{label} ×{n}"))
+        .collect()
 }
 
 /// What a tool wheel wedge asked for, applied by [`apply_toolbar_action`].
@@ -1471,7 +1696,10 @@ pub enum ToolbarAction {
 /// Index `index` in [`TOOL_KEYS`] order; -1 (or any index without a tool)
 /// puts the tool down.
 pub fn tool_action(index: i32) -> ToolbarAction {
-    let tool = usize::try_from(index).ok().and_then(|i| TOOL_KEYS.get(i)).map(|(_, tool)| *tool);
+    let tool = usize::try_from(index)
+        .ok()
+        .and_then(|i| TOOL_KEYS.get(i))
+        .map(|(_, tool)| *tool);
     ToolbarAction::SelectTool(tool)
 }
 
@@ -1491,7 +1719,11 @@ pub fn wheel_action(index: usize, active: Option<Tool>) -> Option<ToolbarAction>
 /// and the keys still work.
 pub fn wheel_labels(cut: bool) -> Vec<String> {
     let cut = if cut { "Show above" } else { "Hide above" }.to_string();
-    TOOL_KEYS.iter().map(|(_, tool)| tool.label().to_string()).chain([cut]).collect()
+    TOOL_KEYS
+        .iter()
+        .map(|(_, tool)| tool.label().to_string())
+        .chain([cut])
+        .collect()
 }
 
 /// Apply one wedge pick. Tools are picked only with a home region
@@ -1515,7 +1747,8 @@ pub fn apply_toolbar_action(
 
 /// The wheel index of `tool`, -1 for none.
 fn tool_index(tool: Option<Tool>) -> i32 {
-    tool.and_then(|t| TOOL_KEYS.iter().position(|(_, k)| *k == t)).map_or(-1, |i| i as i32)
+    tool.and_then(|t| TOOL_KEYS.iter().position(|(_, k)| *k == t))
+        .map_or(-1, |i| i as i32)
 }
 
 /// [`WHEEL_KEY`] held: the tool wheel, which replaced the bottom tool bar.
@@ -1552,13 +1785,20 @@ fn tool_wheel(
     let available = designate.is_some()
         && mirror.as_ref().is_some_and(|m| m.region().is_some())
         && !mode.as_ref().is_some_and(|m| m.adventure());
-    let free = policy.as_ref().is_none_or(|p| !p.blocks_game() && !p.ui_pointer);
+    let free = policy
+        .as_ref()
+        .is_none_or(|p| !p.blocks_game() && !p.ui_pointer);
     let cursor = window.cursor_position();
     let input = WheelInput {
-        open_press: keys.just_pressed(WHEEL_KEY) && available && free && window.focused && cursor.is_some(),
+        open_press: keys.just_pressed(WHEEL_KEY)
+            && available
+            && free
+            && window.focused
+            && cursor.is_some(),
         hold_press: keys.just_pressed(WHEEL_KEY),
         // A release lost with the focus counts as one.
-        hold_release: keys.just_released(WHEEL_KEY) || (*phase == WheelPhase::Held && !keys.pressed(WHEEL_KEY)),
+        hold_release: keys.just_released(WHEEL_KEY)
+            || (*phase == WheelPhase::Held && !keys.pressed(WHEEL_KEY)),
         cancel_press: buttons.just_pressed(MouseButton::Right),
         left_release: buttons.just_released(MouseButton::Left),
         hovered: ui.get_wheel_hovered(),
@@ -1588,9 +1828,19 @@ fn tool_wheel(
         }
     }
     *phase = next;
-    let to = Screens { wheel: next.is_open(), ..Screens::of(ui) };
+    let to = Screens {
+        wheel: next.is_open(),
+        ..Screens::of(ui)
+    };
     let in_play = in_play.is_none_or(|e| e.0);
-    set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), in_play);
+    set_screens(
+        ui,
+        to,
+        &mut world_map,
+        status.home_region,
+        policy.as_mut(),
+        in_play,
+    );
 }
 
 /// The level readout: the working level and how far it is from the surface
@@ -1649,12 +1899,18 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     if *p.wheel_cut.get() != Some(cut) {
         let items: Vec<slint_ui::RadialItem> = wheel_labels(cut)
             .into_iter()
-            .map(|text| slint_ui::RadialItem { text: text.into(), enabled: true, ..Default::default() })
+            .map(|text| slint_ui::RadialItem {
+                text: text.into(),
+                enabled: true,
+                ..Default::default()
+            })
             .collect();
         ui.set_wheel_items(ModelRc::new(VecModel::from(items)));
         *p.wheel_cut.get() = Some(cut);
     }
-    let Some(state) = p.designate.as_mut() else { return };
+    let Some(state) = p.designate.as_mut() else {
+        return;
+    };
     let active = tool_index(state.tool);
     if ui.get_active_tool() != active {
         ui.set_active_tool(active);
@@ -1671,8 +1927,12 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
         (Some(grid), Some(cam)) => focus_surface(grid, cam.focus).map(surface_level),
         _ => None,
     };
-    let level: SharedString =
-        p.level.as_ref().and_then(|l| l.level).map_or(String::new(), |l| level_text(l, surface)).into();
+    let level: SharedString = p
+        .level
+        .as_ref()
+        .and_then(|l| l.level)
+        .map_or(String::new(), |l| level_text(l, surface))
+        .into();
     if ui.get_level_text() != level {
         ui.set_level_text(level);
     }
@@ -1684,7 +1944,9 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     if drag.is_empty() {
         return;
     }
-    let Some(cursor) = p.window.single().ok().and_then(|w| w.cursor_position()) else { return };
+    let Some(cursor) = p.window.single().ok().and_then(|w| w.cursor_position()) else {
+        return;
+    };
     let at = cursor / ui_scale;
     if ui.get_drag_x() != at.x || ui.get_drag_y() != at.y {
         ui.set_drag_x(at.x);
@@ -1758,7 +2020,8 @@ fn sync_world_map(ui: &GameUi, p: &mut MapParams) {
     if shown.info_for != info_for {
         shown.info_for = info_for;
         let picked = map.and_then(|map| Some((map, tile_region(map, col, row)?)));
-        let mut lines: Vec<String> = picked.map_or_else(Vec::new, |(map, rc)| tile_info_lines(map, rc));
+        let mut lines: Vec<String> =
+            picked.map_or_else(Vec::new, |(map, rc)| tile_info_lines(map, rc));
         if let Some((_, rc)) = picked {
             if let Some(site) = p.history.sites.iter().find(|s| s.region == rc) {
                 lines.push(site_line(site, &p.history.civ_name(site.civ)));
@@ -1770,12 +2033,20 @@ fn sync_world_map(ui: &GameUi, p: &mut MapParams) {
 
     // In the map window and, with the map closed, on the game-level status line.
     let now = p.time.elapsed_secs();
-    let status = p.history.visible_adventure_refusal(now).map(|why| why.describe()).unwrap_or("");
+    let status = p
+        .history
+        .visible_adventure_refusal(now)
+        .map(|why| why.describe())
+        .unwrap_or("");
     if ui.get_map_status() != status {
         ui.set_map_status(status.into());
     }
     // The map status wins; with none, the current history notice.
-    let game_status = if status.is_empty() { p.history.current_notice(now).unwrap_or("") } else { status };
+    let game_status = if status.is_empty() {
+        p.history.current_notice(now).unwrap_or("")
+    } else {
+        status
+    };
     if ui.get_game_status() != game_status {
         ui.set_game_status(game_status.into());
     }
@@ -1823,8 +2094,15 @@ fn push_ui_state(
     if let Some(person) = person {
         let inspected = map.inspected.get();
         let due = map.history.person_refresh_due(person, now)
-            && inspected.asked.is_none_or(|(p, at)| p != person || history_view::person_info_refresh_due(Some(at), now));
-        if due && map.requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::RequestPersonInfo(person)).is_ok()) {
+            && inspected.asked.is_none_or(|(p, at)| {
+                p != person || history_view::person_info_refresh_due(Some(at), now)
+            });
+        if due
+            && map
+                .requests
+                .as_ref()
+                .is_some_and(|r| r.0.send(ClientRequest::RequestPersonInfo(person)).is_ok())
+        {
             inspected.asked = Some((person, now));
         }
     }
@@ -1834,7 +2112,10 @@ fn push_ui_state(
     let lines: Vec<SharedString> = match person {
         Some(person) => {
             let info = map.history.people.get(&person).map(|(i, _)| i);
-            history_view::person_lines(person, info).into_iter().map(Into::into).collect()
+            history_view::person_lines(person, info)
+                .into_iter()
+                .map(Into::into)
+                .collect()
         }
         None => selection_lines(kinds).into_iter().map(Into::into).collect(),
     };
@@ -1854,7 +2135,13 @@ pub(crate) fn render_slint_layer<C: ComponentHandle + 'static>(
 ) {
     let Some(mut slint) = slint else { return };
     let full_map_open = full_map.is_some_and(|m| m.0);
-    let hidden = frontend_hides(slint.hidden_by_frontend, state.as_deref(), in_play.as_deref(), world_map.as_deref(), full_map_open);
+    let hidden = frontend_hides(
+        slint.hidden_by_frontend,
+        state.as_deref(),
+        in_play.as_deref(),
+        world_map.as_deref(),
+        full_map_open,
+    );
     if hidden {
         if !slint.blanked {
             if let Some(mut image) = images.get_mut(&slint.target) {
@@ -1871,16 +2158,29 @@ pub(crate) fn render_slint_layer<C: ComponentHandle + 'static>(
         // Coming back from the frontend: the overlay's buffer still holds the
         // last frame, so upload all of it.
         let (width, height) = slint.overlay.size();
-        dirty = Some(slint_ui::Dirty { x: 0, y: 0, width, height });
+        dirty = Some(slint_ui::Dirty {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        });
     }
     let Some(dirty) = dirty else { return };
-    let Some(mut image) = images.get_mut(&slint.target) else { return };
+    let Some(mut image) = images.get_mut(&slint.target) else {
+        return;
+    };
     let (width, height) = slint.overlay.size();
-    let size = Extent3d { width, height, depth_or_array_layers: 1 };
+    let size = Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
     if image.texture_descriptor.size != size {
         image.resize(size);
     }
-    let Some(data) = image.data.as_mut() else { return };
+    let Some(data) = image.data.as_mut() else {
+        return;
+    };
     let pixels = slint.overlay.pixels();
     for y in dirty.y..dirty.y + dirty.height {
         let row = (y * width) as usize;
@@ -1891,7 +2191,9 @@ pub(crate) fn render_slint_layer<C: ComponentHandle + 'static>(
     }
 }
 
-fn unpremultiply(p: slint_ui::slint::platform::software_renderer::PremultipliedRgbaColor) -> [u8; 4] {
+fn unpremultiply(
+    p: slint_ui::slint::platform::software_renderer::PremultipliedRgbaColor,
+) -> [u8; 4] {
     let a = p.alpha as u16;
     if a == 0 {
         return [0; 4];
@@ -1918,15 +2220,18 @@ mod tests {
     fn layer_init_runs_before_startup_systems() {
         struct Marker;
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default(), bevy::input::InputPlugin))
-            .init_asset::<Image>()
-            .add_plugins(SlintLayerPlugin::new(HudUi::new).with_init(|_, world| world.insert_non_send(Marker)));
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::input::InputPlugin,
+        ))
+        .init_asset::<Image>()
+        .add_plugins(
+            SlintLayerPlugin::new(HudUi::new).with_init(|_, world| world.insert_non_send(Marker)),
+        );
         // Registered after the plugin, as an app's own Startup systems are.
         app.add_systems(Startup, |_marker: NonSend<Marker>| {});
         app.update();
         assert!(app.world().get_non_send::<SlintLayer<HudUi>>().is_some());
     }
-
-    
-    
 }

@@ -1,0 +1,23 @@
+[package]
+name = "observability"
+version = "0.1.0"
+edition = "2024"
+description = "Shared traces, correlated logs, and optional CPU profiles for native Errantry services."
+
+[dependencies]
+futures-util = "0.3"
+log = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+pyroscope = { workspace = true, optional = true }
+pyroscope_pprofrs = { workspace = true, optional = true }
+rand_core = { workspace = true }
+tracing = { workspace = true }
+tracing-log = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[features]
+pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]

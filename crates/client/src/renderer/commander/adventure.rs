@@ -17,14 +17,14 @@
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
-use game::{Order, PlayMode, TilePos, REGION_BLOCKS};
+use game::{Order, PlayMode, REGION_BLOCKS, TilePos};
 
+use super::CommanderCamera;
 use super::designate::DesignateState;
 use super::first_person::BodyView;
 use super::follow::{Follow, FollowTarget};
 use super::selection::Selection;
 use super::tiles::TileMirror;
-use super::CommanderCamera;
 use crate::renderer::bridge::{LocalBody, SimEntity};
 use crate::renderer::{GameEvents, LocalPlayer};
 
@@ -85,13 +85,18 @@ pub fn ask_for_adventure(
         return;
     }
     *asked = Some(now);
-    let order = Order::SetMode { mode: PlayMode::Adventure, at: None };
+    let order = Order::SetMode {
+        mode: PlayMode::Adventure,
+        at: None,
+    };
     let _ = events.0.send(game::GameEventKind::Order(client, order));
 }
 
 /// Whether to ask again: never asked, or [`ADVENTURE_ASK_EVERY_MS`] since.
 pub fn ask_due(last: Option<std::time::Duration>, now: std::time::Duration) -> bool {
-    last.is_none_or(|at| now.saturating_sub(at) >= std::time::Duration::from_millis(ADVENTURE_ASK_EVERY_MS))
+    last.is_none_or(|at| {
+        now.saturating_sub(at) >= std::time::Duration::from_millis(ADVENTURE_ASK_EVERY_MS)
+    })
 }
 
 /// The other mode.
@@ -213,8 +218,6 @@ pub fn on_mode_change(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     /// Regression: player saved in Overview came back in the commander camera with no way out; seen in the owner's play session during third-person polish (21dbe0f8)
     /// A session that starts in Overview (a client saved there) without the
@@ -222,13 +225,15 @@ mod tests {
     /// once the mode reads Adventure the body view is on.
     #[test]
     fn a_client_back_in_the_overview_asks_for_adventure_and_ends_in_the_body() {
-        use super::super::first_person::{ensure_first_person, FirstPerson};
+        use super::super::first_person::{FirstPerson, ensure_first_person};
         use super::super::level::WorkingLevel;
         use crate::renderer::cursor::CursorPolicy;
         let (send, recv) = crossbeam::channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
-            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(500)))
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_millis(500),
+            ))
             .insert_resource(ClientPlayMode(PlayMode::Overview))
             .init_resource::<CursorPolicy>()
             .init_resource::<FirstPerson>()
@@ -243,7 +248,13 @@ mod tests {
                 .filter(|e| {
                     matches!(
                         e,
-                        game::GameEventKind::Order(7, Order::SetMode { mode: PlayMode::Adventure, at: None })
+                        game::GameEventKind::Order(
+                            7,
+                            Order::SetMode {
+                                mode: PlayMode::Adventure,
+                                at: None
+                            }
+                        )
                     )
                 })
                 .count()
@@ -253,7 +264,10 @@ mod tests {
             app.update();
         }
         assert_eq!(asks(&recv), 1, "one ask, not one a frame");
-        assert!(!app.world().resource::<FirstPerson>().on, "no body view in the overview");
+        assert!(
+            !app.world().resource::<FirstPerson>().on,
+            "no body view in the overview"
+        );
         for _ in 0..4 {
             app.update();
         }

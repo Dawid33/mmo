@@ -96,7 +96,12 @@ impl PeerLog {
     fn push(&mut self, accounted: Option<CutId>, queue_id: Option<u64>, entry: JournalEntry) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.rows.push(Row { seq, accounted, queue_id, entry });
+        self.rows.push(Row {
+            seq,
+            accounted,
+            queue_id,
+            entry,
+        });
     }
 }
 
@@ -133,7 +138,14 @@ impl PeerJournal {
     /// An empty journal from committed cut `base` (at boot: the store's last committed
     /// cut, `CutId(0)` before any).
     pub fn new(base: CutId) -> Self {
-        Self { peers: BTreeMap::new(), cuts: BTreeMap::new(), base, taken: BTreeMap::new(), last_marks: None, last_counted: None }
+        Self {
+            peers: BTreeMap::new(),
+            cuts: BTreeMap::new(),
+            base,
+            taken: BTreeMap::new(),
+            last_marks: None,
+            last_counted: None,
+        }
     }
 
     /// This host takes part in world cut `cut` with `participants` (the other hosts of it):
@@ -159,11 +171,26 @@ impl PeerJournal {
     /// tick `_now` (no entry is stamped with it: see `subjects`); `accounted`: the cut it
     /// travels wrapped in. Only a transfer or a player move is journalled (an `InCut` is
     /// unwrapped).
-    pub fn sent(&mut self, peer: HostId, queue_id: u64, msg: &Reliable, accounted: Option<CutId>, _now: Tick) {
+    pub fn sent(
+        &mut self,
+        peer: HostId,
+        queue_id: u64,
+        msg: &Reliable,
+        accounted: Option<CutId>,
+        _now: Tick,
+    ) {
         let (msg, accounted) = unwrap(msg, accounted);
         for (subject, stamp) in subjects(msg) {
             let event = JournalEvent::Sent(Box::new(msg.clone()));
-            self.peers.entry(peer).or_default().push(accounted, Some(queue_id), JournalEntry { subject, stamp, event });
+            self.peers.entry(peer).or_default().push(
+                accounted,
+                Some(queue_id),
+                JournalEntry {
+                    subject,
+                    stamp,
+                    event,
+                },
+            );
         }
     }
 
@@ -172,8 +199,15 @@ impl PeerJournal {
     pub fn received(&mut self, peer: HostId, msg: &Reliable, accounted: Option<CutId>, _now: Tick) {
         let (msg, accounted) = unwrap(msg, accounted);
         for (subject, stamp) in subjects(msg) {
-            let entry = JournalEntry { subject, stamp, event: JournalEvent::Received };
-            self.peers.entry(peer).or_default().push(accounted, None, entry);
+            let entry = JournalEntry {
+                subject,
+                stamp,
+                event: JournalEvent::Received,
+            };
+            self.peers
+                .entry(peer)
+                .or_default()
+                .push(accounted, None, entry);
         }
     }
 
@@ -199,14 +233,28 @@ impl PeerJournal {
     /// `received_before` (inside this host's own count: in its part) go unless they came
     /// wrapped in `cut` (the sender's part holds those). Called when this host's part
     /// completes; a later call replaces an earlier one.
-    pub fn counted(&mut self, peer: HostId, cut: CutId, kept_sent: &BTreeSet<u64>, received_before: usize) {
+    pub fn counted(
+        &mut self,
+        peer: HostId,
+        cut: CutId,
+        kept_sent: &BTreeSet<u64>,
+        received_before: usize,
+    ) {
         let log = self.peers.entry(peer).or_default();
-        log.counted.insert(cut, Counted { kept_sent: kept_sent.clone(), received_before });
+        log.counted.insert(
+            cut,
+            Counted {
+                kept_sent: kept_sent.clone(),
+                received_before,
+            },
+        );
     }
 
     /// The `Received` entries with `peer` now.
     pub fn received_len(&self, peer: HostId) -> usize {
-        self.peers.get(&peer).map_or(0, |log| log.rows.iter().filter(|r| r.queue_id.is_none()).count())
+        self.peers.get(&peer).map_or(0, |log| {
+            log.rows.iter().filter(|r| r.queue_id.is_none()).count()
+        })
     }
 
     /// World cut `cut` committed with `participants` (the other hosts of it, joined with
@@ -223,8 +271,19 @@ impl PeerJournal {
         let mut read = BTreeMap::new();
         let mut read_counted = BTreeMap::new();
         for (peer, log) in &mut self.peers {
-            if let Some(c) = log.counted.get(&cut).filter(|_| participants.contains(peer)).cloned() {
-                read_counted.insert(*peer, CountedRead { after: log.next_seq, kept_sent: c.kept_sent.clone() });
+            if let Some(c) = log
+                .counted
+                .get(&cut)
+                .filter(|_| participants.contains(peer))
+                .cloned()
+            {
+                read_counted.insert(
+                    *peer,
+                    CountedRead {
+                        after: log.next_seq,
+                        kept_sent: c.kept_sent.clone(),
+                    },
+                );
                 let mut received = 0usize;
                 log.rows.retain(|r| {
                     if r.accounted == Some(cut) {
@@ -274,7 +333,10 @@ impl PeerJournal {
     /// once a later cut — the succession's settle — committed.
     pub fn take(&mut self, peer: HostId) -> Vec<JournalEntry> {
         self.taken.insert(peer, self.base);
-        self.peers.remove(&peer).map(|log| log.rows.into_iter().map(|r| r.entry).collect()).unwrap_or_default()
+        self.peers
+            .remove(&peer)
+            .map(|log| log.rows.into_iter().map(|r| r.entry).collect())
+            .unwrap_or_default()
     }
 
     /// The journal forgets `peer` for good (a dead or departed host the manager forgets,
@@ -286,16 +348,25 @@ impl PeerJournal {
     pub fn forget(&mut self, peer: HostId) -> Result<(), ForgetRefused> {
         let rows = self.peers.get(&peer).map_or(0, |log| log.rows.len());
         if rows > 0 {
-            return Err(ForgetRefused { peer, why: format!("{rows} journal entries with it are not reported or saved") });
+            return Err(ForgetRefused {
+                peer,
+                why: format!("{rows} journal entries with it are not reported or saved"),
+            });
         }
         if let Some(&at) = self.taken.get(&peer).filter(|at| **at >= self.base) {
             return Err(ForgetRefused {
                 peer,
-                why: format!("its report was taken against cut {} and no later cut has committed (the settle cut)", at.0),
+                why: format!(
+                    "its report was taken against cut {} and no later cut has committed (the settle cut)",
+                    at.0
+                ),
             });
         }
         if let Some((cut, _)) = self.cuts.iter().find(|(_, p)| p.contains(&peer)) {
-            return Err(ForgetRefused { peer, why: format!("world cut {} with it is not decided", cut.0) });
+            return Err(ForgetRefused {
+                peer,
+                why: format!("world cut {} with it is not decided", cut.0),
+            });
         }
         self.peers.remove(&peer);
         self.taken.remove(&peer);
@@ -318,7 +389,10 @@ impl PeerJournal {
     /// The entries with `peer`, in order, each with its queue id (a sent entry's id among
     /// everything queued to `peer`; `None` for a received one).
     pub fn entries(&self, peer: HostId) -> impl Iterator<Item = (&JournalEntry, Option<u64>)> {
-        self.peers.get(&peer).into_iter().flat_map(|log| log.rows.iter().map(|r| (&r.entry, r.queue_id)))
+        self.peers
+            .get(&peer)
+            .into_iter()
+            .flat_map(|log| log.rows.iter().map(|r| (&r.entry, r.queue_id)))
     }
 
     /// Test support: the entries with `peer` as truncation reads them — `(entry, place
@@ -326,7 +400,10 @@ impl PeerJournal {
     /// (`(cut, peer → (this host's mark, the peer's mark))`, places in the same order).
     #[doc(hidden)]
     pub fn rows(&self, peer: HostId) -> impl Iterator<Item = (&JournalEntry, u64, Option<CutId>)> {
-        self.peers.get(&peer).into_iter().flat_map(|log| log.rows.iter().map(|r| (&r.entry, r.seq, r.accounted)))
+        self.peers
+            .get(&peer)
+            .into_iter()
+            .flat_map(|log| log.rows.iter().map(|r| (&r.entry, r.seq, r.accounted)))
     }
 
     #[doc(hidden)]
@@ -340,7 +417,6 @@ impl PeerJournal {
     pub fn last_counted(&self) -> Option<&(CutId, BTreeMap<HostId, CountedRead>)> {
         self.last_counted.as_ref()
     }
-
 
     /// Entries over every peer (the `[server]` line's `journal_entries=`).
     pub fn len(&self) -> usize {
@@ -361,7 +437,11 @@ pub struct ForgetRefused {
 
 impl std::fmt::Display for ForgetRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the peer journal still needs host {}: {}", self.peer, self.why)
+        write!(
+            f,
+            "the peer journal still needs host {}: {}",
+            self.peer, self.why
+        )
     }
 }
 
@@ -384,12 +464,19 @@ fn unwrap(msg: &Reliable, accounted: Option<CutId>) -> (&Reliable, Option<CutId>
 /// could resolve to the older `Sent`. Nothing for any other message.
 fn subjects(msg: &Reliable) -> Vec<(Subject, Tick)> {
     match msg {
-        Reliable::Transfer { stamp, bundle, player, .. } => {
+        Reliable::Transfer {
+            stamp,
+            bundle,
+            player,
+            ..
+        } => {
             let mut out = vec![(Subject::Entity(bundle.id), *stamp)];
             out.extend(player.as_ref().map(|h| (Subject::Player(h.player), h.hop)));
             out
         }
-        Reliable::PlayerMove { handoff, .. } => vec![(Subject::Player(handoff.player), handoff.hop)],
+        Reliable::PlayerMove { handoff, .. } => {
+            vec![(Subject::Player(handoff.player), handoff.hop)]
+        }
         _ => Vec::new(),
     }
 }

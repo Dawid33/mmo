@@ -361,7 +361,8 @@ impl KinematicCharacterController {
             is_moving = true;
 
             // 2. Cast towards the movement direction.
-            if let Some((handle, hit)) = queries.cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
+            if let Some((handle, hit)) = queries.cast_shape_on_continuous_surfaces(
+                // mmo-fork: was `cast_shape`
                 &(Pose::from_translation(result.translation) * *character_pos),
                 translation_dir,
                 character_shape,
@@ -391,7 +392,7 @@ impl KinematicCharacterController {
                 let hit_info = self.compute_hit_info(hit);
 
                 // Try to go upstairs.
-                if !self.handle_stairs(
+                if self.handle_stairs(
                     *queries,
                     character_shape,
                     &(Pose::from_translation(result.translation) * *character_pos),
@@ -401,6 +402,34 @@ impl KinematicCharacterController {
                     &mut translation_remaining,
                     &mut result,
                 ) {
+                    // mmo-fork: a step taken is kept. `handle_stairs` leaves the
+                    // step's height as a downward remainder, measured for a body
+                    // `min_width` past the riser, but advances it only by what
+                    // travel is left: a round-footed shape short of that comes
+                    // down on the step's EDGE, a contact steep enough to be a
+                    // wall, and the slide took it back off, every tick, at any
+                    // approach whose leftover travel was short. Set it down
+                    // where it lands instead: the next move steps on from there.
+                    let down = -self.up.dot(translation_remaining);
+                    if down > 0.0 {
+                        let drop = queries
+                            .cast_shape_on_continuous_surfaces(
+                                &(Pose::from_translation(result.translation) * *character_pos),
+                                -self.up,
+                                character_shape,
+                                ShapeCastOptions {
+                                    target_distance: offset,
+                                    stop_at_penetration: false,
+                                    max_time_of_impact: down,
+                                    compute_impact_geometry_on_penetration: true,
+                                },
+                                offset,
+                            )
+                            .map_or(down, |(_, hit)| hit.time_of_impact);
+                        result.translation -= self.up * drop;
+                        translation_remaining += self.up * down;
+                    }
+                } else {
                     // No stairs, try to move along slopes.
                     translation_remaining = self.handle_slopes(
                         &hit_info,
@@ -485,7 +514,8 @@ impl KinematicCharacterController {
             {
                 let snap_distance = snap_distance.eval(dims.y);
                 let offset = self.offset.eval(dims.y);
-                if let Some((hit_handle, hit)) = queries.cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
+                if let Some((hit_handle, hit)) = queries.cast_shape_on_continuous_surfaces(
+                    // mmo-fork: was `cast_shape`
                     character_pos,
                     -self.up,
                     character_shape,
@@ -755,7 +785,22 @@ impl KinematicCharacterController {
         };
 
         // Only try to autostep on walls.
-        if !hit.is_wall {
+        // mmo-fork: and on a slant the move runs into and cannot climb. A round
+        // foot on a box's edge meets it at any angle: under the climb angle it
+        // is no wall, yet a slow approach loses to its own downward push there
+        // and neither slid up nor stepped (a walk along a stair, a body set
+        // down on a step's edge).
+        let stalled_on_slant = {
+            let [_, horizontal] = self.split_into_components(*translation_remaining);
+            let into = horizontal.dot(hit.toi.normal1);
+            into < -1.0e-3 * horizontal.length()
+                && self.up.dot(hit.toi.normal1) > 0.0
+                && self.up.dot(
+                    self.decompose_hit(*translation_remaining, &hit.toi)
+                        .vertical_tangent,
+                ) <= 0.0
+        };
+        if !hit.is_wall && !stalled_on_slant {
             return false;
         }
 
@@ -791,7 +836,8 @@ impl KinematicCharacterController {
         };
 
         if queries
-            .cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
+            .cast_shape_on_continuous_surfaces(
+                // mmo-fork: was `cast_shape`
                 character_pos,
                 self.up,
                 character_shape,
@@ -811,7 +857,8 @@ impl KinematicCharacterController {
         }
 
         if queries
-            .cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
+            .cast_shape_on_continuous_surfaces(
+                // mmo-fork: was `cast_shape`
                 &shifted_character_pos,
                 horizontal_dir,
                 character_shape,
@@ -830,45 +877,18 @@ impl KinematicCharacterController {
             return false;
         }
 
-        // Check that we are not getting into a ramp that is too steep
-        // after stepping.
-        if let Some((_, hit)) = queries.cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
-            &Pose::from_parts(
-                shifted_character_pos.translation + horizontal_dir * min_width,
-                shifted_character_pos.rotation,
-            ),
-            -self.up,
-            character_shape,
-            ShapeCastOptions {
-                target_distance: offset,
-                stop_at_penetration: false,
-                max_time_of_impact: max_height,
-                compute_impact_geometry_on_penetration: true,
-            },
-            // mmo-fork: terrain is many boxes laid flush: seams are not edges.
-            offset,
-        ) {
-            let [vertical_slope_translation, horizontal_slope_translation] = self
-                .split_into_components(*translation_remaining)
-                .map(|remaining| subtract_hit(remaining, &hit));
-
-            let slope_translation = horizontal_slope_translation + vertical_slope_translation;
-
-            #[cfg(feature = "dim2")]
-            let angle_with_floor = self.up.angle_to(hit.normal1);
-            #[cfg(feature = "dim3")]
-            let angle_with_floor = self.up.angle_between(hit.normal1);
-            let climbing = self.up.dot(slope_translation) >= 0.0;
-
-            if climbing && angle_with_floor > self.max_slope_climb_angle {
-                return false; // The target ramp is too steep.
-            }
-        }
+        // mmo-fork: upstream refused the step here when the body, set down
+        // `min_width` ahead, landed on a contact steeper than the climb angle
+        // ("the target ramp is too steep"). Terrain is boxes: a round foot that
+        // lands slanted is on a step's EDGE, not on a ramp — whenever the move
+        // runs along the riser more than into it — and the refusal left a body
+        // sliding along a stair it could never mount.
 
         // We can step, we need to find the actual step height.
         let step_height = max_height
             - queries
-                .cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
+                .cast_shape_on_continuous_surfaces(
+                    // mmo-fork: was `cast_shape`
                     &Pose::from_parts(
                         shifted_character_pos.translation + horizontal_dir * min_width,
                         shifted_character_pos.rotation,
@@ -1009,6 +1029,7 @@ impl KinematicCharacterController {
     }
 }
 
+#[allow(dead_code)] // mmo-fork: its one caller was the autostep's ramp refusal (removed, `handle_stairs`)
 fn subtract_hit(translation: Vector, hit: &ShapeCastHit) -> Vector {
     let surface_correction = (-translation).dot(hit.normal1).max(0.0);
     // This fixes some instances of moving through walls

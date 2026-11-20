@@ -21,19 +21,23 @@ use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
 use crossbeam::channel::{self, Receiver, RecvTimeoutError, Sender};
-use slint_ui::slint::{Image as SlintImage, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint_ui::slint::{
+    Image as SlintImage, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
+};
 use slint_ui::{FrontendUi, KnobRow};
-use worldgen::forge::knobs::{Knobs, Spec, CHOICES, SPECS};
+use worldgen::forge::knobs::{CHOICES, Knobs, SPECS, Spec};
+use worldgen::forge::play::{
+    self, ForgeEstimate, ForgeFileError, forge_estimate, forge_to_file, panic_message,
+};
 use worldgen::forge::presets::{self, CUSTOM, PRESETS};
 use worldgen::forge::render::{self, PreviewLayer, PreviewStats, Rgba};
-use worldgen::forge::play::{self, forge_estimate, forge_to_file, panic_message, ForgeEstimate, ForgeFileError};
-use worldgen::forge::{forge_with, ForgeParams, ForgeProgress, ForgeStage};
+use worldgen::forge::{ForgeParams, ForgeProgress, ForgeStage, forge_with};
 use worldgen::{forged, world_store};
 
 use crate::renderer::slint_overlay::SlintLayer;
@@ -72,7 +76,10 @@ pub fn tab_of(spec: &Spec) -> usize {
         .iter()
         .find(|(key, _)| *key == spec.key)
         .and_then(|(_, tab)| named(tab))
-        .or_else(|| TABS.iter().position(|(_, groups)| groups.contains(&spec.group)))
+        .or_else(|| {
+            TABS.iter()
+                .position(|(_, groups)| groups.contains(&spec.group))
+        })
         .unwrap_or(ADVANCED)
 }
 
@@ -86,8 +93,13 @@ pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(250);
 pub const PREVIEW_CELL_KEY: &str = "preview_cell";
 pub const WORLD_CELL_KEY: &str = "world_cell";
 pub const PREVIEW_AUTO: f64 = 0.0;
-pub const PREVIEW_CELLS: [(f64, &str); 5] =
-    [(PREVIEW_AUTO, "Auto"), (32.0, "32 m"), (64.0, "64 m"), (128.0, "128 m"), (256.0, "256 m")];
+pub const PREVIEW_CELLS: [(f64, &str); 5] = [
+    (PREVIEW_AUTO, "Auto"),
+    (32.0, "32 m"),
+    (64.0, "64 m"),
+    (128.0, "128 m"),
+    (256.0, "256 m"),
+];
 /// The world cells; the row offers only those within the forge's memory cap
 /// at the chosen size (`play::offered_cells`).
 pub use worldgen::forge::play::WORLD_CELLS;
@@ -116,7 +128,10 @@ pub fn format_seed(seed: u64) -> String {
 /// Parses a seed like forge_proto's `--seed`: hex, `0x` and `_` allowed.
 pub fn parse_seed(text: &str) -> Option<u64> {
     let t = text.trim();
-    let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    let t = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
     let hex = t.replace('_', "");
     if hex.is_empty() {
         return None;
@@ -162,10 +177,22 @@ pub fn rfc3339_utc(time: SystemTime) -> String {
 // ---- rows ----
 
 fn strings(items: impl IntoIterator<Item = impl Into<SharedString>>) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(items.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
+    ModelRc::new(VecModel::from(
+        items
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<SharedString>>(),
+    ))
 }
 
-fn choice_row(key: &str, label: &str, help: &str, choices: &[impl AsRef<str>], value: usize, default: usize) -> KnobRow {
+fn choice_row(
+    key: &str,
+    label: &str,
+    help: &str,
+    choices: &[impl AsRef<str>],
+    value: usize,
+    default: usize,
+) -> KnobRow {
     KnobRow {
         key: key.into(),
         label: label.into(),
@@ -181,8 +208,13 @@ fn choice_row(key: &str, label: &str, help: &str, choices: &[impl AsRef<str>], v
 }
 
 fn knob_row(spec: &Spec, value: f64) -> KnobRow {
-    let choices = CHOICES.iter().find(|(key, _)| *key == spec.key).map(|(_, c)| *c);
-    let whole = [spec.min, spec.max, spec.default].iter().all(|v| v.fract() == 0.0)
+    let choices = CHOICES
+        .iter()
+        .find(|(key, _)| *key == spec.key)
+        .map(|(_, c)| *c);
+    let whole = [spec.min, spec.max, spec.default]
+        .iter()
+        .all(|v| v.fract() == 0.0)
         && spec.max - spec.min >= WHOLE_STEP_MIN_RANGE;
     KnobRow {
         key: spec.key.into(),
@@ -271,7 +303,9 @@ impl GeneratorState {
     }
 
     pub fn preset_description(&self) -> &'static str {
-        PRESETS.get(self.preset_index()).map_or("Custom settings.", |p| p.description)
+        PRESETS
+            .get(self.preset_index())
+            .map_or("Custom settings.", |p| p.description)
     }
 
     /// The current tab's rows, in `SPECS` order (Land starts with the world
@@ -283,8 +317,13 @@ impl GeneratorState {
             let sizes: Vec<String> = WORLD_SIZES
                 .iter()
                 .map(|s| {
-                    let time = forge_estimate(s.width_m, s.height_m, self.world_cell_m()).time_text();
-                    format!("{} · {} · {time}", s.name, play::km_text(s.width_m, s.height_m))
+                    let time =
+                        forge_estimate(s.width_m, s.height_m, self.world_cell_m()).time_text();
+                    format!(
+                        "{} · {} · {time}",
+                        s.name,
+                        play::km_text(s.width_m, s.height_m)
+                    )
                 })
                 .collect();
             rows.push(choice_row(
@@ -356,7 +395,12 @@ impl GeneratorState {
     /// The line beside Play, e.g. "100 × 50 km at 16 m: ≈ 8 min, ≈ 4 GB RAM (est.)".
     pub fn play_estimate_text(&self) -> String {
         let (width_m, height_m) = self.dimensions();
-        format!("{} at {:.0} m: {}", play::km_text(width_m, height_m), self.world_cell_m(), self.play_estimate().text())
+        format!(
+            "{} at {:.0} m: {}",
+            play::km_text(width_m, height_m),
+            self.world_cell_m(),
+            self.play_estimate().text()
+        )
     }
 
     pub fn params(&self, cell_m: f64) -> ForgeParams {
@@ -402,7 +446,10 @@ impl GeneratorState {
                 let default = match key.as_str() {
                     PREVIEW_CELL_KEY | WORLD_CELL_KEY => 0.0,
                     WORLD_SIZE_KEY => DEFAULT_WORLD_SIZE as f64,
-                    _ => SPECS.iter().find(|s| s.key == key).map_or(0.0, |s| s.default),
+                    _ => SPECS
+                        .iter()
+                        .find(|s| s.key == key)
+                        .map_or(0.0, |s| s.default),
                 };
                 self.set_knob(&key, default);
                 self.rows_dirty = true;
@@ -498,9 +545,15 @@ pub enum GeneratorAction {
 pub fn stats_lines(stats: &PreviewStats) -> Vec<String> {
     vec![
         format!("Land: {:.0} % of the world", stats.land_share * 100.0),
-        format!("Islands: {} (largest {:.1} km²)", stats.islands, stats.largest_island_km2),
+        format!(
+            "Islands: {} (largest {:.1} km²)",
+            stats.islands, stats.largest_island_km2
+        ),
         format!("Highest peak: {:.0} m", stats.highest_peak_m),
-        format!("Lakes: {} · river reaches: {}", stats.lakes, stats.river_reaches),
+        format!(
+            "Lakes: {} · river reaches: {}",
+            stats.lakes, stats.river_reaches
+        ),
     ]
 }
 
@@ -508,8 +561,17 @@ pub fn stats_lines(stats: &PreviewStats) -> Vec<String> {
 
 /// What the preview of a forge depends on, bit for bit.
 fn forge_key(p: &ForgeParams) -> (u64, u64, u64, u64, Vec<u64>) {
-    let knobs = SPECS.iter().map(|s| p.knobs.get(s.key).unwrap_or(0.0).to_bits()).collect();
-    (p.seed, p.width_m.to_bits(), p.height_m.to_bits(), p.cell_m.to_bits(), knobs)
+    let knobs = SPECS
+        .iter()
+        .map(|s| p.knobs.get(s.key).unwrap_or(0.0).to_bits())
+        .collect();
+    (
+        p.seed,
+        p.width_m.to_bits(),
+        p.height_m.to_bits(),
+        p.cell_m.to_bits(),
+        knobs,
+    )
 }
 
 struct PreviewRequest {
@@ -544,13 +606,21 @@ impl PreviewWorker {
             .name("map-preview".into())
             .spawn(move || preview_loop(inbox, current, outbox))
             .expect("spawn the preview thread");
-        PreviewWorker { requests: Some(requests), latest, results }
+        PreviewWorker {
+            requests: Some(requests),
+            latest,
+            results,
+        }
     }
 
     pub fn request(&self, params: ForgeParams, layer: PreviewLayer, generation: u64) {
         self.latest.store(generation, Ordering::SeqCst);
         if let Some(requests) = &self.requests {
-            let _ = requests.send(PreviewRequest { params, layer, generation });
+            let _ = requests.send(PreviewRequest {
+                params,
+                layer,
+                generation,
+            });
         }
     }
 }
@@ -567,7 +637,11 @@ impl Drop for PreviewWorker {
 /// terrain) and its result, reused when only the layer or view changes.
 type LastForge = ((u64, u64, u64, u64, Vec<u64>), worldgen::forge::Forged);
 
-fn preview_loop(inbox: Receiver<PreviewRequest>, latest: Arc<AtomicU64>, outbox: Sender<(u64, PreviewResult)>) {
+fn preview_loop(
+    inbox: Receiver<PreviewRequest>,
+    latest: Arc<AtomicU64>,
+    outbox: Sender<(u64, PreviewResult)>,
+) {
     let mut last: Option<LastForge> = None;
     while let Ok(mut request) = inbox.recv() {
         loop {
@@ -583,7 +657,11 @@ fn preview_loop(inbox: Receiver<PreviewRequest>, latest: Arc<AtomicU64>, outbox:
             last = None;
             let forged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 forge_with(&request.params, &mut |_| {
-                    if latest.load(Ordering::SeqCst) == generation { ControlFlow::Continue(()) } else { ControlFlow::Break(()) }
+                    if latest.load(Ordering::SeqCst) == generation {
+                        ControlFlow::Continue(())
+                    } else {
+                        ControlFlow::Break(())
+                    }
                 })
             }));
             match forged {
@@ -629,9 +707,10 @@ pub enum ForgeEvent {
 pub fn progress_text(p: ForgeProgress) -> (f32, String) {
     match p.stage {
         ForgeStage::Setup => (0.0, p.stage.label().to_string()),
-        ForgeStage::Eroding => {
-            (0.9 * p.iter as f32 / p.iters.max(1) as f32, format!("{} {} / {}", p.stage.label(), p.iter, p.iters))
-        }
+        ForgeStage::Eroding => (
+            0.9 * p.iter as f32 / p.iters.max(1) as f32,
+            format!("{} {} / {}", p.stage.label(), p.iter, p.iters),
+        ),
         ForgeStage::Shaping => (0.92, p.stage.label().to_string()),
         ForgeStage::Hydrology => (0.95, p.stage.label().to_string()),
         ForgeStage::Saving => (0.97, p.stage.label().to_string()),
@@ -665,7 +744,10 @@ impl ForgeJob {
                     // A panic after the terrain was written (PNG render,
                     // finish_staged) must not leave the staged world behind.
                     let _ = std::fs::remove_dir_all(&staging);
-                    ForgeEvent::Failed(format!("The forge failed: {}", panic_message(panic.as_ref())))
+                    ForgeEvent::Failed(format!(
+                        "The forge failed: {}",
+                        panic_message(panic.as_ref())
+                    ))
                 });
                 let _ = tx.send(end);
             })
@@ -710,24 +792,38 @@ fn forge_world(
         let _ = std::fs::remove_dir_all(&staging);
         end
     };
-    let forged = match forge_to_file(params, &staging.join(world_store::TERRAIN_FILE), cancel, &mut |p| {
-        let _ = tx.send(ForgeEvent::Progress(p));
-    }) {
+    let forged = match forge_to_file(
+        params,
+        &staging.join(world_store::TERRAIN_FILE),
+        cancel,
+        &mut |p| {
+            let _ = tx.send(ForgeEvent::Progress(p));
+        },
+    ) {
         Ok(forged) => forged,
         Err(ForgeFileError::Cancelled) => return fail(ForgeEvent::Cancelled),
         // `artifact` panics when the world has no dry land at all for a spawn
         // (`spawn::pick` falls back to the flattest dry patch otherwise).
         Err(ForgeFileError::Failed(why)) if why.contains("no dry land") => {
-            return fail(ForgeEvent::Failed("This world has no dry land to start on; try other settings.".into()))
+            return fail(ForgeEvent::Failed(
+                "This world has no dry land to start on; try other settings.".into(),
+            ));
         }
-        Err(ForgeFileError::Failed(why)) => return fail(ForgeEvent::Failed(format!("Could not create the world: {why}"))),
+        Err(ForgeFileError::Failed(why)) => {
+            return fail(ForgeEvent::Failed(format!(
+                "Could not create the world: {why}"
+            )));
+        }
     };
     if cancelled() {
         return fail(ForgeEvent::Cancelled);
     }
     let png = render::encode_png(&render::render(&forged, PreviewLayer::Relief));
     // The world's sides as forged (`nx · cell`), not as asked for.
-    let (width_m, height_m) = (forged.world.nx as f64 * forged.world.dx, forged.world.nz as f64 * forged.world.dx);
+    let (width_m, height_m) = (
+        forged.world.nx as f64 * forged.world.dx,
+        forged.world.nz as f64 * forged.world.dx,
+    );
     drop(forged);
     let meta = world_store::WorldMeta {
         format_version: world_store::META_FORMAT,
@@ -738,7 +834,9 @@ fn forge_world(
         width_m,
         height_m,
         cell_m: params.cell_m,
-        preset: presets::matching(&params.knobs).map_or(CUSTOM, |p| p.name).to_string(),
+        preset: presets::matching(&params.knobs)
+            .map_or(CUSTOM, |p| p.name)
+            .to_string(),
         knobs: world_store::knobs_map(&params.knobs),
         forge_ms: started.elapsed().as_millis() as u64,
         region_blocks: game::REGION_BLOCKS as u32,
@@ -753,7 +851,11 @@ fn forge_world(
         let _ = std::fs::remove_dir_all(&dir);
         return ForgeEvent::Cancelled;
     }
-    ForgeEvent::Done(PendingWorld { terrain: dir.join(world_store::TERRAIN_FILE), entry_dir: dir, name })
+    ForgeEvent::Done(PendingWorld {
+        terrain: dir.join(world_store::TERRAIN_FILE),
+        entry_dir: dir,
+        name,
+    })
 }
 
 // ---- Bevy wiring ----
@@ -773,6 +875,10 @@ pub fn connect(ui: &FrontendUi, world: &mut World) {
     ui.set_gen_tabs(strings(TABS.iter().map(|t| t.0)));
     ui.set_gen_layers(strings(PreviewLayer::ALL.iter().map(|l| l.label())));
     macro_rules! queue {
+        (|| $action:expr) => {{
+            let queue = actions.clone();
+            move || queue.borrow_mut().push($action)
+        }};
         (|$($arg:ident),*| $action:expr) => {{
             let queue = actions.clone();
             move |$($arg),*| queue.borrow_mut().push($action)
@@ -780,14 +886,17 @@ pub fn connect(ui: &FrontendUi, world: &mut World) {
     }
     ui.on_gen_preset_chosen(queue!(|i| GeneratorAction::Preset(i.max(0) as usize)));
     ui.on_gen_seed_edited(queue!(|text| GeneratorAction::Seed(text.to_string())));
-    ui.on_gen_shuffle_seed(queue!(| | GeneratorAction::Shuffle));
-    ui.on_gen_knob_edited(queue!(|key, value| GeneratorAction::Knob(key.to_string(), value)));
+    ui.on_gen_shuffle_seed(queue!(|| GeneratorAction::Shuffle));
+    ui.on_gen_knob_edited(queue!(|key, value| GeneratorAction::Knob(
+        key.to_string(),
+        value
+    )));
     ui.on_gen_knob_reset(queue!(|key| GeneratorAction::Reset(key.to_string())));
     ui.on_gen_tab_changed(queue!(|i| GeneratorAction::Tab(i.max(0) as usize)));
     ui.on_gen_layer_chosen(queue!(|i| GeneratorAction::Layer(i.max(0) as usize)));
-    ui.on_gen_refresh(queue!(| | GeneratorAction::Refresh));
-    ui.on_gen_play(queue!(| | GeneratorAction::Play));
-    ui.on_gen_cancel_forge(queue!(| | GeneratorAction::CancelForge));
+    ui.on_gen_refresh(queue!(|| GeneratorAction::Refresh));
+    ui.on_gen_play(queue!(|| GeneratorAction::Play));
+    ui.on_gen_cancel_forge(queue!(|| GeneratorAction::CancelForge));
     world.insert_non_send(GeneratorUi { actions, rows });
 }
 
@@ -800,14 +909,24 @@ impl Plugin for GeneratorPlugin {
             .add_systems(OnExit(AppState::MapGenerator), exit_generator)
             .add_systems(
                 Update,
-                (apply_generator_actions, request_preview, receive_preview, poll_forge, push_generator_state)
+                (
+                    apply_generator_actions,
+                    request_preview,
+                    receive_preview,
+                    poll_forge,
+                    push_generator_state,
+                )
                     .chain()
                     .run_if(in_state(AppState::MapGenerator)),
             );
     }
 }
 
-fn enter_generator(mut commands: Commands, mut state: ResMut<GeneratorState>, layer: Option<NonSend<SlintLayer<FrontendUi>>>) {
+fn enter_generator(
+    mut commands: Commands,
+    mut state: ResMut<GeneratorState>,
+    layer: Option<NonSend<SlintLayer<FrontendUi>>>,
+) {
     commands.insert_resource(PreviewWorker::spawn());
     state.stale = true;
     state.rows_dirty = true;
@@ -817,7 +936,11 @@ fn enter_generator(mut commands: Commands, mut state: ResMut<GeneratorState>, la
     }
 }
 
-fn exit_generator(mut commands: Commands, job: Option<Res<ForgeJob>>, mut state: ResMut<GeneratorState>) {
+fn exit_generator(
+    mut commands: Commands,
+    job: Option<Res<ForgeJob>>,
+    mut state: ResMut<GeneratorState>,
+) {
     commands.remove_resource::<PreviewWorker>();
     if let Some(job) = job {
         job.cancel();
@@ -834,7 +957,9 @@ fn apply_generator_actions(
     mut state: ResMut<GeneratorState>,
     job: Option<Res<ForgeJob>>,
 ) {
-    let (Some(ui), Some(layer)) = (ui, layer) else { return };
+    let (Some(ui), Some(layer)) = (ui, layer) else {
+        return;
+    };
     let queued = std::mem::take(&mut *ui.actions.borrow_mut());
     let name = layer.overlay.ui().get_gen_name_text().to_string();
     for action in queued {
@@ -843,11 +968,20 @@ fn apply_generator_actions(
                 // Backstop for the offered cells: never start a forge the
                 // machine is not expected to hold.
                 let (width_m, height_m) = state.dimensions();
-                if let Err(why) = play::check_play_ram(width_m, height_m, state.world_cell_m(), play::physical_memory_bytes()) {
+                if let Err(why) = play::check_play_ram(
+                    width_m,
+                    height_m,
+                    state.world_cell_m(),
+                    play::physical_memory_bytes(),
+                ) {
                     state.play_error = why;
                     continue;
                 }
-                let name = if name.trim().is_empty() { default_name(state.seed) } else { name.trim().to_string() };
+                let name = if name.trim().is_empty() {
+                    default_name(state.seed)
+                } else {
+                    name.trim().to_string()
+                };
                 let root = forged::from_repo_root(Path::new(world_store::WORLDS_DIR));
                 let params = state.params(state.world_cell_m());
                 commands.insert_resource(ForgeJob::start(root, params, name));
@@ -869,7 +1003,9 @@ fn request_preview(
     worker: Option<Res<PreviewWorker>>,
     mut state: ResMut<GeneratorState>,
 ) {
-    let (Some(layer), Some(worker)) = (layer, worker) else { return };
+    let (Some(layer), Some(worker)) = (layer, worker) else {
+        return;
+    };
     let auto = layer.overlay.ui().get_gen_auto_refresh();
     if !state.stale || !(auto || state.refresh_requested) || state.forging.is_some() {
         return;
@@ -887,13 +1023,26 @@ fn receive_preview(
     worker: Option<Res<PreviewWorker>>,
     mut state: ResMut<GeneratorState>,
 ) {
-    let (Some(layer), Some(worker)) = (layer, worker) else { return };
-    let newest = worker.results.try_iter().filter(|(generation, ..)| *generation == state.generation).last();
+    let (Some(layer), Some(worker)) = (layer, worker) else {
+        return;
+    };
+    let newest = worker
+        .results
+        .try_iter()
+        .filter(|(generation, ..)| *generation == state.generation)
+        .last();
     let Some((_, result)) = newest else { return };
     match result {
         Ok((image, stats)) => {
-            let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&image.pixels, image.width, image.height);
-            layer.overlay.ui().set_gen_preview(SlintImage::from_rgba8(buffer));
+            let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                &image.pixels,
+                image.width,
+                image.height,
+            );
+            layer
+                .overlay
+                .ui()
+                .set_gen_preview(SlintImage::from_rgba8(buffer));
             state.stats_lines = stats_lines(&stats);
         }
         Err(why) => state.stats_lines = vec![why],
@@ -912,7 +1061,11 @@ fn poll_forge(
         match job.settle(event) {
             ForgeEvent::Progress(p) => state.forging = Some(progress_text(p)),
             ForgeEvent::Done(world) => {
-                info!("created world {:?} in {}", world.name, world.entry_dir.display());
+                info!(
+                    "created world {:?} in {}",
+                    world.name,
+                    world.entry_dir.display()
+                );
                 commands.remove_resource::<ForgeJob>();
                 commands.insert_resource(world);
                 state.forging = None;
@@ -939,7 +1092,9 @@ fn push_generator_state(
     layer: Option<NonSend<SlintLayer<FrontendUi>>>,
     mut state: ResMut<GeneratorState>,
 ) {
-    let (Some(models), Some(layer)) = (ui, layer) else { return };
+    let (Some(models), Some(layer)) = (ui, layer) else {
+        return;
+    };
     let ui = layer.overlay.ui();
     if std::mem::take(&mut state.rows_dirty) {
         models.rows.set_vec(state.rows());
@@ -947,7 +1102,12 @@ fn push_generator_state(
     }
     for key in std::mem::take(&mut state.row_updates) {
         let fresh = state.rows().into_iter().find(|r| r.key == key.as_str());
-        let index = (0..models.rows.row_count()).find(|&i| models.rows.row_data(i).is_some_and(|r| r.key == key.as_str()));
+        let index = (0..models.rows.row_count()).find(|&i| {
+            models
+                .rows
+                .row_data(i)
+                .is_some_and(|r| r.key == key.as_str())
+        });
         if let (Some(fresh), Some(index)) = (fresh, index) {
             models.rows.set_row_data(index, fresh);
         }
@@ -979,8 +1139,16 @@ fn push_generator_state(
         ui.set_gen_preview_busy(state.preview_busy);
     }
     let shown: Vec<SharedString> = ui.get_gen_stats_lines().iter().collect();
-    if shown.len() != state.stats_lines.len().min(STATS_LINES) || shown.iter().zip(&state.stats_lines).any(|(a, b)| a != b) {
-        ui.set_gen_stats_lines(strings(state.stats_lines.iter().take(STATS_LINES).map(String::as_str)));
+    if shown.len() != state.stats_lines.len().min(STATS_LINES)
+        || shown.iter().zip(&state.stats_lines).any(|(a, b)| a != b)
+    {
+        ui.set_gen_stats_lines(strings(
+            state
+                .stats_lines
+                .iter()
+                .take(STATS_LINES)
+                .map(String::as_str),
+        ));
     }
     let forging = state.forging.is_some();
     if ui.get_gen_forging() != forging {
@@ -1002,4 +1170,3 @@ fn push_generator_state(
         ui.set_gen_play_estimate(estimate.into());
     }
 }
-

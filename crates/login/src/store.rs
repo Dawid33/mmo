@@ -3,9 +3,9 @@
 use std::str::FromStr;
 
 use login_api::{EMAIL_MAX_CHARS, WorldStatus};
+use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::Row;
 
 use crate::LOGIN_POOL_MAX;
 
@@ -65,9 +65,15 @@ pub enum OidcUpsert {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefreshOutcome {
     /// The token was live; it is now revoked (rotated).
-    Valid { account: AccountId, family: [u8; 16] },
+    Valid {
+        account: AccountId,
+        family: [u8; 16],
+    },
     /// The token was already revoked: the caller revokes its family.
-    Reused { account: AccountId, family: [u8; 16] },
+    Reused {
+        account: AccountId,
+        family: [u8; 16],
+    },
     Unknown,
 }
 
@@ -115,7 +121,8 @@ enum Pool {
 }
 
 /// Run the same expression against whichever pool is open.
-const REVOKE_ACCOUNT: &str = "UPDATE refresh_tokens SET revoked_at = $1 WHERE account_id = $2 AND revoked_at IS NULL";
+const REVOKE_ACCOUNT: &str =
+    "UPDATE refresh_tokens SET revoked_at = $1 WHERE account_id = $2 AND revoked_at IS NULL";
 const QUEUE_KICKS: &str = "INSERT INTO pending_kicks (world_id, player_token, session_epoch, reason, created_at) \
      SELECT s.world_id, p.player_token, s.session_epoch, CAST($2 AS TEXT), CAST($3 AS BIGINT) \
      FROM sessions s \
@@ -132,8 +139,18 @@ const ADOPTION_KICK_REASON: &str = "signed in again through the identity provide
 /// each of its open sessions in a world with a host link; evaluates to how many were queued.
 macro_rules! revoke_with_kicks {
     ($tx:ident, $account:expr, $now:expr, $reason:expr) => {{
-        sqlx::query(REVOKE_ACCOUNT).bind($now).bind($account).execute(&mut *$tx).await?;
-        sqlx::query(QUEUE_KICKS).bind($account).bind($reason).bind($now).execute(&mut *$tx).await?.rows_affected()
+        sqlx::query(REVOKE_ACCOUNT)
+            .bind($now)
+            .bind($account)
+            .execute(&mut *$tx)
+            .await?;
+        sqlx::query(QUEUE_KICKS)
+            .bind($account)
+            .bind($reason)
+            .bind($now)
+            .execute(&mut *$tx)
+            .await?
+            .rows_affected()
     }};
 }
 
@@ -177,7 +194,11 @@ fn status_int(s: WorldStatus) -> i64 {
 }
 
 fn status_of(i: i64) -> WorldStatus {
-    if i == 0 { WorldStatus::Open } else { WorldStatus::Closed }
+    if i == 0 {
+        WorldStatus::Open
+    } else {
+        WorldStatus::Closed
+    }
 }
 
 macro_rules! account_row {
@@ -211,16 +232,21 @@ macro_rules! world_row {
     };
 }
 
-const ACCOUNT_COLS: &str = "account_id, email, password_hash, email_verified_at, created_at, subject, display_name";
-const WORLD_COLS: &str =
-"world_id, name, status, quic, webtransport, cert_hash, created_at, host_link, host_link_cert, map_url";
+const ACCOUNT_COLS: &str =
+    "account_id, email, password_hash, email_verified_at, created_at, subject, display_name";
+const WORLD_COLS: &str = "world_id, name, status, quic, webtransport, cert_hash, created_at, host_link, host_link_cert, map_url";
 
 impl LoginStore {
     /// Open and migrate: a `postgres://` URL, `sqlite::memory:`, `sqlite:<path>` or a bare path.
     /// No lock is taken: several login replicas may share one Postgres database.
     pub async fn open(url: &str) -> Result<LoginStore, LoginError> {
         let pool = if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-            Pool::Pg(PgPoolOptions::new().max_connections(LOGIN_POOL_MAX).connect(url).await?)
+            Pool::Pg(
+                PgPoolOptions::new()
+                    .max_connections(LOGIN_POOL_MAX)
+                    .connect(url)
+                    .await?,
+            )
         } else if url == "sqlite::memory:" {
             let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
             // One connection that never expires: each in-memory connection is its own database.
@@ -244,7 +270,12 @@ impl LoginStore {
                 .journal_mode(SqliteJournalMode::Wal)
                 .synchronous(SqliteSynchronous::Normal)
                 .foreign_keys(true);
-            Pool::Sqlite(SqlitePoolOptions::new().max_connections(LOGIN_POOL_MAX).connect_with(opts).await?)
+            Pool::Sqlite(
+                SqlitePoolOptions::new()
+                    .max_connections(LOGIN_POOL_MAX)
+                    .connect_with(opts)
+                    .await?,
+            )
         };
         match &pool {
             Pool::Sqlite(p) => sqlx::migrate!("migrations/sqlite").run(p).await?,
@@ -262,18 +293,27 @@ impl LoginStore {
     ) -> Result<Option<AccountId>, LoginError> {
         const SQL: &str = "INSERT INTO accounts (email, password_hash, created_at) VALUES ($1, $2, $3) \
              ON CONFLICT (email) DO NOTHING RETURNING account_id";
-        Ok(on!(self, p => sqlx::query(SQL).bind(email).bind(password_hash).bind(now).fetch_optional(p).await?
-            .map(|r| r.get::<i64, _>(0))))
+        Ok(
+            on!(self, p => sqlx::query(SQL).bind(email).bind(password_hash).bind(now).fetch_optional(p).await?
+            .map(|r| r.get::<i64, _>(0))),
+        )
     }
 
     pub async fn account_by_email(&self, email: &str) -> Result<Option<AccountRow>, LoginError> {
         let sql = format!("SELECT {ACCOUNT_COLS} FROM accounts WHERE email = $1");
-        Ok(on!(self, p => sqlx::query(&sql).bind(email).fetch_optional(p).await?.map(|r| account_row!(r))))
+        Ok(
+            on!(self, p => sqlx::query(&sql).bind(email).fetch_optional(p).await?.map(|r| account_row!(r))),
+        )
     }
 
-    pub async fn account_by_subject(&self, subject: &str) -> Result<Option<AccountRow>, LoginError> {
+    pub async fn account_by_subject(
+        &self,
+        subject: &str,
+    ) -> Result<Option<AccountRow>, LoginError> {
         let sql = format!("SELECT {ACCOUNT_COLS} FROM accounts WHERE subject = $1");
-        Ok(on!(self, p => sqlx::query(&sql).bind(subject).fetch_optional(p).await?.map(|r| account_row!(r))))
+        Ok(
+            on!(self, p => sqlx::query(&sql).bind(subject).fetch_optional(p).await?.map(|r| account_row!(r))),
+        )
     }
 
     /// Sign-in through the identity provider, in one transaction: the account of `subject`
@@ -366,16 +406,27 @@ impl LoginStore {
         })
     }
 
+    #[tracing::instrument(
+        name = "login.store.account",
+        skip_all,
+        fields(operation = "account_lookup")
+    )]
     pub async fn account(&self, id: AccountId) -> Result<Option<AccountRow>, LoginError> {
         let sql = format!("SELECT {ACCOUNT_COLS} FROM accounts WHERE account_id = $1");
-        Ok(on!(self, p => sqlx::query(&sql).bind(id).fetch_optional(p).await?.map(|r| account_row!(r))))
+        Ok(
+            on!(self, p => sqlx::query(&sql).bind(id).fetch_optional(p).await?.map(|r| account_row!(r))),
+        )
     }
 
     /// The account of `email`, made (no password, verified) when there is none: what an operator
     /// needs to hand out a refresh token (`login account issue-refresh`). An account that
     /// already exists is left exactly as it is — its verification included: an operator must
     /// not vouch for an email someone else registered.
-    pub async fn ensure_verified_account(&self, email: &str, now: i64) -> Result<AccountId, LoginError> {
+    pub async fn ensure_verified_account(
+        &self,
+        email: &str,
+        now: i64,
+    ) -> Result<AccountId, LoginError> {
         const CREATE: &str = "INSERT INTO accounts (email, password_hash, email_verified_at, created_at) \
              VALUES ($1, '', $2, $2) ON CONFLICT (email) DO NOTHING RETURNING account_id";
         if let Some(account) = self.account_by_email(email).await? {
@@ -390,7 +441,9 @@ impl LoginStore {
                 .account_by_email(email)
                 .await?
                 .map(|a| a.account_id)
-                .ok_or_else(|| LoginError::Backend(format!("account {email:?} vanished while being made"))),
+                .ok_or_else(|| {
+                    LoginError::Backend(format!("account {email:?} vanished while being made"))
+                }),
         }
     }
 
@@ -409,14 +462,20 @@ impl LoginStore {
     }
 
     /// Atomic: of concurrent takes of one token only one sees `Valid`.
-    pub async fn take_refresh(&self, hash: [u8; 32], now: i64) -> Result<RefreshOutcome, LoginError> {
+    pub async fn take_refresh(
+        &self,
+        hash: [u8; 32],
+        now: i64,
+    ) -> Result<RefreshOutcome, LoginError> {
         const TAKE: &str = "UPDATE refresh_tokens SET revoked_at = $1 \
              WHERE token_hash = $2 AND revoked_at IS NULL AND expires_at > $1 RETURNING account_id, family";
-        let taken: Option<(i64, Vec<u8>)> =
-            on!(self, p => sqlx::query(TAKE).bind(now).bind(&hash[..]).fetch_optional(p).await?
+        let taken: Option<(i64, Vec<u8>)> = on!(self, p => sqlx::query(TAKE).bind(now).bind(&hash[..]).fetch_optional(p).await?
                 .map(|r| (r.get(0), r.get(1))));
         if let Some((account, family)) = taken {
-            return Ok(RefreshOutcome::Valid { account, family: family_of(family) });
+            return Ok(RefreshOutcome::Valid {
+                account,
+                family: family_of(family),
+            });
         }
         self.not_taken(hash).await
     }
@@ -432,6 +491,11 @@ impl LoginStore {
     /// - SQLite: writers are serialised, and the take UPDATE is the transaction's first statement,
     ///   so the deferred transaction takes the write lock before reading anything (no stale
     ///   snapshot to upgrade); a loser's reuse lookup runs after the winner committed.
+    #[tracing::instrument(
+        name = "login.store.refresh",
+        skip_all,
+        fields(operation = "refresh_rotate")
+    )]
     pub async fn rotate_refresh(
         &self,
         old: [u8; 32],
@@ -446,11 +510,19 @@ impl LoginStore {
             Pool::Sqlite(p) => {
                 let mut tx = p.begin().await?;
                 let taken: Option<(i64, Vec<u8>)> = sqlx::query(TAKE)
-                    .bind(now).bind(&old[..]).fetch_optional(&mut *tx).await?
+                    .bind(now)
+                    .bind(&old[..])
+                    .fetch_optional(&mut *tx)
+                    .await?
                     .map(|r| (r.get(0), r.get(1)));
                 if let Some((account, family)) = &taken {
-                    sqlx::query(INS).bind(&new[..]).bind(account).bind(&family[..]).bind(new_expires_at)
-                        .execute(&mut *tx).await?;
+                    sqlx::query(INS)
+                        .bind(&new[..])
+                        .bind(account)
+                        .bind(&family[..])
+                        .bind(new_expires_at)
+                        .execute(&mut *tx)
+                        .await?;
                 }
                 tx.commit().await?;
                 taken
@@ -458,42 +530,61 @@ impl LoginStore {
             Pool::Pg(p) => {
                 let mut tx = p.begin().await?;
                 let taken: Option<(i64, Vec<u8>)> = sqlx::query(TAKE)
-                    .bind(now).bind(&old[..]).fetch_optional(&mut *tx).await?
+                    .bind(now)
+                    .bind(&old[..])
+                    .fetch_optional(&mut *tx)
+                    .await?
                     .map(|r| (r.get(0), r.get(1)));
                 if let Some((account, family)) = &taken {
-                    sqlx::query(INS).bind(&new[..]).bind(account).bind(&family[..]).bind(new_expires_at)
-                        .execute(&mut *tx).await?;
+                    sqlx::query(INS)
+                        .bind(&new[..])
+                        .bind(account)
+                        .bind(&family[..])
+                        .bind(new_expires_at)
+                        .execute(&mut *tx)
+                        .await?;
                 }
                 tx.commit().await?;
                 taken
             }
         };
         if let Some((account, family)) = taken {
-            return Ok(RefreshOutcome::Valid { account, family: family_of(family) });
+            return Ok(RefreshOutcome::Valid {
+                account,
+                family: family_of(family),
+            });
         }
         self.not_taken(old).await
     }
 
     /// A refresh token that could not be taken: `Reused` if it was revoked, else `Unknown`.
     async fn not_taken(&self, hash: [u8; 32]) -> Result<RefreshOutcome, LoginError> {
-        const LOOK: &str = "SELECT account_id, family, revoked_at FROM refresh_tokens WHERE token_hash = $1";
-        let seen: Option<(i64, Vec<u8>, Option<i64>)> =
-            on!(self, p => sqlx::query(LOOK).bind(&hash[..]).fetch_optional(p).await?
+        const LOOK: &str =
+            "SELECT account_id, family, revoked_at FROM refresh_tokens WHERE token_hash = $1";
+        let seen: Option<(i64, Vec<u8>, Option<i64>)> = on!(self, p => sqlx::query(LOOK).bind(&hash[..]).fetch_optional(p).await?
                 .map(|r| (r.get(0), r.get(1), r.get(2))));
         Ok(match seen {
-            Some((account, family, Some(_))) => RefreshOutcome::Reused { account, family: family_of(family) },
+            Some((account, family, Some(_))) => RefreshOutcome::Reused {
+                account,
+                family: family_of(family),
+            },
             // No row, or expired and never used: nothing to revoke.
             _ => RefreshOutcome::Unknown,
         })
     }
 
     pub async fn revoke_family(&self, family: [u8; 16], now: i64) -> Result<(), LoginError> {
-        const SQL: &str = "UPDATE refresh_tokens SET revoked_at = $1 WHERE family = $2 AND revoked_at IS NULL";
+        const SQL: &str =
+            "UPDATE refresh_tokens SET revoked_at = $1 WHERE family = $2 AND revoked_at IS NULL";
         exec!(self, p => sqlx::query(SQL).bind(now).bind(&family[..]).execute(p).await?);
         Ok(())
     }
 
-    pub async fn revoke_account_refresh(&self, account: AccountId, now: i64) -> Result<(), LoginError> {
+    pub async fn revoke_account_refresh(
+        &self,
+        account: AccountId,
+        now: i64,
+    ) -> Result<(), LoginError> {
         const SQL: &str = "UPDATE refresh_tokens SET revoked_at = $1 WHERE account_id = $2 AND revoked_at IS NULL";
         exec!(self, p => sqlx::query(SQL).bind(now).bind(account).execute(p).await?);
         Ok(())
@@ -524,15 +615,29 @@ impl LoginStore {
 
     pub async fn worlds(&self) -> Result<Vec<WorldRow>, LoginError> {
         let sql = format!("SELECT {WORLD_COLS} FROM worlds ORDER BY world_id");
-        Ok(on!(self, p => sqlx::query(&sql).fetch_all(p).await?.into_iter().map(|r| world_row!(r)).collect()))
+        Ok(
+            on!(self, p => sqlx::query(&sql).fetch_all(p).await?.into_iter().map(|r| world_row!(r)).collect()),
+        )
     }
 
+    #[tracing::instrument(
+        name = "login.store.world",
+        skip(self),
+        fields(operation = "world_lookup")
+    )]
     pub async fn world(&self, id: &str) -> Result<Option<WorldRow>, LoginError> {
         let sql = format!("SELECT {WORLD_COLS} FROM worlds WHERE world_id = $1");
-        Ok(on!(self, p => sqlx::query(&sql).bind(id).fetch_optional(p).await?.map(|r| world_row!(r))))
+        Ok(
+            on!(self, p => sqlx::query(&sql).bind(id).fetch_optional(p).await?.map(|r| world_row!(r))),
+        )
     }
 
     /// The account's player token in a world, created (from `new_token`) on first use.
+    #[tracing::instrument(
+        name = "login.store.player_token",
+        skip_all,
+        fields(operation = "player_token_resolve", mmo.world_id = %world)
+    )]
     pub async fn player_token_for(
         &self,
         account: AccountId,
@@ -540,11 +645,11 @@ impl LoginStore {
         now: i64,
         new_token: impl FnOnce() -> String,
     ) -> Result<String, LoginError> {
-        const SEL: &str = "SELECT player_token FROM world_players WHERE account_id = $1 AND world_id = $2";
+        const SEL: &str =
+            "SELECT player_token FROM world_players WHERE account_id = $1 AND world_id = $2";
         const INS: &str = "INSERT INTO world_players (account_id, world_id, player_token, created_at) \
              VALUES ($1, $2, $3, $4) ON CONFLICT (account_id, world_id) DO NOTHING";
-        let have: Option<String> =
-            on!(self, p => sqlx::query(SEL).bind(account).bind(world).fetch_optional(p).await?.map(|r| r.get(0)));
+        let have: Option<String> = on!(self, p => sqlx::query(SEL).bind(account).bind(world).fetch_optional(p).await?.map(|r| r.get(0)));
         if let Some(t) = have {
             return Ok(t);
         }
@@ -555,29 +660,54 @@ impl LoginStore {
     }
 
     /// Upsert; the new epoch, starting at 1. The session is open again (`ended_at` cleared).
-    pub async fn bump_session(&self, account: AccountId, world: &str, now: i64) -> Result<u64, LoginError> {
+    #[tracing::instrument(
+        name = "login.store.session",
+        skip_all,
+        fields(operation = "session_bump", mmo.world_id = %world)
+    )]
+    pub async fn bump_session(
+        &self,
+        account: AccountId,
+        world: &str,
+        now: i64,
+    ) -> Result<u64, LoginError> {
         const SQL: &str = "INSERT INTO sessions (account_id, world_id, session_epoch, started_at) \
              VALUES ($1, $2, 1, $3) ON CONFLICT (account_id, world_id) DO UPDATE SET \
              session_epoch = sessions.session_epoch + 1, started_at = excluded.started_at, ended_at = NULL \
              RETURNING session_epoch";
-        let epoch: i64 =
-            on!(self, p => sqlx::query(SQL).bind(account).bind(world).bind(now).fetch_one(p).await?.get(0));
+        let epoch: i64 = on!(self, p => sqlx::query(SQL).bind(account).bind(world).bind(now).fetch_one(p).await?.get(0));
         Ok(epoch as u64)
     }
 
     /// The account of a live (unrevoked, unexpired) refresh token, without spending it. `join`
     /// reads it before pushing a spawn order, so a world host that is down does not cost the
     /// client its token (the rotation happens after the ack).
-    pub async fn live_refresh_account(&self, hash: [u8; 32], now: i64) -> Result<Option<AccountId>, LoginError> {
-        const SQL: &str =
-            "SELECT account_id FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $2";
-        Ok(on!(self, p => sqlx::query(SQL).bind(&hash[..]).bind(now).fetch_optional(p).await?
-            .map(|r| r.get::<i64, _>(0))))
+    #[tracing::instrument(
+        name = "login.store.refresh",
+        skip_all,
+        fields(operation = "refresh_validate")
+    )]
+    pub async fn live_refresh_account(
+        &self,
+        hash: [u8; 32],
+        now: i64,
+    ) -> Result<Option<AccountId>, LoginError> {
+        const SQL: &str = "SELECT account_id FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $2";
+        Ok(
+            on!(self, p => sqlx::query(SQL).bind(&hash[..]).bind(now).fetch_optional(p).await?
+            .map(|r| r.get::<i64, _>(0))),
+        )
     }
 
     /// A host reported the session of `player_token` in `world` admitted with `epoch` ended.
     /// Only that epoch's session ends (a late report never ends a newer join). Whether it did.
-    pub async fn end_session(&self, world: &str, player_token: &str, epoch: u64, now: i64) -> Result<bool, LoginError> {
+    pub async fn end_session(
+        &self,
+        world: &str,
+        player_token: &str,
+        epoch: u64,
+        now: i64,
+    ) -> Result<bool, LoginError> {
         const SQL: &str = "UPDATE sessions SET ended_at = $1 \
              WHERE world_id = $2 AND session_epoch = $3 AND ended_at IS NULL AND account_id = \
              (SELECT account_id FROM world_players WHERE world_id = $2 AND player_token = $4)";
@@ -587,9 +717,20 @@ impl LoginStore {
         macro_rules! tx {
             ($p:expr) => {{
                 let mut tx = $p.begin().await?;
-                let n = sqlx::query(SQL).bind(now).bind(world).bind(epoch).bind(player_token)
-                    .execute(&mut *tx).await?.rows_affected();
-                sqlx::query(DROP_KICK).bind(world).bind(player_token).bind(epoch).execute(&mut *tx).await?;
+                let n = sqlx::query(SQL)
+                    .bind(now)
+                    .bind(world)
+                    .bind(epoch)
+                    .bind(player_token)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                sqlx::query(DROP_KICK)
+                    .bind(world)
+                    .bind(player_token)
+                    .bind(epoch)
+                    .execute(&mut *tx)
+                    .await?;
                 tx.commit().await?;
                 n
             }};
@@ -606,16 +747,23 @@ impl LoginStore {
         const SQL: &str = "SELECT s.world_id, w.player_token, s.session_epoch FROM sessions s \
              JOIN world_players w ON w.account_id = s.account_id AND w.world_id = s.world_id \
              WHERE s.account_id = $1 AND s.ended_at IS NULL ORDER BY s.world_id";
-        Ok(on!(self, p => sqlx::query(SQL).bind(account).fetch_all(p).await?.into_iter()
+        Ok(
+            on!(self, p => sqlx::query(SQL).bind(account).fetch_all(p).await?.into_iter()
             .map(|r| OpenSession { world_id: r.get(0), player_token: r.get(1), session_epoch: r.get::<i64, _>(2) as u64 })
-            .collect()))
+            .collect()),
+        )
     }
 
     /// Revoke every refresh token of `account` and, in the SAME transaction, queue a kick (with
     /// `reason`) for each of its open sessions in a world with a host link — so a revocation
     /// is never committed without its kicks. A kick already queued for that player is replaced
     /// (the newest epoch and reason). How many kicks were queued.
-    pub async fn revoke_account_with_kicks(&self, account: AccountId, now: i64, reason: &str) -> Result<u64, LoginError> {
+    pub async fn revoke_account_with_kicks(
+        &self,
+        account: AccountId,
+        now: i64,
+        reason: &str,
+    ) -> Result<u64, LoginError> {
         macro_rules! tx {
             ($p:expr) => {{
                 let mut tx = $p.begin().await?;
@@ -634,19 +782,26 @@ impl LoginStore {
     pub async fn pending_kicks(&self) -> Result<Vec<PendingKick>, LoginError> {
         const SQL: &str = "SELECT world_id, player_token, session_epoch, reason FROM pending_kicks \
              ORDER BY world_id, player_token";
-        Ok(on!(self, p => sqlx::query(SQL).fetch_all(p).await?.into_iter()
+        Ok(
+            on!(self, p => sqlx::query(SQL).fetch_all(p).await?.into_iter()
             .map(|r| PendingKick {
                 world_id: r.get(0),
                 player_token: r.get(1),
                 session_epoch: r.get::<i64, _>(2) as u64,
                 reason: r.get(3),
             })
-            .collect()))
+            .collect()),
+        )
     }
 
     /// The host applied the kick of `player_token` in `world` up to `epoch`: forgotten, unless
     /// a newer one was queued since. Whether a row went.
-    pub async fn kick_acked(&self, world: &str, player_token: &str, epoch: u64) -> Result<bool, LoginError> {
+    pub async fn kick_acked(
+        &self,
+        world: &str,
+        player_token: &str,
+        epoch: u64,
+    ) -> Result<bool, LoginError> {
         const SQL: &str = "DELETE FROM pending_kicks WHERE world_id = $1 AND player_token = $2 AND session_epoch <= $3";
         let epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
         let n = on!(self, p => sqlx::query(SQL).bind(world).bind(player_token).bind(epoch).execute(p).await?.rows_affected());
@@ -656,7 +811,11 @@ impl LoginStore {
     /// Delete and return the kicks queued `ttl_secs` or more before `now_secs`: a host that
     /// never acknowledges must not be retried forever. One statement, so two replicas never
     /// both report the same row.
-    pub async fn expire_pending_kicks(&self, now_secs: u64, ttl_secs: u64) -> Result<Vec<PendingKick>, LoginError> {
+    pub async fn expire_pending_kicks(
+        &self,
+        now_secs: u64,
+        ttl_secs: u64,
+    ) -> Result<Vec<PendingKick>, LoginError> {
         const SQL: &str = "DELETE FROM pending_kicks WHERE created_at <= $1 \
              RETURNING world_id, player_token, session_epoch, reason";
         let cutoff = i64::try_from(now_secs.saturating_sub(ttl_secs)).unwrap_or(i64::MAX);

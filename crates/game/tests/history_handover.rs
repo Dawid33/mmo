@@ -54,5 +54,3 @@ pub fn start() -> CalendarTick {
 }
 
 // ---- the world manager runs the history -------------------------------------
-
-

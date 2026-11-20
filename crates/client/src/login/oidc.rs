@@ -8,8 +8,8 @@
 
 use std::fmt;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -26,12 +26,18 @@ const VERIFIER_BYTES: usize = 32;
 
 /// The provider's device authorization endpoint under its issuer URL.
 pub fn device_endpoint(issuer: &str) -> String {
-    format!("{}/protocol/openid-connect/auth/device", issuer.trim_end_matches('/'))
+    format!(
+        "{}/protocol/openid-connect/auth/device",
+        issuer.trim_end_matches('/')
+    )
 }
 
 /// The provider's token endpoint under its issuer URL.
 pub fn token_endpoint(issuer: &str) -> String {
-    format!("{}/protocol/openid-connect/token", issuer.trim_end_matches('/'))
+    format!(
+        "{}/protocol/openid-connect/token",
+        issuer.trim_end_matches('/')
+    )
 }
 
 /// The device authorization answer: the code the player types (or the link
@@ -90,7 +96,10 @@ impl fmt::Debug for DevicePoll {
 
 /// `http://` or `https://` (the scheme in any case).
 fn is_web_url(url: &str) -> bool {
-    let starts = |scheme: &str| url.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme));
+    let starts = |scheme: &str| {
+        url.get(..scheme.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+    };
     starts("https://") || starts("http://")
 }
 
@@ -98,7 +107,10 @@ fn is_web_url(url: &str) -> bool {
 pub fn parse_device_start(body: &str) -> Result<DeviceStart, String> {
     let mut start: DeviceStart =
         serde_json::from_str(body).map_err(|e| format!("bad device authorization answer: {e}"))?;
-    if start.device_code.is_empty() || start.user_code.is_empty() || start.verification_uri.is_empty() {
+    if start.device_code.is_empty()
+        || start.user_code.is_empty()
+        || start.verification_uri.is_empty()
+    {
         return Err("device authorization answer without its codes".into());
     }
     if start.verification_uri_complete.is_empty() {
@@ -107,10 +119,15 @@ pub fn parse_device_start(body: &str) -> Result<DeviceStart, String> {
     // The pages are opened in the player's browser: only web pages.
     for (field, url) in [
         ("verification_uri", &start.verification_uri),
-        ("verification_uri_complete", &start.verification_uri_complete),
+        (
+            "verification_uri_complete",
+            &start.verification_uri_complete,
+        ),
     ] {
         if !is_web_url(url) {
-            return Err(format!("device authorization answer with a non-http(s) {field}"));
+            return Err(format!(
+                "device authorization answer with a non-http(s) {field}"
+            ));
         }
     }
     Ok(start)
@@ -176,4 +193,3 @@ pub fn new_pkce_verifier() -> String {
     getrandom::getrandom(&mut bytes).expect("no secure random source for the sign-in");
     URL_SAFE_NO_PAD.encode(bytes)
 }
-

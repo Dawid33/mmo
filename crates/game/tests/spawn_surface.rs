@@ -13,7 +13,10 @@ fn region_with_high_floor() -> Region {
     let c = 128 / cu;
     Region::from_chunks(
         RegionId::new(0, 0),
-        vec![(ChunkCoords::new(c, cy as i32, c), Chunk::flat_floor(depth as u32))],
+        vec![(
+            ChunkCoords::new(c, cy as i32, c),
+            Chunk::flat_floor(depth as u32),
+        )],
     )
 }
 
@@ -32,7 +35,10 @@ fn player_spawns_above_terrain_surface() {
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     let y = player_body_y(&region);
     // Must be clear of the surface (top face at 128), not the old hardcoded 26.
-    assert!(y > 128.0, "player must spawn above the terrain surface, got y={y}");
+    assert!(
+        y > 128.0,
+        "player must spawn above the terrain surface, got y={y}"
+    );
     // Spawn math: (surface_top) + capsule_half_extent(8.0 + 6.4 = 14.4) + clear(3.6).
     // Surface top = 128 -> 128 + 18.0 = 146.0.
     assert!((y - 146.0).abs() < 0.01, "expected ~146.0, got {y}");

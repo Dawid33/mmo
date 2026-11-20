@@ -9,7 +9,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use game::BlockRegistry;
 use image::RgbaImage;
 
-use crate::renderer::block_textures::{mip_chain, BlockTextureLayers};
+use crate::renderer::block_textures::{BlockTextureLayers, mip_chain};
 
 /// A block with no texture (or none resolved).
 pub const MAP_FALLBACK_RGB: [u8; 4] = [128, 128, 128, 255];
@@ -22,11 +22,21 @@ pub struct MapPalette {
 }
 
 /// Every block's map colour, index = block id (`layers` as `build_layers` made them).
-pub fn block_colours(registry: &BlockRegistry, layers: &[RgbaImage], block_layers: &BlockTextureLayers) -> Vec<[u8; 4]> {
-    let len = registry.iter().map(|(id, _)| id.0 as usize + 1).max().unwrap_or(1);
+pub fn block_colours(
+    registry: &BlockRegistry,
+    layers: &[RgbaImage],
+    block_layers: &BlockTextureLayers,
+) -> Vec<[u8; 4]> {
+    let len = registry
+        .iter()
+        .map(|(id, _)| id.0 as usize + 1)
+        .max()
+        .unwrap_or(1);
     let mut rgb = vec![MAP_FALLBACK_RGB; len];
     for (id, [top, _, _]) in &block_layers.0 {
-        let Some(layer) = layers.get(*top as usize) else { continue };
+        let Some(layer) = layers.get(*top as usize) else {
+            continue;
+        };
         let chain = mip_chain(layer);
         let p = chain.last().expect("a chain has a level").get_pixel(0, 0);
         if (id.0 as usize) < len {
@@ -39,12 +49,19 @@ pub fn block_colours(registry: &BlockRegistry, layers: &[RgbaImage], block_layer
 /// The palette resource, its texture added to `images`.
 pub fn make_palette(images: &mut Assets<Image>, rgb: Vec<[u8; 4]>) -> MapPalette {
     let mut image = Image::new(
-        Extent3d { width: rgb.len() as u32, height: 1, depth_or_array_layers: 1 },
+        Extent3d {
+            width: rgb.len() as u32,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         rgb.iter().flatten().copied().collect(),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::nearest());
-    MapPalette { rgb, texture: images.add(image) }
+    MapPalette {
+        rgb,
+        texture: images.add(image),
+    }
 }

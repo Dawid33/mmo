@@ -3,7 +3,7 @@
 //! `ForgedWorld` rasters, the client builds the picture.
 
 use crate::biome::{Biome, RegionType};
-use crate::protocol::{RegionCoords, WorldBlockPos, WorldChunkPos, REGION_BLOCKS, REGION_CHUNKS};
+use crate::protocol::{REGION_BLOCKS, REGION_CHUNKS, RegionCoords, WorldBlockPos, WorldChunkPos};
 
 /// What one region looks like from above, summarised from the forged rasters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -67,7 +67,12 @@ pub struct WorldMap {
 impl WorldMap {
     /// The regions the map covers.
     pub fn extent(&self) -> MapExtent {
-        MapExtent { origin: self.origin, width: self.width, height: self.height, wrap_x: self.wrap_x }
+        MapExtent {
+            origin: self.origin,
+            width: self.width,
+            height: self.height,
+            wrap_x: self.wrap_x,
+        }
     }
 
     /// Whether `rc` is one of the map's regions.
@@ -110,7 +115,17 @@ impl WorldMap {
 ///
 /// A wrapped map is at least [`MIN_WRAP_REGIONS`] wide; a narrower one is held
 /// like an unwrapped one (its east and west neighbour would be one region).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub struct MapExtent {
     /// Min-x, min-z region.
     pub origin: RegionCoords,
@@ -185,7 +200,10 @@ impl MapExtent {
         let n = REGION_BLOCKS as i64;
         let lo = i64::from(self.origin.x) * n;
         let span = i64::from(self.width) * n;
-        WorldBlockPos { x: lo + (pos.x - lo).rem_euclid(span), ..pos }
+        WorldBlockPos {
+            x: lo + (pos.x - lo).rem_euclid(span),
+            ..pos
+        }
     }
 
     /// `pos` with x folded into the map's chunks, as [`Self::canonical_block`].
@@ -196,7 +214,10 @@ impl MapExtent {
         let n = REGION_CHUNKS as i64;
         let lo = i64::from(self.origin.x) * n;
         let span = i64::from(self.width) * n;
-        WorldChunkPos { x: lo + (pos.x - lo).rem_euclid(span), ..pos }
+        WorldChunkPos {
+            x: lo + (pos.x - lo).rem_euclid(span),
+            ..pos
+        }
     }
 }
 
@@ -212,10 +233,18 @@ pub fn canonical(map: Option<MapExtent>, rc: RegionCoords) -> RegionCoords {
 
 /// [`MapExtent::neighbour`]; with no map the plain neighbour (`None` only
 /// past the coordinate range).
-pub fn region_neighbour(map: Option<MapExtent>, rc: RegionCoords, dx: i32, dz: i32) -> Option<RegionCoords> {
+pub fn region_neighbour(
+    map: Option<MapExtent>,
+    rc: RegionCoords,
+    dx: i32,
+    dz: i32,
+) -> Option<RegionCoords> {
     match map {
         Some(m) => m.neighbour(rc, dx, dz),
-        None => Some(RegionCoords::new(rc.x.checked_add(dx)?, rc.z.checked_add(dz)?)),
+        None => Some(RegionCoords::new(
+            rc.x.checked_add(dx)?,
+            rc.z.checked_add(dz)?,
+        )),
     }
 }
 
@@ -256,23 +285,33 @@ pub fn nearest_x(map: Option<MapExtent>, dx: i64, per_region: i64) -> i64 {
 /// difference otherwise.
 pub fn local_block(map: Option<MapExtent>, rc: RegionCoords, p: WorldBlockPos) -> [i32; 3] {
     let n = REGION_BLOCKS as i64;
-    [nearest_x(map, p.x - i64::from(rc.x) * n, n) as i32, p.y, (p.z - i64::from(rc.z) * n) as i32]
+    [
+        nearest_x(map, p.x - i64::from(rc.x) * n, n) as i32,
+        p.y,
+        (p.z - i64::from(rc.z) * n) as i32,
+    ]
 }
 
 /// World chunk `c` in `rc`'s chunk frame, as [`local_block`].
 pub fn local_chunk(map: Option<MapExtent>, rc: RegionCoords, c: WorldChunkPos) -> [i32; 3] {
     let n = REGION_CHUNKS as i64;
-    [nearest_x(map, c.x - i64::from(rc.x) * n, n) as i32, c.y, (c.z - i64::from(rc.z) * n) as i32]
+    [
+        nearest_x(map, c.x - i64::from(rc.x) * n, n) as i32,
+        c.y,
+        (c.z - i64::from(rc.z) * n) as i32,
+    ]
 }
 
 /// The canonical world block of local block `local` of `rc` (which may lie
 /// past `rc`'s edges).
 pub fn world_block(map: Option<MapExtent>, rc: RegionCoords, local: [i32; 3]) -> WorldBlockPos {
-    canonical_block(map, WorldBlockPos::from_local(rc, crate::BlockPos::new(local[0], local[1], local[2])))
+    canonical_block(
+        map,
+        WorldBlockPos::from_local(rc, crate::BlockPos::new(local[0], local[1], local[2])),
+    )
 }
 
 /// The canonical world chunk of local chunk `local` of `rc`.
 pub fn world_chunk(map: Option<MapExtent>, rc: RegionCoords, local: [i32; 3]) -> WorldChunkPos {
     canonical_chunk(map, WorldChunkPos::from_local(rc, local))
 }
-

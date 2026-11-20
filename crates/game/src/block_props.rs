@@ -106,7 +106,10 @@ impl BlockProps {
 
     /// Break time in hundredths ([`DEFAULT_HARDNESS_CENTI`] unless set).
     pub fn hardness_centi(&self, id: BlockId) -> u16 {
-        self.hardness.get(&id.0).copied().unwrap_or(DEFAULT_HARDNESS_CENTI)
+        self.hardness
+            .get(&id.0)
+            .copied()
+            .unwrap_or(DEFAULT_HARDNESS_CENTI)
     }
 
     /// What the block yields when broken.
@@ -121,12 +124,19 @@ impl BlockProps {
 
     /// The block called `name` in the manifest.
     pub fn id_named(&self, name: &str) -> Option<BlockId> {
-        self.names.iter().find(|(_, n)| n.as_str() == name).map(|(id, _)| BlockId(*id))
+        self.names
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(id, _)| BlockId(*id))
     }
 
     /// The grid the block's chisel collides on.
     pub fn collider_scale(&self, id: BlockId) -> ColliderScale {
-        if self.half_collider.contains(&id.0) { ColliderScale::Half } else { ColliderScale::Voxel }
+        if self.half_collider.contains(&id.0) {
+            ColliderScale::Half
+        } else {
+            ColliderScale::Voxel
+        }
     }
 }
 
@@ -136,7 +146,10 @@ static PROPS: OnceLock<BlockProps> = OnceLock::new();
 /// registry load calls it); panics if a different set is installed after.
 pub fn install_block_props(p: BlockProps) {
     let installed = PROPS.get_or_init(|| p.clone());
-    assert_eq!(*installed, p, "conflicting block properties installed in one process");
+    assert_eq!(
+        *installed, p,
+        "conflicting block properties installed in one process"
+    );
 }
 
 /// The installed props, `None` before [`install_block_props`] ran. Once

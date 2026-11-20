@@ -48,8 +48,7 @@ bitflags::bitflags! {
 /// the main way of creating a concave shape from convex parts. Each parts can have its own
 /// delta transformation to shift or rotate it with regard to the other shapes.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Compound {
     shapes: Vec<(Pose, SharedShape)>,
     bvh: Bvh,

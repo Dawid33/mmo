@@ -24,11 +24,11 @@
 
 use bevy::prelude::*;
 
-use game::{RegionId, BLOCK_VOXELS, UNDERGROUND_DEPTH};
+use game::{BLOCK_VOXELS, RegionId, UNDERGROUND_DEPTH};
 
+use super::CommanderCamera;
 use super::height::HeightGrid;
 use super::tiles::TileMirror;
-use super::CommanderCamera;
 use crate::renderer::cursor::CursorPolicy;
 
 /// Levels per key step with Ctrl held.
@@ -42,7 +42,8 @@ pub const LEVEL_DOWN_KEYS: [KeyCode; 1] = [KeyCode::PageDown];
 /// With the cut on these step the level too (with it off they move the
 /// camera, `super::RISE_KEYS` / `super::SINK_KEYS`).
 pub const CUT_LEVEL_UP_KEYS: [KeyCode; 2] = [KeyCode::Space, KeyCode::PageUp];
-pub const CUT_LEVEL_DOWN_KEYS: [KeyCode; 3] = [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::PageDown];
+pub const CUT_LEVEL_DOWN_KEYS: [KeyCode; 3] =
+    [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::PageDown];
 /// How far above the highest loaded surface the level may climb (cut on).
 pub const LEVELS_ABOVE_SURFACE: i32 = 8;
 /// The fast (×[`LEVEL_STEP_FAST`]) modifier for the level keys.
@@ -65,7 +66,10 @@ pub struct WorkingLevel {
 
 impl Default for WorkingLevel {
     fn default() -> Self {
-        Self { level: None, cut: true }
+        Self {
+            level: None,
+            cut: true,
+        }
     }
 }
 
@@ -91,7 +95,13 @@ pub fn wheel_level_steps(notches: f32, carry: &mut f32) -> i32 {
 /// The level after a wheel of `notches` ([`wheel_level_steps`], then
 /// [`step_level`] within `range`). A step clamped at the range's end drops
 /// the carried fraction, so scrolling past the end stores nothing to undo.
-pub fn wheel_step_level(level: i32, notches: f32, carry: &mut f32, fast: bool, range: (i32, i32)) -> i32 {
+pub fn wheel_step_level(
+    level: i32,
+    notches: f32,
+    carry: &mut f32,
+    fast: bool,
+    range: (i32, i32),
+) -> i32 {
     let steps = wheel_level_steps(notches, carry);
     if steps == 0 {
         return level;
@@ -169,7 +179,11 @@ pub fn focus_surface(grid: &HeightGrid, focus: Vec2) -> Option<f32> {
 }
 
 /// Start at the surface under the camera once it has loaded.
-pub fn init_level(grid: Res<HeightGrid>, cam: Res<CommanderCamera>, mut level: ResMut<WorkingLevel>) {
+pub fn init_level(
+    grid: Res<HeightGrid>,
+    cam: Res<CommanderCamera>,
+    mut level: ResMut<WorkingLevel>,
+) {
     if level.level.is_none() {
         if let Some(y) = focus_surface(&grid, cam.focus) {
             level.level = Some(surface_level(y));
@@ -236,8 +250,11 @@ pub fn level_input(
         level.cut = !level.cut;
     }
     let dt = time.delta_secs();
-    let (up_keys, down_keys): (&[KeyCode], &[KeyCode]) =
-        if level.cut { (&CUT_LEVEL_UP_KEYS, &CUT_LEVEL_DOWN_KEYS) } else { (&LEVEL_UP_KEYS, &LEVEL_DOWN_KEYS) };
+    let (up_keys, down_keys): (&[KeyCode], &[KeyCode]) = if level.cut {
+        (&CUT_LEVEL_UP_KEYS, &CUT_LEVEL_DOWN_KEYS)
+    } else {
+        (&LEVEL_UP_KEYS, &LEVEL_DOWN_KEYS)
+    };
     let (up_t, up) = repeat_step(held[0], keys.any_pressed(up_keys.iter().copied()), dt);
     let (down_t, down) = repeat_step(held[1], keys.any_pressed(down_keys.iter().copied()), dt);
     *held = [up_t, down_t];
@@ -285,4 +302,3 @@ pub fn cut_y(level: &WorkingLevel, home: Option<RegionId>) -> Option<f32> {
     let (at, region) = (level.level?, home?);
     level.cut.then(|| cut_plane_world_y(at, region))
 }
-

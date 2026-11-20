@@ -1,10 +1,10 @@
 use crate::{
-    bounds::assert_in_bounds, IdentityVoxel, OrientedBlockFace, UnitQuadBuffer, UnorientedUnitQuad, Voxel, VoxelVisibility,
+    IdentityVoxel, OrientedBlockFace, UnitQuadBuffer, UnorientedUnitQuad, Voxel, VoxelVisibility,
+    bounds::assert_in_bounds,
 };
 
 use crate::extent::Extent;
 use ndshape::Shape;
-
 
 /// A fast and simple meshing algorithm that produces a single quad for every visible face of a block.
 ///
@@ -79,4 +79,3 @@ pub fn visible_block_faces_with_voxel_view<'a, T, V, S>(
         }
     }
 }
-

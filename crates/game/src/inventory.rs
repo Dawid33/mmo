@@ -1,11 +1,13 @@
-//! The player inventory: 36 slots (hotbar `0..9`, main `9..36`) and the
-//! Minecraft cursor-click rules (`click`). Authoritative sim state carried on
+//! The player inventory — the hotbar alone (owner, 2026-11-19: a player
+//! carries only that until a backpack adds slots, which nothing does yet) —
+//! and the Minecraft cursor-click rules (`click`). Authoritative sim state carried on
 //! `Client`, so it follows the player across region handoffs.
 
-use crate::{chest_block, ItemId, ItemStack, MAX_STACK, STARTING_CHESTS};
+use crate::{ItemId, ItemStack, MAX_STACK, STARTING_CHESTS, chest_block};
 
-pub const INVENTORY_SLOTS: usize = 36;
 pub const HOTBAR_SLOTS: usize = 9;
+/// Every slot a player has: `0..HOTBAR_SLOTS`, then the backpack's (none yet).
+pub const INVENTORY_SLOTS: usize = HOTBAR_SLOTS;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, state_hash::StateHash, PartialEq)]
 pub struct Inventory {
@@ -20,7 +22,9 @@ impl Default for Inventory {
 
 impl Inventory {
     pub fn new() -> Self {
-        Self { slots: vec![None; INVENTORY_SLOTS] }
+        Self {
+            slots: vec![None; INVENTORY_SLOTS],
+        }
     }
 
     /// What a new player starts with: `STARTING_CHESTS` chests in slot 0
@@ -28,7 +32,10 @@ impl Inventory {
     pub fn starting_kit() -> Self {
         let mut inv = Self::new();
         if let Some(chest) = chest_block() {
-            inv.slots[0] = Some(ItemStack { item: ItemId::block(chest), count: STARTING_CHESTS });
+            inv.slots[0] = Some(ItemStack {
+                item: ItemId::block(chest),
+                count: STARTING_CHESTS,
+            });
         }
         inv
     }
@@ -36,7 +43,34 @@ impl Inventory {
     /// Adds `stack`, topping up existing stacks first (hotbar then main),
     /// then filling empty slots in that order. Returns what did not fit.
     pub fn add(&mut self, stack: ItemStack) -> u32 {
-        add_to(&mut self.slots, stack)
+        let n = self.slots.len().min(INVENTORY_SLOTS);
+        add_to(&mut self.slots[..n], stack)
+    }
+
+    /// Brings an inventory saved with another slot count to
+    /// [`INVENTORY_SLOTS`]: a short one is padded; the stacks past the end of
+    /// a long one move into the slots a player has, and each emptied extra
+    /// slot is dropped. What does not fit stays where it was — kept, unseen —
+    /// and is tried again at the next call (`parked_client`: every restore
+    /// and hand-over). Deterministic.
+    pub fn fit(&mut self) {
+        if self.slots.len() <= INVENTORY_SLOTS {
+            self.slots.resize(INVENTORY_SLOTS, None);
+            return;
+        }
+        let (kept, over) = self.slots.split_at_mut(INVENTORY_SLOTS);
+        for slot in over.iter_mut() {
+            if let Some(stack) = slot.take() {
+                let rest = add_to(kept, stack);
+                *slot = (rest > 0).then_some(ItemStack {
+                    item: stack.item,
+                    count: rest,
+                });
+            }
+        }
+        while self.slots.len() > INVENTORY_SLOTS && matches!(self.slots.last(), Some(None)) {
+            self.slots.pop();
+        }
     }
 
     /// Takes up to `n` items from the selected hotbar slot.
@@ -76,7 +110,10 @@ fn add_to(slots: &mut [Option<ItemStack>], mut stack: ItemStack) -> u32 {
         }
         if s.is_none() {
             let n = stack.count.min(MAX_STACK);
-            *s = Some(ItemStack { item: stack.item, count: n });
+            *s = Some(ItemStack {
+                item: stack.item,
+                count: n,
+            });
             stack.count -= n;
         }
     }
@@ -113,7 +150,11 @@ pub fn click(
     if is_container && container.is_none() {
         return;
     }
-    let len = if is_container { container.as_ref().map_or(0, |c| c.len()) } else { player.slots.len() };
+    let len = if is_container {
+        container.as_ref().map_or(0, |c| c.len())
+    } else {
+        player.slots.len()
+    };
     if idx >= len {
         return;
     }
@@ -147,11 +188,17 @@ pub fn click(
             (None, Some(mut t)) => {
                 let take = t.count.div_ceil(2);
                 t.count -= take;
-                *cursor = Some(ItemStack { item: t.item, count: take });
+                *cursor = Some(ItemStack {
+                    item: t.item,
+                    count: take,
+                });
                 *target = (t.count > 0).then_some(t);
             }
             (Some(mut c), None) => {
-                *target = Some(ItemStack { item: c.item, count: 1 });
+                *target = Some(ItemStack {
+                    item: c.item,
+                    count: 1,
+                });
                 c.count -= 1;
                 *cursor = (c.count > 0).then_some(c);
             }
@@ -182,17 +229,70 @@ fn shift_move(
     if is_container {
         let Some(c) = container else { return };
         if let Some(stack) = c[idx].take() {
-            let rest = add_to(&mut player.slots, stack);
-            c[idx] = (rest > 0).then_some(ItemStack { item: stack.item, count: rest });
+            let rest = player.add(stack);
+            c[idx] = (rest > 0).then_some(ItemStack {
+                item: stack.item,
+                count: rest,
+            });
         }
         return;
     }
-    let Some(stack) = player.slots[idx].take() else { return };
+    let Some(stack) = player.slots[idx].take() else {
+        return;
+    };
     let rest = if let Some(c) = container {
         add_to(c, stack)
     } else {
+        // Only the slots a player has: an inventory saved with more keeps
+        // them out of reach until `Inventory::fit` folds them back.
         let (hot, main) = player.slots.split_at_mut(HOTBAR_SLOTS);
+        let reach = (INVENTORY_SLOTS - HOTBAR_SLOTS).min(main.len());
+        let main = &mut main[..reach];
         add_to(if idx < HOTBAR_SLOTS { main } else { hot }, stack)
     };
-    player.slots[idx] = (rest > 0).then_some(ItemStack { item: stack.item, count: rest });
+    player.slots[idx] = (rest > 0).then_some(ItemStack {
+        item: stack.item,
+        count: rest,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: a shift-clicked hotbar stack vanished — it went into slots a player no longer has; seen IN PLAY by the owner (2026-11-19) on a character saved with 36 slots after the inventory became the hotbar alone. Fixed by bounding shift-click and `add` to `INVENTORY_SLOTS` and folding a longer saved inventory back (`Inventory::fit`).
+    #[test]
+    fn a_stack_never_goes_into_slots_a_player_no_longer_has() {
+        let stack = ItemStack {
+            count: 5,
+            ..ItemStack::default()
+        };
+        // As saved before: 36 slots, one stack already hidden past the hotbar.
+        let mut player = Inventory {
+            slots: vec![None; 36],
+        };
+        player.slots[0] = Some(stack);
+        player.slots[20] = Some(ItemStack { count: 7, ..stack });
+        let mut cursor = None;
+        click(
+            &mut cursor,
+            &mut player,
+            None,
+            SlotRef::Player(0),
+            ClickButton::Left,
+            true,
+        );
+        assert_eq!(
+            player.slots[0],
+            Some(stack),
+            "with nowhere to go the stack stays in its slot"
+        );
+        player.fit();
+        assert_eq!(player.slots.len(), INVENTORY_SLOTS);
+        assert_eq!(
+            player.slots[0],
+            Some(ItemStack { count: 12, ..stack }),
+            "the hidden stack is back in reach"
+        );
+    }
 }

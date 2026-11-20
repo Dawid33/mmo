@@ -28,8 +28,8 @@
 
 use std::collections::BTreeMap;
 
-use super::{AssignLand, Assigned, Coordinator, CoordMsg, HostSeen, StoreDecision, Target};
-use crate::{HostId, SuperRegion, HOST_LIVE};
+use super::{AssignLand, Assigned, CoordMsg, Coordinator, HostSeen, StoreDecision, Target};
+use crate::{HOST_LIVE, HostId, SuperRegion};
 
 /// The tick headroom a host keeps before it takes new land while another can (permille of the
 /// tick period): a host whose worst tick uses over 80 % of the period is skipped.
@@ -51,18 +51,29 @@ impl Coordinator {
     /// [`Self::take_land_lookups`], `rows` the `super_regions` rows read of them (an asked
     /// super-region with no row is free). The module docs say what each row decides. Ticker
     /// only, outside the log: a rebase drops what it decided, and the hosts ask again.
-    pub(super) fn on_land_read(&mut self, asked: Vec<(SuperRegion, Vec<HostId>)>, rows: &[(SuperRegion, i64, u64)], now_ms: u64) {
+    pub(super) fn on_land_read(
+        &mut self,
+        asked: Vec<(SuperRegion, Vec<HostId>)>,
+        rows: &[(SuperRegion, i64, u64)],
+        now_ms: u64,
+    ) {
         if self.crash_policy() != crate::CrashPolicy::Succession {
             log::debug!("coordinator: an owners read under Static: nothing is assigned");
             return;
         }
         self.clock_ms = self.clock_ms.max(now_ms);
-        self.provisional.retain(|&(_, at)| now_ms.saturating_sub(at) < ASSIGN_PROVISIONAL_MS);
-        let rows: BTreeMap<SuperRegion, (i64, u64)> = rows.iter().map(|&(sr, owner, epoch)| (sr, (owner, epoch))).collect();
+        self.provisional
+            .retain(|&(_, at)| now_ms.saturating_sub(at) < ASSIGN_PROVISIONAL_MS);
+        let rows: BTreeMap<SuperRegion, (i64, u64)> = rows
+            .iter()
+            .map(|&(sr, owner, epoch)| (sr, (owner, epoch)))
+            .collect();
         let live = self.attached_live();
         let mut decided = 0usize;
         for (sr, askers) in asked {
-            let owned = rows.get(&sr).and_then(|&(owner, epoch)| u64::try_from(owner).ok().map(|o| (HostId(o), epoch)));
+            let owned = rows
+                .get(&sr)
+                .and_then(|&(owner, epoch)| u64::try_from(owner).ok().map(|o| (HostId(o), epoch)));
             if let Some((owner, epoch)) = owned {
                 // Owned: an assignment of it answered or lost is no longer awaited here.
                 self.assign_askers.remove(&sr);
@@ -78,10 +89,17 @@ impl Coordinator {
                         // adoption — an `Assigned` would make it plain land (final review,
                         // A-F1). The heir asks again; after the settle the heal runs.
                         if self.inherits_or_may(owner, sr) {
-                            log::debug!("coordinator: host {owner} asks for {sr:?}, which a succession gives it: its order carries it");
+                            log::debug!(
+                                "coordinator: host {owner} asks for {sr:?}, which a succession gives it: its order carries it"
+                            );
                             continue;
                         }
-                        self.push(Target::Host(owner), CoordMsg::Assigned { rows: vec![(sr, epoch)] });
+                        self.push(
+                            Target::Host(owner),
+                            CoordMsg::Assigned {
+                                rows: vec![(sr, epoch)],
+                            },
+                        );
                     } else {
                         self.push(Target::Host(asker), CoordMsg::LandIs { sr, owner, epoch });
                     }
@@ -90,11 +108,18 @@ impl Coordinator {
             }
             if decided >= ASSIGN_PER_PASS_MAX {
                 // The rest wait for the next read.
-                self.successions.land_lookups.entry(sr).or_default().extend(askers);
+                self.successions
+                    .land_lookups
+                    .entry(sr)
+                    .or_default()
+                    .extend(askers);
                 continue;
             }
             let Some((host, boot)) = self.pick_assignee(sr, now_ms) else {
-                if self.assign_warned_ms.is_none_or(|at| now_ms.saturating_sub(at) >= ASSIGN_WARN_EVERY_MS) {
+                if self
+                    .assign_warned_ms
+                    .is_none_or(|at| now_ms.saturating_sub(at) >= ASSIGN_WARN_EVERY_MS)
+                {
                     self.assign_warned_ms = Some(now_ms);
                     log::warn!(
                         "coordinator: super-region {sr:?} is free and asked for by {askers:?}, but no attached host takes logins: nothing assigned (the hosts ask again)"
@@ -102,7 +127,9 @@ impl Coordinator {
                 }
                 continue;
             };
-            log::debug!("coordinator: super-region {sr:?} is free: assigning it to host {host} (boot {boot})");
+            log::debug!(
+                "coordinator: super-region {sr:?} is free: assigning it to host {host} (boot {boot})"
+            );
             self.push_decision(StoreDecision::AssignLand(AssignLand { sr, host, boot }));
             self.provisional.push((host, now_ms));
             let waiting = self.assign_askers.entry(sr).or_default();
@@ -119,7 +146,9 @@ impl Coordinator {
     /// settled yet moved to it: an open run names `host` heir of it, a declaration is in flight,
     /// or this replica does not know the open successions yet.
     fn inherits_or_may(&self, host: HostId, sr: SuperRegion) -> bool {
-        !self.successions_known() || self.successions_declaring().is_some() || self.succession_moved_to(host, sr)
+        !self.successions_known()
+            || self.successions_declaring().is_some()
+            || self.succession_moved_to(host, sr)
     }
 
     /// The host free super-region `sr` goes to, with the boot its `hosts` row is of (what the
@@ -129,20 +158,39 @@ impl Coordinator {
             .attached_live()
             .into_iter()
             .filter(|h| self.takes_logins(*h))
-            .filter_map(|h| self.leases.row(h).filter(|r| !r.clean && r.state == HOST_LIVE).map(|r| (h, r.clone())))
+            .filter_map(|h| {
+                self.leases
+                    .row(h)
+                    .filter(|r| !r.clean && r.state == HOST_LIVE)
+                    .map(|r| (h, r.clone()))
+            })
             .collect();
         let watch_now = self.leases.latest_received_ms();
         // Each filter applies only if it leaves a candidate.
-        narrow(&mut candidates, |(h, _)| self.leases.known_for(*h, watch_now) >= ASSIGN_MIN_ATTACHED_MS);
-        narrow(&mut candidates, |(_, r)| r.load.tick_permille <= 1000 - ASSIGN_HEADROOM_MIN_PERMILLE);
+        narrow(&mut candidates, |(h, _)| {
+            self.leases.known_for(*h, watch_now) >= ASSIGN_MIN_ATTACHED_MS
+        });
+        narrow(&mut candidates, |(_, r)| {
+            r.load.tick_permille <= 1000 - ASSIGN_HEADROOM_MIN_PERMILLE
+        });
         let key = |(h, r): &(HostId, HostSeen)| {
             let provisional = self.provisional_load(*h, now_ms);
-            (r.load.players.saturating_add(provisional), r.load.regions.saturating_add(provisional))
+            (
+                r.load.players.saturating_add(provisional),
+                r.load.regions.saturating_add(provisional),
+            )
         };
         let least = candidates.iter().map(key).min()?;
-        let tied: Vec<HostId> = candidates.iter().filter(|c| key(c) == least).map(|(h, _)| *h).collect();
+        let tied: Vec<HostId> = candidates
+            .iter()
+            .filter(|c| key(c) == least)
+            .map(|(h, _)| *h)
+            .collect();
         let host = crate::rendezvous_among(sr, tied)?;
-        candidates.iter().find(|(h, _)| *h == host).map(|(h, r)| (*h, r.boot))
+        candidates
+            .iter()
+            .find(|(h, _)| *h == host)
+            .map(|(h, r)| (*h, r.boot))
     }
 
     /// The store's answer to an [`AssignLand`] ([`super::DecisionAnswer::Assigned`], a logged input):
@@ -151,22 +199,43 @@ impl Coordinator {
     /// load the decision counted (the host took nothing). The askers are dropped with the first
     /// application: a replay (a rebase) tells the assignee again, and the askers ask again.
     /// Nothing durable changes.
-    pub(super) fn assign_answered(&mut self, assign: AssignLand, outcome: Result<Assigned, String>, now_ms: u64) {
+    pub(super) fn assign_answered(
+        &mut self,
+        assign: AssignLand,
+        outcome: Result<Assigned, String>,
+        now_ms: u64,
+    ) {
         self.clock_ms = self.clock_ms.max(now_ms);
         let AssignLand { sr, host, .. } = assign;
         let askers = self.assign_askers.remove(&sr);
         match outcome {
             Ok(Assigned::Done { epoch }) => {
                 log::info!("coordinator: super-region {sr:?} is host {host}'s now (epoch {epoch})");
-                self.push(Target::Host(host), CoordMsg::Assigned { rows: vec![(sr, epoch)] });
+                self.push(
+                    Target::Host(host),
+                    CoordMsg::Assigned {
+                        rows: vec![(sr, epoch)],
+                    },
+                );
                 for asker in askers.into_iter().flatten().filter(|a| *a != host) {
-                    self.push(Target::Host(asker), CoordMsg::LandIs { sr, owner: host, epoch });
+                    self.push(
+                        Target::Host(asker),
+                        CoordMsg::LandIs {
+                            sr,
+                            owner: host,
+                            epoch,
+                        },
+                    );
                 }
             }
             refused => {
                 match &refused {
-                    Err(e) => log::warn!("coordinator: super-region {sr:?} could not be assigned to host {host} ({e}); the hosts ask again"),
-                    Ok(why) => log::info!("coordinator: super-region {sr:?} was not assigned to host {host}: {why:?}; the hosts ask again"),
+                    Err(e) => log::warn!(
+                        "coordinator: super-region {sr:?} could not be assigned to host {host} ({e}); the hosts ask again"
+                    ),
+                    Ok(why) => log::info!(
+                        "coordinator: super-region {sr:?} was not assigned to host {host}: {why:?}; the hosts ask again"
+                    ),
                 }
                 if askers.is_some() {
                     if let Some(i) = self.provisional.iter().rposition(|(h, _)| *h == host) {
@@ -180,7 +249,11 @@ impl Coordinator {
     /// Test support: the assignments decided and not yet expired, per host.
     #[doc(hidden)]
     pub fn provisional_load(&self, host: HostId, now_ms: u64) -> u32 {
-        let n = self.provisional.iter().filter(|&&(h, at)| h == host && now_ms.saturating_sub(at) < ASSIGN_PROVISIONAL_MS).count();
+        let n = self
+            .provisional
+            .iter()
+            .filter(|&&(h, at)| h == host && now_ms.saturating_sub(at) < ASSIGN_PROVISIONAL_MS)
+            .count();
         u32::try_from(n).unwrap_or(u32::MAX)
     }
 }

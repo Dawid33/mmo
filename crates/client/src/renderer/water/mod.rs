@@ -28,14 +28,14 @@ use bevy::asset::RenderAssetUsages;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, Task};
+use bevy::tasks::{Task, block_on, futures_lite::future};
 use game::{
-    BlockId, Chunk, ColumnCoords, ColumnGround, RegionId, CHUNK_BLOCKS, REGION_BLOCKS,
-    REGION_CHUNKS,
+    BlockId, CHUNK_BLOCKS, Chunk, ColumnCoords, ColumnGround, REGION_BLOCKS, REGION_CHUNKS,
+    RegionId,
 };
 
-use self::material::{sync_water_material_cut, WaterMaterial, WaterMaterialHandle};
-use self::mesh::{WaterColumn, WaterMeshData, WaterMeshJob, WaterRun, WaterTileInput, SIDES};
+use self::material::{WaterMaterial, WaterMaterialHandle, sync_water_material_cut};
+use self::mesh::{SIDES, WaterColumn, WaterMeshData, WaterMeshJob, WaterRun, WaterTileInput};
 use crate::session::{SessionResetExt, SessionScoped};
 
 /// Edge of a water tile in blocks: each region is cut into tiles this wide,
@@ -418,7 +418,9 @@ fn schedule_water_meshes(
             continue;
         };
         // Its chunks are keyed where its tree is drawn.
-        let Some(alias) = roots.alias(*region) else { continue };
+        let Some(alias) = roots.alias(*region) else {
+            continue;
+        };
         let input = tile_input(alias, *tile, ground, chunk_at);
         state.task = Some(super::compute::spawn(WaterMeshJob(input), tile_mesh));
         state.dirty = false;
@@ -504,4 +506,3 @@ impl Plugin for WaterPlugin {
             );
     }
 }
-

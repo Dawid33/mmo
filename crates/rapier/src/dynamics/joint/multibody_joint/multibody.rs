@@ -68,8 +68,7 @@ fn concat_rb_mass_matrix(
 /// joint-to-joint coupling) is represented for the linear (first-order) case —
 /// e.g. the robotiq gripper's two driver joints moving together.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyDofCoupling {
     /// Internal id of the link owning the first joint.
     pub link1: usize,
@@ -93,8 +92,7 @@ pub struct MultibodyDofCoupling {
 
 /// An articulated body simulated using the reduced-coordinates approach.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Multibody {
     // TODO: serialization: skip the workspace fields.
     pub(crate) links: MultibodyLinkVec,
@@ -112,14 +110,16 @@ pub struct Multibody {
     //       move dofs from/to a format that matches the augmented mass.
     // TODO: use sparse matrices?
     augmented_mass: DMatrix<Real>,
-    #[state_hash(skip)] // mmo-fork: StateHash — an LU factorisation of augmented_mass, recomputed with it.
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — an LU factorisation of augmented_mass, recomputed with it.
     inv_augmented_mass: LU<Real, Dyn, Dyn>,
     // The indexing sequence for moving all kinematics degrees of
     // freedoms to the end of the generalized coordinates vector.
     augmented_mass_indices: IndexSequence,
 
     acc_augmented_mass: DMatrix<Real>,
-    #[state_hash(skip)] // mmo-fork: StateHash — an LU factorisation of acc_augmented_mass, recomputed with it.
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — an LU factorisation of acc_augmented_mass, recomputed with it.
     acc_inv_augmented_mass: LU<Real, Dyn, Dyn>,
 
     ndofs: usize,
@@ -1729,8 +1729,7 @@ impl Multibody {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 struct IndexSequence {
     first_to_remove: u32,
     index_map: Vec<usize>,

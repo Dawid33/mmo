@@ -10,9 +10,15 @@ use physics_next::PhysicsWorld;
 use rapier3d::prelude::*;
 
 fn world_with(body: RigidBodyBuilder) -> (PhysicsWorld, RigidBodyHandle) {
-    let mut w = PhysicsWorld { params: game::PhysicsParams::default().0, ..Default::default() };
-    let h = w.bodies.insert(body.translation(Vector::new(0.0, 10.0, 0.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::cuboid(1.0, 1.0, 1.0), h, &mut w.bodies);
+    let mut w = PhysicsWorld {
+        params: game::PhysicsParams::default().0,
+        ..Default::default()
+    };
+    let h = w
+        .bodies
+        .insert(body.translation(Vector::new(0.0, 10.0, 0.0)));
+    w.colliders
+        .insert_with_parent(ColliderBuilder::cuboid(1.0, 1.0, 1.0), h, &mut w.bodies);
     (w, h)
 }
 
@@ -31,7 +37,10 @@ fn a_kinematic_body_that_cannot_sleep_stays_awake_at_rest() {
     let (mut w, h) = world_with(RigidBodyBuilder::kinematic_position_based().can_sleep(false));
     stand(&mut w);
     assert!(!w.bodies[h].is_sleeping(), "can_sleep(false) is ignored");
-    assert!(w.islands.active_bodies().any(|b| b == h), "not in the awake island");
+    assert!(
+        w.islands.active_bodies().any(|b| b == h),
+        "not in the awake island"
+    );
 }
 
 /// Gate: pins the `mmo-fork` hunk: same hunk rigid_body_components.rs:1520, angular half; fix eb053adb (gate checked only linear threshold; red before)
@@ -42,5 +51,8 @@ fn a_negative_angular_threshold_alone_keeps_a_kinematic_body_awake() {
     let (mut w, h) = world_with(RigidBodyBuilder::kinematic_position_based());
     w.bodies[h].activation_mut().angular_threshold = -1.0;
     stand(&mut w);
-    assert!(!w.bodies[h].is_sleeping(), "a negative angular threshold is ignored");
+    assert!(
+        !w.bodies[h].is_sleeping(),
+        "a negative angular threshold is ignored"
+    );
 }

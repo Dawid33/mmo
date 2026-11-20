@@ -20,7 +20,7 @@
 mod common;
 
 use common::{entity_body, spawn_slime};
-use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
+use game::{GameEventKind, InputEvent, Key, Region, RegionCoords, state_hash};
 
 /// `state_hash` after the scene's last tick. Re-recorded for the rapier 0.36
 /// / parry 0.31 switch (with the continuous-surfaces tie-break, `dt` =
@@ -132,33 +132,54 @@ fn canonical_scene_state_hash() {
         return;
     }
     let rc = RegionCoords::new(0, 0);
-    let mut region = Region::from_columns(rc, worldgen::generate_region(rc, worldgen::WORLD_SEED, mats()));
+    let mut region = Region::from_columns(
+        rc,
+        worldgen::generate_region(rc, worldgen::WORLD_SEED, mats()),
+    );
     let apply = |region: &mut Region, ev| {
         region.handle_event(ev).unwrap();
         region.forget_last_event();
     };
     apply(&mut region, GameEventKind::CreateClient(0));
     let player = |region: &Region| {
-        let b = entity_body(region.data(), *region.data().player_entites.get(&0).unwrap());
+        let b = entity_body(
+            region.data(),
+            *region.data().player_entites.get(&0).unwrap(),
+        );
         [b.x, b.z]
     };
     let spawn = player(&region);
     // One slime, a few blocks off the player's spawn, dropped onto the surface.
     let (x, z) = (spawn[0] + 48.0, spawn[1] + 48.0);
-    let surface = region.data().surface_voxel_y(x as i32, z as i32).expect("land next to the spawn");
+    let surface = region
+        .data()
+        .surface_voxel_y(x as i32, z as i32)
+        .expect("land next to the spawn");
     spawn_slime(&mut region, [x, surface as f32 + 24.0, z], 1, 0.0, 0);
     let start = player(&region);
     let events = script();
-    assert_eq!(events.iter().filter(|e| matches!(e, GameEventKind::Tick)).count(), SCENE_TICKS);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEventKind::Tick))
+            .count(),
+        SCENE_TICKS
+    );
     for ev in events {
         apply(&mut region, ev);
     }
     let end = player(&region);
     let walked = ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt();
-    assert!(walked > 16.0, "the scripted walk must move the player: {start:?} -> {end:?}");
+    assert!(
+        walked > 16.0,
+        "the scripted walk must move the player: {start:?} -> {end:?}"
+    );
     let hash = state_hash(region.data());
     if std::env::var_os("SCENE_HASH_PRINT").is_some() {
         eprintln!("SCENE_HASH = 0x{hash:08X}");
     }
-    assert_eq!(hash, SCENE_HASH, "canonical scene hash 0x{hash:08X} != golden 0x{SCENE_HASH:08X}");
+    assert_eq!(
+        hash, SCENE_HASH,
+        "canonical scene hash 0x{hash:08X} != golden 0x{SCENE_HASH:08X}"
+    );
 }

@@ -32,11 +32,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use crossbeam::channel::{Receiver, Sender};
 use crossbeam::channel::TryRecvError;
+use crossbeam::channel::{Receiver, Sender};
 use game::{
-    ClientPacket, ClientUpdateEvent, Credential, GameDataUpdate, GameEventKind, HostEndpoint, RegionId, ServerPacket,
-    UiUpdate,
+    ClientPacket, ClientUpdateEvent, Credential, GameDataUpdate, GameEventKind, HostEndpoint,
+    RegionId, ServerPacket, UiUpdate,
 };
 use js_sys::Uint8Array;
 use serde::{Deserialize, Serialize};
@@ -44,13 +44,13 @@ use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
 use super::{LogLine, MainThreadOnly};
+use crate::GameInstanceManager;
 use crate::connections::{ConnEvent, ConnHandle, ConnOpener, LOGIN_CONN};
 use crate::instance::ClientRequest;
-use crate::web_frame::{decode_server_frame, server_frame_header, TAG_SERVER_FRAME, TAG_TO_SIM};
 use crate::session::SessionChannels;
 use crate::web_endpoint::WebServer;
+use crate::web_frame::{TAG_SERVER_FRAME, TAG_TO_SIM, decode_server_frame, server_frame_header};
 use crate::world_scale::WorldScale;
-use crate::GameInstanceManager;
 
 /// How often the worker wakes to tick the sim and move traffic (ms). Browsers
 /// clamp nested timers to 4 ms anyway.
@@ -87,7 +87,10 @@ impl ScaleWire {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ToSim {
     /// Build the session's game manager.
-    Start { scale: ScaleWire, collider_wireframes: bool },
+    Start {
+        scale: ScaleWire,
+        collider_wireframes: bool,
+    },
     /// One frame's traffic from the app.
     Batch {
         events: Vec<GameEventKind>,
@@ -120,7 +123,11 @@ pub enum SimOut {
     /// Open connection `conn` to the host at `endpoint`, presenting `credential` (an
     /// observer ticket); before any of its [`SimOut::Packets`]. (`Credential`'s `Debug`
     /// redacts its secret.)
-    Open { conn: u32, endpoint: HostEndpoint, credential: Credential },
+    Open {
+        conn: u32,
+        endpoint: HostEndpoint,
+        credential: Credential,
+    },
     /// The manager dropped connection `conn` (an idle observer connection, a closed one):
     /// hang it up once its queued frames are written; after its last packets.
     Close { conn: u32 },
@@ -150,7 +157,9 @@ struct WorkerOpener {
 impl ConnOpener for WorkerOpener {
     fn open(&mut self, key: u32, endpoint: &HostEndpoint, credential: Credential) -> ConnHandle {
         let (send, packets) = crossbeam::channel::unbounded();
-        let _ = self.opened.send((key, endpoint.clone(), credential, packets));
+        let _ = self
+            .opened
+            .send((key, endpoint.clone(), credential, packets));
         ConnHandle { send }
     }
 }
@@ -190,27 +199,33 @@ fn scope() -> web_sys::DedicatedWorkerGlobalScope {
 
 /// The worker's half: install the message handler and the drive timer.
 pub fn worker_start() {
-    let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(|event: web_sys::MessageEvent| {
-        let Some(bytes) = super::message_bytes(&event) else { return };
-        match bytes.split_first() {
-            Some((&TAG_TO_SIM, body)) => match bincode::deserialize::<ToSim>(body) {
-                Ok(message) => handle(message),
-                Err(e) => log::error!("[sim-worker] bad message: {e}"),
-            },
-            Some((&TAG_SERVER_FRAME, _)) => match decode_server_frame(&bytes) {
-                Some((conn, frame)) => match game::decode_packet::<ServerPacket>(frame) {
-                    Ok(packet) => SESSION.with(|s| {
-                        if let Some(session) = s.borrow_mut().as_mut() {
-                            let _ = session.server_send.send((conn, ConnEvent::Packet(packet)));
-                        }
-                    }),
-                    Err(e) => log::warn!("failed deserializing packet {e:?}"),
+    let on_message =
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(|event: web_sys::MessageEvent| {
+            let Some(bytes) = super::message_bytes(&event) else {
+                return;
+            };
+            match bytes.split_first() {
+                Some((&TAG_TO_SIM, body)) => match bincode::deserialize::<ToSim>(body) {
+                    Ok(message) => handle(message),
+                    Err(e) => log::error!("[sim-worker] bad message: {e}"),
                 },
-                None => log::warn!("[sim-worker] a server frame of {} bytes, short of its header", bytes.len()),
-            },
-            _ => log::error!("[sim-worker] untagged message"),
-        }
-    });
+                Some((&TAG_SERVER_FRAME, _)) => match decode_server_frame(&bytes) {
+                    Some((conn, frame)) => match game::decode_packet::<ServerPacket>(frame) {
+                        Ok(packet) => SESSION.with(|s| {
+                            if let Some(session) = s.borrow_mut().as_mut() {
+                                let _ = session.server_send.send((conn, ConnEvent::Packet(packet)));
+                            }
+                        }),
+                        Err(e) => log::warn!("failed deserializing packet {e:?}"),
+                    },
+                    None => log::warn!(
+                        "[sim-worker] a server frame of {} bytes, short of its header",
+                        bytes.len()
+                    ),
+                },
+                _ => log::error!("[sim-worker] untagged message"),
+            }
+        });
     scope().set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     on_message.forget();
 
@@ -224,20 +239,36 @@ pub fn worker_start() {
 
 fn handle(message: ToSim) {
     match message {
-        ToSim::Start { scale, collider_wireframes } => {
+        ToSim::Start {
+            scale,
+            collider_wireframes,
+        } => {
             let channels = SessionChannels::new();
-            let SessionChannels { game_send, game_recv, client_send, client_recv, request_send, request_recv } =
-                channels;
+            let SessionChannels {
+                game_send,
+                game_recv,
+                client_send,
+                client_recv,
+                request_send,
+                request_recv,
+            } = channels;
             let debug_flags = game::DebugFlags::default();
             debug_flags.set_collider_wireframes(collider_wireframes);
             let (server_send, server_recv) = crossbeam::channel::unbounded();
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0)); // unused on wasm
-            let mut manager =
-                GameInstanceManager::new(game_send.clone(), game_recv, client_send, addr, debug_flags.clone());
+            let mut manager = GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                addr,
+                debug_flags.clone(),
+            );
             manager.set_world_scale(scale.into_scale());
             manager.set_request_recv(request_recv);
             let (opened_send, opened) = crossbeam::channel::unbounded();
-            manager.set_conn_opener(Box::new(WorkerOpener { opened: opened_send }));
+            manager.set_conn_opener(Box::new(WorkerOpener {
+                opened: opened_send,
+            }));
             let conns = BTreeMap::from([(LOGIN_CONN, manager.client_packet_recv())]);
             manager.start();
             log::info!("[sim-worker] session started");
@@ -260,7 +291,11 @@ fn handle(message: ToSim) {
                 })
             });
         }
-        ToSim::Batch { events, requests, collider_wireframes } => SESSION.with(|s| {
+        ToSim::Batch {
+            events,
+            requests,
+            collider_wireframes,
+        } => SESSION.with(|s| {
             let s = s.borrow();
             let Some(session) = s.as_ref() else { return };
             for event in events {
@@ -343,14 +378,21 @@ fn collect(session: &mut WorkerSession, out: &mut FromSim) {
     }
     for (conn, endpoint, credential, packets) in session.opened.try_iter() {
         session.conns.insert(conn, packets);
-        out.push(SimOut::Open { conn, endpoint, credential });
+        out.push(SimOut::Open {
+            conn,
+            endpoint,
+            credential,
+        });
     }
     let mut packets = Vec::new();
     let mut closed = Vec::new();
     for (&conn, rx) in &session.conns {
         loop {
             match rx.try_recv() {
-                Ok(p) => packets.push((conn, game::encode_packet(&p).expect("client packet encodes"))),
+                Ok(p) => packets.push((
+                    conn,
+                    game::encode_packet(&p).expect("client packet encodes"),
+                )),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     closed.push(conn);
@@ -373,7 +415,11 @@ fn collect(session: &mut WorkerSession, out: &mut FromSim) {
                     flush(id, &old, out);
                 }
                 session.regions.insert(id, rx);
-                out.push(SimOut::Client(ClientUpdateEvent::NewRegion(id, data, crossbeam::channel::never())));
+                out.push(SimOut::Client(ClientUpdateEvent::NewRegion(
+                    id,
+                    data,
+                    crossbeam::channel::never(),
+                )));
             }
             ClientUpdateEvent::RemoveRegion(id) => {
                 if let Some(old) = session.regions.remove(&id) {
@@ -413,7 +459,10 @@ pub struct SimWorker {
     inbox: Arc<Mutex<Inbox>>,
     /// The message handler owns the session's connections (each one's frame queue):
     /// dropping it hangs them all up.
-    _handlers: MainThreadOnly<(Closure<dyn FnMut(web_sys::MessageEvent)>, Closure<dyn FnMut(JsValue)>)>,
+    _handlers: MainThreadOnly<(
+        Closure<dyn FnMut(web_sys::MessageEvent)>,
+        Closure<dyn FnMut(JsValue)>,
+    )>,
     /// The sim ends of the session channels: what the app sends is forwarded.
     game_recv: Receiver<GameEventKind>,
     request_recv: Receiver<ClientRequest>,
@@ -439,7 +488,10 @@ impl SimWorker {
     ) -> Result<Self, JsValue> {
         let worker = super::spawn("sim", "orion-sim")?;
         let wireframes = debug_flags.collider_wireframes();
-        let start = ToSim::Start { scale: world_scale.into(), collider_wireframes: wireframes };
+        let start = ToSim::Start {
+            scale: world_scale.into(),
+            collider_wireframes: wireframes,
+        };
         let start = bincode::serialize(&start).expect("start message encodes");
         super::post_bytes(&worker, &tagged(TAG_TO_SIM, &start))?;
 
@@ -454,7 +506,9 @@ impl SimWorker {
             let inbox = inbox.clone();
             let worker = worker.clone();
             Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-                let Some(bytes) = super::message_bytes(&event) else { return };
+                let Some(bytes) = super::message_bytes(&event) else {
+                    return;
+                };
                 let batch: FromSim = match bincode::deserialize(&bytes) {
                     Ok(batch) => batch,
                     Err(e) => {
@@ -471,19 +525,32 @@ impl SimWorker {
                                     Some(queue) => {
                                         let _ = queue.send(frame);
                                     }
-                                    None => log::debug!("[session] a frame for connection {conn}, closed: dropped"),
+                                    None => log::debug!(
+                                        "[session] a frame for connection {conn}, closed: dropped"
+                                    ),
                                 }
                             }
                         }
-                        SimOut::Open { conn, endpoint, credential } => {
-                            match crate::web_endpoint::web_server_for_host(&endpoint) {
-                                Ok(server) => {
-                                    log::info!("[session] connection {conn}: to host {} ({server:?})", endpoint.id);
-                                    open_connection(&worker, &mut conns, conn, server, Some(credential));
-                                }
-                                Err(reason) => post_to_sim(&worker, &ToSim::Closed { conn, reason }),
+                        SimOut::Open {
+                            conn,
+                            endpoint,
+                            credential,
+                        } => match crate::web_endpoint::web_server_for_host(&endpoint) {
+                            Ok(server) => {
+                                log::info!(
+                                    "[session] connection {conn}: to host {} ({server:?})",
+                                    endpoint.id
+                                );
+                                open_connection(
+                                    &worker,
+                                    &mut conns,
+                                    conn,
+                                    server,
+                                    Some(credential),
+                                );
                             }
-                        }
+                            Err(reason) => post_to_sim(&worker, &ToSim::Closed { conn, reason }),
+                        },
                         // Dropping its queue hangs it up once what is queued is written.
                         SimOut::Close { conn } => {
                             conns.remove(&conn);
@@ -496,13 +563,22 @@ impl SimWorker {
         let on_error = {
             let inbox = inbox.clone();
             Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-                inbox.lock().unwrap().error.get_or_insert_with(|| super::error_text(&event));
+                inbox
+                    .lock()
+                    .unwrap()
+                    .error
+                    .get_or_insert_with(|| super::error_text(&event));
             })
         };
         worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
-        let SessionChannels { game_recv, client_send, request_recv, .. } = channels;
+        let SessionChannels {
+            game_recv,
+            client_send,
+            request_recv,
+            ..
+        } = channels;
         // The manager announces its UI stream first thing (`GameInstanceManager::new`);
         // here the stream is the page's own channel, fed from `SimOut::Ui`.
         let (ui_send, ui_recv) = crossbeam::channel::unbounded();
@@ -539,7 +615,11 @@ impl SimWorker {
         if events.is_empty() && requests.is_empty() && collider_wireframes.is_none() {
             return;
         }
-        self.post(&ToSim::Batch { events, requests, collider_wireframes });
+        self.post(&ToSim::Batch {
+            events,
+            requests,
+            collider_wireframes,
+        });
     }
 
     /// Once per frame: forward the app's traffic to the worker and the
@@ -556,7 +636,9 @@ impl SimWorker {
                 SimOut::Client(ClientUpdateEvent::NewRegion(id, data, _)) => {
                     let (send, recv) = crossbeam::channel::unbounded();
                     self.regions.insert(id, send);
-                    let _ = self.client_send.send(ClientUpdateEvent::NewRegion(id, data, recv));
+                    let _ = self
+                        .client_send
+                        .send(ClientUpdateEvent::NewRegion(id, data, recv));
                 }
                 SimOut::Client(event) => {
                     if let ClientUpdateEvent::RemoveRegion(id) = &event {
@@ -617,7 +699,9 @@ fn open_connection(
             let header = server_frame_header(conn);
             let message = Uint8Array::new_with_length((header.len() + frame.len()) as u32);
             message.subarray(0, header.len() as u32).copy_from(&header);
-            message.subarray(header.len() as u32, message.length()).copy_from(&frame);
+            message
+                .subarray(header.len() as u32, message.length())
+                .copy_from(&frame);
             let _ = super::post_bytes(&frame_target, &message);
         },
         move |reason| post_to_sim(&closed_target, &ToSim::Closed { conn, reason }),

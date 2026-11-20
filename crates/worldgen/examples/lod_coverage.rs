@@ -13,10 +13,13 @@
 use std::collections::BTreeMap;
 
 use game::lod::LodKey;
-use game::{build_lod_job, BlockId, LodBuildJob, RegionCoords};
+use game::{BlockId, LodBuildJob, RegionCoords, build_lod_job};
 
 fn main() {
-    let args: Vec<i32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
+    let args: Vec<i32> = std::env::args()
+        .skip(1)
+        .filter_map(|a| a.parse().ok())
+        .collect();
     let region = RegionCoords::new(*args.first().unwrap_or(&0), *args.get(1).unwrap_or(&-1));
     let factor = *args.get(2).unwrap_or(&2) as u32;
     let materials = worldgen::material::Materials {
@@ -33,14 +36,26 @@ fn main() {
     let seed = worldgen::WORLD_SEED;
 
     let columns = worldgen::generate_region(region, seed, materials);
-    let materialized: usize = columns.iter().map(|(_, c)| c.materialized_sub_chunks().len()).sum();
-    println!("region {region:?}: {} columns, {materialized} materialized sub-chunks", columns.len());
+    let materialized: usize = columns
+        .iter()
+        .map(|(_, c)| c.materialized_sub_chunks().len())
+        .sum();
+    println!(
+        "region {region:?}: {} columns, {materialized} materialized sub-chunks",
+        columns.len()
+    );
 
     let key = LodKey::for_region(factor, region);
     let coarse = |k: &LodKey| worldgen::coarse_tile(k, seed, materials);
     let generate = |rc: RegionCoords| worldgen::generate_region(rc, seed, materials);
     let water = |k: &LodKey| worldgen::coarse_water(k, seed, materials);
-    let (_, payload, _) = build_lod_job(LodBuildJob::Pristine { key, region }, &coarse, &water, &generate, &game::NoStoredTerrain);
+    let (_, payload, _) = build_lod_job(
+        LodBuildJob::Pristine { key, region },
+        &coarse,
+        &water,
+        &generate,
+        &game::NoStoredTerrain,
+    );
 
     // x/z group -> (cells, max solid voxels in one cell)
     let mut map: BTreeMap<(i32, i32), (u32, usize)> = BTreeMap::new();
@@ -56,19 +71,33 @@ fn main() {
         entry.1 = entry.1.max(solid);
         *ys.entry(group[1]).or_default() += 1;
     }
-    println!("factor {factor}: {} cells, {undecodable} undecodable, y groups {ys:?}", payload.len());
+    println!(
+        "factor {factor}: {} cells, {undecodable} undecodable, y groups {ys:?}",
+        payload.len()
+    );
 
     let span = (32 / factor as i32).max(1);
-    let (min_x, max_x) = (map.keys().map(|k| k.0).min().unwrap_or(0).min(0), map.keys().map(|k| k.0).max().unwrap_or(0).max(span - 1));
-    let (min_z, max_z) = (map.keys().map(|k| k.1).min().unwrap_or(0).min(0), map.keys().map(|k| k.1).max().unwrap_or(0).max(span - 1));
-    println!("x {min_x}..={max_x} (columns), z {min_z}..={max_z} (rows); expected 0..={}", span - 1);
+    let (min_x, max_x) = (
+        map.keys().map(|k| k.0).min().unwrap_or(0).min(0),
+        map.keys().map(|k| k.0).max().unwrap_or(0).max(span - 1),
+    );
+    let (min_z, max_z) = (
+        map.keys().map(|k| k.1).min().unwrap_or(0).min(0),
+        map.keys().map(|k| k.1).max().unwrap_or(0).max(span - 1),
+    );
+    println!(
+        "x {min_x}..={max_x} (columns), z {min_z}..={max_z} (rows); expected 0..={}",
+        span - 1
+    );
     for z in min_z..=max_z {
         let row: String = (min_x..=max_x)
             .map(|x| match map.get(&(x, z)) {
                 None => '.',
                 Some((_, 0)) => '0',
                 Some((_, solid)) if *solid == game::BRICK_VOXEL_COUNT => '#',
-                Some((_, solid)) => char::from(b'1' + (solid * 9 / game::BRICK_VOXEL_COUNT).min(8) as u8),
+                Some((_, solid)) => {
+                    char::from(b'1' + (solid * 9 / game::BRICK_VOXEL_COUNT).min(8) as u8)
+                }
             })
             .collect();
         println!("  {row}");

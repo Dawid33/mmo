@@ -60,4 +60,3 @@ pub fn step(phase: WheelPhase, input: WheelInput) -> (WheelPhase, Option<usize>)
         WheelPhase::Sticky => (WheelPhase::Sticky, None),
     }
 }
-

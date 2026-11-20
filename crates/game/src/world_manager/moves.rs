@@ -31,8 +31,8 @@ use std::collections::BTreeSet;
 
 use super::{Parking, RegionSpawner, SessionKind, WorldManager};
 use crate::{
-    ClientId, CutFailure, CutId, GameEventKind, HostId, LandMove, MoveId, PlayerId, PlayerRecord, RegionCoords,
-    RegionInput, Reliable, ServerPacket, SuperRegion, Tick,
+    ClientId, CutFailure, CutId, GameEventKind, HostId, LandMove, MoveId, PlayerId, PlayerRecord,
+    RegionCoords, RegionInput, Reliable, ServerPacket, SuperRegion, Tick,
 };
 
 /// How long (ms) the taker holds a player handed into land it expects before it takes the
@@ -65,7 +65,14 @@ pub(super) struct MoveIn {
     /// That cut committed: S is fenced at the first read that shows it as this host's.
     committed: bool,
     /// Hand-offs into S held until it is claimed: `(from, handoff, record, target, place, since ms)`.
-    held: Vec<(HostId, crate::PlayerHandoff, PlayerRecord, RegionCoords, crate::MovePlace, u64)>,
+    held: Vec<(
+        HostId,
+        crate::PlayerHandoff,
+        PlayerRecord,
+        RegionCoords,
+        crate::MovePlace,
+        u64,
+    )>,
 }
 
 impl MoveIn {
@@ -84,9 +91,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         match self.moving_out.get_mut(&sr) {
             Some(m) if m.id == id => m.at_tick = at_tick,
             _ => {
-                log::info!("[server] move {}: super-region {sr:?} moves to host {taker} at tick {at_tick}: warning its players", id.0);
-                self.moving_out
-                    .insert(sr, MoveOut { id, taker, at_tick, masked: None, kept: Vec::new(), notified: BTreeSet::new(), off: false });
+                log::info!(
+                    "[server] move {}: super-region {sr:?} moves to host {taker} at tick {at_tick}: warning its players",
+                    id.0
+                );
+                self.moving_out.insert(
+                    sr,
+                    MoveOut {
+                        id,
+                        taker,
+                        at_tick,
+                        masked: None,
+                        kept: Vec::new(),
+                        notified: BTreeSet::new(),
+                        off: false,
+                    },
+                );
             }
         }
         let now = self.clock_ms;
@@ -94,30 +114,67 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// `CoordMsg::ExpectLand`: `sr` comes here from `giver`.
-    pub(super) fn expect_land(&mut self, id: MoveId, sr: SuperRegion, giver: HostId, _at_tick: Tick) {
+    pub(super) fn expect_land(
+        &mut self,
+        id: MoveId,
+        sr: SuperRegion,
+        giver: HostId,
+        _at_tick: Tick,
+    ) {
         if self.expecting.get(&sr).is_some_and(|m| m.id == id) {
             return;
         }
-        log::info!("[server] move {}: super-region {sr:?} is to come from host {giver}", id.0);
-        self.expecting.insert(sr, MoveIn { id, giver, cut: None, committed: false, held: Vec::new() });
+        log::info!(
+            "[server] move {}: super-region {sr:?} is to come from host {giver}",
+            id.0
+        );
+        self.expecting.insert(
+            sr,
+            MoveIn {
+                id,
+                giver,
+                cut: None,
+                committed: false,
+                held: Vec::new(),
+            },
+        );
     }
 
     /// `CoordMsg::MoveOff`: the move is called off. The giver's warned sessions are told; the
     /// taker releases what it held (the ordinary path).
     pub(super) fn move_off(&mut self, id: MoveId, sr: SuperRegion) {
         // Masked (its cut not settled here yet): the abort that is coming ends it (final review F-I1).
-        if let Some(m) = self.moving_out.get_mut(&sr).filter(|m| m.id == id && m.masked.is_some()) {
+        if let Some(m) = self
+            .moving_out
+            .get_mut(&sr)
+            .filter(|m| m.id == id && m.masked.is_some())
+        {
             m.off = true;
         }
-        if let Some(m) = self.moving_out.get(&sr).filter(|m| m.id == id && m.masked.is_none()) {
+        if let Some(m) = self
+            .moving_out
+            .get(&sr)
+            .filter(|m| m.id == id && m.masked.is_none())
+        {
             log::info!("[server] move {} of super-region {sr:?} is off", id.0);
             let told: Vec<ClientId> = m.notified.iter().copied().collect();
             self.moving_out.remove(&sr);
             for c in told {
-                let _ = self.out.send((Some(c), ServerPacket::LandMoving { super_region: sr, at_tick: None, standby: None }));
+                let _ = self.out.send((
+                    Some(c),
+                    ServerPacket::LandMoving {
+                        super_region: sr,
+                        at_tick: None,
+                        standby: None,
+                    },
+                ));
             }
         }
-        if self.expecting.get(&sr).is_some_and(|m| m.id == id && !m.committed) {
+        if self
+            .expecting
+            .get(&sr)
+            .is_some_and(|m| m.id == id && !m.committed)
+        {
             if let Some(m) = self.expecting.remove(&sr) {
                 self.release_held(m);
             }
@@ -127,15 +184,32 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `CoordMsg::Attached` (a re-attach): orders not begun in a cut are dropped — the coordinator
     /// sends them again in the same transition while the move runs.
     pub(super) fn moves_reattached(&mut self) {
-        let warned: Vec<SuperRegion> = self.moving_out.iter().filter(|(_, m)| m.masked.is_none()).map(|(sr, _)| *sr).collect();
+        let warned: Vec<SuperRegion> = self
+            .moving_out
+            .iter()
+            .filter(|(_, m)| m.masked.is_none())
+            .map(|(sr, _)| *sr)
+            .collect();
         for sr in warned {
             if let Some(m) = self.moving_out.remove(&sr) {
                 for c in m.notified {
-                    let _ = self.out.send((Some(c), ServerPacket::LandMoving { super_region: sr, at_tick: None, standby: None }));
+                    let _ = self.out.send((
+                        Some(c),
+                        ServerPacket::LandMoving {
+                            super_region: sr,
+                            at_tick: None,
+                            standby: None,
+                        },
+                    ));
                 }
             }
         }
-        let uncut: Vec<SuperRegion> = self.expecting.iter().filter(|(_, m)| m.cut.is_none() && !m.committed).map(|(sr, _)| *sr).collect();
+        let uncut: Vec<SuperRegion> = self
+            .expecting
+            .iter()
+            .filter(|(_, m)| m.cut.is_none() && !m.committed)
+            .map(|(sr, _)| *sr)
+            .collect();
         for sr in uncut {
             if let Some(m) = self.expecting.remove(&sr) {
                 self.release_held(m);
@@ -145,12 +219,15 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Whether `client`'s session is parked for a move here (its restore waits for the cut).
     pub(super) fn kept_for_move(&self, client: ClientId) -> bool {
-        self.moving_out.values().any(|m| m.kept.iter().any(|(c, _)| *c == client))
+        self.moving_out
+            .values()
+            .any(|m| m.kept.iter().any(|(c, _)| *c == client))
     }
 
     /// Whether `sr` is masked by a move here (the giver's part moves it, or a peer's does).
     pub(super) fn move_masked(&self, sr: SuperRegion) -> bool {
-        self.moving_out.get(&sr).is_some_and(|m| m.masked.is_some()) || self.peer_moving.contains_key(&sr)
+        self.moving_out.get(&sr).is_some_and(|m| m.masked.is_some())
+            || self.peer_moving.contains_key(&sr)
     }
 
     /// Whether this host waits for `sr` to be moved here (it does not ask for it).
@@ -161,49 +238,98 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The super-regions moved here by a committed cut and not claimed yet: the server's keeper
     /// fences each once a directory read shows it as this host's.
     pub fn expected_committed(&self) -> Vec<SuperRegion> {
-        self.expecting.iter().filter(|(_, m)| m.committed).map(|(sr, _)| *sr).collect()
+        self.expecting
+            .iter()
+            .filter(|(_, m)| m.committed)
+            .map(|(sr, _)| *sr)
+            .collect()
     }
 
     /// The moved rows of cut `cut`'s part, each with the epoch it was masked at (the server
     /// shrinks its fence by them when the part commits; [`Self::release_epochs_of`] includes them).
     pub(super) fn move_epochs_of(&self, cut: CutId) -> Vec<(SuperRegion, u64)> {
-        self.moving_out.iter().filter_map(|(sr, m)| m.masked.filter(|(c, _)| *c == cut).map(|(_, e)| (*sr, e))).collect()
+        self.moving_out
+            .iter()
+            .filter_map(|(sr, m)| m.masked.filter(|(c, _)| *c == cut).map(|(_, e)| (*sr, e)))
+            .collect()
     }
 
     /// What cut `cut`'s part moves: `(super-region, taker)`.
     pub(super) fn moves_of(&self, cut: CutId) -> Vec<(SuperRegion, HostId)> {
-        self.moving_out.iter().filter(|(_, m)| m.masked.is_some_and(|(c, _)| c == cut)).map(|(sr, m)| (*sr, m.taker)).collect()
+        self.moving_out
+            .iter()
+            .filter(|(_, m)| m.masked.is_some_and(|(c, _)| c == cut))
+            .map(|(sr, m)| (*sr, m.taker))
+            .collect()
     }
 
     /// Whether this host masks land for cut `cut`'s move (the server settles such a cut by the
     /// store's decision when no part of it is tracked, as for a release).
     pub fn gives_land_in(&self, cut: CutId) -> bool {
-        self.moving_out.values().any(|m| m.masked.is_some_and(|(c, _)| c == cut))
+        self.moving_out
+            .values()
+            .any(|m| m.masked.is_some_and(|(c, _)| c == cut))
     }
 
     /// The `BeginCut`'s moves, BEFORE the part begins: refuses the part if this host cannot give
     /// a move it is the giver of; notes the taker's and the other participants' sides.
-    pub(super) fn check_cut_moves(&mut self, cut: CutId, participants: &BTreeSet<HostId>, moves: &[LandMove]) -> Result<(), CutFailure> {
+    pub(super) fn check_cut_moves(
+        &mut self,
+        cut: CutId,
+        participants: &BTreeSet<HostId>,
+        moves: &[LandMove],
+    ) -> Result<(), CutFailure> {
         let me = self.ordinal();
         let s = self.ownership.1;
         for mv in moves.iter().filter(|m| m.giver == me) {
             let Some(m) = self.moving_out.get(&mv.sr).filter(|m| m.id == mv.id) else {
-                log::warn!("world cut {}: move {} of {:?}: no such move here; refused", cut.0, mv.id.0, mv.sr);
+                log::warn!(
+                    "world cut {}: move {} of {:?}: no such move here; refused",
+                    cut.0,
+                    mv.id.0,
+                    mv.sr
+                );
                 return Err(CutFailure::MoveRefused);
             };
             let epoch = self.ownership.0.directory().and_then(|d| d.epoch(mv.sr));
-            if self.owner_of_sr(mv.sr) != crate::Owner::Me || epoch.is_none() || m.taker != mv.taker || !participants.contains(&mv.taker) {
-                log::warn!("world cut {}: move {} of {:?}: not this host's to give to host {}; refused", cut.0, mv.id.0, mv.sr, mv.taker);
+            if self.owner_of_sr(mv.sr) != crate::Owner::Me
+                || epoch.is_none()
+                || m.taker != mv.taker
+                || !participants.contains(&mv.taker)
+            {
+                log::warn!(
+                    "world cut {}: move {} of {:?}: not this host's to give to host {}; refused",
+                    cut.0,
+                    mv.id.0,
+                    mv.sr,
+                    mv.taker
+                );
                 return Err(CutFailure::MoveRefused);
             }
             let in_sr = |rc: &RegionCoords| crate::super_region_of(*rc, s) == mv.sr;
-            let held = self.spawn_held.iter().map(|(_, r)| r).chain(&self.spawn_here).any(|r| in_sr(&self.spawn_region(r.record_region)));
+            let held = self
+                .spawn_held
+                .iter()
+                .map(|(_, r)| r)
+                .chain(&self.spawn_here)
+                .any(|r| in_sr(&self.spawn_region(r.record_region)));
             let pinned = self.pinned_regions().any(|rc| in_sr(&rc));
-            let between = self.moving.keys().chain(self.creating.keys()).chain(self.parking.keys()).any(|c| self.homes.get(c).is_some_and(in_sr))
-                || self.moving.values().any(|mv| in_sr(&mv.from) || in_sr(&mv.target))
+            let between = self
+                .moving
+                .keys()
+                .chain(self.creating.keys())
+                .chain(self.parking.keys())
+                .any(|c| self.homes.get(c).is_some_and(in_sr))
+                || self
+                    .moving
+                    .values()
+                    .any(|mv| in_sr(&mv.from) || in_sr(&mv.target))
                 || self.creating.values().any(|(rc, _, _)| in_sr(rc))
                 || self.parking.values().any(|p| in_sr(&p.region))
-                || self.awaiting_session.keys().any(|c| self.homes.get(c).is_some_and(in_sr));
+                || self
+                    .awaiting_session
+                    .keys()
+                    .any(|c| self.homes.get(c).is_some_and(in_sr));
             if held || pinned || between {
                 log::warn!(
                     "world cut {}: move {} of {:?}: a spawn order held or pinned ({}) or a player between states ({between}) on it; refused",
@@ -221,7 +347,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                     m.cut = Some(cut);
                 }
             } else if mv.giver != me {
-                let known = self.ownership.0.directory().and_then(|d| d.epoch(mv.sr)).unwrap_or(0);
+                let known = self
+                    .ownership
+                    .0
+                    .directory()
+                    .and_then(|d| d.epoch(mv.sr))
+                    .unwrap_or(0);
                 self.peer_moving.insert(mv.sr, (cut, known));
             }
         }
@@ -236,19 +367,43 @@ impl<S: RegionSpawner> WorldManager<S> {
         let s = self.ownership.1;
         let now_ms = self.clock_ms;
         for mv in moves.iter().filter(|m| m.giver == me) {
-            let epoch = self.ownership.0.directory().and_then(|d| d.epoch(mv.sr)).unwrap_or(0);
+            let epoch = self
+                .ownership
+                .0
+                .directory()
+                .and_then(|d| d.epoch(mv.sr))
+                .unwrap_or(0);
             let in_sr = |rc: &RegionCoords| crate::super_region_of(*rc, s) == mv.sr;
-            let homes: Vec<(ClientId, RegionCoords)> = self.homes.iter().filter(|(_, rc)| in_sr(rc)).map(|(c, rc)| (*c, *rc)).collect();
+            let homes: Vec<(ClientId, RegionCoords)> = self
+                .homes
+                .iter()
+                .filter(|(_, rc)| in_sr(rc))
+                .map(|(c, rc)| (*c, *rc))
+                .collect();
             let mut kept = Vec::new();
             for (c, home) in homes {
-                let Some(&player) = self.player_of.get(&c) else { continue };
+                let Some(&player) = self.player_of.get(&c) else {
+                    continue;
+                };
                 let adventure = self.adventurer_of.get(&c).copied();
                 self.homes.remove(&c);
-                self.parking.insert(c, Parking { player, region: home, adventure });
+                self.parking.insert(
+                    c,
+                    Parking {
+                        player,
+                        region: home,
+                        adventure,
+                    },
+                );
                 self.send_play_event(home, GameEventKind::ParkPlayer(c));
                 kept.push((c, player));
             }
-            let regions: Vec<RegionCoords> = self.regions.iter().filter(|(rc, l)| in_sr(rc) && !l.stopping).map(|(rc, _)| *rc).collect();
+            let regions: Vec<RegionCoords> = self
+                .regions
+                .iter()
+                .filter(|(rc, l)| in_sr(rc) && !l.stopping)
+                .map(|(rc, _)| *rc)
+                .collect();
             let mut stopping = Vec::new();
             for rc in regions {
                 if let Some(link) = self.regions.get_mut(&rc) {
@@ -288,8 +443,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// before `drop_stored_parked` (which would drop those records as parked on foreign land).
     pub(super) fn land_moved(&mut self, cut: CutId) {
         let moved: Vec<(SuperRegion, MoveOut)> = {
-            let srs: Vec<SuperRegion> = self.moving_out.iter().filter(|(_, m)| m.masked.is_some_and(|(c, _)| c == cut)).map(|(sr, _)| *sr).collect();
-            srs.into_iter().filter_map(|sr| self.moving_out.remove(&sr).map(|m| (sr, m))).collect()
+            let srs: Vec<SuperRegion> = self
+                .moving_out
+                .iter()
+                .filter(|(_, m)| m.masked.is_some_and(|(c, _)| c == cut))
+                .map(|(sr, _)| *sr)
+                .collect();
+            srs.into_iter()
+                .filter_map(|sr| self.moving_out.remove(&sr).map(|m| (sr, m)))
+                .collect()
         };
         if moved.is_empty() {
             return;
@@ -309,7 +471,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.pristine_terrain.retain(|rc, _| !of_sr(rc));
             self.unavailable.retain(|rc, _| !of_sr(rc));
             self.land_idle_since.remove(&sr);
-            log::info!("[server] world cut {} committed: move {}: {sr:?} is host {}'s now; {} player(s) go there", cut.0, m.id.0, m.taker, m.kept.len());
+            log::info!(
+                "[server] world cut {} committed: move {}: {sr:?} is host {}'s now; {} player(s) go there",
+                cut.0,
+                m.id.0,
+                m.taker,
+                m.kept.len()
+            );
             for (c, player) in m.kept {
                 self.hand_over_moved(c, player, m.taker, now_ms);
             }
@@ -325,12 +493,23 @@ impl<S: RegionSpawner> WorldManager<S> {
         // What it asked during the pause is its new home's to answer (the client asks again there).
         self.deferred_packets.remove(&c);
         let Some(record) = self.parked_players.remove(&player) else {
-            log::error!("[server] move: player {} (client {c}) has no parked record here; the store holds it on the taker's land", player.0);
+            log::error!(
+                "[server] move: player {} (client {c}) has no parked record here; the store holds it on the taker's land",
+                player.0
+            );
             return;
         };
         self.parked_bodies.retain(|_, p| *p != player);
-        let connected = self.sessions.get(&c).is_some_and(|s| s.kind == SessionKind::Home) && self.player_of.get(&c) == Some(&player);
-        let claim = super::peers::claim_of(if connected { self.adventurer_of.remove(&c) } else { record.adventure });
+        let connected = self
+            .sessions
+            .get(&c)
+            .is_some_and(|s| s.kind == SessionKind::Home)
+            && self.player_of.get(&c) == Some(&player);
+        let claim = super::peers::claim_of(if connected {
+            self.adventurer_of.remove(&c)
+        } else {
+            record.adventure
+        });
         if connected {
             self.player_of.remove(&c);
         }
@@ -340,9 +519,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         let login = self.logins.remove(&c);
         let target = record.region;
         if connected {
-            let subscribed: Vec<RegionCoords> = self.sessions.get(&c).map(|s| s.subscribed.iter().copied().collect()).unwrap_or_default();
+            let subscribed: Vec<RegionCoords> = self
+                .sessions
+                .get(&c)
+                .map(|s| s.subscribed.iter().copied().collect())
+                .unwrap_or_default();
             self.name_new_home(c, target, taker);
-            let theirs: Vec<RegionCoords> = subscribed.into_iter().filter(|rc| self.owner_host(*rc) == Some(taker) && *rc != target).collect();
+            let theirs: Vec<RegionCoords> = subscribed
+                .into_iter()
+                .filter(|rc| self.owner_host(*rc) == Some(taker) && *rc != target)
+                .collect();
             for rc in theirs {
                 if let super::peers::Redirect::Sent(owner) = self.redirect(c, rc) {
                     self.redirected_to(c, rc, owner);
@@ -356,21 +542,51 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.awaiting_session.remove(&c);
         self.departed.insert(player, taker);
-        log::info!("[server] move: player {} (client {c}) goes to host {taker} at its pose in {target:?}", player.0);
-        let handoff = crate::PlayerHandoff { client: c, player, claim, login, park: false, hop };
-        self.queue_to_peer(taker, Reliable::PlayerMove { handoff, record: Box::new(record), target, place: crate::MovePlace::Pose });
+        log::info!(
+            "[server] move: player {} (client {c}) goes to host {taker} at its pose in {target:?}",
+            player.0
+        );
+        let handoff = crate::PlayerHandoff {
+            client: c,
+            player,
+            claim,
+            login,
+            park: false,
+            hop,
+        };
+        self.queue_to_peer(
+            taker,
+            Reliable::PlayerMove {
+                handoff,
+                record: Box::new(record),
+                target,
+                place: crate::MovePlace::Pose,
+            },
+        );
     }
 
     /// Cut `cut` was decided aborted (or its part never staged): the giver's mask lifts and its
     /// players are restored here at their pose; the taker's and the peers' notes of the cut go.
     pub(super) fn move_aborted(&mut self, cut: CutId) {
         let now_ms = self.clock_ms;
-        let srs: Vec<SuperRegion> = self.moving_out.iter().filter(|(_, m)| m.masked.is_some_and(|(c, _)| c == cut)).map(|(sr, _)| *sr).collect();
+        let srs: Vec<SuperRegion> = self
+            .moving_out
+            .iter()
+            .filter(|(_, m)| m.masked.is_some_and(|(c, _)| c == cut))
+            .map(|(sr, _)| *sr)
+            .collect();
         for sr in srs {
-            let Some(m) = self.moving_out.get_mut(&sr) else { continue };
+            let Some(m) = self.moving_out.get_mut(&sr) else {
+                continue;
+            };
             m.masked = None;
             let kept = std::mem::take(&mut m.kept);
-            log::info!("[server] world cut {} aborted: move {} of {sr:?} stays here; {} player(s) restored", cut.0, m.id.0, kept.len());
+            log::info!(
+                "[server] world cut {} aborted: move {} of {sr:?} stays here; {} player(s) restored",
+                cut.0,
+                m.id.0,
+                kept.len()
+            );
             for (c, player) in kept {
                 if self.parking.get(&c).is_some_and(|p| p.player == player) {
                     // Its park has not answered yet (the cut aborted first): the park stays in
@@ -387,7 +603,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 match self.take_parked(player) {
                     Some(record) => self.restore_player(c, record, now_ms),
-                    None => log::error!("[server] move aborted: player {} (client {c}) has no parked record to restore", player.0),
+                    None => log::error!(
+                        "[server] move aborted: player {} (client {c}) has no parked record to restore",
+                        player.0
+                    ),
                 }
                 // What it asked during the pause goes on now (final review F-C1).
                 for packet in self.deferred_packets.remove(&c).unwrap_or_default() {
@@ -399,12 +618,23 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if let Some(m) = self.moving_out.remove(&sr) {
                     log::info!("[server] move {} of {sr:?} is off", m.id.0);
                     for c in m.notified {
-                        let _ = self.out.send((Some(c), ServerPacket::LandMoving { super_region: sr, at_tick: None, standby: None }));
+                        let _ = self.out.send((
+                            Some(c),
+                            ServerPacket::LandMoving {
+                                super_region: sr,
+                                at_tick: None,
+                                standby: None,
+                            },
+                        ));
                     }
                 }
             }
         }
-        for m in self.expecting.values_mut().filter(|m| m.cut == Some(cut) && !m.committed) {
+        for m in self
+            .expecting
+            .values_mut()
+            .filter(|m| m.cut == Some(cut) && !m.committed)
+        {
             m.cut = None;
         }
         self.peer_moving.retain(|_, (c, _)| *c != cut);
@@ -429,8 +659,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ends and what was held for it is delivered here.
     pub(super) fn moved_in(&mut self, sr: SuperRegion) {
         if let Some(m) = self.expecting.remove(&sr) {
-            log::info!("[server] move {}: super-region {sr:?} from host {} is this host's; {} held player(s) placed", m.id.0, m.giver, m.held.len());
-            self.release_held(m);
+            tracing::info_span!("host.land.move_in", held_players = m.held.len()).in_scope(|| {
+                log::info!("[server] move {}: super-region {sr:?} from host {} is this host's; {} held player(s) placed", m.id.0, m.giver, m.held.len());
+                self.release_held(m);
+            });
         }
     }
 
@@ -449,9 +681,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             return false;
         }
         let now_ms = self.clock_ms;
-        let Some(m) = self.expecting.get_mut(&sr) else { return false };
-        log::info!("[server] player {} handed into {target:?} by host {from}: held until move {} lands here", h.player.0, m.id.0);
-        m.held.push((from, h.clone(), record.clone(), target, place, now_ms));
+        let Some(m) = self.expecting.get_mut(&sr) else {
+            return false;
+        };
+        log::info!(
+            "[server] player {} handed into {target:?} by host {from}: held until move {} lands here",
+            h.player.0,
+            m.id.0
+        );
+        m.held
+            .push((from, h.clone(), record.clone(), target, place, now_ms));
         let player = h.player;
         self.cut_transit(player, record);
         true
@@ -473,20 +712,31 @@ impl<S: RegionSpawner> WorldManager<S> {
         let late: Vec<SuperRegion> = self
             .expecting
             .iter()
-            .filter(|(_, m)| m.held.first().is_some_and(|h| now_ms.saturating_sub(h.5) >= MOVE_HOP_WAIT_MS))
+            .filter(|(_, m)| {
+                m.held
+                    .first()
+                    .is_some_and(|h| now_ms.saturating_sub(h.5) >= MOVE_HOP_WAIT_MS)
+            })
             .map(|(sr, _)| *sr)
             .collect();
         for sr in late {
             // The expectation ends (final review F-I2): released, a player is not held again — it
             // takes the ordinary path (parked here: the client rejoins).
             if let Some(m) = self.expecting.remove(&sr) {
-                log::warn!("[server] move {}: {sr:?} is not this host's after {MOVE_HOP_WAIT_MS} ms; its held players take the ordinary path", m.id.0);
+                log::warn!(
+                    "[server] move {}: {sr:?} is not this host's after {MOVE_HOP_WAIT_MS} ms; its held players take the ordinary path",
+                    m.id.0
+                );
                 self.release_held(m);
             }
         }
         if let Some(directory) = self.ownership.0.directory() {
-            let lifted: Vec<SuperRegion> =
-                self.peer_moving.iter().filter(|(sr, (_, known))| directory.epoch(**sr).is_some_and(|e| e > *known)).map(|(sr, _)| *sr).collect();
+            let lifted: Vec<SuperRegion> = self
+                .peer_moving
+                .iter()
+                .filter(|(sr, (_, known))| directory.epoch(**sr).is_some_and(|e| e > *known))
+                .map(|(sr, _)| *sr)
+                .collect();
             for sr in lifted {
                 self.peer_moving.remove(&sr);
             }
@@ -498,24 +748,51 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// is off for it.
     fn notify_moving(&mut self, now_ms: u64) {
         let s = self.ownership.1;
-        let srs: Vec<SuperRegion> = self.moving_out.iter().filter(|(_, m)| m.masked.is_none()).map(|(sr, _)| *sr).collect();
+        let srs: Vec<SuperRegion> = self
+            .moving_out
+            .iter()
+            .filter(|(_, m)| m.masked.is_none())
+            .map(|(sr, _)| *sr)
+            .collect();
         for sr in srs {
-            let Some(m) = self.moving_out.get(&sr) else { continue };
+            let Some(m) = self.moving_out.get(&sr) else {
+                continue;
+            };
             let (taker, at_tick) = (m.taker, m.at_tick);
             let inside: BTreeSet<ClientId> = self
                 .homes
                 .iter()
-                .filter(|(c, rc)| crate::super_region_of(**rc, s) == sr && self.sessions.get(c).is_some_and(|s| s.kind == SessionKind::Home))
+                .filter(|(c, rc)| {
+                    crate::super_region_of(**rc, s) == sr
+                        && self
+                            .sessions
+                            .get(c)
+                            .is_some_and(|s| s.kind == SessionKind::Home)
+                })
                 .map(|(c, _)| *c)
                 .collect();
             let told = m.notified.clone();
             for c in told.difference(&inside) {
-                let _ = self.out.send((Some(*c), ServerPacket::LandMoving { super_region: sr, at_tick: None, standby: None }));
+                let _ = self.out.send((
+                    Some(*c),
+                    ServerPacket::LandMoving {
+                        super_region: sr,
+                        at_tick: None,
+                        standby: None,
+                    },
+                ));
             }
             let fresh: Vec<ClientId> = inside.difference(&told).copied().collect();
             for c in fresh {
                 let standby = self.standby_for(c, taker, now_ms);
-                let _ = self.out.send((Some(c), ServerPacket::LandMoving { super_region: sr, at_tick: Some(at_tick), standby }));
+                let _ = self.out.send((
+                    Some(c),
+                    ServerPacket::LandMoving {
+                        super_region: sr,
+                        at_tick: Some(at_tick),
+                        standby,
+                    },
+                ));
             }
             if let Some(m) = self.moving_out.get_mut(&sr) {
                 m.notified = inside;
@@ -524,7 +801,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// A standby ticket for `client` to `taker` (its endpoint and an observer ticket), if known.
-    fn standby_for(&mut self, client: ClientId, taker: HostId, now_ms: u64) -> Option<(crate::HostEndpoint, crate::ObserverTicket)> {
+    fn standby_for(
+        &mut self,
+        client: ClientId,
+        taker: HostId,
+        now_ms: u64,
+    ) -> Option<(crate::HostEndpoint, crate::ObserverTicket)> {
         let endpoint = self.peer_endpoints.get(&taker).cloned()?;
         self.nonces.as_ref()?;
         self.sessions.get(&client).and_then(|s| s.player)?;
@@ -533,7 +815,9 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: the moves this host gives / expects, by super-region.
     pub fn moves_here(&self) -> (Vec<SuperRegion>, Vec<SuperRegion>) {
-        (self.moving_out.keys().copied().collect(), self.expecting.keys().copied().collect())
+        (
+            self.moving_out.keys().copied().collect(),
+            self.expecting.keys().copied().collect(),
+        )
     }
 }
-

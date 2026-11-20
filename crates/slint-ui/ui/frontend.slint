@@ -6,6 +6,7 @@ import { Loading } from "loading.slint";
 import { LoginScreen } from "login.slint";
 import { OnlineWorldRow, WorldsScreen } from "worlds.slint";
 import { GameTheme } from "theme.slint";
+import { SettingsWindow } from "settings.slint";
 
 export { KnobRow, OnlineWorldRow, WorldRow }
 
@@ -38,12 +39,49 @@ export component FrontendUi inherits Window {
     in property <string> load-screen-step <=> loading.step;
     in property <float> load-screen-fade <=> loading.fade;
 
+    // The settings window (settings.slint) over the main menu: its Settings
+    // opens it, its Close shuts it; the client fills it, with a `settings-`
+    // prefix (graphics_settings.rs).
+    in-out property <bool> settings-open;
+    in-out property <float> settings-view-distance <=> settings.view-distance;
+    in property <float> settings-view-distance-min <=> settings.view-distance-min;
+    in property <float> settings-view-distance-max <=> settings.view-distance-max;
+    in property <float> settings-view-distance-step <=> settings.view-distance-step;
+    callback settings-view-distance-edited <=> settings.view-distance-edited;
+    in-out property <float> settings-detail-distance <=> settings.detail-distance;
+    in property <float> settings-detail-distance-min <=> settings.detail-distance-min;
+    in property <float> settings-detail-distance-max <=> settings.detail-distance-max;
+    in property <float> settings-detail-distance-step <=> settings.detail-distance-step;
+    callback settings-detail-distance-edited <=> settings.detail-distance-edited;
+    in-out property <bool> settings-vsync <=> settings.vsync;
+    callback settings-vsync-edited <=> settings.vsync-edited;
+    in-out property <float> settings-fov <=> settings.fov;
+    in property <float> settings-fov-min <=> settings.fov-min;
+    in property <float> settings-fov-max <=> settings.fov-max;
+    in property <float> settings-fov-step <=> settings.fov-step;
+    callback settings-fov-edited <=> settings.fov-edited;
+    in-out property <bool> settings-view-bobbing <=> settings.view-bobbing;
+    callback settings-view-bobbing-edited <=> settings.view-bobbing-edited;
+    in-out property <bool> settings-sprint-fov <=> settings.sprint-fov;
+    callback settings-sprint-fov-edited <=> settings.sprint-fov-edited;
+    in-out property <float> settings-ui-scale <=> settings.ui-scale;
+    in property <float> settings-ui-scale-min <=> settings.ui-scale-min;
+    in property <float> settings-ui-scale-max <=> settings.ui-scale-max;
+    in property <float> settings-ui-scale-step <=> settings.ui-scale-step;
+    callback settings-ui-scale-edited <=> settings.ui-scale-edited;
+    out property <length> settings-button-x: menu.settings-button-x;
+    out property <length> settings-button-y: menu.settings-button-y;
+    out property <length> settings-close-x: settings.close-x;
+    out property <length> settings-close-y: settings.close-y;
+
     callback new-world();
     callback load-world();
     callback exit();
     callback back();
-    // The browser build's menu: a server address and Join server (main-menu.slint).
+    // The browser build has no local-world controls. Direct server joins are
+    // enabled only by debug builds.
     in property <bool> join-only;
+    in property <bool> debug-direct-join;
     in-out property <string> server-address <=> menu.server-address;
     callback join-server(string);
     out property <length> join-button-x: menu.join-button-x;
@@ -177,12 +215,14 @@ export component FrontendUi inherits Window {
         menu-error: root.menu-error;
         background-image: root.menu-background;
         join-only: root.join-only;
+        debug-direct-join: root.debug-direct-join;
         online-available: root.online-available;
         new-world => { root.new-world(); }
         load-world => { root.load-world(); }
         exit => { root.exit(); }
         join-server(address) => { root.join-server(address); }
         play-online => { root.play-online(); }
+        open-settings => { root.settings-open = true; }
     }
     generator := MapGenerator {
         visible: root.shown && root.screen == 1;
@@ -229,5 +269,12 @@ export component FrontendUi inherits Window {
         visible: root.shown && root.screen == 4;
         width: root.width;
         height: root.height;
+    }
+    // Over the main menu only (another screen leaves it shut).
+    settings := SettingsWindow {
+        visible: root.shown && root.screen == 0 && root.settings-open;
+        width: root.width;
+        height: root.height;
+        close => { root.settings-open = false; }
     }
 }

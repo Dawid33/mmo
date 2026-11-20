@@ -21,7 +21,20 @@ use rapier3d::math::Vector;
 use crate::{Client, ClientId, Pose, RegionCoords, Rollback, StateHash, TileSource};
 
 /// The stable identity of a player (never reused for another name or token).
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, StateHash)]
+#[derive(
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    StateHash,
+)]
 pub struct PlayerId(pub u64);
 
 /// Low bits of a [`ClientId`] that hold the login ticket's `session_epoch`.
@@ -30,7 +43,11 @@ pub const SESSION_EPOCH_BITS: u32 = 24;
 /// The world-unique session id of `player`'s login session `session_epoch`: the player id
 /// above [`SESSION_EPOCH_BITS`] bits of the epoch (only its low bits: the epoch wraps after 16 million logins of one player). The same on every host of a world.
 pub fn session_client_id(player: PlayerId, session_epoch: u64) -> ClientId {
-    debug_assert!(player.0 < 1 << (64 - SESSION_EPOCH_BITS), "player id {} does not fit a session id", player.0);
+    debug_assert!(
+        player.0 < 1 << (64 - SESSION_EPOCH_BITS),
+        "player id {} does not fit a session id",
+        player.0
+    );
     (player.0 << SESSION_EPOCH_BITS) | (session_epoch & ((1 << SESSION_EPOCH_BITS) - 1))
 }
 
@@ -56,7 +73,11 @@ impl PlayerToken {
 
     /// Exactly [`PLAYER_TOKEN_LEN`] lowercase hex characters.
     pub fn is_valid(&self) -> bool {
-        self.0.len() == PLAYER_TOKEN_LEN && self.0.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        self.0.len() == PLAYER_TOKEN_LEN
+            && self
+                .0
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     }
 }
 
@@ -117,7 +138,10 @@ pub enum Credential {
     /// A session to a host that does not hold the client's body (an observer): the
     /// [`crate::ObserverTicket`] its home host handed out (`ServerPacket::RegionElsewhere`).
     /// `client` is the session id the home host knows the client by.
-    Observer { client: crate::ClientId, nonce: u64 },
+    Observer {
+        client: crate::ClientId,
+        nonce: u64,
+    },
 }
 
 impl std::fmt::Debug for Credential {
@@ -127,7 +151,9 @@ impl std::fmt::Debug for Credential {
         match self {
             Credential::Local(name) => write!(f, "Local({:?})", name.0),
             Credential::Jwt(j) => write!(f, "Jwt(<{} bytes>)", j.len()),
-            Credential::Observer { client, .. } => write!(f, "Observer {{ client: {client}, nonce: <secret> }}"),
+            Credential::Observer { client, .. } => {
+                write!(f, "Observer {{ client: {client}, nonce: <secret> }}")
+            }
         }
     }
 }
@@ -158,6 +184,8 @@ pub fn parked_client(client: &Client) -> Client {
     c.fps_cam_mode = false;
     c.inventory_open = false;
     c.open_container = None;
+    // A record saved when players had more slots: back to the ones they have.
+    c.inventory.fit();
     if let Some(rest) = c.stow_cursor() {
         c.cursor = Some(rest);
     }
@@ -183,7 +211,12 @@ impl Rollback {
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;
         let pose = *self.data.physics.bodies.get(handle)?.position();
         let c = self.data.clients.get(&client)?;
-        Some(PlayerRecord { client: parked_client(c), pose, region, adventure: None })
+        Some(PlayerRecord {
+            client: parked_client(c),
+            pose,
+            region,
+            adventure: None,
+        })
     }
 
     /// Puts a returning player back, undo-safely: its `Client` (session state
@@ -197,7 +230,9 @@ impl Rollback {
             return;
         }
         let at = restore_translation(self, record.pose.translation);
-        self.data.clients.insert(client, parked_client(&record.client));
+        self.data
+            .clients
+            .insert(client, parked_client(&record.client));
         self.create_player_body_safe(client, at);
     }
 }

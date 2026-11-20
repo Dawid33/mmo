@@ -2,7 +2,7 @@
 //! clock, so a region started late joins at the world's current tick and the
 //! regions of one world agree on what "tick N" means. Time is the manager's
 //! explicit `now_ms`, never `Instant`, so this works on wasm and in tests.
-use crate::{Tick, TICK_RATE};
+use crate::{TICK_RATE, Tick};
 
 /// Most ticks a region runs back to back while behind the world tick before
 /// it services its inputs again.
@@ -17,7 +17,10 @@ pub struct WorldClock {
 
 impl WorldClock {
     pub fn starting_at(anchor_ms: u64, anchor_tick: Tick) -> Self {
-        Self { anchor_ms, anchor_tick }
+        Self {
+            anchor_ms,
+            anchor_tick,
+        }
     }
 
     /// The tick in progress at `now_ms`: `anchor_tick + (now_ms - anchor_ms) / TICK_RATE`,
@@ -57,7 +60,10 @@ impl WorldClock {
     /// at the same wall instants in every process: feed the clock `elapsed + phase`.
     pub fn from_anchor(anchor: ClockAnchor, now_unix_ms: u64) -> (WorldClock, u64) {
         let phase = now_unix_ms.saturating_sub(anchor.unix_ms) % TICK_RATE;
-        (WorldClock::starting_at(0, anchor.tick_at_unix(now_unix_ms)), phase)
+        (
+            WorldClock::starting_at(0, anchor.tick_at_unix(now_unix_ms)),
+            phase,
+        )
     }
 }
 
@@ -65,5 +71,7 @@ impl WorldClock {
 /// tick): the whole gap, at most [`MAX_CATCH_UP_BURST`]. Never overshoots, so
 /// no tick number is skipped.
 pub fn ticks_due(current: Tick, target: Tick) -> u32 {
-    target.saturating_sub(current).min(u64::from(MAX_CATCH_UP_BURST)) as u32
+    target
+        .saturating_sub(current)
+        .min(u64::from(MAX_CATCH_UP_BURST)) as u32
 }

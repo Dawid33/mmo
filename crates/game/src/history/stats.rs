@@ -57,7 +57,8 @@ impl History {
             };
             *events.entry(name).or_default() += 1;
         }
-        let per_civ: Vec<(CivId, u32, u32)> = per.into_iter().map(|(c, (a, s))| (c, a, s)).collect();
+        let per_civ: Vec<(CivId, u32, u32)> =
+            per.into_iter().map(|(c, (a, s))| (c, a, s)).collect();
         HistoryStats {
             now: self.now,
             civs: self.civs.len() as u32,

@@ -9,11 +9,14 @@
 
 use std::time::Instant;
 
-use game::lod::{downsample_chunks, PackedLodGrid};
+use game::lod::{PackedLodGrid, downsample_chunks};
 use game::{BlockId, RegionCoords, TerrainSnapshot};
 
 fn main() {
-    let args: Vec<i32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
+    let args: Vec<i32> = std::env::args()
+        .skip(1)
+        .filter_map(|a| a.parse().ok())
+        .collect();
     let region = RegionCoords::new(*args.first().unwrap_or(&3), *args.get(1).unwrap_or(&-2));
     let materials = worldgen::material::Materials {
         stone: BlockId(1),

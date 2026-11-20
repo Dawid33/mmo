@@ -34,20 +34,23 @@
 use bevy::prelude::*;
 use game::movement::UNITS_PER_METER;
 use game::rapier3d::math::Vector;
-use game::{Goal, Order, PathPlan, RouteMap, RegionCoords, RegionId, TilePos, TileSource, BLOCK_VOXELS, REGION_BLOCKS};
+use game::{
+    BLOCK_VOXELS, Goal, Order, PathPlan, REGION_BLOCKS, RegionCoords, RegionId, RouteMap, TilePos,
+    TileSource,
+};
 
+use super::CommanderView;
+use super::RightPress;
 use super::adventure::ClientPlayMode;
 use super::designate::{self, HiddenEdgeGizmos};
 use super::level::WorkingLevel;
-use super::CommanderView;
-use bevy::window::PrimaryWindow;
 use super::selection::{self, GroundPick, Selection};
 use super::tiles::TileMirror;
-use super::RightPress;
 use crate::renderer::bridge::{LocalBody, SimEntity};
 use crate::renderer::cursor::CursorPolicy;
 use crate::renderer::{GameEvents, LocalPlayer};
 use crate::wrap_frame::WrapFrame;
+use bevy::window::PrimaryWindow;
 
 /// Expansion budget of one preview search, in nodes. The sim searches up to
 /// `game::MAX_PATH_NODES` (32 768), which measured ~87 ms on the main thread
@@ -83,10 +86,20 @@ pub fn is_click(accumulated_motion_px: f32) -> bool {
 /// `home`; elsewhere the level is left to the sim (`y: None`, the topmost
 /// standable tile of the column). `region` may be any copy of a region in
 /// `frame`; the goal names its canonical form (the sims' and the server's).
-pub fn goal_from_hover(frame: &WrapFrame, region: RegionId, local: Vec3, exact: bool, home: RegionId) -> Goal {
+pub fn goal_from_hover(
+    frame: &WrapFrame,
+    region: RegionId,
+    local: Vec3,
+    exact: bool,
+    home: RegionId,
+) -> Goal {
     let region = frame.canonical(region);
     let t = game::feet_tile(Vector::new(local.x, local.y, local.z));
-    Goal::local(region, [t[0], t[2]], (exact && region == frame.canonical(home)).then_some(t[1]))
+    Goal::local(
+        region,
+        [t[0], t[2]],
+        (exact && region == frame.canonical(home)).then_some(t[1]),
+    )
 }
 
 /// The `MoveTo` goal for a picked block-selection tile in `home`: that
@@ -100,9 +113,16 @@ pub fn goal_from_tile(tile: TilePos, home: RegionId) -> Goal {
 /// the ray meets, at any level; with it on the working level's cell. `None`
 /// when the ray meets none of the region's blocks. `xray`: the cut-off view
 /// looks through to dug spaces (`designate::pick_visible_xray`).
-pub fn pick_move_tile(ray: (Vector, Vector), working: &WorkingLevel, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
+pub fn pick_move_tile(
+    ray: (Vector, Vector),
+    working: &WorkingLevel,
+    mirror: &TileMirror,
+    xray: bool,
+) -> Option<TilePos> {
     let p = if working.cut {
-        game::pick_level_cell(ray.0, ray.1, working.level?, |p| game::block_props().blocks_ray(mirror.block(p)))?
+        game::pick_level_cell(ray.0, ray.1, working.level?, |p| {
+            game::block_props().blocks_ray(mirror.block(p))
+        })?
     } else {
         designate::pick_visible_xray(ray, true, mirror, xray)?
     };
@@ -201,7 +221,11 @@ impl PathPreview {
         self.goal = Some(goal);
         self.path = preview_path(src, from, &goal, here, map);
         self.unreachable = false;
-        self.beyond = self.path.as_ref().is_some_and(|p| !p.reaches_goal).then_some(world);
+        self.beyond = self
+            .path
+            .as_ref()
+            .is_some_and(|p| !p.reaches_goal)
+            .then_some(world);
         true
     }
 
@@ -264,7 +288,8 @@ pub fn update_path_preview(
         .and_then(|home| body_tile(&bodies, &tiles, home, origin(home)).map(|b| (home, b)));
     // The sent path is done once the body stands on its end, or left with it.
     if !sent.path.is_empty() {
-        let arrived = body.is_some_and(|(_, (tile, _))| sent.beyond.is_none() && sent.path.last() == Some(&tile));
+        let arrived = body
+            .is_some_and(|(_, (tile, _))| sent.beyond.is_none() && sent.path.last() == Some(&tile));
         if arrived || sent.region != home {
             *sent = SentPath::default();
         }
@@ -288,20 +313,49 @@ pub fn update_path_preview(
         return;
     };
     // Block selection's tile first; the ground pick only off the region's blocks.
-    let ray = window.single().ok().zip(view.single().ok()).and_then(|(w, v)| designate::cursor_ray(w, v, home, &frame));
-    if let Some(tile) = ray.and_then(|ray| pick_move_tile(ray, &working, &mirror, crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut))) {
-        preview.update(&tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(tile, origin(home)));
+    let ray = window
+        .single()
+        .ok()
+        .zip(view.single().ok())
+        .and_then(|(w, v)| designate::cursor_ray(w, v, home, &frame));
+    if let Some(tile) = ray.and_then(|ray| {
+        pick_move_tile(
+            ray,
+            &working,
+            &mirror,
+            crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut),
+        )
+    }) {
+        preview.update(
+            &tiles,
+            from,
+            tile,
+            goal_from_tile(tile, home),
+            home,
+            map,
+            tile_point(tile, origin(home)),
+        );
         return;
     }
     let goal = goal_from_hover(&frame, region, local, pick.1, home);
     let world = local + Vec3::from_array(frame.offset(region));
-    preview.update(&tiles, from, hover_tile(&frame, region, local, home), goal, home, map, world);
+    preview.update(
+        &tiles,
+        from,
+        hover_tile(&frame, region, local, home),
+        goal,
+        home,
+        map,
+        world,
+    );
 }
 
 /// The world's coarse-route map, as the sim's regions are bounded by it and
 /// route over it (`Region::set_route_map`); `None` without a map
 /// (procedural).
-fn route_of(state: Option<&crate::renderer::world_map::WorldMapState>) -> Option<std::sync::Arc<RouteMap>> {
+fn route_of(
+    state: Option<&crate::renderer::world_map::WorldMapState>,
+) -> Option<std::sync::Arc<RouteMap>> {
     state.and_then(|s| s.route.clone())
 }
 
@@ -310,7 +364,10 @@ fn route_of(state: Option<&crate::renderer::world_map::WorldMapState>) -> Option
 pub enum ClickOrder {
     /// Send `Order::MoveTo`: along `plan` (`None` when the client could not
     /// plan it), drawn with a dashed line on to `beyond`.
-    Send { plan: Option<PathPlan>, beyond: Option<Vec3> },
+    Send {
+        plan: Option<PathPlan>,
+        beyond: Option<Vec3>,
+    },
     /// The goal is in the home region and the sim, planning over the same
     /// tiles at the same budget, would find no path: nothing is sent.
     NoPath,
@@ -333,9 +390,15 @@ pub fn click_order(
     match click_path(src, from, goal, here, map, previewed) {
         Some(plan) => {
             let beyond = (!plan.reaches_goal).then_some(hover).flatten();
-            ClickOrder::Send { plan: Some(plan), beyond }
+            ClickOrder::Send {
+                plan: Some(plan),
+                beyond,
+            }
         }
-        None if goal.region() != Some(here) => ClickOrder::Send { plan: None, beyond: hover },
+        None if goal.region() != Some(here) => ClickOrder::Send {
+            plan: None,
+            beyond: hover,
+        },
         None => ClickOrder::NoPath,
     }
 }
@@ -371,20 +434,33 @@ pub fn send_move_order(
     let pending = pending.get();
     if buttons.just_pressed(MouseButton::Right) && press.at.is_some() {
         *pending = match (preview.key, preview.goal) {
-            (Some(key), Some(goal)) if !preview.unreachable => {
-                Some(PressedHover { key, goal, path: preview.path.clone(), beyond: preview.hover })
-            }
+            (Some(key), Some(goal)) if !preview.unreachable => Some(PressedHover {
+                key,
+                goal,
+                path: preview.path.clone(),
+                beyond: preview.hover,
+            }),
             _ => None,
         };
     }
     let Some(motion) = press.released else { return };
     let Some(hover) = pending.take() else { return };
-    let (Some(client), Some(here)) = (local.0, mirror.region()) else { return };
+    let (Some(client), Some(here)) = (local.0, mirror.region()) else {
+        return;
+    };
     if !is_click(motion) {
         return;
     }
     let route = route_of(world_map.as_deref());
-    let order = click_order(&mirror.with_halo(), hover.key.0, &hover.goal, here, route.as_deref(), hover.path, hover.beyond);
+    let order = click_order(
+        &mirror.with_halo(),
+        hover.key.0,
+        &hover.goal,
+        here,
+        route.as_deref(),
+        hover.path,
+        hover.beyond,
+    );
     let ClickOrder::Send { plan, beyond } = order else {
         // Truly unreachable: show it, for as long as the hover stays.
         if preview.key == Some(hover.key) && preview.path.is_none() {
@@ -392,19 +468,34 @@ pub fn send_move_order(
         }
         return;
     };
-    let path = plan.as_ref().map(|p| p.local_path(here)).unwrap_or_default();
+    let path = plan
+        .as_ref()
+        .map(|p| p.local_path(here))
+        .unwrap_or_default();
     if preview.key == Some(hover.key) && preview.path.is_none() {
         preview.path = plan;
     }
-    let _ = events.0.send(game::GameEventKind::Order(client, Order::MoveTo(hover.goal)));
-    *sent = SentPath { region: Some(here), path, beyond };
+    let _ = events.0.send(game::GameEventKind::Order(
+        client,
+        Order::MoveTo(hover.goal),
+    ));
+    *sent = SentPath {
+        region: Some(here),
+        path,
+        beyond,
+    };
 }
 
 /// World point of tile `p`'s floor centre in the home region drawn at
 /// `origin`, lifted [`PATH_LIFT_M`].
 fn tile_point(p: TilePos, origin: Vec3) -> Vec3 {
     let bv = BLOCK_VOXELS as f32;
-    origin + Vec3::new((p[0] as f32 + 0.5) * bv, p[1] as f32 * bv + PATH_LIFT_M * UNITS_PER_METER, (p[2] as f32 + 0.5) * bv)
+    origin
+        + Vec3::new(
+            (p[0] as f32 + 0.5) * bv,
+            p[1] as f32 * bv + PATH_LIFT_M * UNITS_PER_METER,
+            (p[2] as f32 + 0.5) * bv,
+        )
 }
 
 /// A dashed line from `a` to `b`.
@@ -432,9 +523,17 @@ fn draw_path(
 ) {
     let points: Vec<Vec3> = path.iter().map(|&p| tile_point(p, origin)).collect();
     gizmos.linestrip(points.iter().copied(), color);
-    hidden.linestrip(points.iter().copied(), color.with_alpha(color.alpha() * HIDDEN_PATH_ALPHA));
+    hidden.linestrip(
+        points.iter().copied(),
+        color.with_alpha(color.alpha() * HIDDEN_PATH_ALPHA),
+    );
     if let (Some(end), Some(b)) = (points.last(), beyond) {
-        dashed(gizmos, *end, b + Vec3::Y * PATH_LIFT_M * UNITS_PER_METER, color);
+        dashed(
+            gizmos,
+            *end,
+            b + Vec3::Y * PATH_LIFT_M * UNITS_PER_METER,
+            color,
+        );
     }
 }
 
@@ -448,15 +547,35 @@ pub fn draw_paths(
     mut gizmos: Gizmos,
     mut hidden: Gizmos<HiddenEdgeGizmos>,
 ) {
-    let (Some(home), Some(origin)) = (mirror.region(), mirror.home_offset()) else { return };
+    let (Some(home), Some(origin)) = (mirror.region(), mirror.home_offset()) else {
+        return;
+    };
     if sent.region == Some(home) && !sent.path.is_empty() {
         let dim = PATH_COLOR_OK.with_alpha(SENT_PATH_ALPHA);
-        draw_path(&mut gizmos, &mut hidden, &sent.path, sent.beyond, origin, dim);
+        draw_path(
+            &mut gizmos,
+            &mut hidden,
+            &sent.path,
+            sent.beyond,
+            origin,
+            dim,
+        );
     }
     match (&preview.path, preview.hover) {
-        (Some(plan), _) => draw_path(&mut gizmos, &mut hidden, &plan.local_path(home), preview.beyond, origin, PATH_COLOR_OK),
+        (Some(plan), _) => draw_path(
+            &mut gizmos,
+            &mut hidden,
+            &plan.local_path(home),
+            preview.beyond,
+            origin,
+            PATH_COLOR_OK,
+        ),
         (None, Some(at)) => {
-            let color = if preview.unreachable { PATH_COLOR_NONE } else { PATH_COLOR_UNKNOWN };
+            let color = if preview.unreachable {
+                PATH_COLOR_NONE
+            } else {
+                PATH_COLOR_UNKNOWN
+            };
             let r = NO_PATH_CROSS_M * UNITS_PER_METER;
             let at = at + Vec3::Y * PATH_LIFT_M * UNITS_PER_METER;
             for d in [Vec3::new(r, 0.0, r), Vec3::new(r, 0.0, -r)] {
@@ -467,4 +586,3 @@ pub fn draw_paths(
         (None, None) => {}
     }
 }
-

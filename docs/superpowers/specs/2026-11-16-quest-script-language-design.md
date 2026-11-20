@@ -6,6 +6,12 @@ Working name: **quest script** (files `.qs`, crates `quest-*`). The name is a pl
 Marks used below: **[decided]** = the owner decided it; **[call]** = the designer's call, made in the
 conversation's spirit — the builder may revisit a [call] if it turns out wrong, and should say so.
 
+**Game direction changed the same day** (`docs/game-design.md`, revision 2026-11-16): the standalone MVP
+stands, but its in-game assumptions changed. Quests come from packages, not from players typing into
+blocks. Namespaces belong to one quest instance, not to players (§8.1). "Per block" rules become per
+script instance, and a script block is an admin's access point. See
+`2026-11-16-quests-in-the-world-design.md` §2 and `2026-11-16-content-packages-design.md`.
+
 ---
 
 ## 1. Intent
@@ -340,6 +346,512 @@ pub struct Ledger:
 - Error names stay global across modules.
 - How modules are stored and shared in game (likely per namespace) is **open** — not part of the MVP.
 
+### 5.11 Dialogue [model decided 2026-11-16; syntax decided 2026-11-16]
+
+**Folded 2026-11-17** from the accepted construction design (`2026-11-16-quest-construction-design.md`, accepted
+by Dawid 2026-11-16; worked examples `2026-11-16-quest-examples.md`). That document keeps the research and the
+reasons; this section is the rule. Decided at the fold (Dawid, 2026-11-17): **conversations are private** (one
+talker; others nearby hear nothing); **a bark is a one-actor `scene`**, and the `dialogue name(npc: Person)` form
+stays accepted as a bark; the namespace keeps the name `world.*` (the examples' `ns.*` reads as `world.*`).
+
+**Calls made at the fold (2026-11-17), where the design left a detail open — change any on review:** `EndReason`
+is `Finished | Left | Timeout | TooDeep | Edited | OutOfRange`; an exit's type is `Exit`; a scene has no `detour`;
+a role's `where` may name only earlier roles; new diagnostic codes `bad-quest-option`, `bad-objective-call`,
+`bad-part-item`, `part-write`, `scene-follow-up`, `mirror-size` (warning); live timers are bounded by
+`TIMERS_MAX`; a line's character count for its duration counts f-string holes by their source length.
+
+**Decided (owner, 2026-11-16):**
+- **Description, not execution.** A dialogue in quest script declaratively describes a tree of nodes, lines
+  and choices, attached to NPCs. The VM does not execute it. The compiler turns it into **data** in the
+  `Program`, and the **region's Rust code runs the conversation** when a player talks to an NPC.
+- **Conditions are pure VM functions.** Each condition (a node's `when`, an option's `if`, a line's `when`),
+  each f-string substitution and each `emit` argument compiles to a small read-only function, which the
+  runner calls.
+- **Effects are events.** A dialogue never changes state itself. It `emit`s events to its script instance,
+  and ordinary `@on` handlers (§7) do the work.
+
+Background and the formats it borrows from (Yarn Spinner 3's node groups, saliency and line ids; ink's
+weave): `2026-11-16-dialogue-and-quest-structure-research.md`. Worked examples, including Yarn Spinner's own
+samples converted: `2026-11-16-dialogue-examples.md`.
+
+```python
+let accepted = false
+let dog_name = "Rufus"
+
+event Accepted:
+    player: Player
+
+@pick(best)
+dialogue farmer_talk(p: Player, npc: Person) for farmer:
+    node start:
+        npc: "Have you seen my dog? He ran off toward the hills."     @farmer.start
+        choice:
+            "I'll find him." @farmer.accept if not accepted:
+                emit Accepted(player=p)
+                npc: "Bless you. Bring him back before dark."          @farmer.thanks
+            "What does he look like?" @farmer.ask_dog:
+                npc: f"Brown, one ear up. He answers to {dog_name}."   @farmer.dog_desc
+                -> start
+            once "Is that blood on your sleeve?" @farmer.blood:
+                detour farmer_secret
+            "Goodbye." @farmer.goodbye
+        npc: "Safe roads."                                             @farmer.bye
+
+@on(Accepted)
+fn accept(e):
+    accepted = true
+    give(e.player, Item(kind="dog whistle", count=1))
+
+dialogue greeting(p: Player, npc: Person) for innkeeper:
+    node hello when p.has_tag("outlaw"):
+        npc: "Keep walking."                                           @greet.outlaw
+    node hello when once per p:
+        npc: "A new face! Welcome."                                    @greet.first
+    node hello:
+        => npc: "Morning."                                             @greet.a
+        => npc: "Weather's turning."                                   @greet.b
+        => npc: "You again?"                                           @greet.c when once per p
+```
+
+**A dialogue body is steps, not statements.** It holds nodes, and nodes hold steps. There is no `let`,
+assignment, `if`/`while`/`for`, `match` or call in a dialogue (`not-a-step`). Logic lives in conditions and in
+handlers.
+
+| Form | Where | Meaning |
+|---|---|---|
+| `dialogue name(p: Player, npc: Person) [for expr [where pred]] [topic "text" [@id] [if cond] [priority n]] [exits a, b, …]:` + body | item | a **conversation**; the runner binds the player who talks and the NPC talked to. Without `topic` it is a **greeting**; with one, a **topic** in the NPC's menu (below). `for npc where pred` is a **filter** (below); `exits` declares named exits (below) |
+| `dialogue name(npc: Person):` + body | item | a **bark** = a one-actor scene (below); no `choice` (`bark-choice`); started by the host command `bark(npc, name)` or the runner's ambient schedule. Any other parameter list is `dialogue-signature` |
+| `scene name(a: Person, …) [where pred] [uninterruptible]:` + body | item | a **scene**: several speakers, no listener, timed lines (below); no `choice` (`scene-choice`) |
+| `node name [when cond]:` + steps | dialogue body | a node; nodes sharing a name form a **node group**, one picked per entry; a body without nodes is one implicit node |
+| `[speaker:] "text" [@id] [(ticks=n)] [when cond]` | step | a **line**; `text` is a string or f-string literal; `speaker` is `p`, `npc` or a name in scope (in a scene: a cast member); `(ticks=n)` overrides its derived duration (scenes and barks only, below) |
+| `pause n` | step | silence for `n` ticks (an `int` literal or constant); in a conversation it ends the batch (below) |
+| `choice[(timeout=ticks)]:` + options | step | offer options, wait for the pick |
+| `[once \| default] "text" [@id] [if cond]` + (`:` steps, or nothing) | inside `choice:` | an option; after its steps, conversation continues after the `choice:` (ink's gather); a `default` option is picked when the timeout runs out |
+| `default:` + steps | inside `choice:` | a **hidden fallback**: not offered, run when the timeout runs out (Yarn's `#fallback`) |
+| `=> line [when cond]` + (`:` steps, or nothing) | step | consecutive `=>` lines form a **line group**; one is said, then its steps run |
+| `when cond:` + steps | step | steps run only if `cond` holds (no `else`: write the opposite condition) |
+| `once [per expr]:` + steps | step | steps run once per script instance, or once per value of `expr` (a player) |
+| `-> name` | step | jump to a node group of the same dialogue |
+| `detour name` | step | run another dialogue (same signature) to its end, then continue here |
+| `detour name:` + arms `exit:` + steps | step | as `detour`, then run the arm of the exit the callee left by, then continue here; an exit with no arm continues straight on; an arm naming an exit the callee does not declare is `unknown-exit` |
+| `emit Event(field=expr, …)` | step | queue an event to this script instance |
+| `return [exit]` | step | leave this dialogue through `exit` (one of its `exits`), or through the implicit exit `done` when bare; back to the detour's caller, or end the conversation. In a scene, `-> other_scene` as the last step is a **follow-up** (below) |
+| `event Name:` + fields | item | an event type of the script's own, handled with `@on(Name)` like a host event |
+| `@pick(first \| best \| best_least_recent \| random_best_least_recent)` | before `dialogue` | node- and line-group selection strategy |
+
+`cond` in `when` is `once`, `once per expr`, either followed by `if expr`, or a plain `expr`.
+
+**Dialogues as values.** A dialogue's name in an expression is a `Dialogue` value — an id, not a function
+value — for the host commands `attach_dialogue(npc, d)`, `detach_dialogue(npc, d)` and `bark(npc, d)`.
+
+**The runner's context in conditions.** Pure functions may call `dialogue_depth()`, the current detour
+depth (1 in the outermost dialogue), to bound a dialogue that detours into itself.
+
+**What the compiler produces**
+
+- Each dialogue becomes a **dialogue graph** in `Program.dialogues`: nodes, steps, options, groups, line ids,
+  the `for` target and the `@pick` strategy.
+- Every condition, substitution, `emit` argument and `for` target becomes a **pure function** in the program,
+  referenced from the graph by id.
+- Line texts go into the package's **string table**, keyed by line id.
+- The graph is versioned with the bytecode (§6.8) and is plain data: hashed and saved with the program.
+
+**Purity.** A pure function may read:
+- top-level and quest state, roles,
+- `p` and `npc`,
+- its own locals.
+
+It may call pure `fn`s and host queries. It may not:
+- assign anything but its locals,
+- call a host command or request,
+- `emit`, `await`, or let an error escape.
+
+Each violation is `impure-condition`. The runner calls a pure function under a small fuel budget
+(`COND_FUEL`). A fault or running out of fuel counts as false (an empty substitution) and is reported to
+the owner.
+
+**The runner (region Rust code, engine side)**
+
+- **Talking to an NPC — attached dialogues combine commutatively [owner, 2026-11-16: "commutatively combine"].**
+  What a player gets depends only on the **set** of dialogues attached to the NPC, never on the order they
+  were attached, nor on the package or module order:
+  1. **Greeting.** The entry node groups of every attached greeting (a dialogue without `topic`) form one
+     pool. The runner picks one member by score, then least recently used, then a **stable key** — the
+     dialogue's qualified name and the node's position in it. A random tie-break rolls on that key. The
+     picked greeting runs to its end. *As built:* between instances of different programs the key after the
+     qualified name is the program's content hash, then the node position; instance ids order only instances of
+     one program — so the pick never depends on how instances were numbered.
+  2. **Topic menu.** Every attached topic whose `if` holds becomes one option of the NPC's menu, labelled
+     with its `topic` text (a line, so it has a line id and is translated). The options are sorted by
+     `priority` (higher first, default 0) and then by qualified name. Picking one runs that dialogue as a
+     detour and returns to the menu.
+  3. **Leaving** (closing the menu, walking away) ends the conversation. With no eligible greeting the menu
+     opens at once. With no eligible topic the conversation ends after the greeting. With neither, the NPC
+     has nothing to say.
+
+  Each attached dialogue keeps its own records (`once` records, pick counts; no `visited` record was built — no
+  example needs one) and emits only to its own
+  script instance, so two quests' dialogues on one NPC cannot disturb each other. A dialogue's own `@pick`
+  applies inside it; the greeting pool always uses `best_least_recent` with the stable key.
+- **Walking the steps:**
+  - says lines, evaluating their substitutions at that moment;
+  - queues `emit`ted events to the script instance, in order;
+  - offers choices, evaluating their `if` guards, and waits for the pick;
+  - follows `->` and `detour`, with a return stack in the conversation state;
+  - picks group members by `@pick`.
+- **The pick is player input,** stamped into the sim at a tick and predicted by the picker's client.
+- **Conversation state lives with the NPC,** per player talking to it: the dialogue, node, step, return
+  stack and a pending choice. Pick counts and `once` records live with the NPC per attaching
+  script instance. All of it is region state of the NPC's current region — hashed, undone, saved — and
+  **travels with the NPC across a seam** like its other carried components (below). **No VM task waits during
+  a conversation**, so any number of players can talk at once, and the VM's parked cap is not involved.
+- **A conversation ends** on:
+  - `return` from the outermost dialogue, or the end of its last node;
+  - an empty node group;
+  - the player leaving (`Left`), or a timeout with no `default` option;
+  - the player and the NPC moving out of talking range of each other (`TALK_RANGE_BLOCKS`);
+  - a return stack deeper than `DIALOGUE_STACK_MAX` (`TooDeep`);
+  - one batch (below) walking more than `BATCH_STEPS_MAX` steps (`TooDeep`; as built).
+
+  The host then raises `DialogueEnded { player, npc, dialogue, reason, exit }` to the script, so handlers can
+  react. *As built:* one `DialogueEnded` per **top-level dialogue run** — the picked greeting, and each topic
+  picked from the menu, each to its own instance with its own exit — so a topic's exit is seen while the player
+  stays in the menu; leaving at the menu raises nothing further. `reason` is an `EndReason` (`Finished`, `Left`, `Timeout`, `TooDeep`, `Edited`, `OutOfRange`);
+  `exit` is the outermost dialogue's exit, a label `<dialogue>::<exit>` (`confront::paid`), `<dialogue>::done`
+  for a bare `return`, the end of the last node, or any reason but `Finished`.
+- **The end acknowledgement.** After the end the conversation stays open until the talker's client sends
+  **`Done`** (stamped input) or `CONVERSATION_LINGER_TICKS` pass; until then the NPC keeps facing the player.
+  `DialogueEnded` is raised at the end, not at the `Done`.
+- **Private.** A conversation has one talker. Lines go to that player's client only. An NPC talks to one player
+  at a time; another player who talks to it meanwhile gets its `busy` bark if one is attached, else nothing.
+- **Recursion:** detours may form cycles or detour into themselves. The runner's explicit stack makes that
+  safe, and §6.1's rule (no script function calling itself) is untouched.
+- **Read-your-emit:** an `emit`ted event is handled by the script after the step runs, at the earliest the
+  next time the instance runs. A condition later in the same conversation sees the handler's effect only
+  after that. Do not write a dialogue that needs it sooner.
+
+**Across region boundaries [owner: "conversations have to work between region boundaries"; design proposed]**
+
+Players and NPCs stand in different regions, cross seams mid-conversation, and the scripts that attach
+dialogue to an NPC run in some third region. The seam rule — regions talk only by stamped messages, and a
+seam changes nothing observable — is met like this:
+
+- **One owner per conversation: the NPC's region.** The conversation is carried state of the NPC. When the
+  NPC crosses a seam it moves as a stamped transfer, as every travelling component does (`carry_components`
+  must classify it).
+- **The player can be anywhere in talking range,** including across a seam:
+  - Its picks travel to the NPC's region as stamped input, applied at T+1, as intents are.
+  - Its client sees the lines as events of the NPC's region, through the region subscriptions and
+    observer connections clients already have.
+  - Range is measured through `WorldView`. `TALK_RANGE_BLOCKS` is at most the halo (`HALO_BLOCKS`, 8), with
+    a compile-time assert, so the other party is always visible from the owner's region.
+  - The player keeps only a `talking_to: Option<EntityId>` (a travelling `Client` field).
+- **Conditions run in the NPC's region, over mirrored script state.** A condition reads its script
+  instance's globals, but that instance may run in another region. So:
+  - The **code** of every pure function is already everywhere (packages are distributed).
+  - The compiler computes each program's **dialogue read set**: the globals any condition, substitution or
+    `for` target can read, transitively.
+  - Each script instance that attaches a dialogue to an NPC **mirrors its read set** to the NPC's current
+    region. A stamped message carries it whenever a value in it changes, landing at T+1 — exactly as halo
+    deltas and entity mirrors do. The mirror is rollback state in the receiving region, like the halo.
+  - The runner evaluates conditions there with `eval_pure` over the mirror and `WorldView`.
+  - A mirror is one tick old at most: the same latency as reading-your-`emit`, so no new rule for authors.
+    *As built (stub):* every conversation reads its instance's dialogue mirror, even in the instance's own
+    region; a mirror is taken only at a tick boundary with no segment open, so an instance busy mid-segment
+    over several ticks hands over its mirror later than one tick (it shows what it had before the segment).
+- **`emit` travels too.** An event emitted in a conversation goes to its script instance's region as a stamped
+  message (T+1) and enters that instance's queue there.
+- **Attachments travel with the NPC.** "Script instance S attached dialogue D" is carried state of the NPC.
+  An instance whose NPC has crossed keeps mirroring to the NPC's new region. A stage change that detaches a
+  dialogue reaches the NPC as a stamped message.
+
+The script author sees none of this: a dialogue reads its script's state and the world, and emits events. The
+one-tick latencies are the engine's ordinary seam latency, which every in-region path also gives.
+
+**Unchanged from the earlier proposal**
+
+- **Line ids** are `@path`. They are optional for `quest check` / `run` (provisional id, warning
+  `missing-line-id`) and required for a package build. They are unique per package (`duplicate-line-id`).
+- **A line's text is a literal** (`bad-line-text`), with markup passed through to clients.
+- **An empty line group says nothing.**
+
+**Scoring — one rule, counting conjuncts [changed 2026-11-16, construction design §7.2]**
+
+The same rule ranks the greeting pool, node groups, line groups, ambient scene candidates and (in the
+coordinator) competing quest definitions:
+
+- **Score** = the number of **top-level conjuncts** of the condition: `a and b and c` scores 3. `once` and
+  `once per p` each count 1. An `or` group counts **1** however many alternatives it has; `not x` counts 1; a
+  parenthesised expression that is not an `and` counts 1. No condition scores 0. (This replaces the Yarn count,
+  where each operator counted 1 and so `a or b` outscored `a`; a later Yarn importer re-scores.)
+- **Ties:** fewest prior selections (least recent), then the **stable key** (the dialogue's qualified name, then
+  the member's source position), then — for the `random_*` strategies only — a `roll` on that key. *As built:*
+  the `random_*` roll (on the qualified name and the site) decides before the source position, which only
+  breaks a tie the roll leaves.
+- The default strategy is `best_least_recent`; the greeting pool always uses it.
+
+**Filters and package-level dialogue [construction design §4.2]**
+
+- `for npc where pred` names the dialogue's own `npc` parameter; `pred` is a pure condition over `npc`, `p`,
+  roles and quest state. When a player talks to an NPC, every in-scope filter dialogue whose `pred` holds joins
+  that NPC's attached set (still unordered, still commutative). In scope: a quest's filter dialogues apply to NPCs
+  in the regions of its instance (the home's and its parts'); the runner evaluates them only for the NPC being
+  talked to — one pure call per filter per talk, never a scan of people.
+- A `for` target that evaluates to `None` (an unbound optional role) attaches nowhere.
+- **Package-level content** (a dialogue or scene in a package with no `quest`, outside any instance) is
+  **stateless**: its conditions may read the NPC, the player, the cast and host queries, never a script global,
+  and it may not `emit` (`stateless-dialogue`). It is in scope wherever its package is enabled; its `once`
+  records live with the NPC keyed by the dialogue's qualified name.
+
+**Exits [construction design §10.2]**
+
+`exits a, b` declares a dialogue's named exits; `return a` leaves through one; a bare `return` or the end of the
+last node is the implicit exit `done` (always declared). Exits are labels on control flow, never values: a
+conversation still holds no variables. The return-stack entry of a `detour x:` with arms carries its arm table.
+An exit is written `<dialogue>::<exit>` in expressions; its type is `Exit`, compared with `==`. `return x` of
+an undeclared exit, and an arm naming one, are `unknown-exit`.
+
+**Scenes [construction design §5]**
+
+- A `scene` has several speakers and no listener. Its parameters are its **cast**, all `Person`; the first is the
+  **lead**, whose carried state the scene is (it crosses seams with the lead). Steps are a dialogue's minus
+  `choice` (`scene-choice`) and minus `detour`; `pause n` is allowed. A bark is a one-actor scene.
+- **Starting:** the host command `play(scene, a=…, b=…)` from a handler, or the runner's **ambient schedule**:
+  now and then, for regions with a player within `HEAR_RANGE_BLOCKS` of idle NPCs, it binds a cast from nearby
+  idle people whose `where` holds and plays one candidate, chosen by the scoring rule.
+- **Follow-up:** a scene whose last step is `-> other_scene` plays `other_scene` with the same cast, mapped by
+  parameter position (`scene-follow-up` if the target's cast is longer).
+- **One activity per NPC:** an NPC is in at most one conversation or scene. A scene is cast only from idle NPCs.
+- **Interruptible by default:** a player talking to a cast member ends the scene for all
+  (`SceneEnded { scene, reason: SceneEnd::Interrupted }`) and the conversation starts. With `uninterruptible`
+  the cast is busy instead. A cast member who dies, leaves range (`HALO_BLOCKS` from the lead) or is removed
+  ends it (`ActorLost`); the end of its last step is `Finished`.
+- **Hearing:** scene lines go to every client within `HEAR_RANGE_BLOCKS` of the speaker.
+
+**Pacing [construction design §6]**
+
+The sim never sees line text (it hashes line ids and substitution values). So:
+
+- **Conversations run to the next choice.** When a conversation starts or a pick lands, the runner walks steps in
+  that one tick until a `choice`, the end, or a `pause`, and sends the lines as one **batch**. The client paces
+  them (typewriter, a continue key, auto-advance); a "continue" is not sim input. The sim waits only at a choice
+  (the pick is stamped input) and at the end (`Done`, above). A choice's timeout counts in ticks from when it is
+  offered. `pause n` ends the batch, and the runner resumes after `n` ticks. Consequence for authors: an `emit`
+  between two lines takes effect at the batch's tick; put an effect after a `choice` where timing matters.
+- **Scenes and barks use timed lines.** The compiler gives each line a duration in ticks from its source-locale
+  text: `LINE_BASE_TICKS + chars × LINE_TICKS_PER_CHAR`, clamped to `[LINE_MIN_TICKS, LINE_MAX_TICKS]`
+  (chars = Unicode scalar values of the literal text, f-string holes counted by their source length). It is stored
+  in the dialogue graph, so it is part of the program bytes; translations do not change timing. `(ticks=n)`
+  overrides one line's.
+
+**Mirror size.** A condition that reads a big global mirrors all of it on each change. The compiler sums the
+static size of the read set and warns (`mirror-size`) above `MIRROR_WORDS_WARN` words; a value of unbounded
+size (a list, a dict, a string) counts as `MIRROR_WORDS_WARN` on its own, so reading one warns. *As built:* the
+generated `participants` list is exempt (bounded by the party, and every part reads it). The farmer example at
+the top of this section reads `dog_name: str` and so draws the warning.
+
+**Attachment**
+
+- `for expr` attaches a dialogue to the NPC `expr` names, such as a quest role or a top-level `let` holding
+  a `Person`. It is evaluated (purely) when a player talks.
+- A dialogue declared inside a quest `stage` is attached only while that stage is current (§5.12).
+- Without `for`, a handler attaches and detaches at run time (host commands `attach_dialogue(npc, name)` /
+  `detach_dialogue(npc, name)`), or a prefab names the dialogue by its qualified id.
+
+**Edits:** the dialogue data is replaced. A conversation whose current node still exists continues there;
+one whose node is gone ends (`Edited`). Records survive an edit because a record's **site** is anchored on line
+ids, never on source order (as built): an option's or a group member's id, a node's name with its first line
+id, a `once:` block's first line id, hashed FNV-1a 32. Two sites of one dialogue on one anchor are the error
+`site-collision`.
+
+**Open:** nothing in the model. (Per-line pacing is decided above; a conversation follows its NPC across a seam,
+as carried state.) Whether to drop the bark form for `scene` stays open; both forms are accepted.
+
+### 5.12 Quests [decided 2026-11-16; folded 2026-11-17 from the construction design §3, §7.1, §9]
+
+```python
+quest LostDog:
+    requires act() >= 1
+    role farmer: Person where farmer.occupation == Occupation::Farmer and farmer.alive
+    role dog: Creature where dog.has_tag("pet") and dog.owner == farmer
+    optional role miller: Person where miller.occupation == Occupation::Miller
+
+    let attempts = 0
+
+    event Accepted:
+        player: Player
+    event DogFound:
+        player: Player
+    event Nightfall:
+        attempt: int
+
+    stage Open:
+        dialogue plea(p: Player, npc: Person) for farmer topic f"About {dog.name}" @lostdog.topic:
+            npc: f"{dog.name} ran off toward the hills."                @lostdog.plea
+            choice:
+                "I'll find him." @lostdog.accept:
+                    emit Accepted(player=p)
+                "Not now." @lostdog.not_now
+        @on(Accepted)
+        fn accepted(e):
+            join(e.player)
+            -> Search
+
+    stage Search:
+        objective find_dog f"Find {dog.name}" @lostdog.find at dog
+        objective feed_dog f"Coax {dog.name} with food" @lostdog.feed at dog
+        optional objective ask_miller "Ask at the mill" @lostdog.mill at miller
+        -> Returning when find_dog.done and feed_dog.done
+        @on(Entered)
+        fn count_attempt(e):
+            attempts = attempts + 1
+        @on(DogFound)
+        fn found(e):
+            if not find_dog.done:
+                find_dog.finish()
+                after(9000, Nightfall(attempt=attempts))
+        @on(Nightfall)
+        fn bolted(e):
+            -> Search                       # a failed attempt: re-entering re-opens the objectives
+
+    stage Returning:
+        objective bring_home f"Bring {dog.name} home" @lostdog.return at farmer
+        @on(DogDelivered)
+        fn delivered(e):
+            bring_home.finish()
+            complete()                      # for every participant
+
+    part dog_watch on dog:
+        @on(PlayerNear)
+        fn spotted(e):
+            if stage == Stage::Search and e.player in participants:
+                emit DogFound(player=e.player)
+```
+
+The full worked set (a world-line multi-region quest, a repeatable one, exits, package content) is
+`2026-11-16-quest-examples.md`.
+
+- **At most one `quest` per program**, in the crate root (`quest-placement`). One quest definition is one
+  program (quests-in-the-world spec §1).
+- **Header:** `[repeatable] quest Name[(options)] [at role]:`.
+  - `repeatable` (a contextual word) makes it repeatable; without it a quest is one-off. Options, all named
+    and constant: `cooldown=ticks` (`int`, default 0), `exclusive=bool` (no `join` while it has participants),
+    `once_per_player=bool`. Options on a quest without `repeatable` are `bad-quest-option`. World-line is not a
+    quest type: an act lists the quest (game-design §4.1).
+  - `at role` anchors the **home** to the region where that role was bound; by default the first role's.
+- **`requires cond`** (any number, quest body only): a requirement on the whole definition, checked before any
+  role is filled. **`role x: T [where cond]`** binds a role at spawn; it never re-binds. **`optional role`** may
+  be unbound: its value is `Option[T]`. Both `requires` and `where` use the **query subset** (below). Roles are
+  read-only (`role-assign`). Standalone, the runner supplies role values (`quest run --roles`).
+- **`let` and `event`** inside a quest are quest state and quest event types.
+- **Stages:** the stages form an enum `Stage` the compiler generates; `stage` (a read of the current stage) is a
+  persistent global that migrates by name on an edit (§6.9). The first stage is the initial one; a quest
+  without a stage is `no-stage`.
+  - A handler declared inside a stage runs only while that stage is current; one declared in the quest body
+    runs in any stage. A dialogue declared inside a stage is attached only while that stage is current.
+  - **`-> Stage`** in a handler sets the stage and ends the handler.
+  - **`-> Stage when cond`** as a step of a stage (not inside a handler) is a **completion transition**: after
+    every committed handler segment while the stage is current, the VM evaluates the stage's transitions in
+    source order (pure functions) and takes the first that holds. *As built:* "handler segment" means a
+    segment of the **home** (a part's never runs them); a run that took a transition runs again, since the new
+    stage's own transition may already hold (fuel bounds a cycle); a run still due when an edit lands is carried
+    across it.
+  - **`Entered`**, a built-in event, is delivered once each time a stage becomes current (by `-> Stage`, a
+    completion transition, or the quest's start into its first stage). `@on(Entered)` is allowed only inside a
+    stage (`entered-outside-stage`).
+- **Objectives:** `[optional] objective name "text" [@id] [at expr] [count n]` declares a **named, stateful**
+  objective of its stage: `Open`, `Done` or `Failed`, plus a progress count with `count`.
+  - Its state is quest state, persistent, migrated by qualified name (`Search.find_dog`).
+  - Its name is a quest-level name: it may not shadow a role, a quest `let` or another objective
+    (`duplicate-def`); another stage's objective is `Stage.name`.
+  - Commands (handlers only): `obj.finish()`, `obj.fail()`, `obj.progress(n)` (done when the count reaches
+    `n` total; on an objective without `count` it is `bad-objective-call`), `obj.reset()`. On a `Done` or
+    `Failed` objective, `finish`, `fail` and `progress` do nothing. Pure reads: `obj.done`, `obj.failed`,
+    `obj.count`.
+  - **Entering a stage re-opens its objectives**, re-entering the same stage included. An earlier stage's
+    objectives keep their last state until it is entered again.
+  - `optional` objectives never gate anything by themselves. An `at` target that is `None` gets no marker.
+  - The text is a line (§5.11 ids and placeholders). **The journal is derived**, never stored: the current
+    stage's objectives with their states, a view over quest state, shown to participants.
+- **Participants:** `participants: list[Player]` is built-in persistent quest state. `join(p)` adds a player
+  (refused, with a host message, while an `exclusive` repeatable quest has participants, or for a
+  `once_per_player` player who completed it); `leave(p)` removes one (one player's failure; the quest stays
+  open). A one-off quest is **shared**: whoever completes it completes it for every participant.
+- **Timers:** `after(ticks, Event(...)) -> Timer` delivers the event to the instance when its tick comes;
+  `cancel(t)`. A timer set by a handler **declared in a stage** is cancelled when the stage changes; one set by a
+  quest-body handler lives until it fires or is cancelled. Timers are VM state: hashed, undone, saved; at most
+  `TIMERS_MAX` live (`after` beyond it faults).
+- **Roles that stop resolving:** the engine raises `RoleLost { role: Role }` (`Role` is a generated enum of the
+  roles, variants spelled as the role names). Without a handler: `fail()` for a required role, nothing for an
+  optional one. *As built, stage-aware:* the default applies in every stage unless the quest body handles
+  `RoleLost`; a stage with its own `RoleLost` handler replaces it while current; a part's handler never counts.
+- **Builtins:** `complete()` (for every participant) or `complete(players)` (for those only; the others are
+  recorded as present), `fail()` (the instance becomes impossible: ends it for everyone and starts the reaper),
+  `decline()` (allowed only while handling `Setup`). `Setup` is delivered once when an instance or a part is
+  placed, and again after a repeatable reset.
+- **Repeatable reset** (on `complete()` of a `repeatable` quest): the instance resets exactly as §6.9's Reset
+  (all quest and part `let`s, the stage to the first, objectives re-opened, `participants` emptied, queue, parked
+  handlers, promises and timers cleared); the reaper removes what the instance placed; the roles' `where` is
+  re-checked (a failure reaps the instance); after `cooldown` ticks `Setup` is delivered again. The namespace is
+  kept. Completions are recorded by the coordinator per (definition, player).
+
+**The query subset (`requires`, a role's `where`) [construction design §7.1].** The coordinator evaluates and
+indexes these without the VM, so they are restricted to a conjunction (`and`) of **atoms**:
+
+- a comparison of a fact to a literal or enum value (`x.occupation == Occupation::Smith`, `x.age >= 16`,
+  `act() >= 2`), or `x.f in [A, B]`;
+- a tag or kind test (`x.has_tag("…")`, `x.kind == …`);
+- a relation between two roles (`a.site == b.site`, `a.owner == b`, `a != b`, `related(a, b)`,
+  `near(a, b, regions=n)`);
+- a world fact (`act()`, `loop()`, `completed(def, …)`, `site_kind(x.site) == …`);
+- `not atom`, and an `or` of atoms about one role (one group).
+
+Anything else is `bad-where`: a script `fn`, a script global, arithmetic beyond a comparison with a constant, a
+host query not in the host description's **fact table** (the subset of pure host queries marked as facts). A
+role's `where` may name only itself and roles declared before it.
+
+**Multi-region quests: a home and its parts [construction design §3.6].** Quest state has one owner, the **home**
+instance (the quest body). A **part** is a named block of the quest that runs as its own instance elsewhere:
+
+- `part name on role:` anchors it to the role's entity (it crosses seams with it); `part name at role:` to the
+  region where the role was bound. The part body holds `let`s (part state), `event`s and handlers — no stages,
+  objectives, dialogues or nested parts (`bad-part-item`).
+- A part **reads** quest state (the stage, objectives, participants, quest `let`s, roles) through a **mirror**
+  of its read set — the same mechanism as dialogue conditions, one tick old. It **never writes** quest state
+  (`part-write`): it `emit`s events to the home, which its handlers handle. Commands that are not quest-state
+  writes (`place`, `give`, `decline` in `Setup`) are allowed in a part. A part's `emit` of a quest event goes to
+  the home, routed by the event's qualified name.
+- In a program with a quest, top-level `let`s of the script are **home state** like quest `let`s: a part reads
+  them only through its mirror and never writes them (`part-write`) — every instance runs the same program, so
+  an unmirrored copy would silently diverge.
+- Every part is placed with the home (all must accept); a `decline()` in any part's `Setup` declines the whole
+  instance. Reaping removes all of them. A single-region quest has no parts.
+- A part's read set is computed like the dialogue read set and counts toward `mirror-size`.
+
+### 5.13 Lexical rules for §5.11–5.12 [decided; folded 2026-11-17]
+
+- **New token:** `=>`.
+- **New reserved keywords:** `dialogue`, `quest`, `choice`, `once`, `when`, `where`.
+- **Contextual words**, recognised by the layout pass (they remain ordinary identifiers everywhere else,
+  so `let stage = 1` and `match node:` still work):
+  - `node`, `stage`, `role`, `objective`, `event`, `emit`, `detour`, `part`, `scene`: when one is the first token
+    of a logical line (after an optional `pub` for `scene`) and the next token is an identifier or a string.
+  - `requires`, `pause`: the first token of a logical line, followed by an expression.
+  - `optional`: the first token of a logical line, followed by `role` or `objective`.
+  - `repeatable`: the first token of a logical line (after an optional `pub`), followed by `quest`.
+  - `default`: when it is the first token of a logical line and the next token is a string, or is `:`
+    followed by a newline.
+  - `per`: directly after `once`.
+  - `at`, `count`: on a line begun by `objective`; `at` also after a `quest` header's name or options, and
+    `on` / `at` after a `part` name.
+  - `topic`, `priority` and `exits`: on a line begun by `dialogue`, after the parameter list; `uninterruptible`
+    on a line begun by `scene`, after the parameter list.
+- Whether `scene` and `repeatable` are reserved instead is the parser builder's call; the grammar must stay
+  conflict-free either way.
+- **`#` still starts a comment**, which is why line ids are `@path`, not Yarn's `#line:`.
+- **Decorators** generalise to `@name(args)` before `fn` and `dialogue`. `@on` is valid only on a `fn`
+  and `@pick` only on a `dialogue` (`bad-decorator`).
+
 ---
 
 ## 6. Execution model
@@ -349,6 +861,19 @@ pub struct Ledger:
 - The call graph is a DAG (recursive **calls** are rejected; recursive data and dialogue are not). Each
   function gets **one fixed frame** (a fixed number of value slots) allocated up front; the maximum call
   depth and total frame memory are known at compile time (as early Fortran).
+- **Scope of the rule [decided 2026-11-16]:** it is a rule of the **quest script language** — what a
+  script may contain and how the compiler lowers it. It forbids only **script functions calling
+  themselves**, directly or through others (a compile error).
+  - **Recursive data** in scripts, such as a type that contains itself (a tree), is allowed. Script code
+    walks it with loops and a work list.
+  - **Recursive dialogue**, where dialogues detour into each other, is allowed. The compiler lowers it to
+    a loop with an explicit return stack in script state, never to script calls.
+  - How a self-typed field is represented — for example only behind a `list` or `Option`, so that a frame
+    keeps a fixed size — is the builder's call.
+  - The **Rust implementation** (compiler, VM, host) has **no recursion rule**; loops are preferred
+    there. One practical limit: a Rust walk whose depth a script controls (hashing, comparing, encoding
+    or formatting a deeply nested value) must not be able to overflow the native stack, which is small
+    on wasm32. Either write it as a loop, or bound its depth the way `ValueTooLarge` bounds its size.
 - Only **one handler runs per block at a time** (§7), so one frame per function suffices. A handler parked at
   `await` has its live frames copied into the heap and restored on resume (§8.2).
 
@@ -569,6 +1094,39 @@ fn ask(e):
 
 ## 9. Host interface and standalone runner
 
+### 9.1 Region data, rollback-transparent [owner: scripts "should have access [to region data], abstracted such that undo / rollback is transparent"; design proposed]
+
+A script reads and changes the world it runs in through the host API, and the host API is built on the
+engine's own seam-safe interfaces, so undo, rollback and seams are invisible to the script:
+
+- **Reads are host queries over the region's `WorldView`.** They see the instance's own region plus the
+  halo (`HALO_BLOCKS` = 8 around it; one tick old; already rollback state). Blocks, entities by
+  `EntityId`, piles, containers, water and tags are all readable. A query is a pure function of region
+  state at the current tick (§9 above), so a client's replay re-runs it and gets the same answer.
+- **Entities are handles.** A `Person`, `Creature` or `Player` value is an `EntityId` (birth region, serial),
+  stable across seams. A query about an entity outside the instance's reach gives `None` or the error
+  `OutOfReach`; it never guesses.
+- **Writes are host commands, applied when their segment commits** (§6.6) and inside the tick:
+  - in the own region, they are ordinary region changes under the region's undo log;
+  - on something outside it, they become the engine's `Intent`s (applied by the owner at T+1, with replies
+    a tick later). A write whose outcome the script needs (taking from a container across a seam) is a
+    promise answered by the intent's reply.
+- **Beyond the halo** there are no synchronous reads, by the seam rule. A quest that needs to watch a far
+  region runs a **part** there (§5.12); world facts come from the coordinator's fact table; shared data goes
+  through the quest namespace (§8). (`world.region_query` was dropped 2026-11-16, construction design §8; if it
+  ever returns it is `regions.query`, answered by the owning host and refused with `Parked`, never waking one.)
+- **Undo is transparent.**
+  - The VM's memory is region state: the VM's undo log (§6.6) is driven by the region's
+    `new_transaction` / `rollback` / `forget`, so a client's reconcile rolls the VM back with everything
+    else and replays it with the same inputs.
+  - Outgoing intents and mirror messages are not rollback state. They are sent only from final ticks (the
+    server never rolls back), and a client's replay sends nothing, as the engine already does.
+  - The script never sees a checkpoint, a rollback or a replay.
+- **Where an instance runs.** Each script instance is **anchored**:
+  - to a **region** (a site's script, a quest's part in one region; quests-in-the-world §5.4); or
+  - to an **entity** (an NPC's own script). An entity-anchored instance is carried state of its entity and
+    crosses seams with it, so its reach moves with it.
+
 - The VM talks to the world only through a **host trait** **[call: shape left to builder]** covering: game
   calls (`say`, `give`, tags, chest access, `roll`…), event delivery, promise request/resolution, the
   fuel budget per tick, warnings and errors for the owner.
@@ -586,7 +1144,13 @@ fn ask(e):
 - **Standalone host** (the MVP's only implementation): in-memory players/items/chests/tags; `say` and
   `print` write to stdout (and to a capture buffer for tests); an in-memory namespace store with configurable
   latency (ticks) and **failure injection** (`Timeout`, `Lost`, `Changed`, `NamespaceGone`); a small set of
-  event structs (`PlayerClicked`, `PlayerEntered`, `ItemDelivered` at least).
+  event structs (`PlayerClicked`, `PlayerEntered`, `ItemDelivered` at least). From Phase 10 it also describes
+  and simulates the quest host API of `2026-11-16-quest-examples.md` ("Assumed host API"): the entity handles
+  `Person`, `Creature`, `Player`, the types `Site`, `Place`, `Prefab`, `Timer`, `Exit`, the enums `Occupation`,
+  `SiteKind`, `EndReason`, `SceneEnd`; the fact queries (marked as facts for the query subset) and other pure
+  queries; the commands; the events `Setup`, `Entered`, `PlayerNear`, `ItemGiven`, `Killed`, `PlayerDefeated`,
+  `BlockUsed`, `RoleLost`, `Talked`, `DialogueEnded`, `SceneEnded`; and **several instances** (a quest's home and
+  its parts) linked by mirrors and routed `emit`s.
 - **The stub's host API as built (version 6):** `Entity { id }` is its "any entity" type (`ItemGiven.to`,
   `Killed.victim`; `place` at any entity); `Person.distance_to(other) -> int raises OutOfReach` is its
   fallible query (either entity missing from `people.txt`); a role's value is checked by struct name as well as

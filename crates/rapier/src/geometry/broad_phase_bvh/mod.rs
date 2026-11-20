@@ -111,7 +111,8 @@ pub struct BroadPhaseBvh {
     /// so the physics pipeline can run it concurrently with the narrow phase and
     /// solver; consumed by [`Self::take_deferred_optimize`].
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — a pipeline-held task flag, serde-skipped; step_journaled joins the task first (H7).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — a pipeline-held task flag, serde-skipped; step_journaled joins the task first (H7).
     deferred_optimize_pending: bool,
 }
 
@@ -121,8 +122,7 @@ pub struct BroadPhaseBvh {
 /// Selection of strategies to maintain through time the broad-phase BVH in shape that remains
 /// efficient for collision-detection and scene queries.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Default, PartialEq, Eq, Copy, Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Default, PartialEq, Eq, Copy, Clone, state_hash::StateHash)] // mmo-fork: StateHash
 pub enum BvhOptimizationStrategy {
     /// Different sub-trees of the BVH will be optimized at each frame.
     #[default]
@@ -185,7 +185,10 @@ fn pair_sort_key((a, b): &(ColliderHandle, ColliderHandle)) -> ((u32, u32), (u32
 
 // mmo-fork: StateHash — `pairs` in its serialized (sorted) order: the map's
 // iteration order doesn't survive a round trip, so it isn't state.
-fn hash_pairs<H: core::hash::Hasher>(pairs: &HashMap<(ColliderHandle, ColliderHandle), u32>, h: &mut H) {
+fn hash_pairs<H: core::hash::Hasher>(
+    pairs: &HashMap<(ColliderHandle, ColliderHandle), u32>,
+    h: &mut H,
+) {
     use state_hash::StateHash;
     let mut entries: alloc::vec::Vec<_> = pairs.iter().collect();
     entries.sort_unstable_by_key(|(k, _)| pair_sort_key(k));

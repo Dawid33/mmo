@@ -68,14 +68,21 @@ fn f3(p: [i32; 3]) -> [f64; 3] {
 }
 
 fn dither01(block: [i32; 3], centre: [i32; 3]) -> f64 {
-    let b = (block[0] as u32 as u64) | (block[1] as u32 as u64) << 21 | (block[2] as u32 as u64) << 42;
-    let c = (centre[0] as u32 as u64) | (centre[1] as u32 as u64) << 21 | (centre[2] as u32 as u64) << 42;
+    let b =
+        (block[0] as u32 as u64) | (block[1] as u32 as u64) << 21 | (block[2] as u32 as u64) << 42;
+    let c = (centre[0] as u32 as u64)
+        | (centre[1] as u32 as u64) << 21
+        | (centre[2] as u32 as u64) << 42;
     (hash64(SALT_DITHER, b, c) >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// The block holding voxel point `p` (y clamped to the base layer: y < 0 is the ground).
 fn block_of(p: [i32; 3]) -> [i32; 3] {
-    [p[0].div_euclid(BV), p[1].max(0).div_euclid(BV), p[2].div_euclid(BV)]
+    [
+        p[0].div_euclid(BV),
+        p[1].max(0).div_euclid(BV),
+        p[2].div_euclid(BV),
+    ]
 }
 
 /// The tree's blocks in a dense box: wood and leaf flags.
@@ -92,10 +99,20 @@ struct Grid {
 impl Grid {
     /// Room for every block within voxel bounds `lo..=hi` (y clipped at 0).
     fn new(lo: [i32; 3], hi: [i32; 3]) -> Grid {
-        let lo = [lo[0].div_euclid(BV), lo[1].max(0).div_euclid(BV), lo[2].div_euclid(BV)];
+        let lo = [
+            lo[0].div_euclid(BV),
+            lo[1].max(0).div_euclid(BV),
+            lo[2].div_euclid(BV),
+        ];
         let dim = [0, 1, 2].map(|i| (hi[i].max(0).div_euclid(BV) - lo[i] + 1).max(1));
         let n = (dim[0] * dim[1] * dim[2]) as usize;
-        Grid { lo, dim, wood: vec![None; n], leaf: vec![false; n], leaf_limb: vec![u8::MAX; n] }
+        Grid {
+            lo,
+            dim,
+            wood: vec![None; n],
+            leaf: vec![false; n],
+            leaf_limb: vec![u8::MAX; n],
+        }
     }
 
     /// Cell of block `b`, ordered (y, z, x) so cell order is output order.
@@ -110,7 +127,11 @@ impl Grid {
 
     fn block(&self, cell: usize) -> [i32; 3] {
         let c = cell as i32;
-        let (x, z, y) = (c % self.dim[0], c / self.dim[0] % self.dim[2], c / (self.dim[0] * self.dim[2]));
+        let (x, z, y) = (
+            c % self.dim[0],
+            c / self.dim[0] % self.dim[2],
+            c / (self.dim[0] * self.dim[2]),
+        );
         [self.lo[0] + x, self.lo[1] + y, self.lo[2] + z]
     }
 
@@ -145,7 +166,10 @@ fn block_line(a: [i32; 3], b: [i32; 3]) -> Vec<[i32; 3]> {
             if taken[i] < n[i] {
                 let better = match best {
                     None => true,
-                    Some(j) => i64::from(2 * taken[i] + 1) * i64::from(n[j]) < i64::from(2 * taken[j] + 1) * i64::from(n[i]),
+                    Some(j) => {
+                        i64::from(2 * taken[i] + 1) * i64::from(n[j])
+                            < i64::from(2 * taken[j] + 1) * i64::from(n[i])
+                    }
                 };
                 if better {
                     best = Some(i);
@@ -178,8 +202,16 @@ fn wood_segment(grid: &mut Grid, a: [i32; 3], b: [i32; 3], ra: i32, rb: i32, lev
     for by in blo(1).max(0)..=bhi(1) {
         for bz in blo(2)..=bhi(2) {
             for bx in blo(0)..=bhi(0) {
-                let c = [(bx * BV + BV / 2) as f64, (by * BV + BV / 2) as f64, (bz * BV + BV / 2) as f64];
-                let t = if dd > 0.0 { (dot(sub(c, af), d) / dd).clamp(0.0, 1.0) } else { 0.0 };
+                let c = [
+                    (bx * BV + BV / 2) as f64,
+                    (by * BV + BV / 2) as f64,
+                    (bz * BV + BV / 2) as f64,
+                ];
+                let t = if dd > 0.0 {
+                    (dot(sub(c, af), d) / dd).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let q = [af[0] + d[0] * t, af[1] + d[1] * t, af[2] + d[2] * t];
                 let r = raf + (rbf - raf) * t;
                 let e = sub(c, q);
@@ -218,7 +250,9 @@ pub fn rasterize(sk: &TreeSkeleton) -> Vec<TreeBlock> {
     for (i, n) in sk.nodes.iter().enumerate() {
         if let Some(p) = n.parent {
             let p = &sk.nodes[p as usize];
-            wood_segment(&mut grid, p.pos, n.pos, p.radius, n.radius, n.level, limbs[i]);
+            wood_segment(
+                &mut grid, p.pos, n.pos, p.radius, n.radius, n.level, limbs[i],
+            );
         }
     }
     let rim = LEAF_DITHER_VOXELS as f64;
@@ -227,16 +261,25 @@ pub fn rasterize(sk: &TreeSkeleton) -> Vec<TreeBlock> {
         let limb = limbs[node as usize];
         let (cf, rf) = (f3(c), r as f64);
         let reach = r + LEAF_DITHER_VOXELS;
-        let own = [c[0].div_euclid(BV), c[1].div_euclid(BV), c[2].div_euclid(BV)];
+        let own = [
+            c[0].div_euclid(BV),
+            c[1].div_euclid(BV),
+            c[2].div_euclid(BV),
+        ];
         for by in (c[1] - reach).max(0).div_euclid(BV)..=(c[1] + reach).div_euclid(BV) {
             for bz in (c[2] - reach).div_euclid(BV)..=(c[2] + reach).div_euclid(BV) {
                 for bx in (c[0] - reach).div_euclid(BV)..=(c[0] + reach).div_euclid(BV) {
-                    let centre = [(bx * BV + BV / 2) as f64, (by * BV + BV / 2) as f64, (bz * BV + BV / 2) as f64];
+                    let centre = [
+                        (bx * BV + BV / 2) as f64,
+                        (by * BV + BV / 2) as f64,
+                        (bz * BV + BV / 2) as f64,
+                    ];
                     let e = sub(centre, cf);
                     let dist = dot(e, e).sqrt();
                     let inside = [bx, by, bz] == own
                         || dist <= rf - rim
-                        || (dist <= rf + rim && dither01([bx, by, bz], c) < (rf + rim - dist) / (2.0 * rim));
+                        || (dist <= rf + rim
+                            && dither01([bx, by, bz], c) < (rf + rim - dist) / (2.0 * rim));
                     if inside && let Some(cell) = grid.cell([bx, by, bz]) {
                         leaves[cell] = grid.wood[cell].is_none();
                         grid.leaf_limb[cell] = grid.leaf_limb[cell].min(limb);
@@ -247,7 +290,14 @@ pub fn rasterize(sk: &TreeSkeleton) -> Vec<TreeBlock> {
     }
 
     // Keep only leaves face-connected (through leaves) to wood: nothing floats.
-    let faces = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    let faces = [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ];
     let step = |k: [i32; 3], d: &[i32; 3]| [k[0] + d[0], k[1] + d[1], k[2] + d[2]];
     let mut stack: Vec<usize> = (0..leaves.len())
         .filter(|&c| leaves[c] && faces.iter().any(|d| grid.is_wood(step(grid.block(c), d))))
@@ -271,13 +321,23 @@ pub fn rasterize(sk: &TreeSkeleton) -> Vec<TreeBlock> {
     for cell in 0..grid.wood.len() {
         let offset = grid.block(cell);
         if let Some(w) = grid.wood[cell] {
-            let part = if w.log { TreePart::Log } else { TreePart::Branch };
-            out.push(TreeBlock { offset, part, limb: w.limb });
+            let part = if w.log {
+                TreePart::Log
+            } else {
+                TreePart::Branch
+            };
+            out.push(TreeBlock {
+                offset,
+                part,
+                limb: w.limb,
+            });
         } else if grid.leaf[cell] {
-            out.push(TreeBlock { offset, part: TreePart::Leaves, limb: grid.leaf_limb[cell] });
+            out.push(TreeBlock {
+                offset,
+                part: TreePart::Leaves,
+                limb: grid.leaf_limb[cell],
+            });
         }
     }
     out
 }
-
-

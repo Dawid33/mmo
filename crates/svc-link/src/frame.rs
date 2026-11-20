@@ -19,14 +19,17 @@ pub enum FrameError {
 impl std::fmt::Display for FrameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FrameError::Unsendable(s) | FrameError::Io(s) | FrameError::Protocol(s) => f.write_str(s),
+            FrameError::Unsendable(s) | FrameError::Io(s) | FrameError::Protocol(s) => {
+                f.write_str(s)
+            }
         }
     }
 }
 
 /// Encode one message into a checked packet (sync, so the message is never held across an await).
 pub(crate) fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
-    let packet = game::encode_packet(msg).map_err(|e| FrameError::Unsendable(format!("encode: {e}")))?;
+    let packet =
+        game::encode_packet(msg).map_err(|e| FrameError::Unsendable(format!("encode: {e}")))?;
     if packet.len() > LINK_MAX_FRAME_BYTES {
         return Err(FrameError::Unsendable(format!(
             "frame of {} bytes exceeds the {LINK_MAX_FRAME_BYTES} byte limit",
@@ -37,11 +40,18 @@ pub(crate) fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
 }
 
 pub(crate) async fn write_packet(send: &mut SendStream, packet: &[u8]) -> Result<(), FrameError> {
-    send.write_all(&(packet.len() as u32).to_be_bytes()).await.map_err(|e| FrameError::Io(e.to_string()))?;
-    send.write_all(packet).await.map_err(|e| FrameError::Io(e.to_string()))
+    send.write_all(&(packet.len() as u32).to_be_bytes())
+        .await
+        .map_err(|e| FrameError::Io(e.to_string()))?;
+    send.write_all(packet)
+        .await
+        .map_err(|e| FrameError::Io(e.to_string()))
 }
 
-pub(crate) async fn write_frame<T: Serialize>(send: &mut SendStream, msg: &T) -> Result<(), FrameError> {
+pub(crate) async fn write_frame<T: Serialize>(
+    send: &mut SendStream,
+    msg: &T,
+) -> Result<(), FrameError> {
     write_packet(send, &encode(msg)?).await
 }
 
@@ -52,9 +62,15 @@ const PACKET_TAG_RAW: u8 = 0;
 /// its ack) a compressed frame is refused before decoding: an lz4 header claims its own output
 /// size, up to the decompression cap, which an unauthenticated peer must not get to allocate.
 /// Post-auth frames may claim up to that cap (trusted peers).
-pub(crate) async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream, max: usize, raw_only: bool) -> Result<T, FrameError> {
+pub(crate) async fn read_frame<T: DeserializeOwned>(
+    recv: &mut RecvStream,
+    max: usize,
+    raw_only: bool,
+) -> Result<T, FrameError> {
     let mut len = [0u8; 4];
-    recv.read_exact(&mut len).await.map_err(|e| FrameError::Io(e.to_string()))?;
+    recv.read_exact(&mut len)
+        .await
+        .map_err(|e| FrameError::Io(e.to_string()))?;
     let len = u32::from_be_bytes(len) as usize;
     if len > max {
         return Err(FrameError::Protocol(format!(
@@ -62,9 +78,14 @@ pub(crate) async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream, max: 
         )));
     }
     let mut body = vec![0u8; len];
-    recv.read_exact(&mut body).await.map_err(|e| FrameError::Io(e.to_string()))?;
+    recv.read_exact(&mut body)
+        .await
+        .map_err(|e| FrameError::Io(e.to_string()))?;
     if raw_only && body.first() != Some(&PACKET_TAG_RAW) {
-        return Err(FrameError::Protocol("compressed or malformed frame where a plain one is required".into()));
+        return Err(FrameError::Protocol(
+            "compressed or malformed frame where a plain one is required".into(),
+        ));
     }
-    game::decode_packet(&body).map_err(|e| FrameError::Protocol(format!("frame does not decode: {e}")))
+    game::decode_packet(&body)
+        .map_err(|e| FrameError::Protocol(format!("frame does not decode: {e}")))
 }

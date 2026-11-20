@@ -1,5 +1,5 @@
 # The orion cluster's container registry: private ECR repositories (mmo/login
-# mmo/server and mmo/web for the game worlds; one more image is one more entry
+# mmo/server and mmo/web for the game worlds, mmo/panel for the world panel; one more image is one more entry
 # in `repositories`; `repository_urls` carries all of them) and
 # the pull-only IAM user `orion-ecr-pull` the cluster pulls with.
 #

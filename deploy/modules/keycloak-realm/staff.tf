@@ -96,7 +96,7 @@ resource "keycloak_openid_client" "grafana" {
   access_type                  = "CONFIDENTIAL"
   standard_flow_enabled        = true
   direct_access_grants_enabled = false
-  valid_redirect_uris          = ["https://${var.grafana_host}/login/generic_oauth"]
+  valid_redirect_uris          = ["${var.grafana_url}/login/generic_oauth"]
   web_origins                  = []
 }
 

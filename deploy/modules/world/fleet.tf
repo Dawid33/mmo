@@ -139,15 +139,32 @@ resource "kubernetes_deployment_v1" "fleet" {
             }
           }
           dynamic "env" {
-            for_each = {
-              VOXEL_ROLE            = "fleet"
-              VOXEL_WORLD_ID        = var.world_id
-              VOXEL_FLEET_PORT_BASE = tostring(var.fleet.port_base)
-              VOXEL_HEALTH_BIND     = "0.0.0.0:${local.health_port}"
-            }
+            for_each = merge(local.telemetry_env, {
+              VOXEL_ROLE              = "fleet"
+              VOXEL_WORLD_ID          = var.world_id
+              VOXEL_FLEET_PORT_BASE   = tostring(var.fleet.port_base)
+              VOXEL_HEALTH_BIND       = "0.0.0.0:${local.health_port}"
+              OTEL_TRACES_SAMPLER_ARG = tostring(var.telemetry.fleet_sampler_ratio)
+            })
             content {
               name  = env.key
               value = env.value
+            }
+          }
+          env {
+            name = "K8S_POD_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.name"
+              }
+            }
+          }
+          env {
+            name = "K8S_NAMESPACE_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.namespace"
+              }
             }
           }
           env {

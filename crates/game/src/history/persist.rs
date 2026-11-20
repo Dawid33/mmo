@@ -34,7 +34,10 @@ impl fmt::Display for HistoryLoadError {
         match self {
             Self::NotAHistory => write!(f, "not a history file"),
             Self::OldVersion { found } => {
-                write!(f, "history file version {found}, expected {HISTORY_FILE_VERSION}")
+                write!(
+                    f,
+                    "history file version {found}, expected {HISTORY_FILE_VERSION}"
+                )
             }
             Self::OtherWorld => write!(f, "history belongs to a different world"),
             Self::Corrupt(e) => write!(f, "corrupt history file: {e}"),
@@ -46,7 +49,11 @@ impl fmt::Display for HistoryLoadError {
 impl std::error::Error for HistoryLoadError {}
 
 pub fn encode(h: &History) -> Vec<u8> {
-    encode_body(h, HISTORY_FILE_VERSION, bincode::serialize(h).expect("history serializes"))
+    encode_body(
+        h,
+        HISTORY_FILE_VERSION,
+        bincode::serialize(h).expect("history serializes"),
+    )
 }
 
 fn encode_body(h: &History, version: u32, body: Vec<u8>) -> Vec<u8> {
@@ -63,7 +70,10 @@ pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadErr
         return Err(HistoryLoadError::NotAHistory);
     }
     if bytes.len() < HEADER_LEN {
-        return Err(HistoryLoadError::Corrupt(format!("{} bytes, shorter than the header", bytes.len())));
+        return Err(HistoryLoadError::Corrupt(format!(
+            "{} bytes, shorter than the header",
+            bytes.len()
+        )));
     }
     let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().expect("4 bytes"));
     let found = u32_at(8);
@@ -79,15 +89,22 @@ pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadErr
     }
     let size = u32::from_le_bytes(rest[..4].try_into().expect("4 bytes")) as usize;
     if size > MAX_HISTORY_BYTES {
-        return Err(HistoryLoadError::Corrupt(format!("body of {size} bytes, more than {MAX_HISTORY_BYTES}")));
+        return Err(HistoryLoadError::Corrupt(format!(
+            "body of {size} bytes, more than {MAX_HISTORY_BYTES}"
+        )));
     }
-    let body = lz4_flex::decompress(&rest[4..], size).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
+    let body = lz4_flex::decompress(&rest[4..], size)
+        .map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
     if body.len() != size {
-        return Err(HistoryLoadError::Corrupt(format!("body is {} bytes, header says {size}", body.len())));
+        return Err(HistoryLoadError::Corrupt(format!(
+            "body is {} bytes, header says {size}",
+            body.len()
+        )));
     }
     // Exactly as saved: nobody embodied is returned to the abstract history here (a load is
     // not a restart; the hosts' attaches and successions undo what a restart must).
-    let mut h: History = bincode::deserialize(&body).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
+    let mut h: History =
+        bincode::deserialize(&body).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
     h.set_grid(grid);
     Ok(h)
 }
@@ -95,7 +112,9 @@ pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadErr
 /// Write atomically: a temp file in the same directory, then a rename.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save(h: &History, path: &Path) -> std::io::Result<()> {
-    let name = path.file_name().map_or_else(|| "history".into(), |n| n.to_string_lossy().into_owned());
+    let name = path
+        .file_name()
+        .map_or_else(|| "history".into(), |n| n.to_string_lossy().into_owned());
     let tmp = path.with_file_name(format!(".{name}.tmp"));
     let written = std::fs::write(&tmp, encode(h)).and_then(|()| std::fs::rename(&tmp, path));
     if written.is_err() {

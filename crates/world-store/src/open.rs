@@ -12,7 +12,9 @@ use sqlx::Row;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
-use crate::{Dials, FormatKind, STORE_FORMAT_VERSION, STORE_POOL_MAX, StoreError, StoreUrl, TerrainKind};
+use crate::{
+    Dials, FormatKind, STORE_FORMAT_VERSION, STORE_POOL_MAX, StoreError, StoreUrl, TerrainKind,
+};
 
 /// The connection pool of either engine.
 #[derive(Clone)]
@@ -48,14 +50,22 @@ fn lock_path(db: &Path) -> std::path::PathBuf {
 
 /// The newest migration this build knows (both engines carry the same versions).
 pub fn newest_migration() -> i64 {
-    sqlx::migrate!("migrations/pg").iter().map(|m| m.version).max().unwrap_or(0)
+    sqlx::migrate!("migrations/pg")
+        .iter()
+        .map(|m| m.version)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Open the store at `url` for a build with `dials`. A writer creates a
 /// missing store, takes the lock BEFORE migrating (the returned guard must
 /// outlive the pool's use) and writes a new world row; a read-only open
 /// creates nothing and takes no lock.
-pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(Pool, LockGuard), StoreError> {
+pub async fn open_pool(
+    url: &StoreUrl,
+    dials: Dials,
+    mode: OpenMode,
+) -> Result<(Pool, LockGuard), StoreError> {
     let writer = mode == OpenMode::Writer;
     let (pool, guard) = match url {
         StoreUrl::Memory => {
@@ -72,8 +82,9 @@ pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(
         StoreUrl::Sqlite(path) => {
             let guard = if writer {
                 if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-                    std::fs::create_dir_all(dir)
-                        .map_err(|e| StoreError::Backend(format!("create {}: {e}", dir.display())))?;
+                    std::fs::create_dir_all(dir).map_err(|e| {
+                        StoreError::Backend(format!("create {}: {e}", dir.display()))
+                    })?;
                 }
                 let lock_file = std::fs::OpenOptions::new()
                     .create(true)
@@ -120,7 +131,11 @@ pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(
     // a writer and a reader alike. A reader never migrates, so it first needs this build's
     // schema (a store below it — an unreturned world among them — is refused untouched).
     let applied = applied_migration(&pool).await?;
-    let schema = if writer { Ok(()) } else { check_schema(&pool).await };
+    let schema = if writer {
+        Ok(())
+    } else {
+        check_schema(&pool).await
+    };
     let refused = match schema {
         Ok(()) => refuse_unreturned_world(&pool, applied).await,
         Err(e) => Err(e),
@@ -135,7 +150,11 @@ pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(
     }
     if writer {
         if let Some(from) = applied.filter(|a| *a < newest_migration()) {
-            log::info!("[world-store] migrating the schema from {from} to {} ({})", newest_migration(), url);
+            log::info!(
+                "[world-store] migrating the schema from {from} to {} ({})",
+                newest_migration(),
+                url
+            );
         }
         match &pool {
             Pool::Sqlite(p) => sqlx::migrate!("migrations/sqlite").run(p).await?,
@@ -149,7 +168,8 @@ pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(
 /// How long a Postgres migration waits for any lock, ms ([`set_migrate_lock_timeout_ms`]).
 pub const MIGRATE_LOCK_TIMEOUT_MS: u64 = 30_000;
 
-static MIGRATE_LOCK_TIMEOUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(MIGRATE_LOCK_TIMEOUT_MS);
+static MIGRATE_LOCK_TIMEOUT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(MIGRATE_LOCK_TIMEOUT_MS);
 
 /// Test hook: the lock timeout of the next Postgres migrations, ms (process-wide).
 #[doc(hidden)]
@@ -172,15 +192,17 @@ async fn migrate_pg(pool: &sqlx::PgPool) -> Result<(), StoreError> {
     let ran = sqlx::migrate!("migrations/pg").run(&mut *conn).await;
     let lock_timeout = |e: &sqlx::Error| matches!(e, sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03"));
     let timed_out = match &ran {
-        Err(sqlx::migrate::MigrateError::Execute(e)) | Err(sqlx::migrate::MigrateError::ExecuteMigration(e, _)) => lock_timeout(e),
+        Err(sqlx::migrate::MigrateError::Execute(e))
+        | Err(sqlx::migrate::MigrateError::ExecuteMigration(e, _)) => lock_timeout(e),
         _ => false,
     };
     if timed_out {
-        let gids: Vec<String> =
-            sqlx::query_scalar("SELECT gid FROM pg_prepared_xacts WHERE database = current_database() ORDER BY gid")
-                .fetch_all(&mut *conn)
-                .await
-                .unwrap_or_default();
+        let gids: Vec<String> = sqlx::query_scalar(
+            "SELECT gid FROM pg_prepared_xacts WHERE database = current_database() ORDER BY gid",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap_or_default();
         return Err(StoreError::Backend(migrate_timeout_message(ms, &gids)));
     }
     ran?;
@@ -248,15 +270,22 @@ const TERRAIN_KIND_MIGRATION: i64 = 4;
 /// database with no migration table yet (a new one).
 async fn applied_migration(pool: &Pool) -> Result<Option<i64>, StoreError> {
     const NEWEST: &str = "SELECT MAX(version) FROM _sqlx_migrations WHERE success";
-    Ok(if table_exists(pool, "_sqlx_migrations").await? { scalar(pool, NEWEST).await? } else { None })
+    Ok(if table_exists(pool, "_sqlx_migrations").await? {
+        scalar(pool, NEWEST).await?
+    } else {
+        None
+    })
 }
 
 async fn table_exists(pool: &Pool, table: &str) -> Result<bool, StoreError> {
     const SQLITE: &str = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $1";
-    const PG: &str =
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name::text = $1 AND table_schema = current_schema()";
+    const PG: &str = "SELECT COUNT(*) FROM information_schema.tables WHERE table_name::text = $1 AND table_schema = current_schema()";
     let tables: i64 = match pool {
-        Pool::Sqlite(p) => sqlx::query(SQLITE).bind(table).fetch_one(p).await?.try_get(0)?,
+        Pool::Sqlite(p) => sqlx::query(SQLITE)
+            .bind(table)
+            .fetch_one(p)
+            .await?
+            .try_get(0)?,
         Pool::Pg(p) => sqlx::query(PG).bind(table).fetch_one(p).await?.try_get(0)?,
     };
     Ok(tables > 0)
@@ -265,8 +294,16 @@ async fn table_exists(pool: &Pool, table: &str) -> Result<bool, StoreError> {
 /// The first column of `sql`'s only row, a nullable integer; `None` also when there is no row.
 async fn scalar(pool: &Pool, sql: &str) -> Result<Option<i64>, StoreError> {
     Ok(match pool {
-        Pool::Sqlite(p) => sqlx::query(sql).fetch_optional(p).await?.map(|r| r.try_get(0)).transpose()?,
-        Pool::Pg(p) => sqlx::query(sql).fetch_optional(p).await?.map(|r| r.try_get(0)).transpose()?,
+        Pool::Sqlite(p) => sqlx::query(sql)
+            .fetch_optional(p)
+            .await?
+            .map(|r| r.try_get(0))
+            .transpose()?,
+        Pool::Pg(p) => sqlx::query(sql)
+            .fetch_optional(p)
+            .await?
+            .map(|r| r.try_get(0))
+            .transpose()?,
     }
     .flatten())
 }
@@ -286,11 +323,19 @@ async fn scalar(pool: &Pool, sql: &str) -> Result<Option<i64>, StoreError> {
 async fn refuse_unreturned_world(pool: &Pool, applied: Option<i64>) -> Result<(), StoreError> {
     const ANY_REGION: &str = "SELECT COUNT(*) FROM (SELECT 1 FROM regions LIMIT 1) AS t";
     const TERRAIN: &str = "SELECT terrain FROM world WHERE id = 1";
-    let Some(applied) = applied else { return Ok(()) };
-    let terrain = if applied >= TERRAIN_KIND_MIGRATION { scalar(pool, TERRAIN).await? } else { None };
+    let Some(applied) = applied else {
+        return Ok(());
+    };
+    let terrain = if applied >= TERRAIN_KIND_MIGRATION {
+        scalar(pool, TERRAIN).await?
+    } else {
+        None
+    };
     if applied >= VOXEL_RETURN_MIGRATION {
         if terrain == Some(TerrainKind::Studs.code()) {
-            return Err(StoreError::OtherTerrain { stored: TerrainKind::Studs });
+            return Err(StoreError::OtherTerrain {
+                stored: TerrainKind::Studs,
+            });
         }
         return Ok(());
     }
@@ -310,23 +355,35 @@ async fn refuse_unreturned_world(pool: &Pool, applied: Option<i64>) -> Result<()
 /// this build's newest (a store never migrated, or migrated by a newer build,
 /// is refused — reading it could misread its rows).
 async fn check_schema(pool: &Pool) -> Result<(), StoreError> {
-    const TABLE_SQLITE: &str = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'";
+    const TABLE_SQLITE: &str =
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'";
     const TABLE_PG: &str = "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '_sqlx_migrations' \
          AND table_schema = current_schema()";
     const NEWEST: &str = "SELECT MAX(version) FROM _sqlx_migrations WHERE success";
     let found: Option<i64> = match pool {
         Pool::Sqlite(p) => {
             let tables: i64 = sqlx::query(TABLE_SQLITE).fetch_one(p).await?.try_get(0)?;
-            if tables == 0 { None } else { sqlx::query(NEWEST).fetch_one(p).await?.try_get(0)? }
+            if tables == 0 {
+                None
+            } else {
+                sqlx::query(NEWEST).fetch_one(p).await?.try_get(0)?
+            }
         }
         Pool::Pg(p) => {
             let tables: i64 = sqlx::query(TABLE_PG).fetch_one(p).await?.try_get(0)?;
-            if tables == 0 { None } else { sqlx::query(NEWEST).fetch_one(p).await?.try_get(0)? }
+            if tables == 0 {
+                None
+            } else {
+                sqlx::query(NEWEST).fetch_one(p).await?.try_get(0)?
+            }
         }
     };
     let found = found.unwrap_or(0);
     if found != newest_migration() {
-        return Err(StoreError::OtherFormat { found: found.clamp(0, u32::MAX as i64) as u32, kind: FormatKind::Schema });
+        return Err(StoreError::OtherFormat {
+            found: found.clamp(0, u32::MAX as i64) as u32,
+            kind: FormatKind::Schema,
+        });
     }
     Ok(())
 }
@@ -336,7 +393,8 @@ async fn check_schema(pool: &Pool) -> Result<(), StoreError> {
 /// after it: two writers opening a fresh database at once (no world lock on
 /// Postgres) both succeed, and the one whose dials lost is refused.
 async fn check_world_row(pool: &Pool, dials: Dials, writer: bool) -> Result<(), StoreError> {
-    const SELECT: &str = "SELECT format_version, region_blocks, chunk_blocks FROM world WHERE id = 1";
+    const SELECT: &str =
+        "SELECT format_version, region_blocks, chunk_blocks FROM world WHERE id = 1";
     const INSERT: &str = "INSERT INTO world (id, format_version, region_blocks, chunk_blocks, content_crc, \
          world_tick, super_region_regions, created_utc, terrain) VALUES (1, $1, $2, $3, 0, 0, $4, $5, $6) \
          ON CONFLICT (id) DO NOTHING";
@@ -380,16 +438,25 @@ async fn check_world_row(pool: &Pool, dials: Dials, writer: bool) -> Result<(), 
             kind: crate::FormatKind::Store,
         });
     }
-    let stored = Dials { region_blocks: region as u32, chunk_blocks: chunk as u32 };
+    let stored = Dials {
+        region_blocks: region as u32,
+        chunk_blocks: chunk as u32,
+    };
     if stored != dials {
-        return Err(StoreError::OtherDials { stored, built: dials });
+        return Err(StoreError::OtherDials {
+            stored,
+            built: dials,
+        });
     }
     Ok(())
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for now (civil-from-days, no date crate).
 pub(crate) fn utc_now() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -400,5 +467,10 @@ pub(crate) fn utc_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }

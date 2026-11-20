@@ -7,7 +7,17 @@ use crate::block_props::block_props;
 use crate::registry::BlockId;
 
 /// A horizontal side of a block, by the axis direction it faces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub enum Side {
     PosX,
     NegX,
@@ -30,7 +40,17 @@ impl Side {
 /// The geometry of a slope block. `low_x` is `PosX` or `NegX`, `low_z` is
 /// `PosZ` or `NegZ`; an outer corner is low on both cardinals, an inner corner
 /// only toward that diagonal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub enum SlopeShape {
     Straight { low: Side },
     Outer { low_x: Side, low_z: Side },
@@ -70,7 +90,9 @@ fn top_solid(shape: SlopeShape, x: usize, z: usize) -> bool {
 /// cache key hashes only `crates/worldgen/src`: run `just worldgen-cache-clear`
 /// (wipes `target/worldgen-cache`) after such a change, or stale regions load.
 pub fn slope_chisel(material: BlockId, shape: SlopeShape) -> ChiselData {
-    ChiselData::from_fn(vec![material], |x, y, z| (y < H || top_solid(shape, x, z)).then_some(0))
+    ChiselData::from_fn(vec![material], |x, y, z| {
+        (y < H || top_solid(shape, x, z)).then_some(0)
+    })
 }
 
 /// One cuboid of a slope geometry: (min, exclusive max), material-free.
@@ -82,7 +104,15 @@ fn shape_table() -> &'static [(SlopeShape, Vec<Bounds>)] {
     static TABLE: std::sync::OnceLock<Vec<(SlopeShape, Vec<Bounds>)>> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
         all_shapes()
-            .map(|shape| (shape, slope_chisel(BlockId(1), shape).cuboids().map(|(min, max, _)| (min, max)).collect()))
+            .map(|shape| {
+                (
+                    shape,
+                    slope_chisel(BlockId(1), shape)
+                        .cuboids()
+                        .map(|(min, max, _)| (min, max))
+                        .collect(),
+                )
+            })
             .collect()
     })
 }
@@ -93,8 +123,14 @@ fn all_shapes() -> impl Iterator<Item = SlopeShape> {
     let xs = [Side::PosX, Side::NegX];
     let zs = [Side::PosZ, Side::NegZ];
     let straight = sides.into_iter().map(|low| SlopeShape::Straight { low });
-    let outer = xs.into_iter().flat_map(move |low_x| zs.into_iter().map(move |low_z| SlopeShape::Outer { low_x, low_z }));
-    let inner = xs.into_iter().flat_map(move |low_x| zs.into_iter().map(move |low_z| SlopeShape::Inner { low_x, low_z }));
+    let outer = xs.into_iter().flat_map(move |low_x| {
+        zs.into_iter()
+            .map(move |low_z| SlopeShape::Outer { low_x, low_z })
+    });
+    let inner = xs.into_iter().flat_map(move |low_x| {
+        zs.into_iter()
+            .map(move |low_z| SlopeShape::Inner { low_x, low_z })
+    });
     straight.chain(outer).chain(inner)
 }
 
@@ -108,8 +144,12 @@ pub fn classify(chisel: &ChiselData) -> Option<SlopeShape> {
     }
     let count = chisel.cuboids().count();
     shape_table().iter().find_map(|(shape, bounds)| {
-        (bounds.len() == count && chisel.cuboids().map(|(min, max, _)| (min, max)).eq(bounds.iter().copied()))
-            .then_some(*shape)
+        (bounds.len() == count
+            && chisel
+                .cuboids()
+                .map(|(min, max, _)| (min, max))
+                .eq(bounds.iter().copied()))
+        .then_some(*shape)
     })
 }
 
@@ -132,12 +172,16 @@ pub fn walk_up(shape: SlopeShape, from: [i32; 2]) -> bool {
 /// The manifest name with spaces and a capital ("Red sand"), plus " slope"
 /// when the chisel is a slope.
 pub fn display_name(id: BlockId, chisel: Option<&ChiselData>) -> String {
-    let raw = block_props().name_of(id).map_or_else(|| format!("block {}", id.0), |n| n.replace('_', " "));
+    let raw = block_props()
+        .name_of(id)
+        .map_or_else(|| format!("block {}", id.0), |n| n.replace('_', " "));
     let mut chars = raw.chars();
-    let mut name: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+    let mut name: String = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
     if chisel.and_then(classify).is_some() {
         name.push_str(" slope");
     }
     name
 }
-

@@ -75,17 +75,24 @@ impl Plugin for SlintCompositePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SlintLayerTextures>()
             .add_plugins(ExtractComponentPlugin::<UiCamera>::default());
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
         render_app
             .init_resource::<ExtractedSlintLayers>()
             .add_systems(ExtractSchedule, extract_slint_layers)
             .add_systems(
                 Render,
-                prepare_slint_composite.in_set(RenderSystems::Prepare).ambiguous_with_all(),
+                prepare_slint_composite
+                    .in_set(RenderSystems::Prepare)
+                    .ambiguous_with_all(),
             )
             .add_systems(
                 Core3d,
-                slint_composite_pass.in_set(SlintCompositeSystems).after(Core3dSystems::PostProcess).before(upscaling),
+                slint_composite_pass
+                    .in_set(SlintCompositeSystems)
+                    .after(Core3dSystems::PostProcess)
+                    .before(upscaling),
             );
     }
 }
@@ -94,8 +101,11 @@ fn extract_slint_layers(
     layers: Extract<Option<Res<SlintLayerTextures>>>,
     mut extracted: ResMut<ExtractedSlintLayers>,
 ) {
-    let pairs: Vec<(i32, AssetId<Image>)> =
-        layers.iter().flat_map(|l| l.0.iter()).map(|(order, h)| (*order, h.id())).collect();
+    let pairs: Vec<(i32, AssetId<Image>)> = layers
+        .iter()
+        .flat_map(|l| l.0.iter())
+        .map(|(order, h)| (*order, h.id()))
+        .collect();
     extracted.0 = sorted_layers(&pairs);
 }
 
@@ -118,7 +128,10 @@ fn prepare_slint_composite(
     views: Query<CompositeView>,
 ) {
     let ui_view = pick_ui_view(
-        views.iter().filter(|v| v.2).map(|(e, _, _, _, camera)| (e, camera.map_or(0, |c| c.order))),
+        views
+            .iter()
+            .filter(|v| v.2)
+            .map(|(e, _, _, _, camera)| (e, camera.map_or(0, |c| c.order))),
     );
     for (entity, target, _, current, _) in &views {
         if !wants_composite(ui_view == Some(entity), layers.0.len()) {
@@ -155,15 +168,25 @@ fn slint_composite_pass(
     mut ctx: RenderContext,
 ) {
     let (target, composite, camera) = view.into_inner();
-    let Some(pipeline) = pipeline_cache.get_render_pipeline(composite.0) else { return };
+    let Some(pipeline) = pipeline_cache.get_render_pipeline(composite.0) else {
+        return;
+    };
 
     cache.0.retain(|id, _| layers.0.contains(id));
     for id in &layers.0 {
-        let Some(image) = images.get(*id) else { continue };
-        let fresh = cache.0.get(id).is_some_and(|(view_id, _)| *view_id == image.texture_view.id());
+        let Some(image) = images.get(*id) else {
+            continue;
+        };
+        let fresh = cache
+            .0
+            .get(id)
+            .is_some_and(|(view_id, _)| *view_id == image.texture_view.id());
         if !fresh {
-            let bind_group =
-                blit_pipeline.create_bind_group(ctx.render_device(), &image.texture_view, &pipeline_cache);
+            let bind_group = blit_pipeline.create_bind_group(
+                ctx.render_device(),
+                &image.texture_view,
+                &pipeline_cache,
+            );
             cache.0.insert(*id, (image.texture_view.id(), bind_group));
         }
     }
@@ -181,9 +204,10 @@ fn slint_composite_pass(
     }
     pass.set_render_pipeline(pipeline);
     for id in &layers.0 {
-        let Some((_, bind_group)) = cache.0.get(id) else { continue };
+        let Some((_, bind_group)) = cache.0.get(id) else {
+            continue;
+        };
         pass.set_bind_group(0, bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 }
-

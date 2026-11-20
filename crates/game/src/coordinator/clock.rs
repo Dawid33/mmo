@@ -66,6 +66,9 @@ pub fn rebase_deadline(deadline_ms: u64, span_ms: u64, now_ms: u64) -> u64 {
 /// than [`CALENDAR_GAP_MS`] in the past starts over at `now_ms` (the period restarts its count,
 /// as at a restart). Never moves it earlier.
 pub fn rebase_since(since_ms: u64, now_ms: u64) -> u64 {
-    if now_ms.saturating_sub(since_ms) > CALENDAR_GAP_MS { now_ms.max(since_ms) } else { since_ms }
+    if now_ms.saturating_sub(since_ms) > CALENDAR_GAP_MS {
+        now_ms.max(since_ms)
+    } else {
+        since_ms
+    }
 }
-

@@ -20,7 +20,7 @@ use js_sys::Uint8Array;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
-use crate::renderer::compute::{run_encoded, ComputeJob, JobKind};
+use crate::renderer::compute::{ComputeJob, JobKind, run_encoded};
 
 /// Header bytes of a job message: id + kind.
 const JOB_HEADER: usize = 9;
@@ -32,23 +32,26 @@ const REPLY_HEADER: usize = 8;
 /// The worker's half: answer every job message.
 pub fn worker_start() {
     let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-    let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-        let Some(bytes) = super::message_bytes(&event) else { return };
-        if bytes.len() < JOB_HEADER {
-            log::error!("[compute-worker] short message");
-            return;
-        }
-        let Some(kind) = JobKind::from_u8(bytes[8]) else {
-            log::error!("[compute-worker] unknown job kind {}", bytes[8]);
-            return;
-        };
-        let output = run_encoded(kind, &bytes[JOB_HEADER..]);
-        let mut reply = Vec::with_capacity(REPLY_HEADER + output.len());
-        reply.extend_from_slice(&bytes[..REPLY_HEADER]);
-        reply.extend_from_slice(&output);
-        let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-        let _ = super::post_bytes(&scope, &Uint8Array::from(reply.as_slice()));
-    });
+    let on_message =
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            let Some(bytes) = super::message_bytes(&event) else {
+                return;
+            };
+            if bytes.len() < JOB_HEADER {
+                log::error!("[compute-worker] short message");
+                return;
+            }
+            let Some(kind) = JobKind::from_u8(bytes[8]) else {
+                log::error!("[compute-worker] unknown job kind {}", bytes[8]);
+                return;
+            };
+            let output = run_encoded(kind, &bytes[JOB_HEADER..]);
+            let mut reply = Vec::with_capacity(REPLY_HEADER + output.len());
+            reply.extend_from_slice(&bytes[..REPLY_HEADER]);
+            reply.extend_from_slice(&output);
+            let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
+            let _ = super::post_bytes(&scope, &Uint8Array::from(reply.as_slice()));
+        });
     scope.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     on_message.forget();
 }
@@ -118,7 +121,10 @@ struct WorkerEntry {
     worker: web_sys::Worker,
     in_flight: usize,
     alive: bool,
-    _handlers: (Closure<dyn FnMut(web_sys::MessageEvent)>, Closure<dyn FnMut(JsValue)>),
+    _handlers: (
+        Closure<dyn FnMut(web_sys::MessageEvent)>,
+        Closure<dyn FnMut(JsValue)>,
+    ),
 }
 
 #[derive(Default)]
@@ -153,7 +159,10 @@ fn start_pool() -> Option<Rc<RefCell<PoolState>>> {
         let on_message = {
             let state = Rc::downgrade(&state);
             Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-                let (Some(state), Some(bytes)) = (state.upgrade(), super::message_bytes(&event)) else { return };
+                let (Some(state), Some(bytes)) = (state.upgrade(), super::message_bytes(&event))
+                else {
+                    return;
+                };
                 if bytes.len() < REPLY_HEADER {
                     return;
                 }
@@ -175,7 +184,10 @@ fn start_pool() -> Option<Rc<RefCell<PoolState>>> {
             let state = Rc::downgrade(&state);
             Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
                 let Some(state) = state.upgrade() else { return };
-                log::error!("[web-worker] compute worker {index} died: {}", super::error_text(&event));
+                log::error!(
+                    "[web-worker] compute worker {index} died: {}",
+                    super::error_text(&event)
+                );
                 worker_died(&state, index);
             })
         };
@@ -204,8 +216,15 @@ fn worker_died(state: &Rc<RefCell<PoolState>>, index: usize) {
         entry.alive = false;
         entry.in_flight = 0;
         entry.worker.terminate();
-        let ids: Vec<u64> = state.pending.iter().filter(|(_, p)| p.worker == index).map(|(&id, _)| id).collect();
-        ids.into_iter().filter_map(|id| state.pending.remove(&id)).collect()
+        let ids: Vec<u64> = state
+            .pending
+            .iter()
+            .filter(|(_, p)| p.worker == index)
+            .map(|(&id, _)| id)
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| state.pending.remove(&id))
+            .collect()
     };
     for orphan in orphans {
         resolve(&orphan.slot, run_encoded(orphan.kind, &orphan.input));
@@ -233,13 +252,26 @@ pub fn submit<J: ComputeJob>(job: J) -> Result<Reply<J>, J> {
     let message = Uint8Array::new_with_length((JOB_HEADER + input.len()) as u32);
     message.subarray(0, 8).copy_from(&id.to_le_bytes());
     message.subarray(8, 9).copy_from(&[J::KIND as u8]);
-    message.subarray(JOB_HEADER as u32, message.length()).copy_from(&input);
+    message
+        .subarray(JOB_HEADER as u32, message.length())
+        .copy_from(&input);
     if let Err(e) = super::post_bytes(&state.workers[index].worker, &message) {
         log::error!("[web-worker] posting a job failed: {e:?}");
         return Err(job);
     }
     let slot = Rc::new(RefCell::new(Slot::default()));
     state.workers[index].in_flight += 1;
-    state.pending.insert(id, Pending { worker: index, kind: J::KIND, input, slot: slot.clone() });
-    Ok(Reply { raw: RawReply(slot), _job: std::marker::PhantomData })
+    state.pending.insert(
+        id,
+        Pending {
+            worker: index,
+            kind: J::KIND,
+            input,
+            slot: slot.clone(),
+        },
+    );
+    Ok(Reply {
+        raw: RawReply(slot),
+        _job: std::marker::PhantomData,
+    })
 }

@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
-use game::map_tile::{MapTileKey, MAP_LEVEL_LIMIT};
+use game::map_tile::{MAP_LEVEL_LIMIT, MapTileKey};
 use map_tiles::{Fetched, TileSource};
 
 /// Threads that build tiles.
@@ -48,13 +48,17 @@ pub fn install(source: TileSource) {
         return;
     }
     let weak = Arc::downgrade(&source);
-    let spawned = std::thread::Builder::new().name("map-revalidate".into()).spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(MAP_REVALIDATE_MS));
-        let Some(source) = weak.upgrade() else { return };
-        if let Err(e) = source.refresh_versions() {
-            log::warn!("[map] re-reading terrain versions: {e}");
-        }
-    });
+    let spawned = std::thread::Builder::new()
+        .name("map-revalidate".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(MAP_REVALIDATE_MS));
+                let Some(source) = weak.upgrade() else { return };
+                if let Err(e) = source.refresh_versions() {
+                    log::warn!("[map] re-reading terrain versions: {e}");
+                }
+            }
+        });
     if let Err(e) = spawned {
         log::warn!("[map] no revalidation thread ({e}): edits show only on a restart");
     }
@@ -67,10 +71,14 @@ pub fn installed_router() -> Option<Router> {
 
 /// The materials of the block manifest, as the server resolves them (for a [`TileSource`]).
 pub fn materials() -> worldgen::material::Materials {
-    let manifest = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/blocks/blocks.ron"))
-        .unwrap_or_else(|_| include_str!("../../../assets/blocks/blocks.ron").to_string());
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/blocks/blocks.ron"),
+    )
+    .unwrap_or_else(|_| include_str!("../../../assets/blocks/blocks.ron").to_string());
     let registry = game::BlockRegistry::from_ron(&manifest).expect("invalid block manifest");
-    worldgen::material::Materials::from_names(|name| registry.id_of(name).unwrap_or(game::BlockId::AIR))
+    worldgen::material::Materials::from_names(|name| {
+        registry.id_of(name).unwrap_or(game::BlockId::AIR)
+    })
 }
 
 type Reply = tokio::sync::oneshot::Sender<Result<Fetched, String>>;
@@ -84,27 +92,38 @@ struct Builds {
 /// The route group over `source` (its own state; mount it with `Router::merge`).
 pub fn router(source: Arc<TileSource>) -> Router {
     let (jobs, rx) = crossbeam::channel::unbounded::<(MapTileKey, Option<u64>, Reply)>();
-    let builds = Arc::new(Builds { jobs, queued: AtomicUsize::new(0), source: source.clone() });
+    let builds = Arc::new(Builds {
+        jobs,
+        queued: AtomicUsize::new(0),
+        source: source.clone(),
+    });
     for i in 0..MAP_BUILD_WORKERS {
         let (rx, source, b) = (rx.clone(), source.clone(), Arc::downgrade(&builds));
-        let spawned = std::thread::Builder::new().name(format!("map-build-{i}")).spawn(move || {
-            for (key, have, reply) in rx {
-                let started = Instant::now();
-                let answer = source.tile(key, have).map_err(|e| e.to_string());
-                if matches!(answer, Ok(Fetched::Tile { .. })) {
-                    crate::health::Health::global().map_built(started.elapsed().as_millis() as u64, source.cache_bytes() as u64);
+        let spawned = std::thread::Builder::new()
+            .name(format!("map-build-{i}"))
+            .spawn(move || {
+                for (key, have, reply) in rx {
+                    let started = Instant::now();
+                    let answer = source.tile(key, have).map_err(|e| e.to_string());
+                    if matches!(answer, Ok(Fetched::Tile { .. })) {
+                        crate::health::Health::global().map_built(
+                            started.elapsed().as_millis() as u64,
+                            source.cache_bytes() as u64,
+                        );
+                    }
+                    if let Some(b) = b.upgrade() {
+                        b.queued.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    let _ = reply.send(answer);
                 }
-                if let Some(b) = b.upgrade() {
-                    b.queued.fetch_sub(1, Ordering::SeqCst);
-                }
-                let _ = reply.send(answer);
-            }
-        });
+            });
         if let Err(e) = spawned {
             log::error!("[map] build worker {i}: {e}");
         }
     }
-    Router::new().route(PATH_MAP_TILE, get(tile)).with_state(builds)
+    Router::new()
+        .route(PATH_MAP_TILE, get(tile))
+        .with_state(builds)
 }
 
 /// `"<hex>"` → the etag (also a bare `<hex>`, and a weak `W/"<hex>"`).
@@ -117,7 +136,11 @@ fn etag_header(etag: u64) -> String {
     format!("\"{etag:016x}\"")
 }
 
-async fn tile(State(b): State<Arc<Builds>>, Path((level, x, z)): Path<(u8, i32, i32)>, headers: HeaderMap) -> Response {
+async fn tile(
+    State(b): State<Arc<Builds>>,
+    Path((level, x, z)): Path<(u8, i32, i32)>,
+    headers: HeaderMap,
+) -> Response {
     let response = answer(&b, level, x, z, &headers).await;
     crate::health::Health::global().map_request(response.status().as_u16());
     response
@@ -128,15 +151,28 @@ async fn answer(b: &Builds, level: u8, x: i32, z: i32, headers: &HeaderMap) -> R
     if level > MAP_LEVEL_LIMIT || !b.source.in_world(key) {
         return (StatusCode::NOT_FOUND, "no such tile").into_response();
     }
-    let have = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).and_then(parse_etag);
+    let have = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_etag);
     if b.queued.fetch_add(1, Ordering::SeqCst) >= MAP_BUILDS_QUEUED_MAX {
         b.queued.fetch_sub(1, Ordering::SeqCst);
-        return (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "1")], "busy").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            "busy",
+        )
+            .into_response();
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     if b.jobs.send((key, have, tx)).is_err() {
         b.queued.fetch_sub(1, Ordering::SeqCst);
-        return (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "1")], "no builder").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            "no builder",
+        )
+            .into_response();
     }
     // Always revalidated: the URL names the world id, not the forge, so only the etag (which carries
     // the forge's identity) tells a re-forged world's tile from the old one.
@@ -144,7 +180,14 @@ async fn answer(b: &Builds, level: u8, x: i32, z: i32, headers: &HeaderMap) -> R
     match rx.await {
         Ok(Ok(Fetched::Unchanged)) => {
             let etag = have.map(etag_header).unwrap_or_default();
-            (StatusCode::NOT_MODIFIED, [(header::ETAG, etag), (header::CACHE_CONTROL, cache.to_string())]).into_response()
+            (
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, etag),
+                    (header::CACHE_CONTROL, cache.to_string()),
+                ],
+            )
+                .into_response()
         }
         Ok(Ok(Fetched::Tile { etag, bytes })) => (
             StatusCode::OK,
@@ -158,9 +201,19 @@ async fn answer(b: &Builds, level: u8, x: i32, z: i32, headers: &HeaderMap) -> R
             .into_response(),
         Ok(Err(e)) => {
             log::warn!("[map] tile {key:?}: {e}");
-            (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "1")], "store").into_response()
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "1")],
+                "store",
+            )
+                .into_response()
         }
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "1")], "no builder").into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            "no builder",
+        )
+            .into_response(),
     }
 }
 
@@ -168,15 +221,23 @@ async fn answer(b: &Builds, level: u8, x: i32, z: i32, headers: &HeaderMap) -> R
 /// (role `all`, the dev server) refuses any other address.
 pub fn serve_plain(bind: SocketAddr, loopback_only: bool) -> Result<(), String> {
     if loopback_only && !bind.ip().is_loopback() {
-        return Err(format!("{MAP_BIND_ENV}={bind}: the dev map listener binds loopback only"));
+        return Err(format!(
+            "{MAP_BIND_ENV}={bind}: the dev map listener binds loopback only"
+        ));
     }
-    let Some(router) = installed_router() else { return Err("no world map source (a procedural world?)".into()) };
-    let listener = std::net::TcpListener::bind(bind).map_err(|e| format!("{MAP_BIND_ENV}={bind}: {e}"))?;
+    let Some(router) = installed_router() else {
+        return Err("no world map source (a procedural world?)".into());
+    };
+    let listener =
+        std::net::TcpListener::bind(bind).map_err(|e| format!("{MAP_BIND_ENV}={bind}: {e}"))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     std::thread::Builder::new()
         .name("map-http".into())
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(r) => r,
                 Err(e) => return log::error!("[map] listener runtime: {e}"),
             };

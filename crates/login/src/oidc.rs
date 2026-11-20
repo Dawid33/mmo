@@ -117,20 +117,30 @@ pub struct OidcVerifier {
 }
 
 fn parse_jwks(jwks_json: &str) -> Result<HashMap<String, DecodingKey>, OidcError> {
-    let jwks: Jwks = serde_json::from_str(jwks_json).map_err(|e| OidcError::Fetch(format!("keys document: {e}")))?;
+    let jwks: Jwks = serde_json::from_str(jwks_json)
+        .map_err(|e| OidcError::Fetch(format!("keys document: {e}")))?;
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let mut by_kid = HashMap::new();
     for key in jwks.keys {
         // Keycloak also publishes encryption keys; only RSA signature keys count.
-        if key.kty != "RSA" || key.use_.as_deref().is_some_and(|u| u != "sig") || key.alg.as_deref().is_some_and(|a| a != "RS256") {
+        if key.kty != "RSA"
+            || key.use_.as_deref().is_some_and(|u| u != "sig")
+            || key.alg.as_deref().is_some_and(|a| a != "RS256")
+        {
             continue;
         }
-        let (Some(kid), Some(n), Some(e)) = (key.kid, key.n, key.e) else { continue };
+        let (Some(kid), Some(n), Some(e)) = (key.kid, key.n, key.e) else {
+            continue;
+        };
         // Validate the encoding ourselves: `from_rsa_components` takes the base64url text as is.
-        if ![&n, &e].iter().all(|part| b64.decode(part.as_bytes()).is_ok()) {
+        if ![&n, &e]
+            .iter()
+            .all(|part| b64.decode(part.as_bytes()).is_ok())
+        {
             return Err(OidcError::Fetch(format!("key {kid}: bad base64url")));
         }
-        let decoding = DecodingKey::from_rsa_components(&n, &e).map_err(|e| OidcError::Fetch(format!("key {kid}: {e}")))?;
+        let decoding = DecodingKey::from_rsa_components(&n, &e)
+            .map_err(|e| OidcError::Fetch(format!("key {kid}: {e}")))?;
         by_kid.insert(kid, decoding);
     }
     Ok(by_kid)
@@ -143,38 +153,81 @@ fn http() -> Result<reqwest::Client, OidcError> {
         .map_err(|e| OidcError::Fetch(e.to_string()))
 }
 
+#[tracing::instrument(
+    name = "login.oidc.fetch",
+    skip_all,
+    fields(operation = "provider_document")
+)]
 async fn get_text(client: &reqwest::Client, url: &str) -> Result<String, OidcError> {
     let fail = |e: reqwest::Error| OidcError::Fetch(format!("{url}: {e}"));
-    client.get(url).send().await.map_err(fail)?.error_for_status().map_err(fail)?.text().await.map_err(fail)
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(fail)?
+        .error_for_status()
+        .map_err(fail)?
+        .text()
+        .await
+        .map_err(fail)
 }
 
 impl OidcVerifier {
     /// A verifier over a fixed key set (tests; it can never refetch).
     pub fn from_jwks(issuer: &str, audience: &str, jwks_json: &str) -> Result<Self, OidcError> {
-        Ok(Self::with_keys(issuer, audience, None, parse_jwks(jwks_json)?))
+        Ok(Self::with_keys(
+            issuer,
+            audience,
+            None,
+            parse_jwks(jwks_json)?,
+        ))
     }
 
-    fn with_keys(issuer: &str, audience: &str, jwks_uri: Option<String>, by_kid: HashMap<String, DecodingKey>) -> Self {
+    fn with_keys(
+        issuer: &str,
+        audience: &str,
+        jwks_uri: Option<String>,
+        by_kid: HashMap<String, DecodingKey>,
+    ) -> Self {
         Self {
             issuer: issuer.to_string(),
             audience: audience.to_string(),
             jwks_uri,
-            keys: RwLock::new(Keys { by_kid, last_fetch: None }),
+            keys: RwLock::new(Keys {
+                by_kid,
+                last_fetch: None,
+            }),
             metrics: OnceLock::new(),
         }
     }
 
     /// Fetch `{issuer}/.well-known/openid-configuration`, then the keys at its `jwks_uri`.
+    #[tracing::instrument(
+        name = "login.oidc.discover",
+        skip_all,
+        fields(operation = "discovery")
+    )]
     pub async fn discover(issuer: &str, audience: &str) -> Result<Self, OidcError> {
         let client = http()?;
-        let url = format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'));
+        let url = format!(
+            "{}/.well-known/openid-configuration",
+            issuer.trim_end_matches('/')
+        );
         let config: Discovery = serde_json::from_str(&get_text(&client, &url).await?)
             .map_err(|e| OidcError::Fetch(format!("{url}: {e}")))?;
         if config.issuer != issuer {
-            return Err(OidcError::Fetch(format!("{url}: names issuer {}", config.issuer)));
+            return Err(OidcError::Fetch(format!(
+                "{url}: names issuer {}",
+                config.issuer
+            )));
         }
         let by_kid = parse_jwks(&get_text(&client, &config.jwks_uri).await?)?;
-        Ok(Self::with_keys(issuer, audience, Some(config.jwks_uri), by_kid))
+        Ok(Self::with_keys(
+            issuer,
+            audience,
+            Some(config.jwks_uri),
+            by_kid,
+        ))
     }
 
     /// Count this verifier's key refetches in `metrics` (the first call wins).
@@ -230,23 +283,42 @@ impl OidcVerifier {
             _ => Err(OidcError::MissingClaim(name)),
         };
         let subject = present(claims.sub, "sub")?;
-        let email = normalize_email(&present(claims.email, "email")?).map_err(|_| OidcError::MissingClaim("email"))?;
+        let email = normalize_email(&present(claims.email, "email")?)
+            .map_err(|_| OidcError::MissingClaim("email"))?;
         let name = present(claims.preferred_username, "preferred_username")?;
-        Ok(Identity { subject, email, name })
+        Ok(Identity {
+            subject,
+            email,
+            name,
+        })
     }
 
     /// [`Self::verify`]; on an unknown `kid` the provider's keys are refetched (at most once per
     /// [`JWKS_REFETCH_MIN_SECS`]) and the token is checked again.
-    pub async fn verify_refreshing(&self, access_token: &str, now_secs: u64) -> Result<Identity, OidcError> {
+    #[tracing::instrument(
+        name = "login.oidc.verify",
+        skip_all,
+        fields(operation = "token_verify")
+    )]
+    pub async fn verify_refreshing(
+        &self,
+        access_token: &str,
+        now_secs: u64,
+    ) -> Result<Identity, OidcError> {
         match self.verify(access_token, now_secs) {
             Err(OidcError::UnknownKid) => {}
             other => return other,
         }
-        let Some(uri) = &self.jwks_uri else { return Err(OidcError::UnknownKid) };
+        let Some(uri) = &self.jwks_uri else {
+            return Err(OidcError::UnknownKid);
+        };
         {
             // Claim the refetch before the request, so a failing provider is not hammered either.
             let mut keys = self.keys.write().unwrap_or_else(|e| e.into_inner());
-            if keys.last_fetch.is_some_and(|at| at.elapsed() < Duration::from_secs(JWKS_REFETCH_MIN_SECS)) {
+            if keys
+                .last_fetch
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(JWKS_REFETCH_MIN_SECS))
+            {
                 return Err(OidcError::UnknownKid);
             }
             keys.last_fetch = Some(Instant::now());

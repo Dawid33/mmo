@@ -72,4 +72,3 @@ pub fn layer_for_face(faces: [u32; 3], face: Face) -> u32 {
 pub fn shade(ao: u8) -> f32 {
     0.55 + 0.15 * ao as f32
 }
-

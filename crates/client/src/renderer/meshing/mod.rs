@@ -1,7 +1,7 @@
 use bevy::mesh::Mesh;
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, Task};
+use bevy::tasks::{Task, block_on, futures_lite::future};
 
 use super::block_textures::BlockTextureLayers;
 use super::voxel_material::StandardVoxelMaterial;
@@ -23,7 +23,10 @@ pub mod visibility;
 
 /// Mesh a padded chunk snapshot. `None` = no visible faces (don't render).
 pub fn build_chunk_mesh(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> Option<Mesh> {
-    emit::quads_to_mesh(&binary::mesh_quads(padded, &binary::CutoutTable::installed()), layers)
+    emit::quads_to_mesh(
+        &binary::mesh_quads(padded, &binary::CutoutTable::installed()),
+        layers,
+    )
 }
 
 /// Everything the async mesh task produces for one chunk. Exactly one of
@@ -63,8 +66,13 @@ pub struct MeshWire {
 
 impl MeshWire {
     /// Nothing to draw (a buried brick, in either render mode).
-    pub const EMPTY: MeshWire =
-        MeshWire { mesh: None, records: None, connectivity: 0, quad_count: 0, has_interior: false };
+    pub const EMPTY: MeshWire = MeshWire {
+        mesh: None,
+        records: None,
+        connectivity: 0,
+        quad_count: 0,
+        has_interior: false,
+    };
 
     pub fn into_output(self) -> MeshOutput {
         MeshOutput {
@@ -212,7 +220,15 @@ pub fn apply_meshed_chunks(
                 continue;
             }
             (None, true, Some(records)) => {
-                draw_own_records(&mut commands, &mut meshes, material.as_deref(), e, &records, connectivity, quad_count);
+                draw_own_records(
+                    &mut commands,
+                    &mut meshes,
+                    material.as_deref(),
+                    e,
+                    &records,
+                    connectivity,
+                    quad_count,
+                );
                 continue;
             }
             (None, _, records) => records,
@@ -357,7 +373,10 @@ fn keep_brick_records(
     )>();
     match records {
         Some(records) => {
-            ec.insert((chunk_mesh::BrickRecords(std::sync::Arc::new(records)), TerrainQuadCount(quad_count)));
+            ec.insert((
+                chunk_mesh::BrickRecords(std::sync::Arc::new(records)),
+                TerrainQuadCount(quad_count),
+            ));
         }
         None => {
             ec.remove::<(chunk_mesh::BrickRecords, TerrainQuadCount)>();
@@ -380,7 +399,10 @@ fn draw_own_records(
     quad_count: u32,
 ) {
     let mut ec = commands.entity(e);
-    ec.insert((visibility::ChunkConnectivity(connectivity), TerrainQuadCount(quad_count)));
+    ec.insert((
+        visibility::ChunkConnectivity(connectivity),
+        TerrainQuadCount(quad_count),
+    ));
     ec.remove::<(MeshingTask, InteriorFaces)>();
     match chunk_mesh::records_to_mesh_data(records) {
         Some(data) => {
@@ -398,7 +420,10 @@ fn draw_own_records(
             }
         }
         None => {
-            ec.remove::<(Mesh3d, MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>)>();
+            ec.remove::<(
+                Mesh3d,
+                MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
+            )>();
         }
     }
 }
@@ -407,7 +432,7 @@ fn draw_own_records(
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
-    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
+    use game::{BRICK_VOXEL_COUNT, BlockId, Voxel};
 
     /// Regression: gaps between chunks, user report 2026-07-08 "there is a gap between chunks" (memory flat-world-ocean-spawn, 151d3c0b)
     #[test]

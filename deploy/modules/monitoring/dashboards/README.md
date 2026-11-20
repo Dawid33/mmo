@@ -20,4 +20,20 @@ picked up by the kube-prometheus-stack Grafana sidecar in any namespace). One JS
   `[perf] event=` lines. Data: the `mmo_*` metrics the server serves on pod port `health` (`crates/server/src/health.rs`)
   and kube-state-metrics. Cut, succession, host-count and generation series are real only on the coordinator
   (`role="coordinator"`), and only while it runs world cuts (several hosts). Its alerts are the `world` rule group in
-  `values/kube-prometheus-stack.yaml.tftpl`.
+  `values/kube-prometheus-stack.yaml.tftpl`. The header link keeps the selected time range and opens the telemetry
+  dashboard for the hidden world id derived from the selected `world-*` namespace.
+- `telemetry.json` — hand-written, uid `telemetry`, with Tempo, Loki and Pyroscope datasource variables. Start with
+  environment, cluster, service (`errantry-login` / `errantry-world`), role, world and pod; all are resource/profile
+  labels, so the defaults remain low-cardinality selectors rather than ad-hoc text searches. It shows recent and error
+  traces, TraceQL p50/p95/p99 operation durations, focused login/coordinator/fleet/host views, correlated
+  `trace_id=<hex>` logs, warnings/errors, a selected-pod CPU flame graph and a world role comparison. Trace rows carry
+  links into Explore. The `trace_id` selector is intentionally manual: paste it from Tempo to line up the Loki panel.
+  Tempo's operation quantiles require its TraceQL metrics generator to be enabled; an empty result is not a dashboard
+  provisioning failure while that backend capability is disabled.
+
+The Tempo datasource retains trace-to-log links (pod and namespace narrow the Loki stream, then the trace ID is
+applied) and maps the stable trace resource attributes to matching Pyroscope tags: `service.name` / `service_name`,
+`mmo.role` / `role`, `mmo.world_id` / `world_id`, and `k8s.pod.name` / `pod`. Do not add player, account, entity,
+region, host-id, raw URL, SQL, or token values to these selectors or profile labels. Do not edit dashboards or
+datasources in Grafana's UI: change JSON/provisioning here, plan the `monitoring` root, and apply that change
+separately from workload releases.

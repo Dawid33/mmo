@@ -20,6 +20,8 @@ worldgen = { workspace = true }
 crossbeam = { workspace = true }
 simplelog = { workspace = true }
 log = { workspace = true }
+observability = { workspace = true }
+tracing = { workspace = true }
 quinn = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time", "signal", "net", "sync", "rt"] }
 lz4_flex = { workspace = true }
@@ -50,13 +52,11 @@ prometheus = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 hyper = { version = "1", features = ["http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
-pyroscope = { workspace = true, optional = true }
-pyroscope_pprofrs = { workspace = true, optional = true }
 
 [features]
 # Push CPU profiles to a local Pyroscope (`just profile-server`); gated so
 # normal builds don't pull the agent in. Runtime-activated by the PYROSCOPE env.
-pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
+pyroscope = ["observability/pyroscope"]
 # The coordinator's test hooks (`CoordinatorThread::{inspect, with_core}` and its `hold_*` hooks):
 # off in production builds; the `roles` and `coordinator_rt` tests need them (`required-features`).
 test-hooks = []

@@ -242,15 +242,15 @@ pub enum PairContacts {
         touching: bool,
         /// The candidates (not serialized: the next update rebuilds them).
         #[cfg_attr(feature = "serde-serialize", serde(skip))]
-        #[state_hash(skip)] // mmo-fork: StateHash — rebuilt by the next update (serde-skipped).
+        #[state_hash(skip)]
+        // mmo-fork: StateHash — rebuilt by the next update (serde-skipped).
         candidates: Box<SoftPairContacts>,
     },
 }
 
 /// The contact manifolds of a [`ContactPair`], with the solver's bookkeeping about them.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidPairContacts {
     /// The set of contact manifolds between the two colliders.
     ///
@@ -271,7 +271,8 @@ pub struct RigidPairContacts {
     /// The clusters solved at the previous step, kept as the warm-start source (and
     /// reused as workspace buffers) when rebuilding `solver_clusters` each frame.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped scratch (a narrow-phase round trip re-steps identically, H7).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — serde-skipped scratch (a narrow-phase round trip re-steps identically, H7).
     pub(crate) solver_clusters_prev: Vec<ContactManifold>,
     /// The persistent solver graph color of this pair: same-color active pairs never share
     /// a rigid-body, so one color solves concurrently. Maintained incrementally on contact
@@ -297,7 +298,8 @@ pub struct RigidPairContacts {
     /// contacts and the volume patch, see `SoftRigidContacts`), rebuilt by every update; `None`
     /// for every other pair.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — soft-body contacts; the game has no soft bodies (serde-skipped).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — soft-body contacts; the game has no soft bodies (serde-skipped).
     pub(crate) soft: Option<Box<SoftRigidContacts>>,
 }
 

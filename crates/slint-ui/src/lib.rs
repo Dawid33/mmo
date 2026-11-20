@@ -83,14 +83,23 @@ impl Overlay<GameUi> {
 
 impl<C: ComponentHandle> Overlay<C> {
     /// `make` is the component's generated `new` (e.g. `AssetViewerUi::new`).
-    pub fn with(make: impl FnOnce() -> Result<C, slint::PlatformError>) -> Result<Self, slint::PlatformError> {
+    pub fn with(
+        make: impl FnOnce() -> Result<C, slint::PlatformError>,
+    ) -> Result<Self, slint::PlatformError> {
         // Fails harmlessly when an earlier Overlay already installed it.
         let _ = slint::platform::set_platform(Box::new(OverlayPlatform));
         let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
         NEXT_WINDOW.with(|next| *next.borrow_mut() = Some(window.clone()));
         let ui = make()?;
         ui.show()?;
-        Ok(Self { ui, window, pixels: Vec::new(), size: (0, 0), scale: 1.0, full_repaint: true })
+        Ok(Self {
+            ui,
+            window,
+            pixels: Vec::new(),
+            size: (0, 0),
+            scale: 1.0,
+            full_repaint: true,
+        })
     }
 
     /// The component: set its properties and connect its callbacks.
@@ -114,7 +123,9 @@ impl<C: ComponentHandle> Overlay<C> {
             return;
         }
         if scale != self.scale {
-            self.window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+            self.window.dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+            });
             self.scale = scale;
         }
         self.size = (width, height);
@@ -160,7 +171,12 @@ impl<C: ComponentHandle> Overlay<C> {
             let w = size.width.min(width - x);
             let h = size.height.min(height - y);
             if w > 0 && h > 0 {
-                dirty = Some(Dirty { x, y, width: w, height: h });
+                dirty = Some(Dirty {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                });
             }
         });
         if self.window.has_active_animations() {

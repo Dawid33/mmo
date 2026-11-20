@@ -34,7 +34,10 @@ impl BlockState {
                 }
             }
         }
-        Ok(BlockState { name: name.to_string(), props })
+        Ok(BlockState {
+            name: name.to_string(),
+            props,
+        })
     }
 }
 
@@ -63,12 +66,17 @@ pub struct BlockVolume {
 impl BlockVolume {
     /// The cell's index into `blocks`. Does not bounds-check.
     pub fn index(&self, x: u32, y: u32, z: u32) -> usize {
-        x as usize + z as usize * self.size[0] as usize + y as usize * self.size[0] as usize * self.size[2] as usize
+        x as usize
+            + z as usize * self.size[0] as usize
+            + y as usize * self.size[0] as usize * self.size[2] as usize
     }
 
     /// The block state at a cell; panics when the cell is outside the volume.
     pub fn at(&self, x: u32, y: u32, z: u32) -> &BlockState {
-        assert!(x < self.size[0] && y < self.size[1] && z < self.size[2], "cell outside the volume");
+        assert!(
+            x < self.size[0] && y < self.size[1] && z < self.size[2],
+            "cell outside the volume"
+        );
         &self.palette[self.blocks[self.index(x, y, z)] as usize]
     }
 }

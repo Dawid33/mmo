@@ -26,11 +26,13 @@ use std::sync::Arc;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::NoAutoAabb;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, Task};
-use game::{BlockId, Voxel, VoxelModel, BLOCK_VOXELS, BLOCK_VOXEL_COUNT, BRICK_BLOCKS, BRICK_VOXELS};
+use bevy::tasks::{Task, block_on, futures_lite::future};
+use game::{
+    BLOCK_VOXEL_COUNT, BLOCK_VOXELS, BRICK_BLOCKS, BRICK_VOXELS, BlockId, Voxel, VoxelModel,
+};
 
 use super::block_textures::BlockTextureLayers;
-use super::meshing::binary::{PaddedVoxels, PADDED};
+use super::meshing::binary::{PADDED, PaddedVoxels};
 use super::meshing::mesh_chunk;
 use super::meshing::records::QuadRecord;
 use super::voxel_pull::ChunkQuads;
@@ -94,7 +96,9 @@ impl ModelVoxels {
 
     fn at(&self, v: [i32; 3]) -> Voxel {
         let b = BLOCK_VOXELS as i32;
-        let Some(block) = self.0.get(&v.map(|c| c.div_euclid(b))) else { return Voxel::default() };
+        let Some(block) = self.0.get(&v.map(|c| c.div_euclid(b))) else {
+            return Voxel::default();
+        };
         match block {
             BlockVoxels::Uniform(id) => Voxel::new(*id),
             BlockVoxels::Grid(m) => {
@@ -110,7 +114,11 @@ impl ModelVoxels {
 /// The bricks a model's blocks fall in (brick units from the model origin).
 pub fn model_bricks(model: &VoxelModel) -> BTreeSet<[i32; 3]> {
     let n = BRICK_BLOCKS as i32;
-    model.blocks.keys().map(|o| o.map(|c| i32::from(c).div_euclid(n))).collect()
+    model
+        .blocks
+        .keys()
+        .map(|o| o.map(|c| i32::from(c).div_euclid(n)))
+        .collect()
 }
 
 /// Brick `brick` of the model with a one-voxel shell read from the model
@@ -121,7 +129,8 @@ fn padded_brick(model: &ModelVoxels, brick: [i32; 3]) -> PaddedVoxels {
     for z in 0..PADDED {
         for y in 0..PADDED {
             for x in 0..PADDED {
-                p[PaddedVoxels::index(x, y, z)] = model.at([base[0] + x as i32, base[1] + y as i32, base[2] + z as i32]);
+                p[PaddedVoxels::index(x, y, z)] =
+                    model.at([base[0] + x as i32, base[1] + y as i32, base[2] + z as i32]);
             }
         }
     }
@@ -140,7 +149,10 @@ pub fn mesh_body(model: &VoxelModel, layers: &BlockTextureLayers) -> BodyMesh {
             out.records.map(|r| (b, r))
         })
         .collect();
-    BodyMesh { com: Vec3::new(com.x, com.y, com.z), bricks }
+    BodyMesh {
+        com: Vec3::new(com.x, com.y, com.z),
+        bricks,
+    }
 }
 
 /// Body-local translation of brick `brick`: its model position less the
@@ -174,9 +186,18 @@ pub fn spawn_voxel_body_meshes(
     layers: Res<BlockTextureLayers>,
 ) {
     for (e, PendingVoxelBody(model)) in &pending {
-        let job = BodyMeshJob { model: VoxelModel::clone(model), layers: layers.clone() };
-        let task = super::compute::spawn(job, |(com, bricks)| BodyMesh { com: Vec3::from_array(com), bricks });
-        commands.entity(e).remove::<PendingVoxelBody>().insert(VoxelBodyMeshing(task));
+        let job = BodyMeshJob {
+            model: VoxelModel::clone(model),
+            layers: layers.clone(),
+        };
+        let task = super::compute::spawn(job, |(com, bricks)| BodyMesh {
+            com: Vec3::from_array(com),
+            bricks,
+        });
+        commands
+            .entity(e)
+            .remove::<PendingVoxelBody>()
+            .insert(VoxelBodyMeshing(task));
     }
 }
 
@@ -187,7 +208,9 @@ pub fn apply_voxel_body_meshes(
     bricks: Query<(), With<VoxelBodyBrick>>,
 ) {
     for (e, mut task, children) in &mut tasks {
-        let Some(mesh) = block_on(future::poll_once(&mut task.0)) else { continue };
+        let Some(mesh) = block_on(future::poll_once(&mut task.0)) else {
+            continue;
+        };
         for &child in children.into_iter().flatten() {
             if bricks.contains(child) {
                 commands.entity(child).despawn();
@@ -199,11 +222,13 @@ pub fn apply_voxel_body_meshes(
                 VoxelBodyBrick { brick },
                 Transform::from_translation(brick_translation(brick, mesh.com)),
                 ChunkQuads(Arc::new(records)),
-                Aabb { center: Vec3A::splat(BRICK_HALF), half_extents: Vec3A::splat(BRICK_HALF) },
+                Aabb {
+                    center: Vec3A::splat(BRICK_HALF),
+                    half_extents: Vec3A::splat(BRICK_HALF),
+                },
                 NoAutoAabb,
                 ChildOf(e),
             ));
         }
     }
 }
-

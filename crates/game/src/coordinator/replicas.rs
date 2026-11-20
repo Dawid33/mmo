@@ -27,7 +27,9 @@ use serde::{Deserialize, Serialize};
 /// (Elastic 2b replaces Elastic 2a's process boot with it). The store issues it at the
 /// process's start (`register_replica`); tests pick one. A store call handed out by another
 /// replica is not in flight here.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct ReplicaId(pub u64);
 
 impl std::fmt::Display for ReplicaId {
@@ -101,7 +103,14 @@ impl ReplicaWatch {
                 Some(s) if s.seen_ms == row.seen_ms => s.first_ms,
                 _ => mono_ms,
             };
-            next.insert(row.replica, Seen { seen_ms: row.seen_ms, first_ms, last_ms: mono_ms });
+            next.insert(
+                row.replica,
+                Seen {
+                    seen_ms: row.seen_ms,
+                    first_ms,
+                    last_ms: mono_ms,
+                },
+            );
         }
         self.rows = next;
         self.dead = rows.iter().filter(|r| !r.live).map(|r| r.replica).collect();
@@ -122,7 +131,9 @@ impl ReplicaWatch {
     /// below the highest id the read returned (one above it registered after the read was
     /// issued: never gone). By id.
     pub fn gone(&self, core_live: &BTreeSet<ReplicaId>, me: ReplicaId) -> Vec<ReplicaId> {
-        let Some(highest) = self.highest else { return Vec::new() };
+        let Some(highest) = self.highest else {
+            return Vec::new();
+        };
         core_live
             .iter()
             .copied()
@@ -144,7 +155,11 @@ impl ReplicaWatch {
     /// The live rows the latest read showed that have not lapsed by `now_mono`, by id.
     pub fn live(&self, now_mono: u64) -> BTreeSet<ReplicaId> {
         let lapsed: BTreeSet<ReplicaId> = self.lapsed(now_mono).into_iter().collect();
-        self.rows.keys().copied().filter(|r| !lapsed.contains(r)).collect()
+        self.rows
+            .keys()
+            .copied()
+            .filter(|r| !lapsed.contains(r))
+            .collect()
     }
 
     /// Whether `me` is the replica that ends lapsed ones: the lowest id of those this watch shows

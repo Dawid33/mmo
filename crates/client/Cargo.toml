@@ -120,6 +120,8 @@ web-sys = { version = "0.3", features = [
   "Worker", "WorkerOptions", "WorkerType", "Blob", "BlobPropertyBag", "Url",
   "MessageEvent", "ErrorEvent", "DedicatedWorkerGlobalScope", "WorkerGlobalScope",
   "Navigator", "WorkerNavigator", "console",
+  # Monotonic client timings in the page and sim worker (perf_clock.rs).
+  "Performance",
   # The player name (src/player_name.rs): localStorage + Web Crypto.
   "Storage", "Crypto",
 ] }

@@ -4,8 +4,7 @@ use crate::dynamics::{RigidBodyHandle, RigidBodySet};
 use super::IslandManager;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Debug)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Default, Debug, state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct Island {
     /// The rigid-bodies part of this island.
     ///

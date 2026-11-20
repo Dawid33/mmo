@@ -1,16 +1,13 @@
-//! The fortress panel's Debug tab (`dev_ui` feature) — dev tooling, never
-//! player UI: the last tab of the top-left fortress panel in `GameUi`
-//! (crates/slint-ui/ui/debug-tab.slint), on the tab row only in `dev_ui`
-//! builds. F3 opens it (and collapses it again), as does a click on the tab.
-//! Stats, the debug toggles (the same flags as F4–F8) and stand-ins for
-//! systems that don't exist yet.
+//! The F3 debug pane (`dev_ui` feature) — dev tooling, never player UI: a
+//! frame at the top left of `GameUi` (`DebugPane`,
+//! crates/slint-ui/ui/debug-tab.slint), drawn over every other in-game
+//! element. F3 shows and hides it. Stats, the debug toggles (the same flags as
+//! F4–F8) and stand-ins for systems that don't exist yet.
 //!
-//! The tab does not pause the game: in the commander view the pointer is
-//! free anyway, so the panel only takes it where it drew (`ui_pointer`, like
-//! any Slint layer) and panning, zoom, tools and selection keep working. Only
-//! when the sim holds the cursor (first person) does it set
-//! `CursorPolicy::overlay_open` ([`panel_claims_cursor`]), which frees the
-//! cursor and stops `forward_input` sending clicks and mouse motion to the sim.
+//! The pane never takes the game's input: it does not pause anything, does
+//! not free a grabbed cursor and holds no keys — in first person mouse look
+//! and movement carry on under it. With a free pointer (the commander view) it
+//! takes clicks only where it draws (`ui_pointer`, like any Slint layer).
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -30,15 +27,10 @@ use super::slint_overlay::SlintLayer;
 use super::voxel_pull::xray::XraySettings;
 use super::{GameEvents, LocalPlayer, UiCamera};
 
-/// Opens and collapses the Debug tab.
+/// Shows and hides the debug pane.
 pub const DEV_UI_KEY: KeyCode = KeyCode::F3;
-/// How often the stats refresh while the tab is open.
+/// How often the stats refresh while the pane is shown.
 pub const DEV_STATS_INTERVAL_S: f32 = 0.25;
-/// The Debug tab's index on the fortress panel's tab row (after Governance,
-/// People, Designations, Stocks; `GameUi.fortress-tab`).
-pub const DEBUG_TAB: i32 = 4;
-/// `GameUi.fortress-tab` with every tab collapsed.
-const NO_TAB: i32 = -1;
 
 /// The panel's debug toggles, in display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,23 +94,27 @@ pub struct DevUiPlugin;
 
 impl Plugin for DevUiPlugin {
     fn build(&self, app: &mut App) {
-        // The tab lives in the session-scoped game UI layer
-        // (`slint_overlay`), whose init calls [`connect_debug_tab`]; the
+        // The pane lives in the session-scoped game UI layer
+        // (`slint_overlay`), whose init calls [`connect_debug_pane`]; the
         // toggles' flags are preferences and outlive the session.
         use crate::session::SessionResetExt as _;
         app.add_session_reset::<DevDropTarget>().add_systems(
             Update,
-            (remember_drop_target, toggle_dev_ui, apply_dev_actions, push_dev_panel)
+            (
+                remember_drop_target,
+                toggle_dev_ui,
+                apply_dev_actions,
+                push_dev_panel,
+            )
                 .chain()
                 .run_if(crate::session::world_systems_enabled()),
         );
     }
 }
 
-/// Puts the Debug tab on the game UI's fortress panel and queues its
-/// callbacks (called from the game UI layer's init, once per session).
-pub fn connect_debug_tab(ui: &GameUi, world: &mut World) {
-    ui.set_debug_available(true);
+/// Queues the debug pane's callbacks (called from the game UI layer's init,
+/// once per session).
+pub fn connect_debug_pane(ui: &GameUi, world: &mut World) {
     let actions = Rc::new(RefCell::new(Vec::new()));
     let queue = actions.clone();
     ui.on_dev_toggle(move |i, on| {
@@ -133,32 +129,11 @@ pub fn connect_debug_tab(ui: &GameUi, world: &mut World) {
     world.insert_non_send(DevActions(actions));
 }
 
-/// The fortress tab F3 leaves open: the Debug tab, or none if it was open.
-pub fn f3_tab(current: i32) -> i32 {
-    if current == DEBUG_TAB { NO_TAB } else { DEBUG_TAB }
-}
-
-/// Whether the open panel must claim the cursor (and with it the game's
-/// input): only to free a cursor the sim has grabbed.
-pub fn panel_claims_cursor(open: bool, sim_grab: bool) -> bool {
-    open && sim_grab
-}
-
-fn toggle_dev_ui(
-    keys: Res<ButtonInput<KeyCode>>,
-    slint: Option<NonSend<SlintLayer<GameUi>>>,
-    mut cursor: ResMut<CursorPolicy>,
-) {
+fn toggle_dev_ui(keys: Res<ButtonInput<KeyCode>>, slint: Option<NonSend<SlintLayer<GameUi>>>) {
     let Some(slint) = slint else { return };
-    let ui = slint.overlay.ui();
-    // Not over the arrival map, which hides the fortress panel.
-    if keys.just_pressed(DEV_UI_KEY) && !ui.get_map_modal() {
-        ui.set_fortress_tab(f3_tab(ui.get_fortress_tab()));
-    }
-    let open = ui.get_fortress_tab() == DEBUG_TAB && !ui.get_map_modal();
-    let claim = panel_claims_cursor(open, cursor.sim_grab);
-    if cursor.overlay_open != claim {
-        cursor.overlay_open = claim;
+    if keys.just_pressed(DEV_UI_KEY) {
+        let ui = slint.overlay.ui();
+        ui.set_debug_open(!ui.get_debug_open());
     }
 }
 
@@ -172,7 +147,9 @@ pub fn toggle_checked(toggle: DevToggle, world: &World) -> bool {
         DevToggle::HideNear => world.resource::<TerrainDebug>().hide_near,
         // Shared with the game thread, which only builds lines while on.
         DevToggle::Colliders => world.resource::<DebugFlagsRes>().0.collider_wireframes(),
-        DevToggle::Xray => world.get_resource::<XraySettings>().is_some_and(|x| x.enabled),
+        DevToggle::Xray => world
+            .get_resource::<XraySettings>()
+            .is_some_and(|x| x.enabled),
     }
 }
 
@@ -184,7 +161,10 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
             DevToggle::CaveCulling => world.resource_mut::<CullingConfig>().graph_enabled = on,
             DevToggle::HideLod => world.resource_mut::<TerrainDebug>().hide_lod = on,
             DevToggle::HideNear => world.resource_mut::<TerrainDebug>().hide_near = on,
-            DevToggle::Colliders => world.resource::<DebugFlagsRes>().0.set_collider_wireframes(on),
+            DevToggle::Colliders => world
+                .resource::<DebugFlagsRes>()
+                .0
+                .set_collider_wireframes(on),
             DevToggle::Xray => world.insert_resource(XraySettings { enabled: on }),
         },
         DevAction::CompleteOrders => {
@@ -195,10 +175,21 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
         }
         DevAction::DropBody => {
             let target = world.get_resource::<DevDropTarget>().and_then(|t| t.0);
-            let home = world.get_resource::<HudStatus>().and_then(|h| h.home_region);
-            let frame = world.get_resource::<crate::wrap_frame::WrapFrame>().copied().unwrap_or_default();
-            if let (Some(client), Some(order)) = (world.resource::<LocalPlayer>().0, drop_body_order(&frame, target, home)) {
-                let _ = world.resource::<GameEvents>().0.send(game::GameEventKind::Order(client, order));
+            let home = world
+                .get_resource::<HudStatus>()
+                .and_then(|h| h.home_region);
+            let frame = world
+                .get_resource::<crate::wrap_frame::WrapFrame>()
+                .copied()
+                .unwrap_or_default();
+            if let (Some(client), Some(order)) = (
+                world.resource::<LocalPlayer>().0,
+                drop_body_order(&frame, target, home),
+            ) {
+                let _ = world
+                    .resource::<GameEvents>()
+                    .0
+                    .send(game::GameEventKind::Order(client, order));
             }
         }
     }
@@ -214,7 +205,9 @@ pub fn drop_body_order(
     home: Option<game::RegionCoords>,
 ) -> Option<game::Order> {
     let ((region, local), home) = (target?, home?);
-    Some(game::Order::DevDropBody { at: super::commander::move_order::hover_tile(frame, region, local, home) })
+    Some(game::Order::DevDropBody {
+        at: super::commander::move_order::hover_tile(frame, region, local, home),
+    })
 }
 
 /// Keeps [`DevDropTarget`] on the ground under the cursor while the cursor
@@ -236,7 +229,9 @@ fn remember_drop_target(
 }
 
 fn apply_dev_actions(world: &mut World) {
-    let Some(actions) = world.get_non_send::<DevActions>() else { return };
+    let Some(actions) = world.get_non_send::<DevActions>() else {
+        return;
+    };
     let pending: Vec<DevAction> = actions.0.borrow_mut().drain(..).collect();
     for action in pending {
         apply_dev_action(action, world);
@@ -253,21 +248,36 @@ pub fn dev_stats(
     entities: usize,
     calendar: Option<game::history::CalendarTick>,
 ) -> Vec<(String, String)> {
-    let region = |r: Option<game::RegionCoords>| r.map_or("--".into(), |r| format!("({}, {})", r.x, r.z));
+    let region =
+        |r: Option<game::RegionCoords>| r.map_or("--".into(), |r| format!("({}, {})", r.x, r.z));
     vec![
         ("FPS".into(), fps.map_or("--".into(), |f| format!("{f:.0}"))),
-        ("Frame".into(), frame_ms.map_or("--".into(), |ms| format!("{ms:.2} ms"))),
-        ("Position".into(), pos.map_or("--".into(), |p| format!("{:.1} / {:.1} / {:.1}", p.x, p.y, p.z))),
+        (
+            "Frame".into(),
+            frame_ms.map_or("--".into(), |ms| format!("{ms:.2} ms")),
+        ),
+        (
+            "Position".into(),
+            pos.map_or("--".into(), |p| {
+                format!("{:.1} / {:.1} / {:.1}", p.x, p.y, p.z)
+            }),
+        ),
         ("Home region".into(), region(status.home_region)),
         ("Viewer region".into(), region(status.viewer_region)),
         ("Connection".into(), format!("{:?}", status.connection)),
-        ("Terrain".into(), format!("near {:?}, far Raster", terrain.near)),
+        (
+            "Terrain".into(),
+            format!("near {:?}, far Raster", terrain.near),
+        ),
         ("Entities".into(), entities.to_string()),
-        ("Date".into(), calendar.map_or("--".into(), |c| c.date().to_string())),
+        (
+            "Date".into(),
+            calendar.map_or("--".into(), |c| c.date().to_string()),
+        ),
     ]
 }
 
-/// The Debug tab's tick-time table: one row per live region (`RegionId`
+/// The debug pane's tick-time table: one row per live region (`RegionId`
 /// order) — region, then mean / p50 / p95 / p99 / max in ms; the home region
 /// is marked `*`.
 pub fn tick_rows(
@@ -279,13 +289,20 @@ pub fn tick_rows(
         .iter()
         .map(|(id, s)| {
             let mark = if Some(*id) == home { "*" } else { "" };
-            [format!("({}, {}){mark}", id.x, id.z), ms(s.mean_us), ms(s.p50_us), ms(s.p95_us), ms(s.p99_us), ms(s.max_us)]
+            [
+                format!("({}, {}){mark}", id.x, id.z),
+                ms(s.mean_us),
+                ms(s.p50_us),
+                ms(s.p95_us),
+                ms(s.p99_us),
+                ms(s.max_us),
+            ]
         })
         .collect()
 }
 
-/// Client state → the Debug tab's properties: the toggles when a flag
-/// changed, the stats every [`DEV_STATS_INTERVAL_S`] while the tab is open.
+/// Client state → the debug pane's properties: the toggles when a flag
+/// changed, the stats every [`DEV_STATS_INTERVAL_S`] while the pane is shown.
 /// Models are always pushed fresh, which also resets a checkbox the user just
 /// clicked.
 fn push_dev_panel(
@@ -296,23 +313,48 @@ fn push_dev_panel(
     mut cameras: Local<Option<QueryState<&GlobalTransform, With<UiCamera>>>>,
     mut all: Local<Option<QueryState<()>>>,
 ) {
-    let Some(layer) = world.get_non_send::<SlintLayer<GameUi>>() else { return };
-    let open = layer.overlay.ui().get_fortress_tab() == DEBUG_TAB;
-    let checked: Vec<bool> = DevToggle::ALL.iter().map(|t| toggle_checked(*t, world)).collect();
+    let Some(layer) = world.get_non_send::<SlintLayer<GameUi>>() else {
+        return;
+    };
+    let open = layer.overlay.ui().get_debug_open();
+    let checked: Vec<bool> = DevToggle::ALL
+        .iter()
+        .map(|t| toggle_checked(*t, world))
+        .collect();
     let elapsed = since.map_or(f32::INFINITY, |s| s + world.resource::<Time>().delta_secs());
     let stats = (open && elapsed >= DEV_STATS_INTERVAL_S).then(|| {
         let diagnostics = world.resource::<DiagnosticsStore>();
-        let fps = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS).and_then(|d| d.smoothed());
-        let frame_ms = diagnostics.get(&FrameTimeDiagnosticsPlugin::FRAME_TIME).and_then(|d| d.smoothed());
+        let fps = diagnostics
+            .get(&FrameTimeDiagnosticsPlugin::FPS)
+            .and_then(|d| d.smoothed());
+        let frame_ms = diagnostics
+            .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+            .and_then(|d| d.smoothed());
         let cameras = cameras.get_or_insert_with(|| world.query_filtered());
         let pos = cameras.iter(world).next().map(|t| t.translation());
         let entities = all.get_or_insert_with(|| world.query()).iter(world).count();
-        let calendar = world.get_resource::<super::history_view::HistoryView>().and_then(|h| h.calendar);
-        dev_stats(fps, frame_ms, pos, world.resource(), world.resource(), entities, calendar)
+        let calendar = world
+            .get_resource::<super::history_view::HistoryView>()
+            .and_then(|h| h.calendar);
+        dev_stats(
+            fps,
+            frame_ms,
+            pos,
+            world.resource(),
+            world.resource(),
+            entities,
+            calendar,
+        )
     });
-    *since = if stats.is_some() { Some(0.0) } else { Some(elapsed.min(DEV_STATS_INTERVAL_S)) };
+    *since = if stats.is_some() {
+        Some(0.0)
+    } else {
+        Some(elapsed.min(DEV_STATS_INTERVAL_S))
+    };
 
-    let Some(layer) = world.get_non_send::<SlintLayer<GameUi>>() else { return };
+    let Some(layer) = world.get_non_send::<SlintLayer<GameUi>>() else {
+        return;
+    };
     let ui = layer.overlay.ui();
     // A new session's game UI starts with no toggles or tick rows.
     if ui.get_dev_toggles().row_count() == 0 {
@@ -344,15 +386,22 @@ fn push_dev_panel(
         let toggles: Vec<slint_ui::DevToggle> = DevToggle::ALL
             .iter()
             .zip(&checked)
-            .map(|(t, on)| slint_ui::DevToggle { label: t.label().into(), checked: *on })
+            .map(|(t, on)| slint_ui::DevToggle {
+                label: t.label().into(),
+                checked: *on,
+            })
             .collect();
         ui.set_dev_toggles(ModelRc::new(VecModel::from(toggles)));
         *shown = checked;
     }
     if let Some(rows) = stats {
-        let rows: Vec<DevStat> =
-            rows.into_iter().map(|(label, value)| DevStat { label: label.into(), value: value.into() }).collect();
+        let rows: Vec<DevStat> = rows
+            .into_iter()
+            .map(|(label, value)| DevStat {
+                label: label.into(),
+                value: value.into(),
+            })
+            .collect();
         ui.set_dev_stats(ModelRc::new(VecModel::from(rows)));
     }
 }
-

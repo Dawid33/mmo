@@ -10,8 +10,18 @@ use std::collections::BTreeMap;
 /// Numeric material identity, assigned by the manifest. `AIR` is reserved.
 /// Serialized (over the wire) and hashed, so client and server must agree.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord, Default,
-    serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    state_hash::StateHash,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct BlockId(pub u16);
 
@@ -24,7 +34,11 @@ impl BlockId {
 pub enum TextureSpec {
     Untextured,
     All(String),
-    Faces { top: String, side: String, bottom: String },
+    Faces {
+        top: String,
+        side: String,
+        bottom: String,
+    },
 }
 
 /// One manifest entry.
@@ -88,7 +102,10 @@ impl std::fmt::Display for RegistryError {
             RegistryError::DuplicateId(id) => write!(f, "duplicate block id {id}"),
             RegistryError::DuplicateName(n) => write!(f, "duplicate block name {n:?}"),
             RegistryError::MissingAir => write!(f, "block manifest must define id 0 as air"),
-            RegistryError::BadAir => write!(f, "block id 0 must be name \"air\" with Untextured textures"),
+            RegistryError::BadAir => write!(
+                f,
+                "block id 0 must be name \"air\" with Untextured textures"
+            ),
             RegistryError::UnknownDropItem { block, item } => {
                 write!(f, "block {block:?} drops unknown item {item:?}")
             }
@@ -112,11 +129,10 @@ pub struct BlockRegistry {
 
 impl BlockRegistry {
     pub fn from_ron(src: &str) -> Result<Self, RegistryError> {
-        let manifest: BlockManifest =
-            ron::Options::default()
-                .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
-                .from_str(src)
-                .map_err(|e| RegistryError::Parse(e.to_string()))?;
+        let manifest: BlockManifest = ron::Options::default()
+            .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
+            .from_str(src)
+            .map_err(|e| RegistryError::Parse(e.to_string()))?;
 
         let mut defs = BTreeMap::new();
         let mut by_name = BTreeMap::new();
@@ -140,7 +156,10 @@ impl BlockRegistry {
         for def in reg.defs.values() {
             if let Some(DropDef::Item(name)) = &def.drop {
                 if reg.drop_item(name).is_none() {
-                    return Err(RegistryError::UnknownDropItem { block: def.name.clone(), item: name.clone() });
+                    return Err(RegistryError::UnknownDropItem {
+                        block: def.name.clone(),
+                        item: name.clone(),
+                    });
                 }
             }
         }
@@ -208,4 +227,3 @@ impl BlockRegistry {
         self.defs.iter().map(|(id, def)| (*id, def))
     }
 }
-

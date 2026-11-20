@@ -31,23 +31,24 @@
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use game::coordinator::{BatchAck, CoordMsg, HostBatch, MailboxPage};
 use game::{HostId, LoginOrder};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use login_api::{HostToLogin, LoginPage, LoginToHost};
-use tokio::sync::{oneshot, watch, Semaphore};
+use tokio::sync::{Semaphore, oneshot, watch};
+use tracing::Instrument;
 use world_store::StoreHandle;
 
 /// The longest a mailbox or answers poll waits; a client's `wait_ms` is capped at it (and the
@@ -85,10 +86,18 @@ pub const REFUSED_VERSION: &str = "version";
 pub enum ApiCall {
     /// A host's batch (`POST /v1/hosts/{host}/messages`): apply it as inputs, answer when its
     /// transition committed.
-    Batch { host: HostId, batch: HostBatch, done: oneshot::Sender<Result<BatchAck, ApiRefusal>> },
+    Batch {
+        host: HostId,
+        batch: HostBatch,
+        done: oneshot::Sender<Result<BatchAck, ApiRefusal>>,
+    },
     /// A login order (`POST /v1/login/orders`): answer `Ok` once its mailbox row committed for
     /// the gate host.
-    LoginOrder { order: LoginOrder, done: oneshot::Sender<Result<(), ApiRefusal>> },
+    LoginOrder {
+        order: LoginOrder,
+        trace: Option<game::coordinator::TraceCarrier>,
+        done: oneshot::Sender<Result<(), ApiRefusal>>,
+    },
 }
 
 /// Why the coordinator's thread refused a call; every one is a 503.
@@ -115,7 +124,14 @@ impl ApiRefusal {
     }
 
     fn from_code(code: u8) -> Option<ApiRefusal> {
-        [ApiRefusal::NotReady, ApiRefusal::Fenced, ApiRefusal::NoGate, ApiRefusal::Starting].into_iter().find(|r| r.code() == code)
+        [
+            ApiRefusal::NotReady,
+            ApiRefusal::Fenced,
+            ApiRefusal::NoGate,
+            ApiRefusal::Starting,
+        ]
+        .into_iter()
+        .find(|r| r.code() == code)
     }
 
     /// The 503 body.
@@ -164,7 +180,8 @@ impl ApiListener {
     /// serving. The listener STARTS as `Some(ApiRefusal::NotReady)`: the runtime calls
     /// `set_refusal(None)` once it is Ready.
     pub fn set_refusal(&self, refusal: Option<ApiRefusal>) {
-        self.refusal.store(refusal.map_or(0, ApiRefusal::code), Ordering::SeqCst);
+        self.refusal
+            .store(refusal.map_or(0, ApiRefusal::code), Ordering::SeqCst);
     }
 }
 
@@ -196,17 +213,34 @@ pub fn serve(
     row_version: watch::Receiver<u64>,
 ) -> io::Result<ApiListener> {
     if cfg.token.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the service token is empty"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the service token is empty",
+        ));
     }
     let (tls, pin) = svc_link::pinned_server_config(&cfg.cert_file, &[b"h2"])?;
     let listener = std::net::TcpListener::bind(cfg.bind)?;
     let addr = listener.local_addr()?;
     let refusal = Arc::new(AtomicU8::new(ApiRefusal::NotReady.code()));
-    let auth = Auth { token: cfg.token, world: cfg.world };
-    let shared = Arc::new(Shared { auth, store, calls, row_version, refusal: refusal.clone() });
+    let auth = Auth {
+        token: cfg.token,
+        world: cfg.world,
+    };
+    let shared = Arc::new(Shared {
+        auth,
+        store,
+        calls,
+        row_version,
+        refusal: refusal.clone(),
+    });
     let stop = serve_tls("coordinator-api", listener, tls, router(shared))?;
     log::info!("[coordinator-api] listening on {addr} (cert sha256 {pin})");
-    Ok(ApiListener { addr, pin, refusal, _stop: stop })
+    Ok(ApiListener {
+        addr,
+        pin,
+        refusal,
+        _stop: stop,
+    })
 }
 
 /// Serves `router` over HTTPS (HTTP/2, `tls`) on `listener` from a thread of its own (named
@@ -221,52 +255,68 @@ pub(crate) fn serve_tls(
     router: Router,
 ) -> io::Result<watch::Sender<bool>> {
     listener.set_nonblocking(true)?;
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
     let (stop_tx, mut stop_rx) = watch::channel(false);
-    std::thread::Builder::new().name(name.into()).spawn(move || {
-        runtime.block_on(async move {
-            let listener = match tokio::net::TcpListener::from_std(listener) {
-                Ok(l) => l,
-                Err(e) => {
-                    log::error!("[{name}] the listener: {e}; not serving");
-                    return;
-                }
-            };
-            let slots = Arc::new(Semaphore::new(API_CONNECTIONS_MAX));
-            loop {
-                let (tcp, peer) = tokio::select! {
-                    _ = stop_rx.changed() => return,
-                    r = listener.accept() => match r {
-                        Ok(a) => a,
-                        Err(e) => {
-                            log::warn!("[{name}] accept: {e}");
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                    },
-                };
-                let Ok(permit) = slots.clone().try_acquire_owned() else {
-                    log::warn!("[{name}] refusing {peer}: {API_CONNECTIONS_MAX} connections open");
-                    continue;
-                };
-                let (acceptor, router) = (acceptor.clone(), router.clone());
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    let tls = match tokio::time::timeout(Duration::from_millis(API_TLS_HANDSHAKE_MS), acceptor.accept(tcp)).await {
-                        Ok(Ok(t)) => t,
-                        Ok(Err(e)) => return log::debug!("[{name}] TLS from {peer}: {e}"),
-                        Err(_) => return log::debug!("[{name}] TLS from {peer}: timed out"),
-                    };
-                    let mut http = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
-                    http.timer(TokioTimer::new()).keep_alive_interval(Some(Duration::from_millis(API_H2_PING_MS)));
-                    if let Err(e) = http.serve_connection(TokioIo::new(tls), TowerToHyperService::new(router)).await {
-                        log::debug!("[{name}] connection from {peer}: {e}");
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            runtime.block_on(async move {
+                let listener = match tokio::net::TcpListener::from_std(listener) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("[{name}] the listener: {e}; not serving");
+                        return;
                     }
-                });
-            }
-        })
-    })?;
+                };
+                let slots = Arc::new(Semaphore::new(API_CONNECTIONS_MAX));
+                loop {
+                    let (tcp, peer) = tokio::select! {
+                        _ = stop_rx.changed() => return,
+                        r = listener.accept() => match r {
+                            Ok(a) => a,
+                            Err(e) => {
+                                log::warn!("[{name}] accept: {e}");
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                continue;
+                            }
+                        },
+                    };
+                    let Ok(permit) = slots.clone().try_acquire_owned() else {
+                        log::warn!(
+                            "[{name}] refusing {peer}: {API_CONNECTIONS_MAX} connections open"
+                        );
+                        continue;
+                    };
+                    let (acceptor, router) = (acceptor.clone(), router.clone());
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let tls = match tokio::time::timeout(
+                            Duration::from_millis(API_TLS_HANDSHAKE_MS),
+                            acceptor.accept(tcp),
+                        )
+                        .await
+                        {
+                            Ok(Ok(t)) => t,
+                            Ok(Err(e)) => return log::debug!("[{name}] TLS from {peer}: {e}"),
+                            Err(_) => return log::debug!("[{name}] TLS from {peer}: timed out"),
+                        };
+                        let mut http =
+                            hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+                        http.timer(TokioTimer::new())
+                            .keep_alive_interval(Some(Duration::from_millis(API_H2_PING_MS)));
+                        if let Err(e) = http
+                            .serve_connection(TokioIo::new(tls), TowerToHyperService::new(router))
+                            .await
+                        {
+                            log::debug!("[{name}] connection from {peer}: {e}");
+                        }
+                    });
+                }
+            })
+        })?;
     Ok(stop_tx)
 }
 
@@ -293,7 +343,12 @@ pub(crate) fn text(status: StatusCode, body: &'static str) -> Response {
 
 pub(crate) fn packet<T: serde::Serialize>(status: StatusCode, value: &T) -> Response {
     match game::encode_packet(value) {
-        Ok(bytes) => (status, [(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
+        Ok(bytes) => (
+            status,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
         Err(e) => {
             log::error!("[coordinator-api] a response does not encode: {e}");
             text(StatusCode::INTERNAL_SERVER_ERROR, "encode")
@@ -308,17 +363,27 @@ fn refusal(r: ApiRefusal) -> Response {
 /// The auth checks every route of this API (and role `all`'s login routes) makes: token (401),
 /// world (412), link version (412). `Err`: the answer.
 pub(crate) fn check_auth(auth: &Auth, headers: &axum::http::HeaderMap) -> Result<(), Response> {
-    let bearer = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("");
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
     // Compared without an early exit (an unset header compares as empty and never matches:
     // the token is non-empty).
     if !svc_link::ct_eq(bearer.as_bytes(), auth.token.as_bytes()) {
         return Err(text(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
-    let world = headers.get(HEADER_WORLD).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let world = headers
+        .get(HEADER_WORLD)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if world != auth.world {
         return Err(text(StatusCode::PRECONDITION_FAILED, REFUSED_WORLD));
     }
-    let version = headers.get(HEADER_LINK_VERSION).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u32>().ok());
+    let version = headers
+        .get(HEADER_LINK_VERSION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u32>().ok());
     if version != Some(svc_link::LINK_PROTOCOL_VERSION) {
         return Err(text(StatusCode::PRECONDITION_FAILED, REFUSED_VERSION));
     }
@@ -329,22 +394,60 @@ pub(crate) fn check_auth(auth: &Auth, headers: &axum::http::HeaderMap) -> Result
 /// answer is counted in `mmo_coordinator_api_requests_total` by [`route_of`] and status.
 async fn guard(State(s): State<Arc<Shared>>, req: Request, next: Next) -> Response {
     let route = route_of(req.uri().path());
-    let response = if let Err(refused) = check_auth(&s.auth, req.headers()) {
-        refused
-    } else if let Some(r) = ApiRefusal::from_code(s.refusal.load(Ordering::SeqCst)) {
-        refusal(r)
-    } else {
-        next.run(req).await
-    };
-    crate::health::Health::global().api_request(route, response.status().as_u16());
+    let route_name = crate::health::API_ROUTES[route];
+    let header_values: Vec<_> = req
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)))
+        .collect();
+    let parent = observability::extract_context(header_values);
+    let operation_id = req
+        .headers()
+        .get("x-mmo-operation-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| valid_operation_id(value))
+        .map(str::to_owned)
+        .unwrap_or_else(observability::operation_id);
+    let span = tracing::info_span!(
+        "coordinator.http.request",
+        route = route_name,
+        "mmo.operation_id" = %operation_id,
+        "http.response.status_code" = tracing::field::Empty,
+        refusal = tracing::field::Empty
+    );
+    observability::set_parent(&span, parent);
+    let response = async {
+        let response = if let Err(refused) = check_auth(&s.auth, req.headers()) {
+            refused
+        } else if let Some(r) = ApiRefusal::from_code(s.refusal.load(Ordering::SeqCst)) {
+            tracing::Span::current().record("refusal", r.body());
+            refusal(r)
+        } else {
+            next.run(req).await
+        };
+        tracing::Span::current().record("http.response.status_code", response.status().as_u16());
+        crate::health::Health::global().api_request(route, response.status().as_u16());
+        response
+    }
+    .instrument(span)
+    .await;
     response
+}
+
+fn valid_operation_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// The index in [`crate::health::API_ROUTES`] of a request path: one of the four routes, else
 /// `other`. A fixed set (never the path itself: `{host}` would make a label per host).
 fn route_of(path: &str) -> usize {
     let host_route = |suffix: &str| {
-        path.strip_prefix("/v1/hosts/").and_then(|rest| rest.strip_suffix(suffix)).is_some_and(|id| !id.is_empty() && !id.contains('/'))
+        path.strip_prefix("/v1/hosts/")
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
     };
     if host_route("/messages") {
         0
@@ -370,9 +473,17 @@ fn send_call(s: &Shared, call: ApiCall) -> bool {
     s.calls.try_send(call).is_ok()
 }
 
-async fn host_messages(State(s): State<Arc<Shared>>, Path(host): Path<String>, body: Bytes) -> Response {
-    let Some(host) = host_id(&host) else { return text(StatusCode::NOT_FOUND, "host") };
-    let Ok(batch) = game::decode_packet::<HostBatch>(&body) else { return text(StatusCode::BAD_REQUEST, "batch") };
+async fn host_messages(
+    State(s): State<Arc<Shared>>,
+    Path(host): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(host) = host_id(&host) else {
+        return text(StatusCode::NOT_FOUND, "host");
+    };
+    let Ok(batch) = game::decode_packet::<HostBatch>(&body) else {
+        return text(StatusCode::BAD_REQUEST, "batch");
+    };
     let (done, answer) = oneshot::channel();
     if !send_call(&s, ApiCall::Batch { host, batch, done }) {
         return refusal(ApiRefusal::NotReady);
@@ -384,11 +495,29 @@ async fn host_messages(State(s): State<Arc<Shared>>, Path(host): Path<String>, b
     }
 }
 
-async fn login_orders(State(s): State<Arc<Shared>>, body: Bytes) -> Response {
-    let Ok(msg) = game::decode_packet::<LoginToHost>(&body) else { return text(StatusCode::BAD_REQUEST, "order") };
+async fn login_orders(
+    State(s): State<Arc<Shared>>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Ok(msg) = game::decode_packet::<LoginToHost>(&body) else {
+        return text(StatusCode::BAD_REQUEST, "order");
+    };
     let order = crate::login_link::order_from(msg);
+    let operation_id = headers
+        .get("x-mmo-operation-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| valid_operation_id(value))
+        .map(str::to_owned)
+        .unwrap_or_else(observability::operation_id);
+    let trace =
+        observability::current_carrier(operation_id).map(|trace| game::coordinator::TraceCarrier {
+            traceparent: trace.traceparent,
+            tracestate: trace.tracestate,
+            operation_id: trace.operation_id,
+        });
     let (done, answer) = oneshot::channel();
-    if !send_call(&s, ApiCall::LoginOrder { order, done }) {
+    if !send_call(&s, ApiCall::LoginOrder { order, trace, done }) {
         return refusal(ApiRefusal::NotReady);
     }
     match answer.await {
@@ -416,12 +545,17 @@ pub(crate) struct AnswersQuery {
 /// passed, waking on `versions` or every [`MAILBOX_RECHECK_MS`]. The version is marked seen
 /// BEFORE each read, so a notice arriving during it wakes the next wait at once. Shared with role
 /// `all`'s login answers (`login_link.rs`).
-pub(crate) async fn long_poll<T, E, F, Fut>(versions: &watch::Receiver<u64>, wait_ms: Option<u64>, mut read: F) -> Result<Vec<T>, E>
+pub(crate) async fn long_poll<T, E, F, Fut>(
+    versions: &watch::Receiver<u64>,
+    wait_ms: Option<u64>,
+    mut read: F,
+) -> Result<Vec<T>, E>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Vec<T>, E>>,
 {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms.unwrap_or(0).min(MAILBOX_WAIT_MS));
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(wait_ms.unwrap_or(0).min(MAILBOX_WAIT_MS));
     let mut versions = versions.clone();
     loop {
         versions.borrow_and_update();
@@ -446,7 +580,10 @@ fn store_failed(what: &str, e: world_store::StoreError) -> Response {
 
 /// Decodes stored rows as `T`; a row that does not decode is a bug (never silently skipped:
 /// delivery is exactly once, in order) and answers 500.
-fn decode_rows<T: serde::de::DeserializeOwned>(what: &str, rows: Vec<(u64, Vec<u8>)>) -> Result<Vec<(u64, T)>, Response> {
+fn decode_rows<T: serde::de::DeserializeOwned>(
+    what: &str,
+    rows: Vec<(u64, Vec<u8>)>,
+) -> Result<Vec<(u64, T)>, Response> {
     rows.into_iter()
         .map(|(seq, bytes)| match game::decode_packet::<T>(&bytes) {
             Ok(m) => Ok((seq, m)),
@@ -458,9 +595,19 @@ fn decode_rows<T: serde::de::DeserializeOwned>(what: &str, rows: Vec<(u64, Vec<u
         .collect()
 }
 
-async fn host_mailbox(State(s): State<Arc<Shared>>, Path(host): Path<String>, Query(q): Query<MailboxQuery>) -> Response {
-    let Some(host) = host_id(&host) else { return text(StatusCode::NOT_FOUND, "host") };
-    let rows = long_poll(&s.row_version, q.wait_ms, || s.store.mailbox_read(host, q.boot, q.after, MAILBOX_PAGE_MAX)).await;
+async fn host_mailbox(
+    State(s): State<Arc<Shared>>,
+    Path(host): Path<String>,
+    Query(q): Query<MailboxQuery>,
+) -> Response {
+    let Some(host) = host_id(&host) else {
+        return text(StatusCode::NOT_FOUND, "host");
+    };
+    let rows = long_poll(&s.row_version, q.wait_ms, || {
+        s.store
+            .mailbox_read(host, q.boot, q.after, MAILBOX_PAGE_MAX)
+    })
+    .await;
     match rows {
         Ok(rows) => match decode_rows::<CoordMsg>("mailbox", rows) {
             Ok(rows) => packet(StatusCode::OK, &MailboxPage { rows }),
@@ -474,7 +621,10 @@ async fn host_mailbox(State(s): State<Arc<Shared>>, Path(host): Path<String>, Qu
 /// coordinator's transitions). A cursor past every row the store ever issued is another
 /// incarnation's (a re-forged world): the store answers from the start (`login_answers_read`).
 async fn login_answers(State(s): State<Arc<Shared>>, Query(q): Query<AnswersQuery>) -> Response {
-    let rows = long_poll(&s.row_version, q.wait_ms, || s.store.login_answers_read(q.after, MAILBOX_PAGE_MAX)).await;
+    let rows = long_poll(&s.row_version, q.wait_ms, || {
+        s.store.login_answers_read(q.after, MAILBOX_PAGE_MAX)
+    })
+    .await;
     match rows {
         Ok(rows) => match decode_rows::<HostToLogin>("login answers", rows) {
             Ok(rows) => packet(StatusCode::OK, &LoginPage { rows }),

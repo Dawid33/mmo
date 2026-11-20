@@ -53,10 +53,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
-use game::{CutFailure, CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldCut, WorldManager};
+use game::{
+    CutFailure, CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldCut, WorldManager,
+};
 use world_store::{CutCommitted, CutNotice, Fence, NotifyMode, StoreError, StoreHandle};
 
-use crate::claims::{Fenced, HostClaims, ServerExit, WorldGeneration, FENCED_REFUSAL, LEAVING_REFUSAL, ROLLBACK_REFUSAL};
+use crate::claims::{
+    FENCED_REFUSAL, Fenced, HostClaims, LEAVING_REFUSAL, ROLLBACK_REFUSAL, ServerExit,
+    WorldGeneration,
+};
 use crate::coordinator_rt::CoordinatorThread;
 
 struct Pending {
@@ -105,7 +110,11 @@ pub fn resolve_staged_cuts(store: &StoreHandle) -> Result<Vec<(CutId, bool)>, St
         log::warn!(
             "[server] world cut {} was left staged by a crash: {}",
             cut.0,
-            if *committed { "committed (it was decided)" } else { "rolled back (undecided: aborted)" }
+            if *committed {
+                "committed (it was decided)"
+            } else {
+                "rolled back (undecided: aborted)"
+            }
         );
     }
     Ok(resolved)
@@ -278,7 +287,10 @@ impl CutWriter {
     /// A writer of a `claim` host (any number of hosts): its world cut parts are staged
     /// at `generation` and decided by the coordinator (see the module docs).
     pub fn with_world_cuts(claims: HostClaims, generation: WorldGeneration) -> Self {
-        CutWriter { world: Some(generation), ..CutWriter::new(claims) }
+        CutWriter {
+            world: Some(generation),
+            ..CutWriter::new(claims)
+        }
     }
 
     /// Whether this writer stages world cut parts (`claim`).
@@ -330,10 +342,19 @@ impl CutWriter {
                 self.prepare(manager, cut);
                 continue;
             }
-            let (id, tick, regions, players) = (cut.id, cut.tick, cut.regions.len(), cut.players.len());
+            let (id, tick, regions, players) =
+                (cut.id, cut.tick, cut.regions.len(), cut.players.len());
             let fence = self.claims.fence();
             let reply = self.claims.store().commit_cut(cut, (*fence).clone());
-            self.pending.push(Pending { id, tick, regions, players, queued: Instant::now(), reply, fence });
+            self.pending.push(Pending {
+                id,
+                tick,
+                regions,
+                players,
+                queued: Instant::now(),
+                reply,
+                fence,
+            });
         }
         if self.world.is_some() {
             self.pump_world(manager);
@@ -348,7 +369,13 @@ impl CutWriter {
                 }
                 Err(TryRecvError::Disconnected) => {
                     let p = self.pending.remove(i);
-                    self.settle(manager, p, Err(StoreError::Backend("the world-store thread has stopped".into())));
+                    self.settle(
+                        manager,
+                        p,
+                        Err(StoreError::Backend(
+                            "the world-store thread has stopped".into(),
+                        )),
+                    );
                 }
             }
         }
@@ -360,13 +387,20 @@ impl CutWriter {
     /// Returns whether the last cut committed.
     ///
     /// Under `claim` the exit's save is the leave cut instead ([`exit_world`]).
-    pub fn finish<S: RegionSpawner>(mut self, manager: &mut WorldManager<S>, now: Tick, timeout: Duration) -> bool {
+    pub fn finish<S: RegionSpawner>(
+        mut self,
+        manager: &mut WorldManager<S>,
+        now: Tick,
+        timeout: Duration,
+    ) -> bool {
         // A cut still pending (waiting for a region that never answered) is
         // given up by the manager at its deadline; a complete one goes first.
         self.pump(manager);
         let last = manager.begin_cut(now);
         if last.is_none() {
-            log::error!("[server] no save cut could be started at exit (one is still pending); the world is saved as of the last commit");
+            log::error!(
+                "[server] no save cut could be started at exit (one is still pending); the world is saved as of the last commit"
+            );
         }
         self.pump(manager);
         let deadline = Instant::now() + timeout;
@@ -376,12 +410,14 @@ impl CutWriter {
             let answer = match p.reply.recv_timeout(left) {
                 Ok(answer) => answer,
                 Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                    log::error!("[server] the world store did not answer the save at exit within {timeout:?}");
+                    log::error!(
+                        "[server] the world store did not answer the save at exit within {timeout:?}"
+                    );
                     break;
                 }
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                    Err(StoreError::Backend("the world-store thread has stopped".into()))
-                }
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => Err(
+                    StoreError::Backend("the world-store thread has stopped".into()),
+                ),
             };
             let p = self.pending.remove(0);
             let id = p.id;
@@ -426,7 +462,10 @@ impl CutWriter {
         // predecessor from its `SuccessionAdopted` until the settle, R4).
         let fence = self.claims.fence();
         let releases = cut.releases.clone();
-        let reply = self.claims.store().prepare_cut(cut, (*fence).clone(), generation);
+        let reply = self
+            .claims
+            .store()
+            .prepare_cut(cut, (*fence).clone(), generation);
         let mut part = WorldPart::new(id, tick, Some(reply));
         part.fence = Some(fence);
         part.releases = releases;
@@ -441,7 +480,13 @@ impl CutWriter {
                 "[server] world saving is stuck: {CUT_FAILURES_BEFORE_STUCK} world cut parts in a row could not be staged, \
                  the last with: {why} (nothing is dropped; every cut retries what is uncommitted)"
             );
-            game::perf_event!("world_save_stuck", "failed={} cut={} tick={}", self.failed_in_a_row, id.0, tick);
+            game::perf_event!(
+                "world_save_stuck",
+                "failed={} cut={} tick={}",
+                self.failed_in_a_row,
+                id.0,
+                tick
+            );
         }
     }
 
@@ -451,7 +496,9 @@ impl CutWriter {
         if let Some(part) = self.part.as_mut() {
             let answer = match part.reply.as_ref().map(|r| r.try_recv()) {
                 Some(Ok(answer)) => Some(answer),
-                Some(Err(TryRecvError::Disconnected)) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+                Some(Err(TryRecvError::Disconnected)) => Some(Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                ))),
                 Some(Err(TryRecvError::Empty)) | None => None,
             };
             if let Some(answer) = answer {
@@ -466,7 +513,8 @@ impl CutWriter {
                     Err(e) => {
                         // Only a `Backend` error (a lost lock conflict among them) may leave the
                         // part staged (its mark kept).
-                        part.maybe_staged = matches!(e, StoreError::Backend(_) | StoreError::LockConflict { .. });
+                        part.maybe_staged =
+                            matches!(e, StoreError::Backend(_) | StoreError::LockConflict { .. });
                         failure = Some((part.id, part.tick, e, part.fence.clone()));
                     }
                 }
@@ -475,7 +523,10 @@ impl CutWriter {
         if let Some((id, tick, e, fence)) = failure {
             let fence = fence.unwrap_or_else(|| self.claims.fence());
             if self.claims.note_refusal_under(&fence, &e) {
-                log::error!("[server] world cut {} was refused as fenced; this server was replaced and stops", id.0);
+                log::error!(
+                    "[server] world cut {} was refused as fenced; this server was replaced and stops",
+                    id.0
+                );
             }
             if let StoreError::StaleGeneration { stored, .. } = &e {
                 self.world.as_ref().expect("world cuts").note(*stored);
@@ -487,7 +538,11 @@ impl CutWriter {
                 // Another cut's part is undecided on this handle: that one is settled first
                 // (obligation 4), with the decision stored for it.
                 StoreError::CutPending(other) => {
-                    log::error!("[server] world cut {}: the store still holds part of cut {} undecided", id.0, other.0);
+                    log::error!(
+                        "[server] world cut {}: the store still holds part of cut {} undecided",
+                        id.0,
+                        other.0
+                    );
                     self.part = Some(WorldPart::new(*other, tick, None));
                 }
                 _ if !self.part.as_ref().is_some_and(|p| p.maybe_staged) => self.part = None,
@@ -505,7 +560,9 @@ impl CutWriter {
                 // store freed the rows). Lifting the mask as for a failure would leave manager
                 // and fence holding land the store gave up (a false fenced exit at the next
                 // load or part): it is settled by the store's decision instead, as a part is.
-                _ if committed && (!manager.releases_of(cut).is_empty() || manager.gives_land_in(cut)) => {
+                _ if committed
+                    && (!manager.releases_of(cut).is_empty() || manager.gives_land_in(cut)) =>
+                {
                     log::warn!(
                         "[server] world cut {} committed and this host masked land for its release, but no part of it is \
                          tracked here: settled by the store's decision",
@@ -516,7 +573,10 @@ impl CutWriter {
                     }
                 }
                 _ => {
-                    log::debug!("[server] world cut {} decided ({committed}); nothing of it staged here", cut.0);
+                    log::debug!(
+                        "[server] world cut {} decided ({committed}); nothing of it staged here",
+                        cut.0
+                    );
                     manager.cut_failed(cut);
                 }
             }
@@ -538,10 +598,14 @@ impl CutWriter {
     /// what this host can see of the cause ([`absent_cut_warning`]) — the `hosts` rows read
     /// first, on the store thread (the loop never waits).
     fn warn_absent_cuts<S: RegionSpawner>(&mut self, manager: &WorldManager<S>) {
-        let Some(period) = self.world_period else { return };
+        let Some(period) = self.world_period else {
+            return;
+        };
         let every = period.max(self.commit_gap.unwrap_or_default());
         let span = every * (CUT_FAILURES_BEFORE_STUCK + 1);
-        if self.world_saved.elapsed() < span || self.absent_warned.is_some_and(|at| at.elapsed() < span) {
+        if self.world_saved.elapsed() < span
+            || self.absent_warned.is_some_and(|at| at.elapsed() < span)
+        {
             self.absent_read = None;
             return;
         }
@@ -560,7 +624,11 @@ impl CutWriter {
         let me = self.claims.fence().owner;
         let cause = AbsentCause {
             coordinator_detached: !manager.world_attached(),
-            successions: manager.successions().into_iter().map(|(id, _)| id.0).collect(),
+            successions: manager
+                .successions()
+                .into_iter()
+                .map(|(id, _)| id.0)
+                .collect(),
             dirty_unattached: rows
                 .iter()
                 .filter(|r| r.id != me && !r.clean && r.state == world_store::HOST_LIVE)
@@ -568,7 +636,10 @@ impl CutWriter {
                 .map(|r| r.id)
                 .collect(),
         };
-        log::error!("{}", absent_cut_warning(self.world_saved.elapsed(), every, &cause));
+        log::error!(
+            "{}",
+            absent_cut_warning(self.world_saved.elapsed(), every, &cause)
+        );
     }
 
     /// Settle the world part once it is decided: the store first (`cut_decided`, which
@@ -576,7 +647,9 @@ impl CutWriter {
     /// is aborted (or past the deadline) while the store has no decision: this host
     /// records the abort itself (`abort_cut`), then settles.
     fn settle_world<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
-        let Some(part) = self.part.as_mut() else { return };
+        let Some(part) = self.part.as_mut() else {
+            return;
+        };
         if part.reply.is_some() {
             return;
         }
@@ -584,11 +657,16 @@ impl CutWriter {
             let failed = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
                 Ok(Ok(committed)) => {
-                    log::info!("[server] world cut {}: decided {committed} (this host's abort, or an earlier decision)", part.id.0);
+                    log::info!(
+                        "[server] world cut {}: decided {committed} (this host's abort, or an earlier decision)",
+                        part.id.0
+                    );
                     None
                 }
                 Ok(Err(e)) => Some(e.to_string()),
-                Err(TryRecvError::Disconnected) => Some("the world-store thread has stopped".into()),
+                Err(TryRecvError::Disconnected) => {
+                    Some("the world-store thread has stopped".into())
+                }
             };
             part.aborting = None;
             match failed {
@@ -601,7 +679,10 @@ impl CutWriter {
                     let id = part.id;
                     if self.warned.is_none_or(|at| at.elapsed() >= WORLD_PART_WARN) {
                         self.warned = Some(Instant::now());
-                        log::warn!("[server] world cut {}: this host's abort could not be recorded ({e}); trying again", id.0);
+                        log::warn!(
+                            "[server] world cut {}: this host's abort could not be recorded ({e}); trying again",
+                            id.0
+                        );
                     }
                     return;
                 }
@@ -611,7 +692,9 @@ impl CutWriter {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
                 Ok(answer) => answer,
-                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                )),
             };
             part.deciding = None;
             let id = part.id;
@@ -626,10 +709,16 @@ impl CutWriter {
                     // earlier one, a commit with no part tracked), what the manager masked for
                     // that cut, at the epoch it masked it at.
                     let fence = part.fence.take();
-                    let mut releases: Vec<(game::SuperRegion, u64)> = std::mem::take(&mut part.releases)
-                        .into_iter()
-                        .filter_map(|sr| fence.as_ref().and_then(|f| f.epochs.get(&sr)).map(|e| (sr, *e)))
-                        .collect();
+                    let mut releases: Vec<(game::SuperRegion, u64)> =
+                        std::mem::take(&mut part.releases)
+                            .into_iter()
+                            .filter_map(|sr| {
+                                fence
+                                    .as_ref()
+                                    .and_then(|f| f.epochs.get(&sr))
+                                    .map(|e| (sr, *e))
+                            })
+                            .collect();
                     for (sr, epoch) in manager.release_epochs_of(id) {
                         if !releases.iter().any(|(q, _)| *q == sr) {
                             releases.push((sr, epoch));
@@ -660,17 +749,26 @@ impl CutWriter {
                     if part.done == Some(false) || late {
                         if self.warned.is_none_or(|at| at.elapsed() >= WORLD_PART_WARN) {
                             self.warned = Some(Instant::now());
-                            log::warn!("[server] world cut {}: no decision stored; this host aborts it", id.0);
+                            log::warn!(
+                                "[server] world cut {}: no decision stored; this host aborts it",
+                                id.0
+                            );
                         }
                         part.aborting = Some(self.claims.store().abort_cut_later(id, part.tick));
                     } else if part.done == Some(true) {
-                        log::error!("[server] world cut {}: told committed, the store has no decision; asking again", id.0);
+                        log::error!(
+                            "[server] world cut {}: told committed, the store has no decision; asking again",
+                            id.0
+                        );
                     }
                 }
                 Err(e) => {
                     if self.warned.is_none_or(|at| at.elapsed() >= WORLD_PART_WARN) {
                         self.warned = Some(Instant::now());
-                        log::warn!("[server] world cut {}: its decision could not be read ({e}); asking again", id.0);
+                        log::warn!(
+                            "[server] world cut {}: its decision could not be read ({e}); asking again",
+                            id.0
+                        );
                     }
                 }
             }
@@ -682,10 +780,18 @@ impl CutWriter {
         }
     }
 
-    fn settle<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {
+    fn settle<S: RegionSpawner>(
+        &mut self,
+        manager: &mut WorldManager<S>,
+        p: Pending,
+        answer: Result<CutCommitted, StoreError>,
+    ) {
         if let Err(e) = &answer {
             if self.claims.note_refusal_under(&p.fence, e) {
-                log::error!("[server] save cut {} was refused: {e}; this server was replaced and stops", p.id.0);
+                log::error!(
+                    "[server] save cut {} was refused: {e}; this server was replaced and stops",
+                    p.id.0
+                );
             }
         }
         match &answer {
@@ -702,7 +808,13 @@ impl CutWriter {
                         "[server] world saving is stuck: {CUT_FAILURES_BEFORE_STUCK} save cuts in a row failed, \
                          the last with: {e} (nothing is dropped; every cut retries what is uncommitted)"
                     );
-                    game::perf_event!("world_save_stuck", "failed={} cut={} tick={}", self.failed_in_a_row, p.id.0, p.tick);
+                    game::perf_event!(
+                        "world_save_stuck",
+                        "failed={} cut={} tick={}",
+                        self.failed_in_a_row,
+                        p.id.0,
+                        p.tick
+                    );
                 }
             }
         }
@@ -807,13 +919,19 @@ fn leave_world<S: RegionSpawner>(
         if world_generation.is_set() {
             manager.refuse_sessions(&clients, ROLLBACK_REFUSAL);
             cuts.finish_without_cut(manager);
-            log::error!("[server] world rolled back while leaving: {}; nothing more is saved", world_generation.why());
+            log::error!(
+                "[server] world rolled back while leaving: {}; nothing more is saved",
+                world_generation.why()
+            );
             return ServerExit::WorldRolledBack;
         }
         let settled = cuts.world_part().is_none();
         match manager.leave_outcome() {
             Some(true) if settled => {
-                log::info!("[server] left the world in cut {}: saved", manager.leaving_cut().map_or(0, |c| c.0));
+                log::info!(
+                    "[server] left the world in cut {}: saved",
+                    manager.leaving_cut().map_or(0, |c| c.0)
+                );
                 // Only now, the cut committed with every player parked in it: a client told
                 // earlier could rejoin elsewhere before its record was saved (lost progress).
                 manager.refuse_sessions(&clients, LEAVING_REFUSAL);
@@ -839,10 +957,16 @@ fn leave_world<S: RegionSpawner>(
         let late = match begun {
             None => asked.elapsed() >= cuts.leave_timeout,
             // Named, never decided (the coordinator gone): past the cut's deadline and a save.
-            Some(at) => at.elapsed() >= Duration::from_millis(game::WORLD_CUT_DEADLINE_MS) + save_timeout,
+            Some(at) => {
+                at.elapsed() >= Duration::from_millis(game::WORLD_CUT_DEADLINE_MS) + save_timeout
+            }
         };
         if late {
-            let what = if begun.is_some() { "the leave cut was never decided" } else { "no leave cut began" };
+            let what = if begun.is_some() {
+                "the leave cut was never decided"
+            } else {
+                "no leave cut began"
+            };
             log::error!("[server] {what}: {LEFT_WITHOUT_A_CUT}");
             manager.refuse_sessions(&clients, LEAVING_REFUSAL);
             cuts.finish_without_cut(manager);
@@ -896,7 +1020,17 @@ pub fn exit_world<S: RegionSpawner>(
     params: ExitParams<'_, impl Fn() -> u64, impl Fn() -> Tick>,
     idle: impl FnMut(&mut WorldManager<S>),
 ) -> ServerExit {
-    let ExitParams { region_out, now_ms, mut cuts, coordinator, fenced, world_generation, park_timeout, save_timeout, now_tick } = params;
+    let ExitParams {
+        region_out,
+        now_ms,
+        mut cuts,
+        coordinator,
+        fenced,
+        world_generation,
+        park_timeout,
+        save_timeout,
+        now_tick,
+    } = params;
     let fenced_now = fenced.is_set() || cuts.as_ref().is_some_and(|c| c.fenced().is_set());
     if fenced_now {
         manager.refuse_all_sessions(FENCED_REFUSAL);
@@ -907,7 +1041,9 @@ pub fn exit_world<S: RegionSpawner>(
             Some(cuts) => cuts.finish_without_cut(manager),
             None => {}
         }
-        log::error!("[server] fenced: another process owns this server's super-regions; nothing more is saved");
+        log::error!(
+            "[server] fenced: another process owns this server's super-regions; nothing more is saved"
+        );
         return ServerExit::Fenced;
     }
     if world_generation.is_set() {
@@ -920,16 +1056,30 @@ pub fn exit_world<S: RegionSpawner>(
         if let Some(cuts) = cuts {
             cuts.finish_without_cut(manager);
         }
-        log::error!("[server] world rolled back: {}; nothing more is saved", world_generation.why());
+        log::error!(
+            "[server] world rolled back: {}; nothing more is saved",
+            world_generation.why()
+        );
         return ServerExit::WorldRolledBack;
     }
     if let Some(cuts) = cuts.take_if(|c| c.world_cuts()) {
         if let Some(coordinator) = coordinator {
             // A host of several has no coordinator of its own.
-            log::error!("[server] a host of several with an in-process coordinator: it stops without a save");
+            log::error!(
+                "[server] a host of several with an in-process coordinator: it stops without a save"
+            );
             coordinator.stop_without_save();
         }
-        return leave_world(manager, cuts, region_out, &now_ms, fenced, world_generation, save_timeout, idle);
+        return leave_world(
+            manager,
+            cuts,
+            region_out,
+            &now_ms,
+            fenced,
+            world_generation,
+            save_timeout,
+            idle,
+        );
     }
     // A refusal after the parks below reaches the sessions they ended only by id.
     let clients = manager.session_ids();
@@ -951,10 +1101,14 @@ pub fn exit_world<S: RegionSpawner>(
         if let Some(cuts) = cuts {
             cuts.finish_without_cut(manager);
         }
-        log::error!("[server] fenced: another process took over this world's coordinator; nothing more is saved");
+        log::error!(
+            "[server] fenced: another process took over this world's coordinator; nothing more is saved"
+        );
         return ServerExit::Fenced;
     }
-    let Some(mut cuts) = cuts else { return ServerExit::Clean };
+    let Some(mut cuts) = cuts else {
+        return ServerExit::Clean;
+    };
     if !given_up.is_empty() {
         log::error!(
             "[server] no exit save: {} region(s) did not park ({given_up:?}); the world restarts from its last committed save",
@@ -977,12 +1131,18 @@ pub fn exit_world<S: RegionSpawner>(
         manager.refuse_sessions(&clients, FENCED_REFUSAL);
         return ServerExit::Fenced;
     } else {
-        log::error!("[server] the world was not saved at exit; it restarts from its last committed save");
+        log::error!(
+            "[server] the world was not saved at exit; it restarts from its last committed save"
+        );
     }
     ServerExit::Clean
 }
 
-fn settle<S: RegionSpawner>(manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {
+fn settle<S: RegionSpawner>(
+    manager: &mut WorldManager<S>,
+    p: Pending,
+    answer: Result<CutCommitted, StoreError>,
+) {
     match answer {
         Ok(done) => {
             game::perf_event!(
@@ -998,7 +1158,11 @@ fn settle<S: RegionSpawner>(manager: &mut WorldManager<S>, p: Pending, answer: R
             manager.cut_committed(done.id, done.versions);
         }
         Err(e) => {
-            log::error!("[server] save cut {} at tick {} was not committed: {e} (the next cut carries it again)", p.id.0, p.tick);
+            log::error!(
+                "[server] save cut {} at tick {} was not committed: {e} (the next cut carries it again)",
+                p.id.0,
+                p.tick
+            );
             manager.cut_failed(p.id);
         }
     }
@@ -1043,7 +1207,13 @@ impl TerrainWatch {
     /// Starts listening on `store` in `mode` (`VOXEL_TERRAIN_NOTIFY`).
     pub fn start(store: StoreHandle, mode: NotifyMode) -> TerrainWatch {
         let notices = store.listen_cuts(mode);
-        TerrainWatch { store, notices, reading: None, next: None, warned: None }
+        TerrainWatch {
+            store,
+            notices,
+            reading: None,
+            next: None,
+            warned: None,
+        }
     }
 
     /// Takes the notices that came, hands an answered read to the manager, and starts the
@@ -1060,15 +1230,22 @@ impl TerrainWatch {
             let answer = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
                 Ok(answer) => answer,
-                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                )),
             };
             self.reading = None;
             match answer {
                 Ok(versions) => manager.stored_terrain_changed(versions),
                 Err(e) => {
-                    if self.warned.is_none_or(|at| at.elapsed() >= TERRAIN_WATCH_WARN) {
+                    if self
+                        .warned
+                        .is_none_or(|at| at.elapsed() >= TERRAIN_WATCH_WARN)
+                    {
                         self.warned = Some(Instant::now());
-                        log::warn!("[server] reading the stored regions' versions failed ({e}); the next notice or poll reads them again");
+                        log::warn!(
+                            "[server] reading the stored regions' versions failed ({e}); the next notice or poll reads them again"
+                        );
                     }
                 }
             }
@@ -1081,4 +1258,3 @@ impl TerrainWatch {
         }
     }
 }
-

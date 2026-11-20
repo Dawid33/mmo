@@ -3,10 +3,10 @@
 //! scripted client, its region outputs and packets pumped by hand. Moved out
 //! of `handoff_schedule.rs` so the seam-translation harness
 //! ([`super::seam_translate`]) drives the same rig.
-use crossbeam::channel::{unbounded, Receiver};
+use crossbeam::channel::{Receiver, unbounded};
 use game::{
-    ClientId, Column, ColumnCoords, EntityId, GameEventKind, InlineLodBuilder, InlineSpawner, InputEvent, LodBuilder, RegionCoords, RegionOutput, ServerEvent,
-    ServerPacket, WorldManager,
+    ClientId, Column, ColumnCoords, EntityId, GameEventKind, InlineLodBuilder, InlineSpawner,
+    InputEvent, LodBuilder, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager,
 };
 use std::collections::BTreeMap;
 
@@ -22,7 +22,10 @@ pub struct Rig {
     /// Latest authoritative `PlayerRegion` push — what a client would believe.
     pub pushed_home: Option<RegionCoords>,
     /// [`Rig::start_trace`]: each traced region's tick, and what was seen.
-    pub trace: Option<(std::collections::BTreeMap<RegionCoords, u64>, Vec<(RegionCoords, Seen)>)>,
+    pub trace: Option<(
+        std::collections::BTreeMap<RegionCoords, u64>,
+        Vec<(RegionCoords, Seen)>,
+    )>,
     /// Every non-person entity [`assert_conserved`] has seen, and where it
     /// was last (`None` = in flight): it must never vanish.
     pub tracked: std::collections::BTreeMap<EntityId, Option<RegionCoords>>,
@@ -51,7 +54,6 @@ pub struct Rig {
 }
 
 impl Rig {
-
     /// [`Rig::with_floor`] over a given spawner (a restarted world's).
     pub fn with_spawner(
         spawner: InlineSpawner,
@@ -69,7 +71,14 @@ impl Rig {
             water: Box::new(game::lod::LodWater::dry),
             out: lod_result_send,
         });
-        let mut manager = WorldManager::new(spawner, Box::new(floor), out_send, region_out_send, lod_builder, lod_result_recv);
+        let mut manager = WorldManager::new(
+            spawner,
+            Box::new(floor),
+            out_send,
+            region_out_send,
+            lod_builder,
+            lod_result_recv,
+        );
         // The peer journal's seeded tests run on `static` hosts too (the mechanism does not
         // depend on the policy); the product journals only under `claim`
         // (`peer_schedule::hosts_under_the_rollback_policy_journal_nothing`).
@@ -119,19 +128,25 @@ impl Rig {
                 if let RegionOutput::Intents(list) = &out {
                     self.intents_seen.extend(list.iter().map(|m| (rc, *m)));
                 }
-                if let (Some(seen), RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..)) =
-                    (self.events_seen.as_mut(), &out)
+                if let (
+                    Some(seen),
+                    RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..),
+                ) = (self.events_seen.as_mut(), &out)
                 {
                     seen.push((rc, e.kind.clone()));
                 }
-                if let (Some(streams), RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..)) =
-                    (self.event_streams.as_mut(), &out)
+                if let (
+                    Some(streams),
+                    RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..),
+                ) = (self.event_streams.as_mut(), &out)
                 {
                     streams.entry(rc).or_default().push((e.id, e.kind.clone()));
                 }
                 if let RegionOutput::CutMissed(id) = &out {
                     let mut at = 0;
-                    self.manager.spawner_mut().with_region(rc, |r| at = r.current_tick());
+                    self.manager
+                        .spawner_mut()
+                        .with_region(rc, |r| at = r.current_tick());
                     self.cut_missed.push((rc, *id, at));
                 }
                 self.manager.handle_region_output(rc, out, self.now_ms);
@@ -146,7 +161,8 @@ impl Rig {
                     ServerPacket::PlayerRegion(home, client)
                 }
                 ServerPacket::Region(rc, state) => {
-                    self.snapshot_has_player.insert(rc, state.player_entites.contains_key(&CLIENT));
+                    self.snapshot_has_player
+                        .insert(rc, state.player_entites.contains_key(&CLIENT));
                     continue;
                 }
                 other => other,
@@ -180,14 +196,22 @@ pub enum Seen {
 }
 
 impl Rig {
-
     pub fn trace_output(&mut self, rc: RegionCoords, out: &RegionOutput) {
-        let Some((ticks, seen)) = self.trace.as_mut() else { return };
-        let Some(tick) = ticks.get_mut(&rc) else { return };
+        let Some((ticks, seen)) = self.trace.as_mut() else {
+            return;
+        };
+        let Some(tick) = ticks.get_mut(&rc) else {
+            return;
+        };
         let events = match out {
-            RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..) => vec![&e.kind],
+            RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..) => {
+                vec![&e.kind]
+            }
             RegionOutput::Departures(list, stamp) => {
-                if list.iter().any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(CLIENT)) {
+                if list
+                    .iter()
+                    .any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(CLIENT))
+                {
                     seen.push((rc, Seen::Departed { stamp: *stamp }));
                 }
                 vec![]
@@ -198,9 +222,17 @@ impl Rig {
             match kind {
                 GameEventKind::Tick => *tick += 1,
                 GameEventKind::PlayerInput(CLIENT, InputEvent::Resized { width, .. }) => {
-                    seen.push((rc, Seen::Marker { seq: *width, tick: *tick }))
+                    seen.push((
+                        rc,
+                        Seen::Marker {
+                            seq: *width,
+                            tick: *tick,
+                        },
+                    ))
                 }
-                GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(CLIENT) => {
+                GameEventKind::EntityArrived(b)
+                    if b.client.as_ref().map(|(c, _)| *c) == Some(CLIENT) =>
+                {
                     seen.push((rc, Seen::Arrived))
                 }
                 _ => {}

@@ -19,9 +19,9 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
+use std::io::{Read, Seek, SeekFrom};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::io::{Read, Seek, SeekFrom};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -81,7 +81,11 @@ pub fn server_binary_from(override_bin: Option<OsString>, exe: &Path) -> PathBuf
     if let Some(bin) = override_bin.filter(|b| !b.is_empty()) {
         return PathBuf::from(bin);
     }
-    let name = if cfg!(windows) { "server.exe" } else { "server" };
+    let name = if cfg!(windows) {
+        "server.exe"
+    } else {
+        "server"
+    };
     exe.parent().unwrap_or(Path::new(".")).join(name)
 }
 
@@ -89,7 +93,10 @@ pub fn server_binary_from(override_bin: Option<OsString>, exe: &Path) -> PathBuf
 /// `worlds/default.world` (whose entry dir is the worlds root), which logs to
 /// `worlds/default.server.log` beside it.
 pub fn server_log_path(entry_dir: &Path, terrain: &Path) -> PathBuf {
-    if terrain.file_name().is_some_and(|n| n == worldgen::world_store::TERRAIN_FILE) {
+    if terrain
+        .file_name()
+        .is_some_and(|n| n == worldgen::world_store::TERRAIN_FILE)
+    {
         entry_dir.join("server.log")
     } else {
         terrain.with_extension("server.log")
@@ -98,7 +105,9 @@ pub fn server_log_path(entry_dir: &Path, terrain: &Path) -> PathBuf {
 
 /// The last `lines` lines within the last `max_bytes` of the file at `path`.
 fn tail_lines(path: &Path, lines: usize, max_bytes: u64) -> String {
-    let Ok(mut file) = File::open(path) else { return String::new() };
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
     let len = file.metadata().map_or(0, |m| m.len());
     let start = len.saturating_sub(max_bytes);
     if file.seek(SeekFrom::Start(start)).is_err() {
@@ -131,7 +140,12 @@ impl LocalHost {
     }
 
     /// [`start`](Self::start) with extra environment variables for the child.
-    pub fn start_with_env(terrain: &Path, log: &Path, port: Option<u16>, extra_env: &[(&str, &str)]) -> io::Result<LocalHost> {
+    pub fn start_with_env(
+        terrain: &Path,
+        log: &Path,
+        port: Option<u16>,
+        extra_env: &[(&str, &str)],
+    ) -> io::Result<LocalHost> {
         Self::start_env(&server_binary(), terrain, log, port, extra_env)
     }
 
@@ -141,7 +155,12 @@ impl LocalHost {
     }
 
     /// [`start`](Self::start) with an explicit binary and port.
-    pub fn start_on(binary: &Path, terrain: &Path, log: &Path, port: Option<u16>) -> io::Result<LocalHost> {
+    pub fn start_on(
+        binary: &Path,
+        terrain: &Path,
+        log: &Path,
+        port: Option<u16>,
+    ) -> io::Result<LocalHost> {
         Self::start_env(binary, terrain, log, port, &[])
     }
 
@@ -164,7 +183,10 @@ impl LocalHost {
         let err = out.try_clone()?;
         let mut child = Command::new(binary)
             .env("VOXEL_WORLD_FILE", terrain)
-            .env("VOXEL_WORLD_DB", worldgen::world_store::store_path_for(terrain))
+            .env(
+                "VOXEL_WORLD_DB",
+                worldgen::world_store::store_path_for(terrain),
+            )
             .env(SINGLE_PLAYER_ENV, "1")
             .env(SERVER_PORT_ENV, port.to_string())
             .envs(extra_env.iter().copied())
@@ -172,9 +194,19 @@ impl LocalHost {
             .stdout(out)
             .stderr(err)
             .spawn()
-            .map_err(|e| io::Error::new(e.kind(), format!("could not start {}: {e}", binary.display())))?;
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("could not start {}: {e}", binary.display()),
+                )
+            })?;
         let stdin = child.stdin.take();
-        Ok(LocalHost { child, stdin, log: log.to_path_buf(), addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) })
+        Ok(LocalHost {
+            child,
+            stdin,
+            log: log.to_path_buf(),
+            addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+        })
     }
 
     /// Close the child's stdin: a single-player server takes it as its
@@ -230,7 +262,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn scratch(name: &str) -> PathBuf {
-        let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/local-host-tests").join(name);
+        let d = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/local-host-tests")
+            .join(name);
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -261,7 +295,8 @@ mod tests {
         let _taken = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6466));
         let dir = scratch("taken");
         let bin = script(&dir, "echo started");
-        let mut host = LocalHost::start_with(&bin, Path::new("t.world"), &dir.join("server.log")).unwrap();
+        let mut host =
+            LocalHost::start_with(&bin, Path::new("t.world"), &dir.join("server.log")).unwrap();
         wait_for(|| host.try_exited().is_some());
         assert_eq!(host.log_tail(1), "started");
     }

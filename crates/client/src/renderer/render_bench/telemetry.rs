@@ -135,4 +135,3 @@ pub fn translate_snapshot(snapshot: &RenderThreadSnapshot) -> TranslatedTelemetr
     translated.near.reserved_bytes = snapshot.near_reserved_bytes;
     translated
 }
-

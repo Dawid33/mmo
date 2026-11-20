@@ -14,8 +14,9 @@
 use std::fmt;
 
 use login_api::{
-    ApiError, ApiErrorCode, JoinRequest, JoinResponse, LoginConfigResponse, LoginResponse, OidcLoginRequest,
-    RefreshRequest, WorldEntry, PATH_CONFIG, PATH_JOIN, PATH_LOGIN_OIDC, PATH_LOGOUT, PATH_REFRESH, PATH_WORLDS,
+    ApiError, ApiErrorCode, JoinRequest, JoinResponse, LoginConfigResponse, LoginResponse,
+    OidcLoginRequest, PATH_CONFIG, PATH_JOIN, PATH_LOGIN_OIDC, PATH_LOGOUT, PATH_REFRESH,
+    PATH_WORLDS, RefreshRequest, WorldEntry,
 };
 use serde::de::DeserializeOwned;
 
@@ -66,23 +67,35 @@ impl fmt::Display for LoginFailure {
         match self {
             LoginFailure::Network(_) => f.write_str("Can't reach the login server"),
             LoginFailure::Api(e) => match e.code {
-                ApiErrorCode::Revoked => f.write_str("Your login expired \u{2014} please log in again"),
+                ApiErrorCode::Revoked => {
+                    f.write_str("Your login expired \u{2014} please log in again")
+                }
                 ApiErrorCode::UnknownWorld => f.write_str("That world does not exist"),
                 ApiErrorCode::WorldClosed => f.write_str("That world is closed"),
-                ApiErrorCode::WorldUnavailable => {
-                    f.write_str("That world's server is not reachable right now \u{2014} try again shortly")
+                ApiErrorCode::WorldUnavailable => f.write_str(
+                    "That world's server is not reachable right now \u{2014} try again shortly",
+                ),
+                ApiErrorCode::IdentityRefused => {
+                    f.write_str("Sign-in was not accepted. Try again.")
                 }
-                ApiErrorCode::IdentityRefused => f.write_str("Sign-in was not accepted. Try again."),
-                ApiErrorCode::IdentityConflict => f.write_str("That email already belongs to another game account."),
+                ApiErrorCode::IdentityConflict => {
+                    f.write_str("That email already belongs to another game account.")
+                }
                 ApiErrorCode::BadRequest => f.write_str(&e.message),
-                ApiErrorCode::Internal => f.write_str("The login server had a problem \u{2014} try again later"),
+                ApiErrorCode::Internal => {
+                    f.write_str("The login server had a problem \u{2014} try again later")
+                }
                 ApiErrorCode::WorldStarting => {
                     f.write_str("That world is still starting \u{2014} try again in a minute")
                 }
             },
-            LoginFailure::Protocol(_) => f.write_str("The login server sent an answer we do not understand"),
+            LoginFailure::Protocol(_) => {
+                f.write_str("The login server sent an answer we do not understand")
+            }
             LoginFailure::NoSignIn => f.write_str(NO_SIGN_IN),
-            LoginFailure::Provider(_) => f.write_str("Can't start the sign-in \u{2014} try again later"),
+            LoginFailure::Provider(_) => {
+                f.write_str("Can't start the sign-in \u{2014} try again later")
+            }
         }
     }
 }
@@ -112,7 +125,8 @@ pub fn parse_response<T: DeserializeOwned>(status: u16, body: &[u8]) -> Result<T
         if let Ok(unit) = serde_json::from_value::<T>(serde_json::Value::Null) {
             return Ok(unit);
         }
-        return serde_json::from_slice(body).map_err(|e| LoginFailure::Protocol(format!("{status} (bad body: {e})")));
+        return serde_json::from_slice(body)
+            .map_err(|e| LoginFailure::Protocol(format!("{status} (bad body: {e})")));
     }
     match serde_json::from_slice::<ApiError>(body) {
         Ok(error) => Err(LoginFailure::Api(error)),
@@ -131,7 +145,10 @@ impl LoginApi {
     pub fn new(base: impl Into<String>) -> Self {
         let base = base.into().trim_end_matches('/').to_string();
         #[cfg(not(target_arch = "wasm32"))]
-        let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build().unwrap_or_default();
+        let http = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_default();
         #[cfg(target_arch = "wasm32")]
         let http = reqwest::Client::new();
         Self { base, http }
@@ -140,7 +157,9 @@ impl LoginApi {
     /// Where this service's players sign in; [`LoginFailure::NoSignIn`] when
     /// it has no identity provider.
     pub async fn config(&self) -> Result<LoginConfigResponse, LoginFailure> {
-        let (status, body) = self.exchange(self.http.get(format!("{}{PATH_CONFIG}", self.base))).await?;
+        let (status, body) = self
+            .exchange(self.http.get(format!("{}{PATH_CONFIG}", self.base)))
+            .await?;
         if status == 404 {
             return Err(LoginFailure::NoSignIn);
         }
@@ -150,20 +169,29 @@ impl LoginApi {
     /// Starts a device sign-in at the identity provider `issuer` for
     /// `client_id`, with the PKCE S256 `challenge` of the verifier the polls
     /// will present.
-    pub async fn device_start(&self, issuer: &str, client_id: &str, challenge: &str) -> Result<DeviceStart, LoginFailure> {
+    pub async fn device_start(
+        &self,
+        issuer: &str,
+        client_id: &str,
+        challenge: &str,
+    ) -> Result<DeviceStart, LoginFailure> {
         let form = [
             ("client_id", client_id),
             ("scope", oidc::SCOPE),
             ("code_challenge", challenge),
             ("code_challenge_method", "S256"),
         ];
-        let (status, body) = self.exchange(self.http.post(oidc::device_endpoint(issuer)).form(&form)).await?;
+        let (status, body) = self
+            .exchange(self.http.post(oidc::device_endpoint(issuer)).form(&form))
+            .await?;
         let body = String::from_utf8_lossy(&body);
         if status != 200 {
-            return Err(LoginFailure::Provider(match oidc::parse_device_poll(status, &body) {
-                DevicePoll::Failed(why) => why,
-                _ => format!("HTTP {status}"),
-            }));
+            return Err(LoginFailure::Provider(
+                match oidc::parse_device_poll(status, &body) {
+                    DevicePoll::Failed(why) => why,
+                    _ => format!("HTTP {status}"),
+                },
+            ));
         }
         oidc::parse_device_start(&body).map_err(LoginFailure::Provider)
     }
@@ -185,24 +213,47 @@ impl LoginApi {
             ("device_code", device_code),
             ("code_verifier", verifier),
         ];
-        let (status, body) = self.exchange(self.http.post(oidc::token_endpoint(issuer)).form(&form)).await?;
+        let (status, body) = self
+            .exchange(self.http.post(oidc::token_endpoint(issuer)).form(&form))
+            .await?;
         if oidc::poll_status_is_transient(status) {
             return Err(LoginFailure::Protocol(status.to_string()));
         }
-        Ok(oidc::parse_device_poll(status, &String::from_utf8_lossy(&body)))
+        Ok(oidc::parse_device_poll(
+            status,
+            &String::from_utf8_lossy(&body),
+        ))
     }
 
     /// Logs in with the identity provider's access token.
     pub async fn login_oidc(&self, access_token: &str) -> Result<LoginResponse, LoginFailure> {
-        self.post(PATH_LOGIN_OIDC, &OidcLoginRequest { access_token: access_token.into() }).await
+        self.post(
+            PATH_LOGIN_OIDC,
+            &OidcLoginRequest {
+                access_token: access_token.into(),
+            },
+        )
+        .await
     }
 
     pub async fn refresh(&self, token: &str) -> Result<LoginResponse, LoginFailure> {
-        self.post(PATH_REFRESH, &RefreshRequest { refresh_token: token.into() }).await
+        self.post(
+            PATH_REFRESH,
+            &RefreshRequest {
+                refresh_token: token.into(),
+            },
+        )
+        .await
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), LoginFailure> {
-        self.post(PATH_LOGOUT, &RefreshRequest { refresh_token: token.into() }).await
+        self.post(
+            PATH_LOGOUT,
+            &RefreshRequest {
+                refresh_token: token.into(),
+            },
+        )
+        .await
     }
 
     pub async fn worlds(&self) -> Result<Vec<WorldEntry>, LoginFailure> {
@@ -212,20 +263,38 @@ impl LoginApi {
 
     /// A join ticket for `world`; the answer also rotates the refresh token.
     pub async fn join(&self, token: &str, world: &str) -> Result<JoinResponse, LoginFailure> {
-        self.post(PATH_JOIN, &JoinRequest { refresh_token: token.into(), world: world.into() }).await
+        self.post(
+            PATH_JOIN,
+            &JoinRequest {
+                refresh_token: token.into(),
+                world: world.into(),
+            },
+        )
+        .await
     }
 
-    async fn post<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, LoginFailure> {
-        self.answer(self.http.post(format!("{}{path}", self.base)).json(body)).await
+    async fn post<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, LoginFailure> {
+        self.answer(self.http.post(format!("{}{path}", self.base)).json(body))
+            .await
     }
 
-    async fn answer<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T, LoginFailure> {
+    async fn answer<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, LoginFailure> {
         let (status, body) = self.exchange(request).await?;
         parse_response(status, &body)
     }
 
     /// Sends `request`: the answer's status and body.
-    async fn exchange(&self, request: reqwest::RequestBuilder) -> Result<(u16, Vec<u8>), LoginFailure> {
+    async fn exchange(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(u16, Vec<u8>), LoginFailure> {
         let call = async {
             let response = request.send().await.map_err(network)?;
             let status = response.status().as_u16();
@@ -259,7 +328,9 @@ async fn with_timeout<T>(
             return Poll::Ready(answer);
         }
         if timer.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Err(LoginFailure::Network(format!("no answer within {secs} s"))));
+            return Poll::Ready(Err(LoginFailure::Network(format!(
+                "no answer within {secs} s"
+            ))));
         }
         Poll::Pending
     })
@@ -285,20 +356,32 @@ fn network(e: reqwest::Error) -> LoginFailure {
 /// proxies `/login/` to the login service (the web image); `https` plus a
 /// non-loopback host keeps a dev page (`http://127.0.0.1:…`, `localhost`) on
 /// its join-only menu.
-pub fn resolve_login_url(override_: Option<&str>, build_time: Option<&str>, page_origin: Option<&str>) -> Option<String> {
-    let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(|v| v.trim_end_matches('/').to_string());
+pub fn resolve_login_url(
+    override_: Option<&str>,
+    build_time: Option<&str>,
+    page_origin: Option<&str>,
+) -> Option<String> {
+    let set = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.trim_end_matches('/').to_string())
+    };
     set(override_).or_else(|| set(build_time)).or_else(|| {
         let origin = set(page_origin)?;
         let authority = origin.strip_prefix("https://")?;
-        (!authority.is_empty() && !authority.contains('/') && !crate::web_endpoint::is_local_host(origin_host(authority)))
-            .then(|| format!("{origin}{LOGIN_PATH_ON_PAGE_ORIGIN}"))
+        (!authority.is_empty()
+            && !authority.contains('/')
+            && !crate::web_endpoint::is_local_host(origin_host(authority)))
+        .then(|| format!("{origin}{LOGIN_PATH_ON_PAGE_ORIGIN}"))
     })
 }
 
 /// The host of an origin's `host[:port]` (an IPv6 literal keeps its brackets).
 fn origin_host(authority: &str) -> &str {
     if authority.starts_with('[') {
-        return authority.find(']').map_or(authority, |end| &authority[..=end]);
+        return authority
+            .find(']')
+            .map_or(authority, |end| &authority[..=end]);
     }
     authority.split(':').next().unwrap_or(authority)
 }
@@ -309,7 +392,11 @@ fn origin_host(authority: &str) -> &str {
 /// otherwise run the genuine sign-in and post the player's access token to
 /// evil; there only the build-time address counts.
 pub fn login_override_allowed(page_host: Option<&str>) -> bool {
-    page_host.is_some_and(|h| LOGIN_OVERRIDE_HOSTS.iter().any(|ok| h.eq_ignore_ascii_case(ok)))
+    page_host.is_some_and(|h| {
+        LOGIN_OVERRIDE_HOSTS
+            .iter()
+            .any(|ok| h.eq_ignore_ascii_case(ok))
+    })
 }
 
 /// The login service this client talks to, if there is one (no "Play online"
@@ -325,14 +412,23 @@ pub fn login_url() -> Option<String> {
         use std::sync::atomic::{AtomicBool, Ordering};
         static WARNED: AtomicBool = AtomicBool::new(false);
         let location = web_sys::window().map(|w| w.location());
-        let search = location.as_ref().and_then(|l| l.search().ok()).unwrap_or_default();
+        let search = location
+            .as_ref()
+            .and_then(|l| l.search().ok())
+            .unwrap_or_default();
         let host = location.as_ref().and_then(|l| l.hostname().ok());
-        let mut explicit = crate::world_scale::query_param(&search, LOGIN_URL_QUERY)
-            .map(|v| js_sys::decode_uri_component(v).ok().and_then(|s| s.as_string()).unwrap_or_else(|| v.to_string()));
+        let mut explicit = crate::world_scale::query_param(&search, LOGIN_URL_QUERY).map(|v| {
+            js_sys::decode_uri_component(v)
+                .ok()
+                .and_then(|s| s.as_string())
+                .unwrap_or_else(|| v.to_string())
+        });
         if explicit.is_some() && !login_override_allowed(host.as_deref()) {
             // Never the value: it is whatever a link put there.
             if !WARNED.swap(true, Ordering::Relaxed) {
-                bevy::log::warn!("[login] ignoring ?{LOGIN_URL_QUERY}= (honoured on a localhost page only)");
+                bevy::log::warn!(
+                    "[login] ignoring ?{LOGIN_URL_QUERY}= (honoured on a localhost page only)"
+                );
             }
             explicit = None;
         }
@@ -340,4 +436,3 @@ pub fn login_url() -> Option<String> {
         resolve_login_url(explicit.as_deref(), built, origin.as_deref())
     }
 }
-

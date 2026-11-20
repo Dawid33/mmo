@@ -67,7 +67,7 @@ component AdventureTab {
             text: root.sites.length == 0 ? "No populated sites." : "Sites";
         }
         Flickable {
-            viewport-height: sites.preferred-height;
+            content-height: sites.preferred-height;
             sites := VerticalLayout {
                 spacing: 1px;
                 for name[i] in root.sites: Button {
@@ -118,7 +118,7 @@ component LegendsTab {
     }
 
     function at-bottom() -> bool {
-        lines-flick.viewport-height + lines-flick.viewport-y <= lines-flick.height + 2px
+        lines-flick.content-height + lines-flick.content-y <= lines-flick.height + 2px
     }
 
     HorizontalLayout {
@@ -128,7 +128,7 @@ component LegendsTab {
 
         filter-flick := Flickable {
             width: (root.width - 6px) / 3;
-            viewport-height: filter-rows.preferred-height;
+            content-height: filter-rows.preferred-height;
             filter-rows := VerticalLayout {
                 alignment: start;
                 for row[i] in root.filters: Rectangle {
@@ -149,8 +149,8 @@ component LegendsTab {
             spacing: 2px;
             LabelFace { text: root.header; }
             lines-flick := Flickable {
-                viewport-height: line-list.preferred-height;
-                changed viewport-y => {
+                content-height: line-list.preferred-height;
+                changed content-y => {
                     if root.more && root.at-bottom() {
                         root.load-more();
                     }

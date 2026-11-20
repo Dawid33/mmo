@@ -9,7 +9,7 @@
 
 use bevy::prelude::*;
 use bevy::render::{extract_resource::ExtractResource, render_resource::ShaderType};
-use game::{RegionCoords, REGION_SIZE};
+use game::{REGION_SIZE, RegionCoords};
 
 use super::hud::HudStatus;
 
@@ -51,10 +51,16 @@ pub struct BoundaryUniform {
 }
 
 /// F8 toggles the overlay (client-only key, never sent to the sim).
-pub fn toggle_boundary_overlay(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<BoundaryOverlay>) {
+pub fn toggle_boundary_overlay(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut state: ResMut<BoundaryOverlay>,
+) {
     if keys.just_pressed(KeyCode::F8) {
         state.enabled = !state.enabled;
-        info!("region boundaries: {}", if state.enabled { "on" } else { "off" });
+        info!(
+            "region boundaries: {}",
+            if state.enabled { "on" } else { "off" }
+        );
     }
 }
 
@@ -67,7 +73,10 @@ pub fn update_boundary_uniform(
     mut uniform: ResMut<BoundaryUniform>,
 ) {
     let frame = frame.as_deref().copied().unwrap_or_default();
-    let next = build_uniform(state.enabled, status.home_region.map(|home| frame.alias(home)));
+    let next = build_uniform(
+        state.enabled,
+        status.home_region.map(|home| frame.alias(home)),
+    );
     if uniform.as_ref() != &next {
         *uniform = next;
     }
@@ -88,4 +97,3 @@ pub fn build_uniform(enabled: bool, home: Option<RegionCoords>) -> BoundaryUnifo
     u.home_color = HOME_LINE_COLOR.extend(HOME_LINE_OPACITY);
     u
 }
-

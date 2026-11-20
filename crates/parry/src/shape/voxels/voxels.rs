@@ -537,7 +537,14 @@ struct VoxelsDe {
 #[cfg(feature = "serde-serialize")]
 impl From<VoxelsDe> for Voxels {
     fn from(de: VoxelsDe) -> Self {
-        let VoxelsDe { chunk_bvh, chunk_headers, chunk_keys, chunks, free_chunks, voxel_size } = de;
+        let VoxelsDe {
+            chunk_bvh,
+            chunk_headers,
+            chunk_keys,
+            chunks,
+            free_chunks,
+            voxel_size,
+        } = de;
         let mut voxels = Voxels {
             chunk_bvh,
             chunk_headers,
@@ -690,9 +697,11 @@ impl Voxels {
             // mmo-fork: leaves in chunk-id order, not hash-map order — the map's
             // order depends on the pointer width (foldhash), and a 1–2 leaf tree
             // keeps its input order, so native and wasm32 built different layouts.
-            result.chunk_keys.iter().enumerate().map(|(id, chunk_key)| {
-                (id, VoxelsChunk::aabb(chunk_key, result.voxel_size))
-            }),
+            result
+                .chunk_keys
+                .iter()
+                .enumerate()
+                .map(|(id, chunk_key)| (id, VoxelsChunk::aabb(chunk_key, result.voxel_size))),
         );
 
         result.recompute_all_voxels_states();

@@ -30,8 +30,14 @@ pub struct ExportedChunk {
 
 #[derive(Deserialize)]
 pub enum ExportedCollider {
-    Voxels { voxel_size: [f32; 3], keys: Vec<[i32; 3]> },
-    Cuboid { half_extents: [f32; 3], translation: [f32; 3] },
+    Voxels {
+        voxel_size: [f32; 3],
+        keys: Vec<[i32; 3]>,
+    },
+    Cuboid {
+        half_extents: [f32; 3],
+        translation: [f32; 3],
+    },
 }
 
 pub fn load_region(path: &std::path::Path) -> RegionExport {
@@ -77,7 +83,10 @@ impl PhysicsWorld {
             &(),
             &(),
         );
-        debug_assert!(self.soft_bodies.is_empty(), "the game never uses soft bodies");
+        debug_assert!(
+            self.soft_bodies.is_empty(),
+            "the game never uses soft bodies"
+        );
     }
 
     /// One step recorded into a fresh `StepJournal` (upgrade plan Task 4.2).
@@ -163,8 +172,14 @@ impl PhysicsWorld {
 /// The parts on which bytes and `StateHash` disagree about whether two states
 /// (`(state_bytes, state_hashes)`) are equal: a missed field (bytes differ,
 /// hash equal) or a hashed non-state (bytes equal, hash differs).
-pub fn hash_disagreements(a: &([Vec<u8>; 8], [u64; 8]), b: &([Vec<u8>; 8], [u64; 8])) -> Vec<&'static str> {
-    (0..8).filter(|&i| (a.0[i] == b.0[i]) != (a.1[i] == b.1[i])).map(|i| STATE_PARTS[i]).collect()
+pub fn hash_disagreements(
+    a: &([Vec<u8>; 8], [u64; 8]),
+    b: &([Vec<u8>; 8], [u64; 8]),
+) -> Vec<&'static str> {
+    (0..8)
+        .filter(|&i| (a.0[i] == b.0[i]) != (a.1[i] == b.1[i]))
+        .map(|i| STATE_PARTS[i])
+        .collect()
 }
 
 /// Names of [`PhysicsWorld::state_bytes`]'s entries, for failure messages.
@@ -181,7 +196,10 @@ pub const STATE_PARTS: [&str; 8] = [
 
 /// The parts whose bytes differ, e.g. `["bodies", "broad_phase"]`.
 pub fn differing_parts(a: &[Vec<u8>; 8], b: &[Vec<u8>; 8]) -> Vec<&'static str> {
-    (0..8).filter(|&i| a[i] != b[i]).map(|i| STATE_PARTS[i]).collect()
+    (0..8)
+        .filter(|&i| a[i] != b[i])
+        .map(|i| STATE_PARTS[i])
+        .collect()
 }
 
 mod erased {
@@ -196,24 +214,29 @@ mod erased {
 }
 
 impl PhysicsWorld {
-
     /// The game's terrain: one fixed body per chunk (with or without
     /// colliders), colliders attached in export order.
     pub fn add_region(&mut self, export: &RegionExport) {
         for chunk in &export.chunks {
             let [x, y, z] = chunk.origin;
-            let body = self.bodies.insert(RigidBodyBuilder::fixed().translation(Vector::new(x, y, z)));
+            let body = self
+                .bodies
+                .insert(RigidBodyBuilder::fixed().translation(Vector::new(x, y, z)));
             for c in &chunk.colliders {
                 let collider = match c {
                     ExportedCollider::Voxels { voxel_size, keys } => {
-                        let keys: Vec<IVector> = keys.iter().map(|&k| IVector::from_array(k)).collect();
+                        let keys: Vec<IVector> =
+                            keys.iter().map(|&k| IVector::from_array(k)).collect();
                         ColliderBuilder::voxels(Vector::from_array(*voxel_size), &keys)
                     }
-                    ExportedCollider::Cuboid { half_extents: [hx, hy, hz], translation } => {
-                        ColliderBuilder::cuboid(*hx, *hy, *hz).translation(Vector::from_array(*translation))
-                    }
+                    ExportedCollider::Cuboid {
+                        half_extents: [hx, hy, hz],
+                        translation,
+                    } => ColliderBuilder::cuboid(*hx, *hy, *hz)
+                        .translation(Vector::from_array(*translation)),
                 };
-                self.colliders.insert_with_parent(collider, body, &mut self.bodies);
+                self.colliders
+                    .insert_with_parent(collider, body, &mut self.bodies);
             }
         }
     }
@@ -253,7 +276,10 @@ impl std::io::Write for DigestWriter<'_> {
 /// crc32 of `value`'s bincode bytes, and their length.
 pub fn digest<T: serde::Serialize>(value: &T) -> (u32, usize) {
     let mut hasher = crc32fast::Hasher::new();
-    let mut w = DigestWriter { hasher: &mut hasher, len: 0 };
+    let mut w = DigestWriter {
+        hasher: &mut hasher,
+        len: 0,
+    };
     bincode::serialize_into(&mut w, value).expect("digest serialize");
     let len = w.len;
     (hasher.finalize(), len)

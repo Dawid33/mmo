@@ -29,12 +29,12 @@ mod common;
 
 use common::{body, fixed_body_mass_count, key, r0, spawn_slime, ticks, world_of};
 use game::rapier3d::math::Vector;
-use glamx::Quat;
 use game::rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 use game::{
-    state_hash, Block, BlockId, Chunk, ChunkCoords, Column, ColumnCoords, ColumnGround,
-    Key, Pose, Region, SubChunk,
+    Block, BlockId, Chunk, ChunkCoords, Column, ColumnCoords, ColumnGround, Key, Pose, Region,
+    SubChunk, state_hash,
 };
+use glamx::Quat;
 use slotmapd::Key as _;
 
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
@@ -85,9 +85,9 @@ use slotmapd::Key as _;
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x25C3_6020);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x38D8_6635);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xC939_1267);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x69D8_2B74);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
 const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x8439_7A8D);
@@ -102,9 +102,9 @@ const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x4472_2ECB);
 /// (16-block values only): parry's voxels-vs-compound contacts now look
 /// `prediction` ahead (`contact_manifolds_voxels_composite_shape`, mmo-fork),
 /// which changes the body's contacts with the terrain during its fall.
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x4F4C_35F6);
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x8C03_03BB);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x566F_DF76);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0xD531_954B);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;
@@ -143,7 +143,10 @@ const fn pinned(at2: u32, at16: u32) -> u32 {
 fn pinned_size() -> bool {
     let pinned = matches!(game::CHUNK_BLOCKS, 2 | 16);
     if !pinned {
-        log(&format!("wasm_determinism: nothing pinned at {}-block chunks, comparison skipped", game::CHUNK_BLOCKS));
+        log(&format!(
+            "wasm_determinism: nothing pinned at {}-block chunks, comparison skipped",
+            game::CHUNK_BLOCKS
+        ));
     }
     pinned
 }
@@ -173,7 +176,13 @@ fn scene() -> (u32, u32) {
         }
         chunk
     });
-    spawn_slime(world.regions.get_mut(&r0()).unwrap(), [176.0, 40.0, 112.0], 1, 0.0, 0);
+    spawn_slime(
+        world.regions.get_mut(&r0()).unwrap(),
+        [176.0, 40.0, 112.0],
+        1,
+        0.0,
+        0,
+    );
     let compound = add_compound_body(&mut world);
     // S (+z) over the half-block row and back off it, then D (+x), with jumps.
     let script: [(usize, Key, bool); 8] = [
@@ -195,27 +204,47 @@ fn scene() -> (u32, u32) {
     }
     let end = body(&world);
     // 40 ticks each way at walk speed is ~138 units: on the floor, standing.
-    assert!(end.z - start.z > 100.0 && end.x - start.x > 100.0, "the script must walk: {start:?} -> {end:?}");
-    assert!(end.grounded && end.x < 320.0 && end.z < 320.0, "the walk must end on the floor: {end:?}");
+    assert!(
+        end.z - start.z > 100.0 && end.x - start.x > 100.0,
+        "the script must walk: {start:?} -> {end:?}"
+    );
+    assert!(
+        end.grounded && end.x < 320.0 && end.z < 320.0,
+        "the walk must end on the floor: {end:?}"
+    );
     let data = world.data(&r0());
     // The hazard this check exists for, asserted directly: were terrain mass
     // properties computed, the digest would only differ if std acos/cos
     // happened to round differently on this floor.
     let (fixed, massive) = fixed_body_mass_count(data);
     let chunks = common::chunks_over(64.0..320.0, 64.0..320.0).len();
-    assert!(fixed >= chunks && massive == 0, "{massive} of {fixed} fixed terrain bodies computed mass properties");
+    assert!(
+        fixed >= chunks && massive == 0,
+        "{massive} of {fixed} fixed terrain bodies computed mass properties"
+    );
     // Upgrade plan Task 5.4 Step 5b: a moving body's mass properties do go
     // through `symmetric_eigen` (glamx's std `acos`/`cos`); the compound's
     // principal frame is off-axis, so the digest carries its result.
-    let mprops = data.physics.bodies.get(compound).unwrap().mass_properties().local_mprops;
+    let mprops = data
+        .physics
+        .bodies
+        .get(compound)
+        .unwrap()
+        .mass_properties()
+        .local_mprops;
     assert!(
-        mprops.principal_inertia_local_frame.angle_between(Quat::IDENTITY) > 0.1,
+        mprops
+            .principal_inertia_local_frame
+            .angle_between(Quat::IDENTITY)
+            > 0.1,
         "the compound's inertia must be off-axis: {mprops:?}"
     );
     let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
     let hash = state_hash(data);
     if print_hash() {
-        log(&format!("WASM_SCENE_DIGEST = 0x{digest:08X}, state_hash = 0x{hash:08X}"));
+        log(&format!(
+            "WASM_SCENE_DIGEST = 0x{digest:08X}, state_hash = 0x{hash:08X}"
+        ));
     }
     (digest, hash)
 }
@@ -239,8 +268,16 @@ fn add_compound_body(world: &mut game::World) -> RigidBodyHandle {
         let h = bodies.insert(body);
         let colliders = physics.colliders.change();
         for (offset, rotation, half) in [
-            (Vector::new(2.0, 1.0, -1.5), Quat::from_xyzw(0.1, 0.3, 0.2, 0.9), Vector::new(3.0, 1.0, 2.0)),
-            (Vector::new(-1.0, -0.5, 2.5), Quat::from_xyzw(-0.4, 0.1, 0.25, 0.8), Vector::new(1.0, 2.5, 0.5)),
+            (
+                Vector::new(2.0, 1.0, -1.5),
+                Quat::from_xyzw(0.1, 0.3, 0.2, 0.9),
+                Vector::new(3.0, 1.0, 2.0),
+            ),
+            (
+                Vector::new(-1.0, -0.5, 2.5),
+                Quat::from_xyzw(-0.4, 0.1, 0.25, 0.8),
+                Vector::new(1.0, 2.5, 0.5),
+            ),
         ] {
             let collider = ColliderBuilder::cuboid(half.x, half.y, half.z)
                 .position(Pose::from_parts(offset, rotation.normalize()))
@@ -264,10 +301,23 @@ fn underground_scene() -> (u32, u32) {
     let column = || {
         // `below` differs from the band, or normalising trims the band chunk.
         let band = SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, stone)));
-        let mut ground = ColumnGround::plain(vec![1; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, stone, bedrock);
-        ground.geo = (0..game::COLUMN_FOOTPRINT).map(|i| (i % 3) as i16).collect();
+        let mut ground = ColumnGround::plain(
+            vec![1; game::COLUMN_FOOTPRINT].into_boxed_slice(),
+            0,
+            stone,
+            bedrock,
+        );
+        ground.geo = (0..game::COLUMN_FOOTPRINT)
+            .map(|i| (i % 3) as i16)
+            .collect();
         ground.strata = vec![(0, stone), (-20, BlockId(4)), (-40, BlockId(5))];
-        Column::new(0, Block::new(BlockId(1)), Block::new(BlockId::AIR), vec![band]).with_ground(ground)
+        Column::new(
+            0,
+            Block::new(BlockId(1)),
+            Block::new(BlockId::AIR),
+            vec![band],
+        )
+        .with_ground(ground)
     };
     let mut columns = Vec::new();
     for x in 0..2 {
@@ -285,7 +335,10 @@ fn underground_scene() -> (u32, u32) {
         for x in 0..2 {
             for z in 0..2 {
                 for cy in (-60i32).div_euclid(cb)..=1i32.div_euclid(cb) {
-                    n += region.data().chunk_key_at(ChunkCoords::new(x, cy, z)).is_some() as usize;
+                    n += region
+                        .data()
+                        .chunk_key_at(ChunkCoords::new(x, cy, z))
+                        .is_some() as usize;
                 }
             }
         }
@@ -298,18 +351,27 @@ fn underground_scene() -> (u32, u32) {
         let pos = [cb - 1 + (i as i32 % 2), y, cb - 1 + (i as i32 % 3) / 2];
         let mut changed = false;
         region.with_data(|d| changed = d.set_block_safe(pos, Block::new(BlockId::AIR)));
-        assert_eq!(changed, i != ys.len() - 1, "dig {i} at y={y}: only the bedrock dig is refused");
+        assert_eq!(
+            changed,
+            i != ys.len() - 1,
+            "dig {i} at y={y}: only the bedrock dig is refused"
+        );
     }
     let after = count(&region);
     if print_hash() {
         log(&format!("underground chunks {before} -> {after}"));
     }
-    assert!(after > before + 10, "digging must materialise implied ground: {before} -> {after} chunks");
+    assert!(
+        after > before + 10,
+        "digging must materialise implied ground: {before} -> {after} chunks"
+    );
     let data = region.data();
     let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
     let hash = state_hash(data);
     if print_hash() {
-        log(&format!("UNDERGROUND_DIGEST = 0x{digest:08X}, UNDERGROUND_STATE_HASH = 0x{hash:08X}"));
+        log(&format!(
+            "UNDERGROUND_DIGEST = 0x{digest:08X}, UNDERGROUND_STATE_HASH = 0x{hash:08X}"
+        ));
     }
     (digest, hash)
 }
@@ -334,21 +396,42 @@ fn voxel_body_scene() -> (u32, u32) {
     region.with_data(|d| {
         let b = game::BLOCK_VOXELS as f32;
         let pivot = Vector::new(16.5 * b, b, 16.5 * b);
-        body = d.detach_blocks_pivoting_safe(&blocks, game::SettlePolicy::Despawn, Vector::new(0.1, 0.0, -0.6), Some(pivot));
+        body = d.detach_blocks_pivoting_safe(
+            &blocks,
+            game::SettlePolicy::Despawn,
+            Vector::new(0.1, 0.0, -0.6),
+            Some(pivot),
+        );
     });
     let body = body.expect("the column detaches");
-    let start = *region.data().physics.bodies.get(*region.data().ecs.rigidbody.get(body)).unwrap().position();
+    let start = *region
+        .data()
+        .physics
+        .bodies
+        .get(*region.data().ecs.rigidbody.get(body))
+        .unwrap()
+        .position();
     for _ in 0..VOXEL_BODY_TICKS {
         region.handle_event(game::GameEventKind::Tick).unwrap();
         region.forget_last_event();
     }
     let data = region.data();
-    let end = *data.physics.bodies.get(*data.ecs.rigidbody.get(body)).unwrap().position();
-    assert!(start.translation.y - end.translation.y > 16.0, "the body must fall: {start:?} -> {end:?}");
+    let end = *data
+        .physics
+        .bodies
+        .get(*data.ecs.rigidbody.get(body))
+        .unwrap()
+        .position();
+    assert!(
+        start.translation.y - end.translation.y > 16.0,
+        "the body must fall: {start:?} -> {end:?}"
+    );
     let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
     let hash = state_hash(data);
     if print_hash() {
-        log(&format!("VOXEL_BODY_DIGEST = 0x{digest:08X}, VOXEL_BODY_STATE_HASH = 0x{hash:08X}"));
+        log(&format!(
+            "VOXEL_BODY_DIGEST = 0x{digest:08X}, VOXEL_BODY_STATE_HASH = 0x{hash:08X}"
+        ));
     }
     (digest, hash)
 }
@@ -358,13 +441,14 @@ fn voxel_body_scene() -> (u32, u32) {
 /// marriages, deaths, migration, maybe an embark). Returns crc32 of the
 /// encoded history file.
 fn history_scene() -> u32 {
-    use game::history::bootstrap::{bootstrap, BootstrapParams};
+    use game::history::bootstrap::{BootstrapParams, bootstrap};
     use game::{Biome, RegionCoords, TileSummary, WorldMap};
     let (w, h) = (16u32, 16u32);
     let mut tiles = Vec::new();
     for z in 0..h as i32 {
         for x in 0..w as i32 {
-            let sea = x == 0 || z == 0 || x == w as i32 - 1 || z == h as i32 - 1 || (x == 8 && z < 10);
+            let sea =
+                x == 0 || z == 0 || x == w as i32 - 1 || z == h as i32 - 1 || (x == 8 && z < 10);
             tiles.push(TileSummary {
                 ground_min_m: 0.0,
                 ground_mean_m: 10.0 + x as f32,
@@ -389,13 +473,36 @@ fn history_scene() -> u32 {
             });
         }
     }
-    let map = WorldMap { origin: RegionCoords::new(0, 0), width: w, height: h, tiles, rock_names: vec![], region_types: vec![], wrap_x: false };
-    let params = BootstrapParams { seed: 0x5EED, civs: 2, founders_per_civ: 20, years: 20, civ_min_spacing_regions: 6, ..BootstrapParams::default() };
+    let map = WorldMap {
+        origin: RegionCoords::new(0, 0),
+        width: w,
+        height: h,
+        tiles,
+        rock_names: vec![],
+        region_types: vec![],
+        wrap_x: false,
+    };
+    let params = BootstrapParams {
+        seed: 0x5EED,
+        civs: 2,
+        founders_per_civ: 20,
+        years: 20,
+        civ_min_spacing_regions: 6,
+        ..BootstrapParams::default()
+    };
     let history = bootstrap(&map, &params).expect("the scene bootstraps");
-    assert!(history.log().len() > 40, "the scene must have happened: {} events", history.log().len());
+    assert!(
+        history.log().len() > 40,
+        "the scene must have happened: {} events",
+        history.log().len()
+    );
     let digest = crc32fast::hash(&game::history::persist::encode(&history));
     if print_hash() {
-        log(&format!("HISTORY_DIGEST = 0x{digest:08X} ({} events, {} people)", history.log().len(), history.people().count()));
+        log(&format!(
+            "HISTORY_DIGEST = 0x{digest:08X} ({} events, {} people)",
+            history.log().len(),
+            history.people().count()
+        ));
     }
     digest
 }
@@ -406,17 +513,43 @@ fn l_shape() -> game::ColliderSpec {
     use game::ColliderSpec;
     let rot = Quat::from_xyzw(0.0, 0.258_819_04, 0.0, 0.965_925_8).normalize();
     ColliderSpec::Compound(vec![
-        (Pose::from_translation(Vector::new(0.0, 8.0, 0.0)), ColliderSpec::Cuboid { half_extents: Vector::new(8.0, 8.0, 8.0) }),
-        (Pose::from_parts(Vector::new(24.0, 4.0, 2.0), rot), ColliderSpec::Cuboid { half_extents: Vector::new(16.0, 4.0, 6.0) }),
+        (
+            Pose::from_translation(Vector::new(0.0, 8.0, 0.0)),
+            ColliderSpec::Cuboid {
+                half_extents: Vector::new(8.0, 8.0, 8.0),
+            },
+        ),
+        (
+            Pose::from_parts(Vector::new(24.0, 4.0, 2.0), rot),
+            ColliderSpec::Cuboid {
+                half_extents: Vector::new(16.0, 4.0, 6.0),
+            },
+        ),
     ])
 }
 
 /// crc32 of every field's bits of the L-shape's explicit mass properties.
 fn explicit_mass_scene() -> u32 {
     let mp = game::mass_props::mass_properties(&l_shape(), game::mass_props::BODY_DEFAULT_DENSITY);
-    let (c, i, q) = (mp.local_com, mp.inv_principal_inertia, mp.principal_inertia_local_frame);
+    let (c, i, q) = (
+        mp.local_com,
+        mp.inv_principal_inertia,
+        mp.principal_inertia_local_frame,
+    );
     let mut bytes = Vec::new();
-    for v in [c.x, c.y, c.z, mp.inv_mass, i.x, i.y, i.z, q.x, q.y, q.z, q.w] {
+    for v in [
+        c.x,
+        c.y,
+        c.z,
+        mp.inv_mass,
+        i.x,
+        i.y,
+        i.z,
+        q.x,
+        q.y,
+        q.z,
+        q.w,
+    ] {
         bytes.extend_from_slice(&v.to_bits().to_le_bytes());
     }
     let digest = crc32fast::hash(&bytes);
@@ -428,22 +561,48 @@ fn explicit_mass_scene() -> u32 {
 
 /// crc32 of the dog's body parts and its explicit mass properties.
 fn creature_mass_scene() -> u32 {
-    use game::creature_shapes::{creature_shape, CREATURE_DENSITY};
+    use game::creature_shapes::{CREATURE_DENSITY, creature_shape};
     let body = &creature_shape("dog").expect("the dog has a model").body;
-    let game::ColliderSpec::Compound(parts) = body else { panic!("the body is a compound") };
+    let game::ColliderSpec::Compound(parts) = body else {
+        panic!("the body is a compound")
+    };
     let mut bits = Vec::new();
     for (pose, part) in parts {
-        let game::ColliderSpec::Cuboid { half_extents: h } = part else { panic!("body parts are cuboids") };
+        let game::ColliderSpec::Cuboid { half_extents: h } = part else {
+            panic!("body parts are cuboids")
+        };
         let t = pose.translation;
         bits.extend([t.x, t.y, t.z, h.x, h.y, h.z]);
     }
     let mp = game::mass_props::mass_properties(body, CREATURE_DENSITY);
-    let (c, i, q) = (mp.local_com, mp.inv_principal_inertia, mp.principal_inertia_local_frame);
-    bits.extend([c.x, c.y, c.z, mp.inv_mass, i.x, i.y, i.z, q.x, q.y, q.z, q.w]);
-    let bytes: Vec<u8> = bits.iter().flat_map(|v| v.to_bits().to_le_bytes()).collect();
+    let (c, i, q) = (
+        mp.local_com,
+        mp.inv_principal_inertia,
+        mp.principal_inertia_local_frame,
+    );
+    bits.extend([
+        c.x,
+        c.y,
+        c.z,
+        mp.inv_mass,
+        i.x,
+        i.y,
+        i.z,
+        q.x,
+        q.y,
+        q.z,
+        q.w,
+    ]);
+    let bytes: Vec<u8> = bits
+        .iter()
+        .flat_map(|v| v.to_bits().to_le_bytes())
+        .collect();
     let digest = crc32fast::hash(&bytes);
     if print_hash() {
-        log(&format!("CREATURE_MASS_DIGEST = 0x{digest:08X} ({} parts, {mp:?})", parts.len()));
+        log(&format!(
+            "CREATURE_MASS_DIGEST = 0x{digest:08X} ({} parts, {mp:?})",
+            parts.len()
+        ));
     }
     digest
 }
@@ -452,7 +611,10 @@ fn creature_mass_scene() -> u32 {
 fn history_pinned() -> bool {
     let pinned = game::REGION_BLOCKS == 64;
     if !pinned {
-        log(&format!("wasm_determinism: no history digest at {}-block regions, comparison skipped", game::REGION_BLOCKS));
+        log(&format!(
+            "wasm_determinism: no history digest at {}-block regions, comparison skipped",
+            game::REGION_BLOCKS
+        ));
     }
     pinned
 }
@@ -488,8 +650,14 @@ fn scene_hash_native() {
     if !pinned_size() {
         return;
     }
-    assert_eq!(digest, WASM_SCENE_DIGEST, "native scene digest 0x{digest:08X} != golden 0x{WASM_SCENE_DIGEST:08X}");
-    assert_eq!(hash, SCENE_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
+    assert_eq!(
+        digest, WASM_SCENE_DIGEST,
+        "native scene digest 0x{digest:08X} != golden 0x{WASM_SCENE_DIGEST:08X}"
+    );
+    assert_eq!(
+        hash, SCENE_STATE_HASH,
+        "native state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -500,8 +668,14 @@ fn scene_hash_wasm() {
     if !pinned_size() {
         return;
     }
-    assert_eq!(digest, WASM_SCENE_DIGEST, "wasm32 scene digest 0x{digest:08X} != golden 0x{WASM_SCENE_DIGEST:08X}");
-    assert_eq!(hash, SCENE_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
+    assert_eq!(
+        digest, WASM_SCENE_DIGEST,
+        "wasm32 scene digest 0x{digest:08X} != golden 0x{WASM_SCENE_DIGEST:08X}"
+    );
+    assert_eq!(
+        hash, SCENE_STATE_HASH,
+        "wasm32 state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -512,8 +686,14 @@ fn underground_hash_native() {
     if !pinned_size() {
         return;
     }
-    assert_eq!(digest, UNDERGROUND_DIGEST, "native digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}");
-    assert_eq!(hash, UNDERGROUND_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
+    assert_eq!(
+        digest, UNDERGROUND_DIGEST,
+        "native digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}"
+    );
+    assert_eq!(
+        hash, UNDERGROUND_STATE_HASH,
+        "native state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -524,8 +704,14 @@ fn underground_hash_wasm() {
     if !pinned_size() {
         return;
     }
-    assert_eq!(digest, UNDERGROUND_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}");
-    assert_eq!(hash, UNDERGROUND_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
+    assert_eq!(
+        digest, UNDERGROUND_DIGEST,
+        "wasm32 digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}"
+    );
+    assert_eq!(
+        hash, UNDERGROUND_STATE_HASH,
+        "wasm32 state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -536,8 +722,14 @@ fn voxel_body_hash_native() {
     if !pinned_size() {
         return;
     }
-    assert_eq!(digest, VOXEL_BODY_DIGEST, "native digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}");
-    assert_eq!(hash, VOXEL_BODY_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
+    assert_eq!(
+        digest, VOXEL_BODY_DIGEST,
+        "native digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}"
+    );
+    assert_eq!(
+        hash, VOXEL_BODY_STATE_HASH,
+        "native state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -548,8 +740,14 @@ fn voxel_body_hash_wasm() {
     if !pinned_size() {
         return;
     }
-    assert_eq!(digest, VOXEL_BODY_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}");
-    assert_eq!(hash, VOXEL_BODY_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
+    assert_eq!(
+        digest, VOXEL_BODY_DIGEST,
+        "wasm32 digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}"
+    );
+    assert_eq!(
+        hash, VOXEL_BODY_STATE_HASH,
+        "wasm32 state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -560,7 +758,10 @@ fn history_hash_native() {
     if !history_pinned() {
         return;
     }
-    assert_eq!(digest, HISTORY_DIGEST, "native history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}");
+    assert_eq!(
+        digest, HISTORY_DIGEST,
+        "native history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -571,7 +772,10 @@ fn history_hash_wasm() {
     if !history_pinned() {
         return;
     }
-    assert_eq!(digest, HISTORY_DIGEST, "wasm32 history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}");
+    assert_eq!(
+        digest, HISTORY_DIGEST,
+        "wasm32 history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -579,7 +783,10 @@ fn history_hash_wasm() {
 #[test]
 fn explicit_mass_compound_is_cross_target_native() {
     let digest = explicit_mass_scene();
-    assert_eq!(digest, EXPLICIT_MASS_DIGEST, "native explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}");
+    assert_eq!(
+        digest, EXPLICIT_MASS_DIGEST,
+        "native explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -587,7 +794,10 @@ fn explicit_mass_compound_is_cross_target_native() {
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn explicit_mass_compound_is_cross_target_wasm() {
     let digest = explicit_mass_scene();
-    assert_eq!(digest, EXPLICIT_MASS_DIGEST, "wasm32 explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}");
+    assert_eq!(
+        digest, EXPLICIT_MASS_DIGEST,
+        "wasm32 explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -595,7 +805,10 @@ fn explicit_mass_compound_is_cross_target_wasm() {
 #[test]
 fn creature_mass_is_cross_target_native() {
     let digest = creature_mass_scene();
-    assert_eq!(digest, CREATURE_MASS_DIGEST, "native creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}");
+    assert_eq!(
+        digest, CREATURE_MASS_DIGEST,
+        "native creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -603,7 +816,10 @@ fn creature_mass_is_cross_target_native() {
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn creature_mass_is_cross_target_wasm() {
     let digest = creature_mass_scene();
-    assert_eq!(digest, CREATURE_MASS_DIGEST, "wasm32 creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}");
+    assert_eq!(
+        digest, CREATURE_MASS_DIGEST,
+        "wasm32 creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}"
+    );
 }
 
 /// Gate: native and wasm32 runs hash identically (`just determinism-wasm`)
@@ -613,6 +829,10 @@ fn creature_mass_is_cross_target_wasm() {
 fn client_id_above_u32_round_trips() {
     let id: game::ClientId = 1 << 40;
     let packet = game::ServerPacket::PlayerRegion(None, id);
-    let back: game::ServerPacket = game::decode_packet(&game::encode_packet(&packet).unwrap()).unwrap();
-    assert!(matches!(back, game::ServerPacket::PlayerRegion(None, got) if got == id), "{back:?}");
+    let back: game::ServerPacket =
+        game::decode_packet(&game::encode_packet(&packet).unwrap()).unwrap();
+    assert!(
+        matches!(back, game::ServerPacket::PlayerRegion(None, got) if got == id),
+        "{back:?}"
+    );
 }

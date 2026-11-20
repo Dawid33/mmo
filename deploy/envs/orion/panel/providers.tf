@@ -1,0 +1,30 @@
+variable "kubeconfig" {
+  description = "Kubeconfig holding the orion context."
+  type        = string
+  default     = "~/.kube/config"
+}
+
+variable "kube_context" {
+  description = "Always the orion server, never the current context."
+  type        = string
+  default     = "orion"
+}
+
+variable "aws_region" {
+  description = "The state bucket's region and the default provider's. The ECR token comes from the registry root's region (provider aws.ecr_pull in main.tf)."
+  type        = string
+  default     = "eu-central-1"
+}
+
+# Credentials: the AWS default chain. Used for nothing here but the state reads.
+provider "aws" {
+  region = var.aws_region
+  default_tags {
+    tags = { project = "mmo", stack = "orion-panel", managed-by = "opentofu" }
+  }
+}
+
+provider "kubernetes" {
+  config_path    = var.kubeconfig
+  config_context = var.kube_context
+}

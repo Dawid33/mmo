@@ -10,7 +10,9 @@
 //! `upstream_movement_probe.rs`; these are the cross-collider ones.
 use crate::common;
 
-use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};
+use game::movement::{
+    CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER,
+};
 use physics_next::PhysicsWorld;
 use rapier3d::parry::query::{ShapeCastHit, ShapeCastOptions};
 use rapier3d::parry::shape::Capsule;
@@ -45,8 +47,11 @@ fn walking_step() -> Vector {
 fn world_of(origins: &[Vector], collider: impl Fn(usize) -> Collider) -> PhysicsWorld {
     let mut w = PhysicsWorld::default();
     for (i, origin) in origins.iter().enumerate() {
-        let body = w.bodies.insert(RigidBodyBuilder::fixed().translation(*origin));
-        w.colliders.insert_with_parent(collider(i), body, &mut w.bodies);
+        let body = w
+            .bodies
+            .insert(RigidBodyBuilder::fixed().translation(*origin));
+        w.colliders
+            .insert_with_parent(collider(i), body, &mut w.bodies);
     }
     w.step(&mut PhysicsPipeline::new());
     w
@@ -54,7 +59,9 @@ fn world_of(origins: &[Vector], collider: impl Fn(usize) -> Collider) -> Physics
 
 /// A chunk's one-block-deep floor of block-scale voxels (2x1x2), top at y = `BLOCK`.
 fn chunk_floor() -> Collider {
-    let cells: Vec<IVector> = (0..2).flat_map(|x| (0..2).map(move |z| IVector::new(x, 0, z))).collect();
+    let cells: Vec<IVector> = (0..2)
+        .flat_map(|x| (0..2).map(move |z| IVector::new(x, 0, z)))
+        .collect();
     ColliderBuilder::voxels(Vector::splat(BLOCK), &cells).build()
 }
 
@@ -65,8 +72,18 @@ fn chunk_cuboid() -> Collider {
         .build()
 }
 
-fn continuous(w: &PhysicsWorld, pos: Vector, vel: Vector, options: ShapeCastOptions) -> Option<ShapeCastHit> {
-    let qp = w.broad_phase.as_query_pipeline(w.narrow_phase.query_dispatcher(), &w.bodies, &w.colliders, QueryFilter::default());
+fn continuous(
+    w: &PhysicsWorld,
+    pos: Vector,
+    vel: Vector,
+    options: ShapeCastOptions,
+) -> Option<ShapeCastHit> {
+    let qp = w.broad_phase.as_query_pipeline(
+        w.narrow_phase.query_dispatcher(),
+        &w.bodies,
+        &w.colliders,
+        QueryFilter::default(),
+    );
     let capsule = Capsule::new_y(HALF_HEIGHT, RADIUS);
     qp.cast_shape_on_continuous_surfaces(&Pose::from_translation(pos), vel, &capsule, options, SKIN)
         .map(|(_, hit)| hit)
@@ -74,8 +91,16 @@ fn continuous(w: &PhysicsWorld, pos: Vector, vel: Vector, options: ShapeCastOpti
 
 fn assert_flat(hit: Option<ShapeCastHit>, context: &str) {
     let hit = hit.unwrap_or_else(|| panic!("{context}: the floor was missed"));
-    assert!(hit.time_of_impact < 1.0e-3, "{context}: toi {}", hit.time_of_impact);
-    assert_eq!(hit.normal1, Vector::Y, "{context}: a flat floor's normal is straight up: {hit:?}");
+    assert!(
+        hit.time_of_impact < 1.0e-3,
+        "{context}: toi {}",
+        hit.time_of_impact
+    );
+    assert_eq!(
+        hit.normal1,
+        Vector::Y,
+        "{context}: a flat floor's normal is straight up: {hit:?}"
+    );
 }
 
 /// Resting across the x = `CHUNK` seam between two chunk bodies, with the
@@ -94,9 +119,21 @@ fn assert_seam_is_flat(w: &PhysicsWorld, what: &str) {
 /// Gate: mmo-fork hunk rapier query_pipeline.rs cast_shape_on_continuous_surfaces + parry shape_cast/mod.rs probe-taking cast + KCC call sites 'was cast_shape' (d54e90b7; seam-as-edge bug 4173c4ef)
 #[test]
 fn seam_between_a_cuboid_chunk_and_a_voxels_chunk_is_not_an_edge() {
-    let w = world_of(&[Vector::ZERO, Vector::new(CHUNK, 0.0, 0.0)], |i| if i == 0 { chunk_cuboid() } else { chunk_floor() });
+    let w = world_of(&[Vector::ZERO, Vector::new(CHUNK, 0.0, 0.0)], |i| {
+        if i == 0 {
+            chunk_cuboid()
+        } else {
+            chunk_floor()
+        }
+    });
     assert_seam_is_flat(&w, "cuboid|voxels");
-    let w = world_of(&[Vector::ZERO, Vector::new(CHUNK, 0.0, 0.0)], |i| if i == 0 { chunk_floor() } else { chunk_cuboid() });
+    let w = world_of(&[Vector::ZERO, Vector::new(CHUNK, 0.0, 0.0)], |i| {
+        if i == 0 {
+            chunk_floor()
+        } else {
+            chunk_cuboid()
+        }
+    });
     assert_seam_is_flat(&w, "voxels|cuboid");
 }
 
@@ -110,7 +147,12 @@ fn seam_between_a_cuboid_chunk_and_a_voxels_chunk_is_not_an_edge() {
 /// on, hence the sweep.
 #[test]
 fn d8_touching_start_sliding_or_lifting_is_no_hit() {
-    let away = [Vector::X, Vector::Z, Vector::new(1.0, 0.5, 0.0).normalize(), Vector::Y];
+    let away = [
+        Vector::X,
+        Vector::Z,
+        Vector::new(1.0, 0.5, 0.0).normalize(),
+        Vector::Y,
+    ];
     for (what, w) in [
         ("voxels", world_of(&[Vector::ZERO], |_| chunk_floor())),
         ("cuboid", world_of(&[Vector::ZERO], |_| chunk_cuboid())),
@@ -120,10 +162,21 @@ fn d8_touching_start_sliding_or_lifting_is_no_hit() {
                 let touching = Vector::new(x, REST + SKIN + eps, 0.5 * BLOCK);
                 for vel in away {
                     let hit = continuous(&w, touching, vel, skin_cast(4.0));
-                    assert!(hit.is_none(), "{what}, eps {eps} x {x} vel {vel:?}: {hit:?}");
+                    assert!(
+                        hit.is_none(),
+                        "{what}, eps {eps} x {x} vel {vel:?}: {hit:?}"
+                    );
                 }
-                let hit = continuous(&w, touching, Vector::new(1.0, -0.5, 0.0).normalize(), skin_cast(4.0));
-                assert_flat(hit, &format!("{what}, eps {eps} x {x}: pressing in from touching"));
+                let hit = continuous(
+                    &w,
+                    touching,
+                    Vector::new(1.0, -0.5, 0.0).normalize(),
+                    skin_cast(4.0),
+                );
+                assert_flat(
+                    hit,
+                    &format!("{what}, eps {eps} x {x}: pressing in from touching"),
+                );
             }
         }
     }
@@ -192,13 +245,32 @@ fn a_touching_tie_resolves_the_same_in_every_bvh_layout() {
     for lu in [1.0, UNITS_PER_METER] {
         for reversed in [false, true] {
             let w = terrace_world(lu, reversed);
-            let qp = w.broad_phase.as_query_pipeline(w.narrow_phase.query_dispatcher(), &w.bodies, &w.colliders, QueryFilter::default());
+            let qp = w.broad_phase.as_query_pipeline(
+                w.narrow_phase.query_dispatcher(),
+                &w.bodies,
+                &w.colliders,
+                QueryFilter::default(),
+            );
             let (_, hit) = qp
-                .cast_shape_on_continuous_surfaces(&Pose::from_translation(pos), desired.normalize(), &capsule, skin_cast(desired.length()), SKIN)
-                .unwrap_or_else(|| panic!("length unit {lu}, reversed {reversed}: resting on the floor is a hit"));
-            assert_eq!(hit.time_of_impact, 0.0, "length unit {lu}, reversed {reversed}: {hit:?}");
-            assert_eq!(hit.normal1, Vector::Y, "length unit {lu}, reversed {reversed}: the floor, not the riser edge: {hit:?}");
+                .cast_shape_on_continuous_surfaces(
+                    &Pose::from_translation(pos),
+                    desired.normalize(),
+                    &capsule,
+                    skin_cast(desired.length()),
+                    SKIN,
+                )
+                .unwrap_or_else(|| {
+                    panic!("length unit {lu}, reversed {reversed}: resting on the floor is a hit")
+                });
+            assert_eq!(
+                hit.time_of_impact, 0.0,
+                "length unit {lu}, reversed {reversed}: {hit:?}"
+            );
+            assert_eq!(
+                hit.normal1,
+                Vector::Y,
+                "length unit {lu}, reversed {reversed}: the floor, not the riser edge: {hit:?}"
+            );
         }
     }
 }
-

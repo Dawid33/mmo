@@ -28,13 +28,13 @@
 //!   `ENDORHEIC_INFLOW_RATIO` times its own surface loses it all to
 //!   evaporation and never spills.
 
-use crate::forge::geology::{rock_index, Geology};
+use crate::forge::geology::{Geology, rock_index};
 use crate::forge::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
 use crate::forge::knobs::Knobs;
 use crate::forge::par;
-use crate::forge::periodic::{sample_or, PeriodicX};
+use crate::forge::periodic::{PeriodicX, sample_or};
 use crate::forge::plates::{self, PlateField};
-use crate::forge::world::{hash01, smoothstep, span_m, ForgeParams, World, REFERENCE_SIZE_M};
+use crate::forge::world::{ForgeParams, REFERENCE_SIZE_M, World, hash01, smoothstep, span_m};
 use crate::noise::OctaveNoise;
 
 /// Flat ground at most this high above the nearest lake surface, or a big
@@ -147,7 +147,10 @@ pub fn permeability(id: u8) -> f64 {
 /// Flood height (m) of water with discharge `q` (m^2; INFINITY for a lake):
 /// `DRAINAGE_FLOOD_M * min(1, (q / DRAINAGE_FLOOD_REF_M2)^0.4)`.
 pub fn flood_height_m(q: f64) -> f64 {
-    DRAINAGE_FLOOD_M * (q.max(0.0) / DRAINAGE_FLOOD_REF_M2).powf(DRAINAGE_FLOOD_EXPONENT).min(1.0)
+    DRAINAGE_FLOOD_M
+        * (q.max(0.0) / DRAINAGE_FLOOD_REF_M2)
+            .powf(DRAINAGE_FLOOD_EXPONENT)
+            .min(1.0)
 }
 
 /// Drainage 0..1 of one cell: `slope` rise/run, `permeability` 0..1, and
@@ -158,13 +161,26 @@ pub fn flood_height_m(q: f64) -> f64 {
 /// with height above the flood, distance from the water and slope (gone by
 /// `DRAINAGE_FLOOD_SLOPE_MAX`). Flat ground within a big river's flood is
 /// < 0.33 on any rock; from `DRAINAGE_FLOOD_SLOPE_MAX` up nothing is.
-pub fn drainage_at(slope: f64, permeability: f64, above_water: f64, water_dist: f64, flood_m: f64) -> f64 {
+pub fn drainage_at(
+    slope: f64,
+    permeability: f64,
+    above_water: f64,
+    water_dist: f64,
+    flood_m: f64,
+) -> f64 {
     let sl = (slope / DRAINAGE_SLOPE_FULL).clamp(0.0, 1.0);
-    let dry = (DRAINAGE_BASE + DRAINAGE_PERMEABILITY_WEIGHT * permeability + DRAINAGE_SLOPE_WEIGHT * sl).min(1.0);
+    let dry =
+        (DRAINAGE_BASE + DRAINAGE_PERMEABILITY_WEIGHT * permeability + DRAINAGE_SLOPE_WEIGHT * sl)
+            .min(1.0);
     let flood_m = flood_m.max(0.01);
     let fade_m = DRAINAGE_FLOOD_FADE_M * flood_m / DRAINAGE_FLOOD_M;
     let flood = (1.0 - smoothstep(flood_m, flood_m + fade_m, above_water))
-        * (1.0 - smoothstep(DRAINAGE_FLOOD_REACH_M, 2.0 * DRAINAGE_FLOOD_REACH_M, water_dist))
+        * (1.0
+            - smoothstep(
+                DRAINAGE_FLOOD_REACH_M,
+                2.0 * DRAINAGE_FLOOD_REACH_M,
+                water_dist,
+            ))
         * (1.0 - smoothstep(0.0, DRAINAGE_FLOOD_SLOPE_MAX, slope));
     dry * (1.0 - DRAINAGE_FLOOD_DAMP * flood)
 }
@@ -212,7 +228,15 @@ pub fn water_levels(w: &World, a: &Analysis) -> Vec<f64> {
 
 /// Drainage 0..100 per cell (sea and lakes: 0).
 pub fn drainage(w: &World, a: &Analysis, geo: &Geology) -> Vec<u8> {
-    let rock: Vec<u8> = (0..w.cells()).map(|i| if w.ocean[i] { 0 } else { geo.surface_rock(w, i) }).collect();
+    let rock: Vec<u8> = (0..w.cells())
+        .map(|i| {
+            if w.ocean[i] {
+                0
+            } else {
+                geo.surface_rock(w, i)
+            }
+        })
+        .collect();
     drainage_from(w, &water_levels(w, a), &water_discharge(w, a), &rock)
 }
 
@@ -247,13 +271,33 @@ const CHAMFER_SETTLED_M: f64 = 1e-6;
 /// pass pair repeats (at most `habitat::CHAMFER_WRAP_EXTRA_PASSES` more times) until
 /// nothing changes: the forward pass reads the row's far column before it
 /// was relaxed.
-fn nearest_water(nx: usize, nz: usize, dx: f64, wrap_x: bool, level: &[f64], q: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>) {
-    let mut dist: Vec<f64> = level.iter().map(|l| if l.is_nan() { f64::INFINITY } else { 0.0 }).collect();
+fn nearest_water(
+    nx: usize,
+    nz: usize,
+    dx: f64,
+    wrap_x: bool,
+    level: &[f64],
+    q: &[f64],
+) -> (Vec<f64>, Vec<(f64, f64)>) {
+    let mut dist: Vec<f64> = level
+        .iter()
+        .map(|l| if l.is_nan() { f64::INFINITY } else { 0.0 })
+        .collect();
     let mut at: Vec<(f64, f64)> = level.iter().zip(q).map(|(&l, &q)| (l, q)).collect();
     let diag = dx * std::f64::consts::SQRT_2;
-    let relax = |dist: &mut Vec<f64>, at: &mut Vec<(f64, f64)>, x: usize, z: usize, ox: isize, oz: isize, step: f64| {
+    let relax = |dist: &mut Vec<f64>,
+                 at: &mut Vec<(f64, f64)>,
+                 x: usize,
+                 z: usize,
+                 ox: isize,
+                 oz: isize,
+                 step: f64| {
         let (jx, jz) = (x as isize + ox, z as isize + oz);
-        let jx = if wrap_x { jx.rem_euclid(nx as isize) } else { jx };
+        let jx = if wrap_x {
+            jx.rem_euclid(nx as isize)
+        } else {
+            jx
+        };
         if jx >= 0 && jz >= 0 && (jx as usize) < nx && (jz as usize) < nz {
             let j = jz as usize * nx + jx as usize;
             let i = z * nx + x;
@@ -303,7 +347,11 @@ fn nearest_water(nx: usize, nz: usize, dx: f64, wrap_x: bool, level: &[f64], q: 
         if cfg!(debug_assertions) && !settled {
             let (mut more, mut more_at) = (dist.clone(), at.clone());
             pair(&mut more, &mut more_at);
-            let moved = dist.iter().zip(&more).map(|(a, b)| a - b).fold(0.0, f64::max);
+            let moved = dist
+                .iter()
+                .zip(&more)
+                .map(|(a, b)| a - b)
+                .fold(0.0, f64::max);
             assert!(
                 moved <= CHAMFER_SETTLED_M,
                 "chamfer distance not settled after the capped pass pairs: one more lowers it by {moved} m"
@@ -323,17 +371,37 @@ pub fn drainage_from(w: &World, water_level: &[f64], water_q: &[f64], rock: &[u8
     let is_water = |j: usize| !water_level[j].is_nan();
     let land_value = |i: usize| {
         let (level, q) = nearest[i];
-        let above = if level.is_nan() { f64::INFINITY } else { w.h[i] - level };
+        let above = if level.is_nan() {
+            f64::INFINITY
+        } else {
+            w.h[i] - level
+        };
         let flood_m = if q.is_nan() { 0.0 } else { flood_height_m(q) };
-        to_u8(drainage_at(ground_slope(w, &is_water, i), permeability(rock[i]), above, dist[i], flood_m))
+        to_u8(drainage_at(
+            ground_slope(w, &is_water, i),
+            permeability(rock[i]),
+            above,
+            dist[i],
+            flood_m,
+        ))
     };
-    let land = par::map_range(w.cells(), |i| if w.ocean[i] || is_water(i) { 0 } else { land_value(i) });
+    let land = par::map_range(w.cells(), |i| {
+        if w.ocean[i] || is_water(i) {
+            0
+        } else {
+            land_value(i)
+        }
+    });
     par::map_range(w.cells(), |i| {
         let river = is_water(i) && water_q[i].is_finite();
         if !river || w.ocean[i] {
             return land[i];
         }
-        let banks: Vec<u32> = w.neighbors(i).filter(|&(j, _)| !w.ocean[j] && !is_water(j)).map(|(j, _)| land[j] as u32).collect();
+        let banks: Vec<u32> = w
+            .neighbors(i)
+            .filter(|&(j, _)| !w.ocean[j] && !is_water(j))
+            .map(|(j, _)| land[j] as u32)
+            .collect();
         if banks.is_empty() {
             land_value(i)
         } else {
@@ -372,11 +440,17 @@ impl VolcanismNoise {
     /// `convergence` there.
     fn at(&self, mx: f64, mz: f64, convergence: f64, k: &Knobs) -> f64 {
         let scale = self.scale;
-        let base_at = sample_or(self.wrap_base.as_ref(), mx, mz, |x, z| self.base.sample2(x / scale, z / scale));
+        let base_at = sample_or(self.wrap_base.as_ref(), mx, mz, |x, z| {
+            self.base.sample2(x / scale, z / scale)
+        });
         let base = VOLCANISM_BASE_MAX * (0.5 + 0.5 * base_at).clamp(0.0, 1.0);
         let flank = smoothstep(VOLCANISM_FLANK.0, VOLCANISM_FLANK.1, convergence)
-            * (1.0 - VOLCANISM_CORE_DAMP * smoothstep(VOLCANISM_CORE.0, VOLCANISM_CORE.1, convergence));
-        let spots_at = sample_or(self.wrap_spots.as_ref(), mx, mz, |x, z| self.spots.sample2(x / scale, z / scale));
+            * (1.0
+                - VOLCANISM_CORE_DAMP
+                    * smoothstep(VOLCANISM_CORE.0, VOLCANISM_CORE.1, convergence));
+        let spots_at = sample_or(self.wrap_spots.as_ref(), mx, mz, |x, z| {
+            self.spots.sample2(x / scale, z / scale)
+        });
         let spot = smoothstep(VOLCANISM_SPOT.0, VOLCANISM_SPOT.1, 0.5 + 0.5 * spots_at);
         k.volcanism_strength.max(0.0) * (base + VOLCANISM_HOTSPOT_GAIN * flank * spot)
     }
@@ -395,7 +469,10 @@ pub fn volcanism_grid(
     let noise = VolcanismNoise::new(seed, span_m(width_m, height_m), wrap);
     let (cell_x, cell_z) = (width_m / nx as f64, height_m / nz as f64);
     par::map_range(nx * nz, |i| {
-        let (mx, mz) = (((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z);
+        let (mx, mz) = (
+            ((i % nx) as f64 + 0.5) * cell_x,
+            ((i / nx) as f64 + 0.5) * cell_z,
+        );
         to_u8(noise.at(mx, mz, plates.convergence[i] as f64, k))
     })
 }
@@ -406,7 +483,14 @@ pub fn volcanism_grid(
 pub fn volcanism(seed: u64, w: &World, plates: &PlateField, k: &Knobs) -> Vec<u8> {
     let width_m = w.nx as f64 * w.dx;
     let wrap = PeriodicX::for_edges(&w.edges, width_m);
-    volcanism_grid(seed, (width_m, w.nz as f64 * w.dx), (w.nx, w.nz), plates, k, wrap)
+    volcanism_grid(
+        seed,
+        (width_m, w.nz as f64 * w.dx),
+        (w.nx, w.nz),
+        plates,
+        k,
+        wrap,
+    )
 }
 
 /// Volcano sites: cells of `volcanism` (an `nx` x `nz` grid of `cell_x` x
@@ -423,22 +507,38 @@ pub fn volcanoes(
     k: &Knobs,
     wrap: PeriodicX,
 ) -> Vec<[f32; 2]> {
-    assert_eq!(volcanism.len(), nx * nz, "volcanism raster vs its {nx} x {nz} grid");
+    assert_eq!(
+        volcanism.len(),
+        nx * nz,
+        "volcanism raster vs its {nx} x {nz} grid"
+    );
     let max = k.volcano_count_max.round().max(0.0) as usize;
-    let mut candidates: Vec<usize> = (0..volcanism.len()).filter(|&i| volcanism[i] >= 100 && eligible[i]).collect();
-    candidates.sort_by(|&a, &b| hash01(seed, 0x701C, a as u64).total_cmp(&hash01(seed, 0x701C, b as u64)).then(a.cmp(&b)));
+    let mut candidates: Vec<usize> = (0..volcanism.len())
+        .filter(|&i| volcanism[i] >= 100 && eligible[i])
+        .collect();
+    candidates.sort_by(|&a, &b| {
+        hash01(seed, 0x701C, a as u64)
+            .total_cmp(&hash01(seed, 0x701C, b as u64))
+            .then(a.cmp(&b))
+    });
     let mut sites: Vec<[f64; 2]> = Vec::new();
     for i in candidates {
         if sites.len() >= max {
             break;
         }
-        let p = [((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z];
+        let p = [
+            ((i % nx) as f64 + 0.5) * cell_x,
+            ((i / nx) as f64 + 0.5) * cell_z,
+        ];
         let gap = |s: &[f64; 2]| wrap.dx(s[0], p[0]).hypot(s[1] - p[1]);
         if sites.iter().all(|s| gap(s) >= VOLCANO_SPACING_M) {
             sites.push(p);
         }
     }
-    sites.into_iter().map(|[x, z]| [x as f32, z as f32]).collect()
+    sites
+        .into_iter()
+        .map(|[x, z]| [x as f32, z as f32])
+        .collect()
 }
 
 /// The volcano sites of a world from its seed and knobs only, on the
@@ -454,9 +554,21 @@ pub fn volcano_sites_on(p: &ForgeParams, eligible: &dyn Fn(f64, f64) -> bool) ->
     let (cell_x, cell_z) = (p.width_m / nx as f64, p.height_m / nz as f64);
     let field = plates::plate_field(p.seed, p.width_m, p.height_m, nx, nz, k);
     let wrap = PeriodicX::for_world(p);
-    let v = volcanism_grid(p.seed, (p.width_m, p.height_m), (nx, nz), &field, k, Some(wrap));
+    let v = volcanism_grid(
+        p.seed,
+        (p.width_m, p.height_m),
+        (nx, nz),
+        &field,
+        k,
+        Some(wrap),
+    );
     let ok: Vec<bool> = (0..nx * nz)
-        .map(|i| eligible(((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z))
+        .map(|i| {
+            eligible(
+                ((i % nx) as f64 + 0.5) * cell_x,
+                ((i / nx) as f64 + 0.5) * cell_z,
+            )
+        })
         .collect();
     volcanoes(p.seed, &v, &ok, (nx, nz), (cell_x, cell_z), k, wrap)
 }
@@ -467,7 +579,9 @@ pub fn volcano_sites_on(p: &ForgeParams, eligible: &dyn Fn(f64, f64) -> bool) ->
 pub fn cone(sites: &[[f32; 2]], mx: f64, mz: f64) -> f64 {
     sites
         .iter()
-        .map(|s| 1.0 - ((s[0] as f64 - mx).hypot(s[1] as f64 - mz) / VOLCANO_CONE_RADIUS_M).min(1.0))
+        .map(|s| {
+            1.0 - ((s[0] as f64 - mx).hypot(s[1] as f64 - mz) / VOLCANO_CONE_RADIUS_M).min(1.0)
+        })
         .fold(0.0, f64::max)
 }
 
@@ -518,10 +632,18 @@ pub fn closed_lakes(w: &World, lake_depth: &[f64], q: &[f64]) -> Vec<bool> {
 /// The shore lies half a cell from a shore cell's centre, so the taper reads
 /// the same at any cell size.
 pub fn salinity_from(w: &World, closed: &[bool]) -> Vec<u8> {
-    let salt: Vec<f32> = (0..w.cells()).map(|i| if w.ocean[i] || closed[i] { -1.0 } else { 1.0 }).collect();
+    let salt: Vec<f32> = (0..w.cells())
+        .map(|i| if w.ocean[i] || closed[i] { -1.0 } else { 1.0 })
+        .collect();
     let dist = crate::habitat::coast_distance_m(&salt, w.nx, w.nz, w.dx, w.wrap_x);
     dist.iter()
-        .map(|&d| if d <= 0.0 { 100 } else { to_u8(1.0 - (d as f64 - 0.5 * w.dx) / SALT_REACH_M as f64) })
+        .map(|&d| {
+            if d <= 0.0 {
+                100
+            } else {
+                to_u8(1.0 - (d as f64 - 0.5 * w.dx) / SALT_REACH_M as f64)
+            }
+        })
         .collect()
 }
 
@@ -530,4 +652,3 @@ pub fn salinity_from(w: &World, closed: &[bool]) -> Vec<u8> {
 pub fn salinity(w: &World, a: &Analysis) -> Vec<u8> {
     salinity_from(w, &closed_lakes(w, &a.lake_depth, &a.q))
 }
-

@@ -1,0 +1,3 @@
+- Make the moon a three dimensional cube, look at it from a corner.
+- stardew vally item pickup sound
+- remove play button in world gen

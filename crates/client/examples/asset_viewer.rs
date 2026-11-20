@@ -25,9 +25,11 @@ use bevy::app::AppExit;
 use bevy::asset::LoadState;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::WindowLevel;
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use client::renderer::model::{BbAnimationPlayer, BbModel, BbModelAsset, BbModelPlugin, BbModelSpawned};
+use client::renderer::model::{
+    BbAnimationPlayer, BbModel, BbModelAsset, BbModelPlugin, BbModelSpawned,
+};
 use client::renderer::slint_overlay::{SlintLayer, SlintLayerPlugin};
 use slint_ui::slint::{Model, ModelRc, SharedString, VecModel};
 use slint_ui_tools::AssetViewerUi;
@@ -118,16 +120,35 @@ fn main() {
             "--anim" => args.anim = it.next(),
             "--time" => args.time = it.next().and_then(|t| t.parse().ok()),
             "--shot" => args.shot = it.next(),
-            "--yaw" => args.yaw = it.next().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_YAW),
-            "--pitch" => args.pitch = it.next().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_PITCH),
+            "--yaw" => {
+                args.yaw = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_YAW)
+            }
+            "--pitch" => {
+                args.pitch = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_PITCH)
+            }
             root => args.roots.push(root.to_string()),
         }
     }
     if args.roots.is_empty() {
         args.roots = DEFAULT_ROOTS.iter().map(|r| r.to_string()).collect();
     }
-    let start_view = Orbit { focus: Vec3::ZERO, distance: 60.0, yaw: args.yaw.to_radians(), pitch: args.pitch.to_radians() };
-    let mut window = Window { title: "asset viewer".into(), resolution: (1600, 900).into(), ..default() };
+    let start_view = Orbit {
+        focus: Vec3::ZERO,
+        distance: 60.0,
+        yaw: args.yaw.to_radians(),
+        pitch: args.pitch.to_radians(),
+    };
+    let mut window = Window {
+        title: "asset viewer".into(),
+        resolution: (1600, 900).into(),
+        ..default()
+    };
     if args.shot.is_some() {
         // Screenshot runs (creature sheets fire dozens) must not land under the
         // cursor and take the keyboard: one fixed place, unfocused, below every
@@ -139,8 +160,14 @@ fn main() {
             Some(monitor) => WindowPosition::Centered(MonitorSelection::Index(monitor)),
             None => {
                 let pos = env("VOXEL_SHOT_POS").unwrap_or_else(|| "160,90".into());
-                let xy: Vec<i32> = pos.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-                WindowPosition::At(IVec2::new(*xy.first().unwrap_or(&160), *xy.get(1).unwrap_or(&90)))
+                let xy: Vec<i32> = pos
+                    .split(',')
+                    .filter_map(|v| v.trim().parse().ok())
+                    .collect();
+                WindowPosition::At(IVec2::new(
+                    *xy.first().unwrap_or(&160),
+                    *xy.get(1).unwrap_or(&90),
+                ))
             }
         };
         window.focused = false;
@@ -150,8 +177,14 @@ fn main() {
         .add_plugins(
             DefaultPlugins
                 // Absolute, so a directly launched binary finds them too.
-                .set(AssetPlugin { file_path: repo_root().to_string_lossy().into_owned(), ..default() })
-                .set(WindowPlugin { primary_window: Some(window), ..default() })
+                .set(AssetPlugin {
+                    file_path: repo_root().to_string_lossy().into_owned(),
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(window),
+                    ..default()
+                })
                 .set(client::renderer::render_plugin()),
         )
         .add_plugins(BbModelPlugin)
@@ -161,7 +194,19 @@ fn main() {
         .insert_resource(start_view)
         .init_resource::<Viewer>()
         .add_systems(Startup, (setup, scan_at_start))
-        .add_systems(Update, (apply_actions, reload_on_save, on_loaded, orbit, turn, push_state, shoot).chain())
+        .add_systems(
+            Update,
+            (
+                apply_actions,
+                reload_on_save,
+                on_loaded,
+                orbit,
+                turn,
+                push_state,
+                shoot,
+            )
+                .chain(),
+        )
         .run();
 }
 
@@ -183,8 +228,12 @@ fn reload_on_save(
         return;
     }
     *since = 0.0;
-    let Some(path) = viewer.selected.and_then(|i| viewer.models.get(i)) else { return };
-    let modified = std::fs::metadata(repo_root().join(path)).and_then(|m| m.modified()).ok();
+    let Some(path) = viewer.selected.and_then(|i| viewer.models.get(i)) else {
+        return;
+    };
+    let modified = std::fs::metadata(repo_root().join(path))
+        .and_then(|m| m.modified())
+        .ok();
     if seen.0.as_deref() == Some(path.as_str()) && modified != seen.1 {
         assets.reload(path.clone());
     }
@@ -217,7 +266,9 @@ fn connect(ui: &AssetViewerUi, world: &mut World) {
 /// relative to `base` with `/` separators.
 fn scan(base: &Path, roots: &[String]) -> Vec<String> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -234,7 +285,12 @@ fn scan(base: &Path, roots: &[String]) -> Vec<String> {
     let mut paths: Vec<String> = found
         .iter()
         .filter_map(|p| p.strip_prefix(base).ok())
-        .map(|p| p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"))
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
         .collect();
     paths.sort();
     paths.dedup();
@@ -255,14 +311,28 @@ fn setup(
 ) {
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(512.0, 512.0))),
-        MeshMaterial3d(materials.add(StandardMaterial { base_color: Color::srgb(0.45, 0.45, 0.42), ..default() })),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.45, 0.45, 0.42),
+            ..default()
+        })),
     ));
     commands.spawn((
-        DirectionalLight { illuminance: 8_000.0, shadow_maps_enabled: true, ..default() },
+        DirectionalLight {
+            illuminance: 8_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
         Transform::default().looking_at(Vec3::new(-0.4, -1.0, -0.6), Vec3::Y),
     ));
-    commands.insert_resource(GlobalAmbientLight { brightness: 500.0, ..default() });
-    commands.spawn((Camera3d::default(), Transform::default(), client::renderer::UiCamera));
+    commands.insert_resource(GlobalAmbientLight {
+        brightness: 500.0,
+        ..default()
+    });
+    commands.spawn((
+        Camera3d::default(),
+        Transform::default(),
+        client::renderer::UiCamera,
+    ));
 }
 
 fn scan_at_start(args: Res<Args>, mut viewer: ResMut<Viewer>, actions: NonSend<Actions>) {
@@ -290,12 +360,16 @@ fn apply_actions(
     for action in queued {
         match action {
             Action::PickModel(i) => {
-                let Some(path) = viewer.models.get(i).cloned() else { continue };
+                let Some(path) = viewer.models.get(i).cloned() else {
+                    continue;
+                };
                 if let Some(old) = viewer.entity.take() {
                     commands.entity(old).despawn();
                 }
                 let handle: Handle<BbModelAsset> = assets.load(path.clone());
-                let entity = commands.spawn((BbModel(handle.clone()), BbAnimationPlayer::default(), Shown)).id();
+                let entity = commands
+                    .spawn((BbModel(handle.clone()), BbAnimationPlayer::default(), Shown))
+                    .id();
                 info!("showing {path}");
                 viewer.selected = Some(i);
                 viewer.entity = Some(entity);
@@ -308,7 +382,9 @@ fn apply_actions(
                 viewer.selected = current.and_then(|c| viewer.models.iter().position(|m| *m == c));
             }
             other => {
-                let Ok(mut player) = players.single_mut() else { continue };
+                let Ok(mut player) = players.single_mut() else {
+                    continue;
+                };
                 match other {
                     Action::PickClip(0) => player.stop(),
                     Action::PickClip(i) => {
@@ -340,8 +416,12 @@ fn on_loaded(
     mut loaded: Query<(&BbModel, &mut BbAnimationPlayer), (With<Shown>, Added<BbModelSpawned>)>,
 ) {
     for (model, mut player) in &mut loaded {
-        let Some(asset) = models.get(&model.0) else { continue };
-        let (lo, hi) = asset.bounds.unwrap_or((Vec3::splat(-8.0), Vec3::splat(8.0)));
+        let Some(asset) = models.get(&model.0) else {
+            continue;
+        };
+        let (lo, hi) = asset
+            .bounds
+            .unwrap_or((Vec3::splat(-8.0), Vec3::splat(8.0)));
         orbit.focus = (lo + hi) / 2.0;
         orbit.distance = (hi - lo).length().max(4.0) * 1.3;
         viewer.clips = std::iter::once(REST_POSE.to_string())
@@ -385,9 +465,14 @@ fn orbit(
             orbit.distance = (orbit.distance * ZOOM_PER_LINE.powf(lines)).clamp(2.0, 4096.0);
         }
     }
-    let dir = Vec3::new(orbit.yaw.sin() * orbit.pitch.cos(), orbit.pitch.sin(), orbit.yaw.cos() * orbit.pitch.cos());
+    let dir = Vec3::new(
+        orbit.yaw.sin() * orbit.pitch.cos(),
+        orbit.pitch.sin(),
+        orbit.yaw.cos() * orbit.pitch.cos(),
+    );
     for mut t in &mut camera {
-        *t = Transform::from_translation(orbit.focus + dir * orbit.distance).looking_at(orbit.focus, Vec3::Y);
+        *t = Transform::from_translation(orbit.focus + dir * orbit.distance)
+            .looking_at(orbit.focus, Vec3::Y);
     }
 }
 
@@ -405,7 +490,12 @@ fn turn(
 }
 
 fn strings(items: impl IntoIterator<Item = String>) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(items.into_iter().map(SharedString::from).collect::<Vec<_>>()))
+    ModelRc::new(VecModel::from(
+        items
+            .into_iter()
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// Viewer state → panel properties, each only when it changed (a set marks
@@ -429,7 +519,11 @@ fn push_state(
         *last_clips = viewer.clips.clone();
     }
 
-    let status = match viewer.handle.as_ref().and_then(|h| assets.get_load_state(h.id())) {
+    let status = match viewer
+        .handle
+        .as_ref()
+        .and_then(|h| assets.get_load_state(h.id()))
+    {
         Some(LoadState::Failed(e)) => format!("load failed: {e}"),
         Some(LoadState::Loading) => "loading…".into(),
         _ => String::new(),
@@ -438,9 +532,16 @@ fn push_state(
         ui.set_status(status.into());
     }
 
-    let Ok((model, player)) = players.single() else { return };
-    let Some(asset) = models.get(&model.0) else { return };
-    let clip = player.animation.as_deref().and_then(|n| asset.skeleton.animation(n));
+    let Ok((model, player)) = players.single() else {
+        return;
+    };
+    let Some(asset) = models.get(&model.0) else {
+        return;
+    };
+    let clip = player
+        .animation
+        .as_deref()
+        .and_then(|n| asset.skeleton.animation(n));
     let selected = player
         .animation
         .as_deref()
@@ -453,10 +554,16 @@ fn push_state(
         Some(a) => {
             let mode = format!("{:?}", a.loop_mode).to_lowercase();
             let t = match a.loop_mode {
-                bbmodel::animation::LoopMode::Loop if a.length > 0.0 => player.elapsed.rem_euclid(a.length),
+                bbmodel::animation::LoopMode::Loop if a.length > 0.0 => {
+                    player.elapsed.rem_euclid(a.length)
+                }
                 _ => player.elapsed.min(a.length),
             };
-            (format!("{} — {mode}, {:.2} s", a.name, a.length), a.length, t)
+            (
+                format!("{} — {mode}, {:.2} s", a.name, a.length),
+                a.length,
+                t,
+            )
         }
         None => ("rest pose".to_string(), 0.0, 0.0),
     };
@@ -479,12 +586,27 @@ fn push_state(
     let (lo, hi) = asset.bounds.unwrap_or((Vec3::ZERO, Vec3::ZERO));
     let size = hi - lo;
     let mut lines = vec![
-        format!("{} nodes, {} parts", asset.nodes.len(), asset.nodes.iter().map(|n| n.parts.len()).sum::<usize>()),
-        format!("{:.1} × {:.1} × {:.1} blocks", size.x / 16.0, size.y / 16.0, size.z / 16.0),
-        format!("format {} ({})", asset.skeleton.format_version, asset.skeleton.model_format),
+        format!(
+            "{} nodes, {} parts",
+            asset.nodes.len(),
+            asset.nodes.iter().map(|n| n.parts.len()).sum::<usize>()
+        ),
+        format!(
+            "{:.1} × {:.1} × {:.1} blocks",
+            size.x / 16.0,
+            size.y / 16.0,
+            size.z / 16.0
+        ),
+        format!(
+            "format {} ({})",
+            asset.skeleton.format_version, asset.skeleton.model_format
+        ),
     ];
     if !asset.skeleton.warnings.is_empty() {
-        lines.push(format!("{} reader warnings (see log)", asset.skeleton.warnings.len()));
+        lines.push(format!(
+            "{} reader warnings (see log)",
+            asset.skeleton.warnings.len()
+        ));
     }
     let current: Vec<String> = ui.get_model_info().iter().map(|s| s.to_string()).collect();
     if current != lines {
@@ -500,7 +622,9 @@ fn shoot(
     mut after_load: Local<u32>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let Some(path) = args.shot.as_ref() else { return };
+    let Some(path) = args.shot.as_ref() else {
+        return;
+    };
     if loaded.is_empty() {
         *waited += 1;
         if *waited > 1200 {
@@ -512,7 +636,9 @@ fn shoot(
     // Let textures upload, shadows settle and the panels draw.
     *after_load += 1;
     if *after_load == 30 {
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.clone()));
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path.clone()));
     }
     if *after_load == 60 {
         exit.write(AppExit::Success);

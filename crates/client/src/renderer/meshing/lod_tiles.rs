@@ -26,14 +26,14 @@ use bevy::pbr::{ExtendedMaterial, MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use game::BRICK_VOXELS;
 
-use super::super::voxel_material::StandardVoxelMaterial;
-use super::chunk_mesh::{per_chunk_backend, records_to_mesh_data, BrickRecords};
 use super::super::config::TerrainRenderConfig;
+use super::super::voxel_material::StandardVoxelMaterial;
 use super::super::voxel_pull::ChunkQuads;
-use super::records;
+use super::ChunkMaterial;
+use super::chunk_mesh::{BrickRecords, per_chunk_backend, records_to_mesh_data};
 use super::lod::{FarFrameUploads, LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
 use super::queue::MeshBudgets;
-use super::ChunkMaterial;
+use super::records;
 
 /// Most cell groups per tile edge (a record's brick placement holds 0..8
 /// per axis): a tile merges up to this many cubed cells.
@@ -130,13 +130,20 @@ pub fn tile_aabb(cells: impl IntoIterator<Item = [u8; 3]>) -> Option<Aabb> {
         return None;
     }
     let cell = BRICK_VOXELS as f32;
-    let min = Vec3A::new(f32::from(lo[0]) * cell, f32::from(lo[1]) * cell, f32::from(lo[2]) * cell);
+    let min = Vec3A::new(
+        f32::from(lo[0]) * cell,
+        f32::from(lo[1]) * cell,
+        f32::from(lo[2]) * cell,
+    );
     let max = Vec3A::new(
         (f32::from(hi[0]) + 1.0) * cell,
         (f32::from(hi[1]) + 1.0) * cell + 1.0,
         (f32::from(hi[2]) + 1.0) * cell,
     );
-    Some(Aabb { center: (min + max) * 0.5, half_extents: (max - min) * 0.5 })
+    Some(Aabb {
+        center: (min + max) * 0.5,
+        half_extents: (max - min) * 0.5,
+    })
 }
 
 type VoxelMaterial = ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>;
@@ -148,7 +155,13 @@ pub fn rebuild_lod_tiles(
     mut commands: Commands,
     dirty: Query<(&ChildOf, &LodGroup), With<LodTileDirty>>,
     children: Query<&Children>,
-    cells: Query<(&LodGroup, &LodChunk, Option<&BrickRecords>, Has<LodMeshTask>, Has<LodTileDirty>)>,
+    cells: Query<(
+        &LodGroup,
+        &LodChunk,
+        Option<&BrickRecords>,
+        Has<LodMeshTask>,
+        Has<LodTileDirty>,
+    )>,
     mut tiles: Query<&mut LodTiles>,
     queue: Res<LodBuildQueue>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -166,7 +179,11 @@ pub fn rebuild_lod_tiles(
         .iter()
         .filter_map(|(parent, group)| {
             let root = parent.parent();
-            let factor = children.get(root).ok()?.iter().find_map(|c| cells.get(c).ok().map(|(_, lod, ..)| lod.factor))?;
+            let factor = children
+                .get(root)
+                .ok()?
+                .iter()
+                .find_map(|c| cells.get(c).ok().map(|(_, lod, ..)| lod.factor))?;
             let groups = tile_groups(factor, per_chunk);
             Some((root, groups, tile_of(group.0, groups)))
         })
@@ -175,16 +192,28 @@ pub fn rebuild_lod_tiles(
         if uploads.0 >= budgets.uploads_per_frame {
             break;
         }
-        let Ok(kids) = children.get(root) else { continue };
-        let members: Vec<Entity> =
-            kids.iter().filter(|&c| cells.get(c).is_ok_and(|(g, ..)| tile_of(g.0, groups) == tile)).collect();
-        let settled = members
+        let Ok(kids) = children.get(root) else {
+            continue;
+        };
+        let members: Vec<Entity> = kids
             .iter()
-            .all(|&c| !queue.contains_raster(c) && cells.get(c).is_ok_and(|(_, _, _, meshing, _)| !meshing));
+            .filter(|&c| {
+                cells
+                    .get(c)
+                    .is_ok_and(|(g, ..)| tile_of(g.0, groups) == tile)
+            })
+            .collect();
+        let settled = members.iter().all(|&c| {
+            !queue.contains_raster(c) && cells.get(c).is_ok_and(|(_, _, _, meshing, _)| !meshing)
+        });
         if !settled {
             continue;
         }
-        let Some(factor) = members.first().and_then(|&c| cells.get(c).ok()).map(|(_, lod, ..)| lod.factor) else {
+        let Some(factor) = members
+            .first()
+            .and_then(|&c| cells.get(c).ok())
+            .map(|(_, lod, ..)| lod.factor)
+        else {
             continue;
         };
         let parts: Vec<([u8; 3], std::sync::Arc<Vec<records::QuadRecord>>)> = members
@@ -196,15 +225,25 @@ pub fn rebuild_lod_tiles(
             .collect();
         let merged = records::merge_records(parts.iter().map(|(local, r)| (*local, r.as_slice())));
         for &c in &members {
-            commands.entity(c).remove::<LodTileDirty>().insert(LodRasterReady);
+            commands
+                .entity(c)
+                .remove::<LodTileDirty>()
+                .insert(LodRasterReady);
         }
-        let Ok(mut root_tiles) = tiles.get_mut(root) else { continue };
+        let Ok(mut root_tiles) = tiles.get_mut(root) else {
+            continue;
+        };
         let entity = match root_tiles.0.get(&tile) {
             Some(&e) => e,
             None if merged.is_empty() => continue,
             None => {
                 let e = commands
-                    .spawn((tile_transform(tile, factor, groups), Visibility::default(), LodTileMesh { tile }, ChildOf(root)))
+                    .spawn((
+                        tile_transform(tile, factor, groups),
+                        Visibility::default(),
+                        LodTileMesh { tile },
+                        ChildOf(root),
+                    ))
                     .id();
                 root_tiles.0.insert(tile, e);
                 e
@@ -217,8 +256,13 @@ pub fn rebuild_lod_tiles(
         }
         uploads.0 += 1;
         // Cells that meshed to nothing (buried, empty) hold no quads to bound.
-        let bounds = tile_aabb(parts.iter().filter(|(_, r)| !r.is_empty()).map(|(local, _)| *local))
-            .expect("merged records come from at least one cell");
+        let bounds = tile_aabb(
+            parts
+                .iter()
+                .filter(|(_, r)| !r.is_empty())
+                .map(|(local, _)| *local),
+        )
+        .expect("merged records come from at least one cell");
         ec.insert((bounds, NoAutoAabb));
         if per_chunk {
             let data = records_to_mesh_data(&merged).expect("non-empty records mesh");
@@ -231,4 +275,3 @@ pub fn rebuild_lod_tiles(
         }
     }
 }
-

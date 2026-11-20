@@ -9,16 +9,17 @@
 use std::collections::BTreeMap;
 
 use game::{
-    Chunk, ChunkCoords, ColumnCoords, ColumnGround, CutId, EntityBundle, EntityId, EntityKind, InFlightRow,
-    IntentMsg, PlayerId, PlayerRecord, RegionCoords, RegionMeta, StoredRegion, TerrainSnapshot, Tick, WorldCut,
+    Chunk, ChunkCoords, ColumnCoords, ColumnGround, CutId, EntityBundle, EntityId, EntityKind,
+    InFlightRow, IntentMsg, PlayerId, PlayerRecord, RegionCoords, RegionMeta, StoredRegion,
+    TerrainSnapshot, Tick, WorldCut,
 };
 
 use crate::codec::*;
 use crate::fence::{Fence, SuperRegion, commit_check_set, load_check};
 use crate::forged::{ForgedHead, TiledRows};
-use game::HostId;
-use game::ClockAnchor;
 use crate::{CutCommitted, HostRow, StoreError, WorldInfo};
+use game::ClockAnchor;
+use game::HostId;
 
 /// Super-regions checked per fence query (two binds each).
 const FENCE_CHECK_BATCH: usize = 200;
@@ -26,8 +27,13 @@ const FENCE_CHECK_BATCH: usize = 200;
 /// The fence query over `n` super-regions, `lock` appended (Postgres:
 /// `FOR SHARE`, in key order so it never deadlocks with a claim's upserts).
 fn fence_check_sql(n: usize, lock: &str) -> String {
-    let wanted: Vec<String> = (0..n).map(|k| format!("(sx = ${} AND sz = ${})", 2 * k + 1, 2 * k + 2)).collect();
-    format!("SELECT sx, sz, owner, epoch FROM super_regions WHERE {} ORDER BY sx, sz{lock}", wanted.join(" OR "))
+    let wanted: Vec<String> = (0..n)
+        .map(|k| format!("(sx = ${} AND sz = ${})", 2 * k + 1, 2 * k + 2))
+        .collect();
+    format!(
+        "SELECT sx, sz, owner, epoch FROM super_regions WHERE {} ORDER BY sx, sz{lock}",
+        wanted.join(" OR ")
+    )
 }
 
 /// A fence check that lost a race with a claim (Postgres: a serialization
@@ -35,7 +41,9 @@ fn fence_check_sql(n: usize, lock: &str) -> String {
 /// bump the epoch, so the row it waited on no longer holds this claim.
 fn fence_race(e: sqlx::Error, sr: SuperRegion) -> StoreError {
     match &e {
-        sqlx::Error::Database(d) if matches!(d.code().as_deref(), Some("40001") | Some("40P01")) => {
+        sqlx::Error::Database(d)
+            if matches!(d.code().as_deref(), Some("40001") | Some("40P01")) =>
+        {
             StoreError::Fenced { sr: Some(sr) }
         }
         _ => e.into(),
@@ -68,13 +76,19 @@ fn kind_code(kind: &EntityKind) -> i64 {
 }
 
 fn region_of(rx: i64, rz: i64) -> Result<RegionCoords, StoreError> {
-    let x = i32::try_from(rx).map_err(|_| StoreError::Corrupt(format!("region x {rx} out of range")))?;
-    let z = i32::try_from(rz).map_err(|_| StoreError::Corrupt(format!("region z {rz} out of range")))?;
+    let x = i32::try_from(rx)
+        .map_err(|_| StoreError::Corrupt(format!("region x {rx} out of range")))?;
+    let z = i32::try_from(rz)
+        .map_err(|_| StoreError::Corrupt(format!("region z {rz} out of range")))?;
     Ok(RegionCoords::new(x, z))
 }
 
 fn chunk_of(rc: RegionCoords, cx: i64, cy: i64, cz: i64) -> Result<ChunkCoords, StoreError> {
-    let bad = || StoreError::Corrupt(format!("region {rc:?}: chunk ({cx}, {cy}, {cz}) out of range"));
+    let bad = || {
+        StoreError::Corrupt(format!(
+            "region {rc:?}: chunk ({cx}, {cy}, {cz}) out of range"
+        ))
+    };
     Ok(ChunkCoords::new(
         usize::try_from(cx).map_err(|_| bad())?,
         i32::try_from(cy).map_err(|_| bad())?,
@@ -123,7 +137,9 @@ fn entity_stale(id: EntityId, saved: RegionCoords, stored: RegionCoords, tick: T
 /// regions (`$1` on); `owned`: only rows in this host's regions (a prepared part:
 /// owner and side bound after the regions). One row is enough to refuse.
 fn stale_row_sql(n: usize, owned: bool) -> String {
-    let regions: Vec<String> = (0..n).map(|k| format!("(n.rx = ${} AND n.rz = ${})", 2 * k + 1, 2 * k + 2)).collect();
+    let regions: Vec<String> = (0..n)
+        .map(|k| format!("(n.rx = ${} AND n.rz = ${})", 2 * k + 1, 2 * k + 2))
+        .collect();
     // Postgres only (a prepared part): the other row's region lies in a super-region
     // owned by `$o` (`super_region_of`: floor division by `$s`, the side).
     let owned = if owned {
@@ -158,7 +174,10 @@ fn entity_insert_error(e: sqlx::Error, id: EntityId, rc: RegionCoords, tick: Tic
 fn ground_blob(ground: Option<&Vec<(ColumnCoords, ColumnGround)>>) -> Vec<u8> {
     match ground {
         Some(g) => encode(FORMAT_REGION_GROUND, g),
-        None => encode(FORMAT_REGION_GROUND, &Vec::<(ColumnCoords, ColumnGround)>::new()),
+        None => encode(
+            FORMAT_REGION_GROUND,
+            &Vec::<(ColumnCoords, ColumnGround)>::new(),
+        ),
     }
 }
 
@@ -199,7 +218,10 @@ where
     Option<Vec<u8>>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
 {
     let land = land_load_bytes(&load.land);
-    q.bind(i64::from(load.players)).bind(i64::from(load.regions)).bind(i64::from(load.tick_permille)).bind(land)
+    q.bind(i64::from(load.players))
+        .bind(i64::from(load.regions))
+        .bind(i64::from(load.tick_permille))
+        .bind(land)
 }
 
 /// Elastic 5: `hosts.land_load` as written — `None` (NULL) for an empty list, else
@@ -213,7 +235,9 @@ pub(crate) fn land_load_bytes(land: &[game::SrLoad]) -> Option<Vec<u8>> {
     match game::encode_packet(&land.to_vec()) {
         Ok(b) => Some(b),
         Err(e) => {
-            log::warn!("[world-store] a beat's land load could not be encoded ({e}); written as none");
+            log::warn!(
+                "[world-store] a beat's land load could not be encoded ({e}); written as none"
+            );
             None
         }
     }
@@ -225,7 +249,9 @@ pub(crate) fn land_load_of(bytes: Option<Vec<u8>>) -> Vec<game::SrLoad> {
     match bytes {
         None => Vec::new(),
         Some(b) => game::decode_packet(&b).unwrap_or_else(|e| {
-            log::warn!("[world-store] a hosts row's land load could not be decoded ({e:?}); read as none");
+            log::warn!(
+                "[world-store] a hosts row's land load could not be decoded ({e:?}); read as none"
+            );
             Vec::new()
         }),
     }
@@ -235,8 +261,14 @@ pub(crate) fn land_load_of(bytes: Option<Vec<u8>>) -> Vec<game::SrLoad> {
 /// live row and its remaining drain time.
 pub(crate) fn beat_of(row: Option<Option<i64>>) -> crate::Beat {
     match row {
-        None => crate::Beat { live: false, drain_in_ms: None },
-        Some(drain_in_ms) => crate::Beat { live: true, drain_in_ms },
+        None => crate::Beat {
+            live: false,
+            drain_in_ms: None,
+        },
+        Some(drain_in_ms) => crate::Beat {
+            live: true,
+            drain_in_ms,
+        },
     }
 }
 
@@ -2045,7 +2077,17 @@ macro_rules! engine_rows {
 // lock and one writer process holds the file lock.
 // `$lock_timeout`: whether a cut's transaction sets a `lock_timeout` (Postgres).
 // `$now_ms`: the engine's SQL for the database clock in ms since the epoch (`seen_ms`).
-engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false, None, "CAST(unixepoch('subsec') * 1000 AS INTEGER)", staged_hosts_sqlite);
+engine_rows!(
+    sqlite,
+    sqlx::Sqlite,
+    None,
+    "",
+    "",
+    false,
+    None,
+    "CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+    staged_hosts_sqlite
+);
 engine_rows!(
     pg,
     sqlx::Postgres,
@@ -2064,7 +2106,11 @@ engine_rows!(
 /// `pg_notify` on [`crate::listen::WORLD_CUT_CHANNEL`], in a transaction of its own —
 /// delivered when it commits). Writes no row, so it needs no fence: a notice is only a
 /// hint to re-read committed rows.
-pub(crate) async fn notify_cut(pool: &sqlx::PgPool, cut: CutId, tick: Tick) -> Result<(), StoreError> {
+pub(crate) async fn notify_cut(
+    pool: &sqlx::PgPool,
+    cut: CutId,
+    tick: Tick,
+) -> Result<(), StoreError> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(crate::listen::WORLD_CUT_CHANNEL)

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use quinn::rustls::{
     self,
-    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject},
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
@@ -62,7 +62,11 @@ enum Source {
     /// Minted at start; its leaf's SHA-256, lowercase hex.
     SelfSigned { sha256_hex: String },
     /// Read from files; `loaded` = the bytes of the pair being served.
-    Files { cert: PathBuf, key: PathBuf, loaded: Mutex<(Vec<u8>, Vec<u8>)> },
+    Files {
+        cert: PathBuf,
+        key: PathBuf,
+        loaded: Mutex<(Vec<u8>, Vec<u8>)>,
+    },
 }
 
 impl ClientCert {
@@ -81,12 +85,28 @@ impl ClientCert {
     pub fn self_signed() -> Result<Self, String> {
         let identity = wtransport::Identity::self_signed(SELF_SIGNED_NAMES)
             .map_err(|e| format!("minting the client certificate: {e}"))?;
-        let chain: Vec<CertificateDer<'static>> =
-            identity.certificate_chain().as_slice().iter().map(|c| CertificateDer::from(c.der().to_vec())).collect();
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.private_key().secret_der().to_vec()));
-        let leaf = identity.certificate_chain().as_slice().first().ok_or("a self-signed identity has a certificate")?;
-        let sha256_hex = leaf.hash().as_ref().iter().map(|b| format!("{b:02x}")).collect();
-        let pair = certified(chain, key).map_err(|e| format!("the minted client certificate: {e}"))?;
+        let chain: Vec<CertificateDer<'static>> = identity
+            .certificate_chain()
+            .as_slice()
+            .iter()
+            .map(|c| CertificateDer::from(c.der().to_vec()))
+            .collect();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            identity.private_key().secret_der().to_vec(),
+        ));
+        let leaf = identity
+            .certificate_chain()
+            .as_slice()
+            .first()
+            .ok_or("a self-signed identity has a certificate")?;
+        let sha256_hex = leaf
+            .hash()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let pair =
+            certified(chain, key).map_err(|e| format!("the minted client certificate: {e}"))?;
         Ok(Self::new(pair, Source::SelfSigned { sha256_hex }))
     }
 
@@ -94,11 +114,23 @@ impl ClientCert {
     fn load_files(cert: PathBuf, key: PathBuf) -> io::Result<Self> {
         let bytes = read_pair(&cert, &key).map_err(|e| files_error(&cert, &key, &e))?;
         let pair = parse_pair(&bytes).map_err(|e| files_error(&cert, &key, &e))?;
-        Ok(Self::new(pair, Source::Files { cert, key, loaded: Mutex::new(bytes) }))
+        Ok(Self::new(
+            pair,
+            Source::Files {
+                cert,
+                key,
+                loaded: Mutex::new(bytes),
+            },
+        ))
     }
 
     fn new(pair: CertifiedKey, source: Source) -> Self {
-        Self { shared: Arc::new(Shared { current: RwLock::new(Arc::new(pair)), source }) }
+        Self {
+            shared: Arc::new(Shared {
+                current: RwLock::new(Arc::new(pair)),
+                source,
+            }),
+        }
     }
 
     /// The leaf's SHA-256, lowercase hex, when self-signed (what a client pins); `None` for a
@@ -138,7 +170,11 @@ impl ClientCert {
             return Ok(false);
         }
         let pair = parse_pair(&bytes).map_err(|e| files_error(cert, key, &e))?;
-        *self.shared.current.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(pair);
+        *self
+            .shared
+            .current
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(pair);
         *loaded = bytes;
         Ok(true)
     }
@@ -153,7 +189,9 @@ impl ClientCert {
         let Some((cert, key)) = files_from_env(&lookup)? else {
             return Self::self_signed().map(Some);
         };
-        Ok(wait_for_files(&cert, &key, stop, CERT_WAIT_RETRY, || Self::load_files(cert.clone(), key.clone())))
+        Ok(wait_for_files(&cert, &key, stop, CERT_WAIT_RETRY, || {
+            Self::load_files(cert.clone(), key.clone())
+        }))
     }
 
     /// [`Self::reload_if_changed`]; an `Err` is re-read once after `pause`.
@@ -174,13 +212,20 @@ impl ClientCert {
 
     /// The DER of the leaf served now.
     pub fn leaf_der(&self) -> Vec<u8> {
-        self.current().cert.first().map(|c| c.to_vec()).unwrap_or_default()
+        self.current()
+            .cert
+            .first()
+            .map(|c| c.to_vec())
+            .unwrap_or_default()
     }
 }
 
 impl Shared {
     fn current(&self) -> Arc<CertifiedKey> {
-        self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -215,7 +260,11 @@ fn wait_for_files(
         match try_load() {
             Ok(loaded) => {
                 if warned.is_some() {
-                    log::info!("the client certificate files are there: {} / {}", cert.display(), key.display());
+                    log::info!(
+                        "the client certificate files are there: {} / {}",
+                        cert.display(),
+                        key.display()
+                    );
                 }
                 return Some(loaded);
             }
@@ -237,21 +286,35 @@ fn wait_for_files(
 
 /// The certificate files the environment names (`None`: neither, a self-signed certificate):
 /// both or neither, by the new names or their old aliases (empty counts as unset).
-fn files_from_env(lookup: &impl Fn(&str) -> Option<String>) -> Result<Option<(PathBuf, PathBuf)>, String> {
+fn files_from_env(
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let cert = named(lookup, CLIENT_CERT_ENV, WT_CERT_ENV)?;
     let key = named(lookup, CLIENT_KEY_ENV, WT_KEY_ENV)?;
     match (cert, key) {
         (None, None) => Ok(None),
         (Some(cert), Some(key)) => Ok(Some((cert.into(), key.into()))),
-        _ => Err(format!("set both {CLIENT_CERT_ENV} and {CLIENT_KEY_ENV} (or {WT_CERT_ENV} and {WT_KEY_ENV}), or neither")),
+        _ => Err(format!(
+            "set both {CLIENT_CERT_ENV} and {CLIENT_KEY_ENV} (or {WT_CERT_ENV} and {WT_KEY_ENV}), or neither"
+        )),
     }
 }
 
 /// A file variable by its new name or its old alias: both set to different values is an error.
-fn named(lookup: &impl Fn(&str) -> Option<String>, name: &str, alias: &str) -> Result<Option<String>, String> {
-    let get = |n: &str| lookup(n).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+fn named(
+    lookup: &impl Fn(&str) -> Option<String>,
+    name: &str,
+    alias: &str,
+) -> Result<Option<String>, String> {
+    let get = |n: &str| {
+        lookup(n)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
     match (get(name), get(alias)) {
-        (Some(a), Some(b)) if a != b => Err(format!("{name} ({a}) and its old name {alias} ({b}) disagree: set one")),
+        (Some(a), Some(b)) if a != b => Err(format!(
+            "{name} ({a}) and its old name {alias} ({b}) disagree: set one"
+        )),
         (a, b) => Ok(a.or(b)),
     }
 }
@@ -269,16 +332,26 @@ fn parse_pair((cert, key): &(Vec<u8>, Vec<u8>)) -> io::Result<CertifiedKey> {
     if chain.is_empty() {
         return Err(invalid("no certificate in the chain file".into()));
     }
-    let key = PrivateKeyDer::from_pem_slice(key).map_err(|e| invalid(format!("private key: {e}")))?;
+    let key =
+        PrivateKeyDer::from_pem_slice(key).map_err(|e| invalid(format!("private key: {e}")))?;
     certified(chain, key).map_err(|e| invalid(e.to_string()))
 }
 
 /// The pair, its key loaded by ring and matched against the leaf.
-fn certified(chain: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>) -> Result<CertifiedKey, rustls::Error> {
+fn certified(
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<CertifiedKey, rustls::Error> {
     CertifiedKey::from_der(chain, key, &rustls::crypto::ring::default_provider())
 }
 
 fn files_error(cert: &Path, key: &Path, e: &io::Error) -> io::Error {
-    io::Error::new(e.kind(), format!("client certificate {} / {}: {e}", cert.display(), key.display()))
+    io::Error::new(
+        e.kind(),
+        format!(
+            "client certificate {} / {}: {e}",
+            cert.display(),
+            key.display()
+        ),
+    )
 }
-

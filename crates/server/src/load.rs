@@ -4,8 +4,8 @@
 //! ([`game::HostLoad::land`]).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The most a window reports: ten times the tick period.
@@ -14,7 +14,10 @@ pub const TICK_PERMILLE_MAX: u32 = 10_000;
 /// The worst tick compute time (µs) of the current window, shared by every region thread of
 /// the process, and each region's own (a slot per region thread, [`TickLoad::slot`]).
 #[derive(Clone, Default)]
-pub struct TickLoad(Arc<AtomicU64>, Arc<Mutex<BTreeMap<game::RegionCoords, Arc<AtomicU64>>>>);
+pub struct TickLoad(
+    Arc<AtomicU64>,
+    Arc<Mutex<BTreeMap<game::RegionCoords, Arc<AtomicU64>>>>,
+);
 
 /// One region thread's window ([`TickLoad::slot`]): noted every tick, taken by the beat.
 #[derive(Clone)]
@@ -43,7 +46,10 @@ impl TickLoad {
     pub fn slot(&self, rc: game::RegionCoords) -> RegionTickLoad {
         let mut slots = self.1.lock().unwrap_or_else(|e| e.into_inner());
         let region = slots.entry(rc).or_default().clone();
-        RegionTickLoad { host: self.0.clone(), region }
+        RegionTickLoad {
+            host: self.0.clone(),
+            region,
+        }
     }
 
     /// A region thread calls this once per tick with the tick's compute time (no region slot).
@@ -61,13 +67,19 @@ impl TickLoad {
     pub fn take_regions(&self, period_ms: u64) -> BTreeMap<game::RegionCoords, u32> {
         let mut slots = self.1.lock().unwrap_or_else(|e| e.into_inner());
         slots.retain(|_, a| Arc::strong_count(a) > 1 || a.load(Ordering::Relaxed) != 0);
-        slots.iter().map(|(rc, a)| (*rc, permille_of(a.swap(0, Ordering::Relaxed), period_ms))).collect()
+        slots
+            .iter()
+            .map(|(rc, a)| (*rc, permille_of(a.swap(0, Ordering::Relaxed), period_ms)))
+            .collect()
     }
 }
 
 /// The load one heartbeat reports: sessions held, regions running, and the worst tick of the
 /// window since the last beat.
-pub fn host_load<S: game::RegionSpawner>(manager: &game::WorldManager<S>, tick: &TickLoad) -> game::HostLoad {
+pub fn host_load<S: game::RegionSpawner>(
+    manager: &game::WorldManager<S>,
+    tick: &TickLoad,
+) -> game::HostLoad {
     let depths = manager.depths();
     game::HostLoad {
         players: u32::try_from(depths.sessions).unwrap_or(u32::MAX),
@@ -76,4 +88,3 @@ pub fn host_load<S: game::RegionSpawner>(manager: &game::WorldManager<S>, tick: 
         land: manager.land_load(&tick.take_regions(game::TICK_RATE)),
     }
 }
-

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{water_alpha, WATER_COLOR, WATER_TILE_BLOCKS};
+use super::{WATER_COLOR, WATER_TILE_BLOCKS, water_alpha};
 
 /// An inclusive y run of water cells in one block column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +109,14 @@ impl WaterMeshData {
 impl WaterMeshData {
     /// One quad at corner `p` spanned by `u` then `v` (`u × v` is the
     /// normal, so it is front-facing from outside).
-    pub(crate) fn quad(&mut self, p: [f32; 3], u: [f32; 3], v: [f32; 3], normal: [f32; 3], alpha: f32) {
+    pub(crate) fn quad(
+        &mut self,
+        p: [f32; 3],
+        u: [f32; 3],
+        v: [f32; 3],
+        normal: [f32; 3],
+        alpha: f32,
+    ) {
         let base = self.positions.len() as u32;
         let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
         for corner in [p, add(p, u), add(add(p, u), v), add(p, v)] {
@@ -262,4 +269,3 @@ impl crate::renderer::compute::ComputeJob for WaterMeshJob {
         mesh_water_tile(&self.0)
     }
 }
-

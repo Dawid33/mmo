@@ -8,7 +8,7 @@
 //! burial and cave connectivity. A [`CutoutTable`] says which ids they are;
 //! [`CutoutTable::NONE`] meshes everything opaque (the LOD rings).
 
-use game::{BlockId, BlockProps, Voxel, BRICK_VOXEL_COUNT};
+use game::{BRICK_VOXEL_COUNT, BlockId, BlockProps, Voxel};
 
 use super::ao::VERTEX_AO_LUT;
 
@@ -425,7 +425,11 @@ impl Occupancy {
                 }
             }
         }
-        Self { cols, opaque, cutout_pair }
+        Self {
+            cols,
+            opaque,
+            cutout_pair,
+        }
     }
 
     /// Visible-face bits along `axis` at cross coords `(u, v)`: bit `a` set
@@ -445,4 +449,3 @@ impl Occupancy {
         vis & INTERIOR_MASK
     }
 }
-

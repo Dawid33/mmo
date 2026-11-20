@@ -4,11 +4,11 @@
 //! netcode::ServerConnection provides on native. A future
 //! WebTransport/WebSocket transport replaces this without touching
 //! GameInstanceManager.
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use game::{
     Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameError, InlineSpawner,
-    RegionCoords, RegionGenerator, RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager,
-    TICK_RATE,
+    RegionCoords, RegionGenerator, RegionOutput, ServerEvent, ServerPacket, SubChunk, TICK_RATE,
+    WorldManager,
 };
 
 /// The only client in an offline world.
@@ -120,7 +120,11 @@ impl LocalServer {
     #[doc(hidden)]
     pub fn connect_local_client(&mut self) {
         self.manager.handle_server_event(
-            ServerEvent::ClientConnected { client: LOCAL_CLIENT_ID, player: LOCAL_PLAYER_ID, record: None },
+            ServerEvent::ClientConnected {
+                client: LOCAL_CLIENT_ID,
+                player: LOCAL_PLAYER_ID,
+                record: None,
+            },
             self.now_ms,
         );
         self.drain();
@@ -130,14 +134,20 @@ impl LocalServer {
     /// server's edge announces once an observer ticket was admitted. Harness hook.
     #[doc(hidden)]
     pub fn observer_connected(&mut self, client: ClientId, player: game::PlayerId) {
-        self.manager.handle_server_event(ServerEvent::ObserverConnected { client, player }, self.now_ms);
+        self.manager.handle_server_event(
+            ServerEvent::ObserverConnected { client, player },
+            self.now_ms,
+        );
         self.drain();
     }
 
     /// The local client's session here ended (its connection closed). Harness hook.
     #[doc(hidden)]
     pub fn client_disconnected(&mut self) {
-        self.manager.handle_server_event(ServerEvent::ClientDisconnected(LOCAL_CLIENT_ID), self.now_ms);
+        self.manager.handle_server_event(
+            ServerEvent::ClientDisconnected(LOCAL_CLIENT_ID),
+            self.now_ms,
+        );
         self.drain();
     }
 
@@ -299,4 +309,3 @@ pub fn lightweight_test_generator() -> RegionGenerator {
         vec![(ColumnCoords::new(4, 4), column)]
     })
 }
-

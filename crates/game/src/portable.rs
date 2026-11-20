@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Chunk, ChunkCoords, ClientId, ColumnCoords, ColumnGround, Ecs, EntityBundle, EntityKind, GameData, PlayerRecord,
-    Region, RegionId, Rollback, Tick,
+    Chunk, ChunkCoords, ClientId, ColumnCoords, ColumnGround, Ecs, EntityBundle, EntityKind,
+    GameData, PlayerRecord, Region, RegionId, Rollback, Tick,
 };
 
 /// Every terrain chunk's `chunk_terrain_term` (its coordinates + content
@@ -69,7 +69,13 @@ impl PortableRegion {
     /// has not been committed yet): chunks union with the newer winning,
     /// meta, entities and players replaced, the ground the first `Some`.
     pub fn merge(&mut self, newer: PortableRegion) {
-        let PortableRegion { meta, chunks, ground, entities, players } = newer;
+        let PortableRegion {
+            meta,
+            chunks,
+            ground,
+            entities,
+            players,
+        } = newer;
         self.meta = meta;
         self.chunks.extend(chunks);
         if self.ground.is_none() {
@@ -112,8 +118,12 @@ impl Rollback {
             if chunk.is_none() {
                 continue;
             }
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else {
+                continue;
+            };
+            let Some(body) = self.data.physics.bodies.get(handle) else {
+                continue;
+            };
             let coords = crate::chunk_coords_from_translation(body.translation());
             if let Some(term) = self.chunk_terrain_term(key) {
                 terms.insert(coords, term);
@@ -131,22 +141,30 @@ impl Rollback {
         let mut chunks = BTreeMap::new();
         for (key, chunk) in d.ecs.chunk.iter() {
             let Some(chunk) = chunk else { continue };
-            let Some(handle) = *d.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = d.physics.bodies.get(handle) else { continue };
+            let Some(handle) = *d.ecs.rigidbody.try_get(key) else {
+                continue;
+            };
+            let Some(body) = d.physics.bodies.get(handle) else {
+                continue;
+            };
             let coords = crate::chunk_coords_from_translation(body.translation());
             if saved.get(&coords) != terms.get(&coords) {
                 chunks.insert(coords, chunk.clone());
             }
         }
-        let ground = saved.is_empty().then(|| d.ground.iter().map(|(c, g)| (*c, g.clone())).collect());
+        let ground = saved
+            .is_empty()
+            .then(|| d.ground.iter().map(|(c, g)| (*c, g.clone())).collect());
         // `id_index` is ordered by `EntityId` and holds owned entities only
         // (never halo mirrors).
         let entities = d
             .id_index
             .iter()
             .filter(|(_, &key)| {
-                !matches!(*d.ecs.kind.try_get(key), Some(EntityKind::Player) | Some(EntityKind::Person { .. }))
-                    && !d.player_entites.values().any(|&p| p == key)
+                !matches!(
+                    *d.ecs.kind.try_get(key),
+                    Some(EntityKind::Player) | Some(EntityKind::Person { .. })
+                ) && !d.player_entites.values().any(|&p| p == key)
             })
             .map(|(_, &key)| self.bundle_of(key))
             .collect();
@@ -165,7 +183,16 @@ impl Rollback {
             water_bodies: (*d.water_bodies).clone(),
         };
         let players = crate::players_in(self, *d.region);
-        (PortableRegion { meta, chunks, ground, entities, players }, terms)
+        (
+            PortableRegion {
+                meta,
+                chunks,
+                ground,
+                entities,
+                players,
+            },
+            terms,
+        )
     }
 }
 
@@ -181,7 +208,12 @@ impl Rollback {
 /// The rollback is built before the `Region`, so the region's
 /// `base_event_id` is the stored `next_game_event_id`.
 pub fn restore_portable(id: RegionId, stored: StoredRegion) -> (Region, ChunkTerms) {
-    let StoredRegion { meta, chunks, ground, entities } = stored;
+    let StoredRegion {
+        meta,
+        chunks,
+        ground,
+        entities,
+    } = stored;
     let RegionMeta {
         tick,
         next_game_event_id,

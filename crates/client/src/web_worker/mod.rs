@@ -73,8 +73,16 @@ fn boot() -> Option<Boot> {
     if boot.is_undefined() || boot.is_null() {
         return None;
     }
-    let get = |key: &str| Reflect::get(&boot, &key.into()).ok().filter(|v| !v.is_undefined());
-    Some(Boot { js: get("js")?, module: get("module")?, base: get("base")? })
+    let get = |key: &str| {
+        Reflect::get(&boot, &key.into())
+            .ok()
+            .filter(|v| !v.is_undefined())
+    };
+    Some(Boot {
+        js: get("js")?,
+        module: get("module")?,
+        base: get("base")?,
+    })
 }
 
 /// Whether workers run here: on the page (not in a worker), with the module
@@ -83,7 +91,10 @@ pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         let on = !in_worker() && workers_param() != Some(0) && boot().is_some();
-        log::info!("[web-worker] workers {}", if on { "on" } else { "off (main thread only)" });
+        log::info!(
+            "[web-worker] workers {}",
+            if on { "on" } else { "off (main thread only)" }
+        );
         on
     })
 }
@@ -94,8 +105,12 @@ pub fn compute_worker_count() -> usize {
     if let Some(n) = workers_param() {
         return n.min(MAX_COMPUTE_WORKERS);
     }
-    let cores = web_sys::window().map(|w| w.navigator().hardware_concurrency()).unwrap_or(4.0) as usize;
-    cores.saturating_sub(CORES_RESERVED).clamp(1, MAX_COMPUTE_WORKERS)
+    let cores = web_sys::window()
+        .map(|w| w.navigator().hardware_concurrency())
+        .unwrap_or(4.0) as usize;
+    cores
+        .saturating_sub(CORES_RESERVED)
+        .clamp(1, MAX_COMPUTE_WORKERS)
 }
 
 /// The worker bootstrap (a module worker from a Blob URL). Its first message is
@@ -168,7 +183,9 @@ static PAGE_BASE: OnceLock<String> = OnceLock::new();
 /// `relative` resolved against the page (works on the page and in workers).
 pub fn page_url(relative: &str) -> String {
     match PAGE_BASE.get() {
-        Some(base) => web_sys::Url::new_with_base(relative, base).map(|u| u.href()).unwrap_or_else(|_| relative.into()),
+        Some(base) => web_sys::Url::new_with_base(relative, base)
+            .map(|u| u.href())
+            .unwrap_or_else(|_| relative.into()),
         None => relative.into(),
     }
 }
@@ -177,7 +194,9 @@ pub fn page_url(relative: &str) -> String {
 pub fn fetch(url: &str) -> js_sys::Promise {
     match web_sys::window() {
         Some(window) => window.fetch_with_str(url),
-        None => js_sys::global().unchecked_into::<web_sys::WorkerGlobalScope>().fetch_with_str(url),
+        None => js_sys::global()
+            .unchecked_into::<web_sys::WorkerGlobalScope>()
+            .fetch_with_str(url),
     }
 }
 
@@ -219,7 +238,11 @@ pub fn post_bytes(target: &JsValue, bytes: &Uint8Array) -> Result<(), JsValue> {
 
 /// The bytes of a message posted with [`post_bytes`].
 pub fn message_bytes(event: &web_sys::MessageEvent) -> Option<Vec<u8>> {
-    event.data().dyn_into::<Uint8Array>().ok().map(|a| a.to_vec())
+    event
+        .data()
+        .dyn_into::<Uint8Array>()
+        .ok()
+        .map(|a| a.to_vec())
 }
 
 /// A readable line for a worker `error` event.
@@ -274,7 +297,12 @@ static FORWARDED: Mutex<Option<Vec<LogLine>>> = Mutex::new(None);
 
 /// Take the lines buffered since the last call (forwarding workers).
 pub fn take_log_lines() -> Vec<LogLine> {
-    FORWARDED.lock().unwrap().as_mut().map(std::mem::take).unwrap_or_default()
+    FORWARDED
+        .lock()
+        .unwrap()
+        .as_mut()
+        .map(std::mem::take)
+        .unwrap_or_default()
 }
 
 struct WorkerLogger {
@@ -301,7 +329,13 @@ impl log::Log for WorkerLogger {
             buffer.push(line);
             return;
         }
-        let text = JsValue::from_str(&format!("[{}] {} {}: {}", self.role, record.level(), line.target, line.message));
+        let text = JsValue::from_str(&format!(
+            "[{}] {} {}: {}",
+            self.role,
+            record.level(),
+            line.target,
+            line.message
+        ));
         match record.level() {
             log::Level::Error => web_sys::console::error_1(&text),
             log::Level::Warn => web_sys::console::warn_1(&text),

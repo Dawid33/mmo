@@ -6,9 +6,9 @@ use game::HostId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::claims::Fenced;
 use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CrashPolicy, HOST_HEARTBEAT_MS};
-use crate::claims::Fenced;
 use world_store::{Beat, NewHost, Registered, StoreError, StoreHandle};
 
 /// At most one warning per this many ms about heartbeats that fail.
@@ -46,7 +46,17 @@ pub struct Heartbeat {
 impl Heartbeat {
     pub fn new(store: StoreHandle, id: HostId, boot: u64) -> Self {
         let period = Duration::from_millis(HOST_HEARTBEAT_MS);
-        Heartbeat { store, id, boot, next_at: None, pending: None, warned_at: None, replaced: false, drain_in_ms: None, period }
+        Heartbeat {
+            store,
+            id,
+            boot,
+            next_at: None,
+            pending: None,
+            warned_at: None,
+            replaced: false,
+            drain_in_ms: None,
+            period,
+        }
     }
 
     /// The row's drain mark as the last successful beat reported it (`worldctl drain`): ms
@@ -75,8 +85,14 @@ impl Heartbeat {
         if self.replaced {
             return LeaseState::Replaced;
         }
-        match self.store.heartbeat(self.id, self.boot, game::HostLoad::default()) {
-            Ok(Beat { live: true, drain_in_ms }) => {
+        match self
+            .store
+            .heartbeat(self.id, self.boot, game::HostLoad::default())
+        {
+            Ok(Beat {
+                live: true,
+                drain_in_ms,
+            }) => {
                 self.drain_in_ms = drain_in_ms;
                 LeaseState::Held
             }
@@ -85,7 +101,10 @@ impl Heartbeat {
                 LeaseState::Replaced
             }
             Err(e) => {
-                log::warn!("[lease] host {}: the heartbeat after {what} failed ({e}); the lease lapses unless one gets through", self.id);
+                log::warn!(
+                    "[lease] host {}: the heartbeat after {what} failed ({e}); the lease lapses unless one gets through",
+                    self.id
+                );
                 LeaseState::Held
             }
         }
@@ -105,7 +124,10 @@ impl Heartbeat {
         if let Some(rx) = &self.pending {
             let failed = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return LeaseState::Held,
-                Ok(Ok(Beat { live: true, drain_in_ms })) => {
+                Ok(Ok(Beat {
+                    live: true,
+                    drain_in_ms,
+                })) => {
                     self.drain_in_ms = drain_in_ms;
                     None
                 }
@@ -115,13 +137,21 @@ impl Heartbeat {
                     return LeaseState::Replaced;
                 }
                 Ok(Err(e)) => Some(e.to_string()),
-                Err(TryRecvError::Disconnected) => Some("the world-store thread has stopped".to_string()),
+                Err(TryRecvError::Disconnected) => {
+                    Some("the world-store thread has stopped".to_string())
+                }
             };
             self.pending = None;
             if let Some(why) = failed {
-                if self.warned_at.is_none_or(|at| now >= at + Duration::from_millis(HEARTBEAT_WARN_MS)) {
+                if self
+                    .warned_at
+                    .is_none_or(|at| now >= at + Duration::from_millis(HEARTBEAT_WARN_MS))
+                {
                     self.warned_at = Some(now);
-                    log::warn!("[lease] host {}: a heartbeat failed ({why}); the lease lapses unless one gets through", self.id);
+                    log::warn!(
+                        "[lease] host {}: a heartbeat failed ({why}); the lease lapses unless one gets through",
+                        self.id
+                    );
                 }
             }
         }
@@ -144,7 +174,9 @@ pub fn pump_or_fence(
     now: Instant,
     load: &mut dyn FnMut() -> game::HostLoad,
 ) -> bool {
-    let Some(beat) = heartbeat.as_mut() else { return false };
+    let Some(beat) = heartbeat.as_mut() else {
+        return false;
+    };
     if beat.pump(now, load) == LeaseState::Held {
         return false;
     }
@@ -161,7 +193,9 @@ pub fn pump_or_fence(
 /// ([`Heartbeat::beat_now`]), so the time from its registration to its main loop's first
 /// pump cannot outlast the lease. A boot replaced meanwhile exits fenced here.
 pub fn beat_at_boot(heartbeat: &mut Option<Heartbeat>, what: &str) {
-    let Some(beat) = heartbeat.as_mut() else { return };
+    let Some(beat) = heartbeat.as_mut() else {
+        return;
+    };
     if beat.beat_now(what) == LeaseState::Replaced {
         log::error!(
             "[server] replaced while starting (after {what}): host {}'s hosts row is no longer this live boot; stopping",
@@ -183,7 +217,10 @@ pub fn register(
     stop: &AtomicBool,
 ) -> Result<Option<Registered>, StoreError> {
     if stop.load(Ordering::SeqCst) {
-        log::info!("[lease] host {:?}: stop signal before registering; exiting", host.name);
+        log::info!(
+            "[lease] host {:?}: stop signal before registering; exiting",
+            host.name
+        );
         return Ok(None);
     }
     crate::health::Health::global().set_waiting(None);
@@ -196,4 +233,3 @@ pub fn register(
 pub fn registration_refusal(e: &StoreError) -> String {
     format!("registering this host: {e}")
 }
-

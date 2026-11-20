@@ -15,13 +15,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use slint_ui::slint::{ModelRc, SharedString, VecModel};
 use slint_ui::{ChatRow, GameUi, HudUi};
 
-use super::command::{submit, Submitted};
+use super::command::{Submitted, submit};
 use super::{ChatKind, ChatLine, ChatLog};
 use crate::renderer::commander::first_person::FirstPerson;
 use crate::renderer::cursor::CursorPolicy;
@@ -48,7 +48,12 @@ pub fn connect(ui: &GameUi, world: &mut World) {
 /// T (first person only) open it empty, `/` with the slash. A repeated press
 /// (a held key) opens nothing, so the Enter that submitted a line does not
 /// reopen the box.
-pub fn opening_key(key: &Key, state: ButtonState, repeat: bool, first_person: bool) -> Option<&'static str> {
+pub fn opening_key(
+    key: &Key,
+    state: ButtonState,
+    repeat: bool,
+    first_person: bool,
+) -> Option<&'static str> {
     if state != ButtonState::Pressed || repeat {
         return None;
     }
@@ -102,7 +107,10 @@ pub fn open_chat(
         return;
     }
     let first_person = first_person.is_some_and(|fp| fp.on);
-    let Some(draft) = events.read().find_map(|e| opening_key(&e.logical_key, e.state, e.repeat, first_person)) else {
+    let Some(draft) = events
+        .read()
+        .find_map(|e| opening_key(&e.logical_key, e.state, e.repeat, first_person))
+    else {
         return;
     };
     events.clear();
@@ -169,7 +177,9 @@ pub fn chat_accept(
         return;
     }
     // One Enter, one line: the box closes on it.
-    let Some(line) = lines.into_iter().next() else { return };
+    let Some(line) = lines.into_iter().next() else {
+        return;
+    };
     let read = submit(&line);
     if read != Submitted::Empty {
         log.remember_sent(line.trim());
@@ -187,7 +197,10 @@ fn row(line: &ChatLine) -> ChatRow {
         ChatKind::Info => 1,
         ChatKind::Error => 2,
     };
-    ChatRow { text: line.text.as_str().into(), kind }
+    ChatRow {
+        text: line.text.as_str().into(),
+        kind,
+    }
 }
 
 fn rows<'a>(lines: impl Iterator<Item = &'a ChatLine>) -> ModelRc<ChatRow> {
@@ -229,7 +242,11 @@ pub fn sync_chat(
     }
     if let Some(hud) = hud {
         // Nothing under the open box: it shows every line itself.
-        let count = if log.open { 0 } else { log.recent(time.elapsed_secs_f64()).count() };
+        let count = if log.open {
+            0
+        } else {
+            log.recent(time.elapsed_secs_f64()).count()
+        };
         let now = (log.revision + 1, count);
         if shown.recent != now {
             let ui = hud.overlay.ui();
@@ -242,4 +259,3 @@ pub fn sync_chat(
         }
     }
 }
-

@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use game::{
-    Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Pose,
-    Key, Region, RegionCoords, Rollback, World, CHUNK_UNITS, PLAYER_SPAWN_X, PLAYER_SPAWN_Z,
+    CHUNK_UNITS, Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Key, PLAYER_SPAWN_X,
+    PLAYER_SPAWN_Z, Pose, Region, RegionCoords, Rollback, World,
 };
 
 /// A chunk's edge in world units, as `f32`.
@@ -26,8 +26,9 @@ pub const CHUNK_EDGE: f32 = CHUNK_UNITS as f32;
 pub fn install_real_block_props() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let reg = game::BlockRegistry::from_ron(include_str!("../../../../assets/blocks/blocks.ron"))
-            .expect("assets/blocks/blocks.ron parses");
+        let reg =
+            game::BlockRegistry::from_ron(include_str!("../../../../assets/blocks/blocks.ron"))
+                .expect("assets/blocks/blocks.ron parses");
         game::install_block_props(reg.props());
     });
 }
@@ -65,11 +66,17 @@ pub fn chunks_over(x_units: Range<f32>, z_units: Range<f32>) -> Vec<(usize, usiz
         lo..hi
     };
     let zs = span(z_units);
-    span(x_units).flat_map(|x| zs.clone().map(move |z| (x, z))).collect()
+    span(x_units)
+        .flat_map(|x| zs.clone().map(move |z| (x, z)))
+        .collect()
 }
 
 /// Every chunk overlapping the unit rectangle, each a `Chunk::flat_floor(depth)`.
-pub fn floor_chunks(x_units: Range<f32>, z_units: Range<f32>, depth: u32) -> Vec<(ChunkCoords, Chunk)> {
+pub fn floor_chunks(
+    x_units: Range<f32>,
+    z_units: Range<f32>,
+    depth: u32,
+) -> Vec<(ChunkCoords, Chunk)> {
     chunks_over(x_units, z_units)
         .into_iter()
         .map(|(x, z)| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(depth)))
@@ -110,11 +117,17 @@ pub fn world_of(
         .collect();
     let mut world = World::new();
     world.load(&r0(), Region::from_chunks(r0(), chunks));
-    world.handle_region_event(GameEventKind::CreateClient(0), r0()).unwrap();
+    world
+        .handle_region_event(GameEventKind::CreateClient(0), r0())
+        .unwrap();
     world.forget_last_event(&r0());
     // A new client is in its body, where E opens the inventory: start from the overview.
     // (set in place, not by an order: the golden scene hashes this world's bytes)
-    world.regions.get_mut(&r0()).unwrap().with_data(|d| d.clients.get_mut(&0).unwrap().mode = game::PlayMode::Overview);
+    world
+        .regions
+        .get_mut(&r0())
+        .unwrap()
+        .with_data(|d| d.clients.get_mut(&0).unwrap().mode = game::PlayMode::Overview);
     key(&mut world, Key::KeyE, true);
     key(&mut world, Key::KeyE, false);
     // The spawn clearance is a few ticks of fall.
@@ -125,7 +138,10 @@ pub fn world_of(
 
 pub fn key(world: &mut World, key: Key, pressed: bool) {
     world
-        .handle_region_event(GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed }), r0())
+        .handle_region_event(
+            GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed }),
+            r0(),
+        )
         .unwrap();
     world.forget_last_event(&r0());
 }
@@ -148,9 +164,20 @@ pub struct Body {
 
 /// Position and motion of any entity with a body.
 pub fn entity_body(data: &Rollback, e: EntityKey) -> Body {
-    let t = data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
+    let t = data
+        .physics
+        .bodies
+        .get(*data.ecs.rigidbody.get(e))
+        .unwrap()
+        .translation();
     let m = data.ecs.motion.try_get(e).unwrap_or_default();
-    Body { x: t.x, y: t.y, z: t.z, grounded: m.grounded, vel_y: m.vel_y }
+    Body {
+        x: t.x,
+        y: t.y,
+        z: t.z,
+        grounded: m.grounded,
+        vel_y: m.vel_y,
+    }
 }
 
 /// The player's body.
@@ -195,7 +222,12 @@ pub fn spawn_slime(region: &mut Region, pos: [f32; 3], size: u8, yaw: f32, tick:
 /// `SymmetricEigen`'s std `acos`/`cos`, which is not bit-identical across
 /// targets.
 pub fn fixed_body_mass_count(data: &Rollback) -> (usize, usize) {
-    let fixed: Vec<_> = data.physics.bodies.iter().filter(|(_, b)| b.is_fixed()).collect();
+    let fixed: Vec<_> = data
+        .physics
+        .bodies
+        .iter()
+        .filter(|(_, b)| b.is_fixed())
+        .collect();
     let massive = fixed.iter().filter(|(_, b)| b.mass() != 0.0).count();
     (fixed.len(), massive)
 }
@@ -225,8 +257,14 @@ impl CoreInputs for game::Coordinator {
     }
 
     fn host_detached(&mut self, host: game::HostId) {
-        if let Some((boot, epoch)) = self.newest_attach(host).filter(|(b, _)| self.attachment(host) == Some(*b)) {
-            self.apply(game::coordinator::Input::HostStalled { host, boot, epoch }, 0);
+        if let Some((boot, epoch)) = self
+            .newest_attach(host)
+            .filter(|(b, _)| self.attachment(host) == Some(*b))
+        {
+            self.apply(
+                game::coordinator::Input::HostStalled { host, boot, epoch },
+                0,
+            );
         }
     }
 }
@@ -234,12 +272,16 @@ impl CoreInputs for game::Coordinator {
 /// The rendezvous owner of `sr` among the hosts `h(0)..h(n)` (the seeded rig's fixed table;
 /// `n` 0 counts as 1).
 pub fn rendezvous_owner(sr: game::SuperRegion, n: u32) -> game::HostId {
-    game::rendezvous_among(sr, (0..u64::from(n.max(1))).map(game::HostId)).expect("at least one host")
+    game::rendezvous_among(sr, (0..u64::from(n.max(1))).map(game::HostId))
+        .expect("at least one host")
 }
 
 /// Host `me` of the fixed table of the hosts `h(0)..h(n)` (`game::Static`).
 pub fn fixed(me: game::HostId, n: u32) -> game::Static {
-    game::Static { me, layout: (0..u64::from(n)).map(game::HostId).collect() }
+    game::Static {
+        me,
+        layout: (0..u64::from(n)).map(game::HostId).collect(),
+    }
 }
 
 pub mod cut_store;

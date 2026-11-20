@@ -40,9 +40,9 @@ use slotmapd::Key as _;
 
 use crate::movement::PLAYER_EYE_OFFSET;
 use crate::{
-    Block, BlockDelta, BlockId, BlockIndex, Chunk, ChunkBlocks, ChunkCoords, ClientId, EntityKey, GameDataTransactionKind,
-    GameDataUpdate, GameDataUpdateKind, Pose, MouseButton, Rollback, BLOCK_VOXELS, CHUNK_BLOCKS,
-    CHUNK_BLOCK_COUNT, REGION_CHUNKS,
+    BLOCK_VOXELS, Block, BlockDelta, BlockId, BlockIndex, CHUNK_BLOCK_COUNT, CHUNK_BLOCKS, Chunk,
+    ChunkBlocks, ChunkCoords, ClientId, EntityKey, GameDataTransactionKind, GameDataUpdate,
+    GameDataUpdateKind, MouseButton, Pose, REGION_CHUNKS, Rollback,
 };
 
 /// How far a player can reach to break or place, in metres (= blocks).
@@ -59,6 +59,13 @@ pub const PLACE_BUTTON: MouseButton = MouseButton::Right;
 /// jump leaves a block under itself, a hover high above the ground does not
 /// pour a column.
 pub const PILLAR_MAX_GAP: f32 = BLOCK_VOXELS as f32;
+
+/// A held place button places again this long after its last place
+/// (Minecraft's right-click delay, 4 of its ticks): a hold builds a row, a
+/// click still places one block.
+pub const PLACE_REPEAT_MS: u64 = 200;
+/// [`PLACE_REPEAT_MS`] in sim ticks.
+pub const PLACE_REPEAT_TICKS: u64 = PLACE_REPEAT_MS / crate::TICK_RATE;
 
 /// Region-local block coordinates: block `b` spans world units
 /// `[b * BLOCK_VOXELS, (b + 1) * BLOCK_VOXELS)` on each axis.
@@ -125,25 +132,49 @@ impl Rollback {
     /// Whether the block at `pos` stops the edit ray: this region's block,
     /// or past its edge the halo's (`halo.rs`) — read-only there.
     pub(crate) fn block_solid(&self, pos: BlockPos) -> bool {
-        let Some((coords, local)) = locate(pos) else { return self.halo_cell_solid(pos) };
-        let Some(e) = self.chunk_key_at(coords) else {
-            return self.implied_block(coords, local).is_some_and(|b| crate::block_props().blocks_ray(b.id));
+        let Some((coords, local)) = locate(pos) else {
+            return self.halo_cell_solid(pos);
         };
-        self.data.ecs.chunk.try_get(e).as_ref().is_some_and(|c| cell_solid(c, local))
+        let Some(e) = self.chunk_key_at(coords) else {
+            return self
+                .implied_block(coords, local)
+                .is_some_and(|b| crate::block_props().blocks_ray(b.id));
+        };
+        self.data
+            .ecs
+            .chunk
+            .try_get(e)
+            .as_ref()
+            .is_some_and(|c| cell_solid(c, local))
     }
 
     /// The block at `local` of chunk `coords` as the sim sees it: the chunk
     /// entity's, else the implied ground's. `None` for an empty slot.
-    pub(crate) fn current_block(&self, coords: ChunkCoords, (bx, by, bz): (usize, usize, usize)) -> Option<Block> {
+    pub(crate) fn current_block(
+        &self,
+        coords: ChunkCoords,
+        (bx, by, bz): (usize, usize, usize),
+    ) -> Option<Block> {
         match self.chunk_key_at(coords) {
-            Some(e) => self.data.ecs.chunk.try_get(e).as_ref().map(|c| c.block_at(bx, by, bz)),
+            Some(e) => self
+                .data
+                .ecs
+                .chunk
+                .try_get(e)
+                .as_ref()
+                .map(|c| c.block_at(bx, by, bz)),
             None => self.implied_block(coords, (bx, by, bz)),
         }
     }
 
     /// Whether `block` is the bedrock of the ground under chunk `coords`.
     fn is_bedrock(&self, coords: ChunkCoords, block: Block) -> bool {
-        is_bedrock_at(self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), block)
+        is_bedrock_at(
+            self.data
+                .ground
+                .get(&crate::ColumnCoords::new(coords.x, coords.z)),
+            block,
+        )
     }
 
     /// Turns implied chunk `coords` into a real chunk entity built from the
@@ -157,7 +188,10 @@ impl Rollback {
         for i in 0..CHUNK_BLOCK_COUNT {
             blocks.push(self.implied_block(coords, BlockIndex::from_linear(i).xyz())?);
         }
-        let chunk = Chunk { blocks: ChunkBlocks::from_vec(blocks), chisel: Default::default() };
+        let chunk = Chunk {
+            blocks: ChunkBlocks::from_vec(blocks),
+            chisel: Default::default(),
+        };
         Some(self.spawn_chunk_safe(coords, chunk))
     }
 
@@ -185,7 +219,12 @@ impl Rollback {
         self.raycast_block_in(origin, dir, reach)
     }
 
-    pub(crate) fn raycast_block_in(&self, origin: Vector, dir: Vector, reach: f32) -> Option<BlockHit> {
+    pub(crate) fn raycast_block_in(
+        &self,
+        origin: Vector,
+        dir: Vector,
+        reach: f32,
+    ) -> Option<BlockHit> {
         raycast_blocks(origin, dir, reach, |p| self.block_solid(p))
     }
 
@@ -193,16 +232,24 @@ impl Rollback {
     /// placed block from burying a player (or any other moving entity).
     pub(crate) fn block_overlaps_body(&self, pos: BlockPos) -> bool {
         let size = BLOCK_VOXELS as f32;
-        let lo = [pos[0] as f32 * size, pos[1] as f32 * size, pos[2] as f32 * size];
+        let lo = [
+            pos[0] as f32 * size,
+            pos[1] as f32 * size,
+            pos[2] as f32 * size,
+        ];
         let hi = [lo[0] + size, lo[1] + size, lo[2] + size];
         for (_, handle) in self.data.ecs.rigidbody.iter() {
             let Some(handle) = handle else { continue };
-            let Some(body) = self.data.physics.bodies.get(*handle) else { continue };
+            let Some(body) = self.data.physics.bodies.get(*handle) else {
+                continue;
+            };
             if body.is_fixed() {
                 continue;
             }
             for &ch in body.colliders() {
-                let Some(collider) = self.data.physics.colliders.get(ch) else { continue };
+                let Some(collider) = self.data.physics.colliders.get(ch) else {
+                    continue;
+                };
                 let aabb = collider.compute_aabb();
                 let (mins, maxs) = (aabb.mins, aabb.maxs);
                 let overlaps = (0..3).all(|a| mins[a] < hi[a] && maxs[a] > lo[a]);
@@ -214,25 +261,71 @@ impl Rollback {
         false
     }
 
+    /// Whether `client`'s place button places at `tick`: a press always; a
+    /// hold once [`PLACE_REPEAT_TICKS`] passed since the last place
+    /// (`Client::place_repeat_at`), or at once when pillaring up
+    /// ([`Self::pillar_target`]). Reads only; the caller stamps the repeat
+    /// with [`Self::placed_at_safe`].
+    pub fn place_due(&self, client: ClientId, tick: u64) -> bool {
+        let Some(c) = self.data.clients.get(&client) else {
+            return false;
+        };
+        c.input.mouse_pressed(&PLACE_BUTTON)
+            || (c.input.mouse_held(&PLACE_BUTTON)
+                && (tick >= c.place_repeat_at || self.pillar_target(client)))
+    }
+
+    /// `client` placed (or tried to) at `tick`: a held button repeats
+    /// [`PLACE_REPEAT_TICKS`] later. One logged delta, none if unchanged.
+    pub(crate) fn placed_at_safe(&mut self, client: ClientId, tick: u64) {
+        let at = tick + PLACE_REPEAT_TICKS;
+        if self
+            .data
+            .clients
+            .get(&client)
+            .is_none_or(|c| c.place_repeat_at == at)
+        {
+            return;
+        }
+        if let Some(c) = self.data.clients.get_mut(&client) {
+            c.place_repeat_at = at;
+        }
+    }
+
     /// Whether `client`'s held place button places this tick (pillaring up,
     /// Minecraft style): the cell against the face under the crosshair is
     /// the one right under its own body — inside the body's footprint, its
     /// top at or below the feet and within [`PILLAR_MAX_GAP`] of them. A
-    /// press places anywhere; holding repeats only here, where the body
-    /// itself paces it (the next cell up is free only after the next jump).
+    /// press places anywhere and a hold repeats every [`PLACE_REPEAT_TICKS`];
+    /// here the hold places at once, the body itself pacing it (the next cell
+    /// up is free only after the next jump).
     pub fn pillar_target(&self, client: ClientId) -> bool {
-        let Some(hit) = self.eye_hit(client) else { return false };
+        let Some(hit) = self.eye_hit(client) else {
+            return false;
+        };
         if hit.normal == [0; 3] {
             return false;
         }
-        let target = [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]];
-        let Some(&e) = self.data.player_entites.get(&client) else { return false };
-        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return false };
-        let Some(body) = self.data.physics.bodies.get(handle) else { return false };
+        let target = [
+            hit.block[0] + hit.normal[0],
+            hit.block[1] + hit.normal[1],
+            hit.block[2] + hit.normal[2],
+        ];
+        let Some(&e) = self.data.player_entites.get(&client) else {
+            return false;
+        };
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else {
+            return false;
+        };
+        let Some(body) = self.data.physics.bodies.get(handle) else {
+            return false;
+        };
         // The body's box: every collider's, as `block_overlaps_body` reads them.
         let mut bounds: Option<([f32; 3], [f32; 3])> = None;
         for &ch in body.colliders() {
-            let Some(collider) = self.data.physics.colliders.get(ch) else { continue };
+            let Some(collider) = self.data.physics.colliders.get(ch) else {
+                continue;
+            };
             let aabb = collider.compute_aabb();
             let (lo, hi) = bounds.get_or_insert(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]));
             for a in 0..3 {
@@ -242,9 +335,15 @@ impl Rollback {
         }
         let Some((lo, hi)) = bounds else { return false };
         let size = BLOCK_VOXELS as f32;
-        let cell_lo = [target[0] as f32 * size, target[1] as f32 * size, target[2] as f32 * size];
+        let cell_lo = [
+            target[0] as f32 * size,
+            target[1] as f32 * size,
+            target[2] as f32 * size,
+        ];
         let top = cell_lo[1] + size;
-        let under = [0, 2].into_iter().all(|a| lo[a] < cell_lo[a] + size && hi[a] > cell_lo[a]);
+        let under = [0, 2]
+            .into_iter()
+            .all(|a| lo[a] < cell_lo[a] + size && hi[a] > cell_lo[a]);
         under && top <= lo[1] && lo[1] - top <= PILLAR_MAX_GAP
     }
 
@@ -258,7 +357,9 @@ impl Rollback {
     /// The one funnel of `set_block_safe` and of the block intents a player's
     /// edit sends (`intents.rs`).
     pub(crate) fn set_block_in(&mut self, pos: BlockPos, block: Block) -> bool {
-        let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
+        let Some((coords, (bx, by, bz))) = locate(pos) else {
+            return false;
+        };
         let breaking = block.id == BlockId::AIR;
         // Bedrock takes no write at all, implied bedrock included; refused
         // before anything changes.
@@ -278,7 +379,14 @@ impl Rollback {
         if changed && breaking {
             // The new air must never border an implied chunk: materialise
             // every face neighbour in another chunk that still is one.
-            for d in [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] {
+            for d in [
+                [1, 0, 0],
+                [-1, 0, 0],
+                [0, 1, 0],
+                [0, -1, 0],
+                [0, 0, 1],
+                [0, 0, -1],
+            ] {
                 let n = [pos[0] + d[0], pos[1] + d[1], pos[2] + d[2]];
                 if let Some((nc, _)) = locate(n).filter(|(nc, _)| *nc != coords) {
                     self.materialize_ground_safe(nc);
@@ -298,7 +406,12 @@ impl Rollback {
 
     /// Writes one block into chunk `coords` (creating the chunk for a placed
     /// block in an empty slot). Returns whether anything changed.
-    fn write_block_safe(&mut self, coords: ChunkCoords, (bx, by, bz): (usize, usize, usize), block: Block) -> bool {
+    fn write_block_safe(
+        &mut self,
+        coords: ChunkCoords,
+        (bx, by, bz): (usize, usize, usize),
+        block: Block,
+    ) -> bool {
         let Some(e) = self.chunk_key_at(coords) else {
             if block.id == BlockId::AIR {
                 return false;
@@ -316,13 +429,19 @@ impl Rollback {
             self.spawn_chunk_safe(coords, chunk);
             return true;
         };
-        let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else { return false };
+        let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else {
+            return false;
+        };
         let index = BlockIndex::from_xyz(bx, by, bz);
         let old_block = chunk.blocks.get(index);
         if old_block == block && !chunk.chisel.contains_key(&index) {
             return false;
         }
-        let old = BlockDelta { index, block: old_block, chisel: chunk.chisel.get(&index).cloned() };
+        let old = BlockDelta {
+            index,
+            block: old_block,
+            chisel: chunk.chisel.get(&index).cloned(),
+        };
         let old_cells = crate::collider_cells_of_block(chunk, index);
         // LIFO: registered before the write, so the old block is re-sent
         // after the chunk value is restored.
@@ -330,10 +449,20 @@ impl Rollback {
             GameDataTransactionKind::Undo,
             GameDataUpdateKind::SetBlocks(e, vec![old]),
         ));
-        self.data.ecs.chunk.set_chunk_block_safe(e, index, block, None);
+        self.data
+            .ecs
+            .chunk
+            .set_chunk_block_safe(e, index, block, None);
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
-            GameDataUpdateKind::SetBlocks(e, vec![BlockDelta { index, block, chisel: None }]),
+            GameDataUpdateKind::SetBlocks(
+                e,
+                vec![BlockDelta {
+                    index,
+                    block,
+                    chisel: None,
+                }],
+            ),
         ));
         let new_cells = crate::collider_cells_of_block(self.data.ecs.chunk.get(e), index);
         self.edit_block_colliders_safe(e, &old_cells, &new_cells);
@@ -355,21 +484,36 @@ impl Rollback {
     /// non-empty grid in `grids()` order (the genesis full-chunk cuboid, or
     /// anything unexpected), a grid gains its first cell, or a grid loses its
     /// last.
-    fn edit_block_colliders_safe(&mut self, e: EntityKey, old: &crate::ColliderCells, new: &crate::ColliderCells) {
+    fn edit_block_colliders_safe(
+        &mut self,
+        e: EntityKey,
+        old: &crate::ColliderCells,
+        new: &crate::ColliderCells,
+    ) {
         use std::collections::HashSet;
-        let Some(body) = *self.data.ecs.rigidbody.try_get(e) else { return };
-        let Some(b) = self.data.physics.bodies.get(body) else { return };
+        let Some(body) = *self.data.ecs.rigidbody.try_get(e) else {
+            return;
+        };
+        let Some(b) = self.data.physics.bodies.get(body) else {
+            return;
+        };
         // The enabled colliders, which must be one voxels shape per grid,
         // coarsest first (what every builder attaches).
         let mut grids: Vec<(f32, rapier3d::prelude::ColliderHandle)> = Vec::with_capacity(3);
         let mut patchable = true;
         for &ch in b.colliders() {
-            let Some(c) = self.data.physics.colliders.get(ch) else { continue };
+            let Some(c) = self.data.physics.colliders.get(ch) else {
+                continue;
+            };
             if !c.is_enabled() {
                 continue;
             }
             match c.shape().as_voxels() {
-                Some(v) if grids.last().is_none_or(|&(prev, _)| v.voxel_size().x < prev) => {
+                Some(v)
+                    if grids
+                        .last()
+                        .is_none_or(|&(prev, _)| v.voxel_size().x < prev) =>
+                {
                     grids.push((v.voxel_size().x, ch));
                 }
                 _ => patchable = false,
@@ -387,8 +531,16 @@ impl Rollback {
                 let before_set: HashSet<_> = before.iter().copied().collect();
                 // Deterministic order: removals in `before` order, then
                 // additions in `after` order (the sets only test membership).
-                let removed: Vec<_> = before.iter().copied().filter(|k| !after_set.contains(k)).collect();
-                let added: Vec<_> = after.iter().copied().filter(|k| !before_set.contains(k)).collect();
+                let removed: Vec<_> = before
+                    .iter()
+                    .copied()
+                    .filter(|k| !after_set.contains(k))
+                    .collect();
+                let added: Vec<_> = after
+                    .iter()
+                    .copied()
+                    .filter(|k| !before_set.contains(k))
+                    .collect();
                 if removed.is_empty() && added.is_empty() {
                     continue;
                 }
@@ -401,14 +553,23 @@ impl Rollback {
                     // Would this empty the grid? Every key of a block is
                     // distinct, so it does iff the shape holds no voxel
                     // beyond the removed ones.
-                    let shape = self.data.physics.colliders.get(ch).and_then(|c| c.shape().as_voxels());
+                    let shape = self
+                        .data
+                        .physics
+                        .colliders
+                        .get(ch)
+                        .and_then(|c| c.shape().as_voxels());
                     let held = shape.map_or(0, |v| v.voxels().take(removed.len() + 1).count());
                     if held <= removed.len() {
                         patchable = false;
                         break;
                     }
                 }
-                let edits: Vec<_> = removed.into_iter().map(|k| (k, false)).chain(added.into_iter().map(|k| (k, true))).collect();
+                let edits: Vec<_> = removed
+                    .into_iter()
+                    .map(|k| (k, false))
+                    .chain(added.into_iter().map(|k| (k, true)))
+                    .collect();
                 patches.push((ch, edits));
             }
         }
@@ -419,9 +580,15 @@ impl Rollback {
             return;
         }
         for (ch, edits) in patches {
-            self.data.physics.colliders.mutate_collider_safe(ch, move |c| {
-                c.shape_mut().as_voxels_mut().expect("checked: a voxels shape").set_voxels(edits);
-            });
+            self.data
+                .physics
+                .colliders
+                .mutate_collider_safe(ch, move |c| {
+                    c.shape_mut()
+                        .as_voxels_mut()
+                        .expect("checked: a voxels shape")
+                        .set_voxels(edits);
+                });
         }
     }
 
@@ -434,7 +601,9 @@ impl Rollback {
     /// ones are attached. A genesis cuboid (fully solid chunk) is reused the
     /// same way, with its centring offset cleared.
     fn rebuild_chunk_colliders_safe(&mut self, e: EntityKey, cells: &crate::ColliderCells) {
-        let Some(body) = *self.data.ecs.rigidbody.try_get(e) else { return };
+        let Some(body) = *self.data.ecs.rigidbody.try_get(e) else {
+            return;
+        };
         self.rebuild_body_colliders_safe(body, e.data().as_ffi() as u128, cells);
     }
 
@@ -464,20 +633,33 @@ impl Rollback {
             match wanted.next() {
                 Some(w) => {
                     let shape = w.shared_shape().clone();
-                    self.data.physics.colliders.mutate_collider_safe(ch, move |c| {
-                        c.set_shape(shape);
-                        if c.position_wrt_parent().is_some_and(|p| *p != Pose::IDENTITY) {
-                            c.set_position_wrt_parent(Pose::IDENTITY);
-                        }
-                        if !c.is_enabled() {
-                            c.set_enabled(true);
-                        }
-                    });
+                    self.data
+                        .physics
+                        .colliders
+                        .mutate_collider_safe(ch, move |c| {
+                            c.set_shape(shape);
+                            if c.position_wrt_parent()
+                                .is_some_and(|p| *p != Pose::IDENTITY)
+                            {
+                                c.set_position_wrt_parent(Pose::IDENTITY);
+                            }
+                            if !c.is_enabled() {
+                                c.set_enabled(true);
+                            }
+                        });
                 }
                 None => {
-                    let enabled = self.data.physics.colliders.get(ch).is_some_and(|c| c.is_enabled());
+                    let enabled = self
+                        .data
+                        .physics
+                        .colliders
+                        .get(ch)
+                        .is_some_and(|c| c.is_enabled());
                     if enabled {
-                        self.data.physics.colliders.mutate_collider_safe(ch, |c| c.set_enabled(false));
+                        self.data
+                            .physics
+                            .colliders
+                            .mutate_collider_safe(ch, |c| c.set_enabled(false));
                     }
                 }
             }
@@ -492,7 +674,10 @@ impl Rollback {
     /// slot, implied air or an unchiseled air block) and for bedrock — the
     /// same refusals as a break through `set_block_safe`. Implied ground
     /// reads as its recipe block, with no chisel.
-    pub(crate) fn clearable_block(&self, pos: BlockPos) -> Option<(Block, Option<crate::ChiselData>)> {
+    pub(crate) fn clearable_block(
+        &self,
+        pos: BlockPos,
+    ) -> Option<(Block, Option<crate::ChiselData>)> {
         let (coords, local) = locate(pos)?;
         let state = match self.chunk_key_at(coords) {
             Some(e) => {
@@ -502,7 +687,9 @@ impl Rollback {
             }
             None => (self.implied_block(coords, local)?, None),
         };
-        if (!crate::block_props().blocks_ray(state.0.id) && state.1.is_none()) || self.is_bedrock(coords, state.0) {
+        if (!crate::block_props().blocks_ray(state.0.id) && state.1.is_none())
+            || self.is_bedrock(coords, state.0)
+        {
             return None;
         }
         Some(state)
@@ -516,7 +703,8 @@ impl Rollback {
     /// implied face-neighbour chunk of a cleared block, so the new air never
     /// borders implied ground. Returns how many blocks were cleared.
     pub fn clear_blocks_safe(&mut self, positions: &[BlockPos]) -> usize {
-        self.fill_blocks_safe(positions, Block::new(BlockId::AIR)).len()
+        self.fill_blocks_safe(positions, Block::new(BlockId::AIR))
+            .len()
     }
 
     /// Writes `block` (whole, unchiseled) at every position, undo-safely, as
@@ -533,21 +721,33 @@ impl Rollback {
         use std::collections::{BTreeMap, BTreeSet};
         let breaking = block.id == BlockId::AIR;
         // Chunk (index-key order) → its writable blocks, deduplicated.
-        let mut by_chunk: BTreeMap<crate::ChunkIndexKey, BTreeMap<BlockIndex, BlockPos>> = BTreeMap::new();
+        let mut by_chunk: BTreeMap<crate::ChunkIndexKey, BTreeMap<BlockIndex, BlockPos>> =
+            BTreeMap::new();
         for &pos in positions {
-            let Some((coords, (bx, by, bz))) = locate(pos) else { continue };
+            let Some((coords, (bx, by, bz))) = locate(pos) else {
+                continue;
+            };
             let writable = if breaking {
                 self.clearable_block(pos).is_some()
             } else {
                 match self.chunk_key_at(coords) {
-                    Some(e) => self.data.ecs.chunk.try_get(e).as_ref().is_some_and(|chunk| {
-                        let index = BlockIndex::from_xyz(bx, by, bz);
-                        let current = chunk.blocks.get(index);
-                        !self.is_bedrock(coords, current) && (current != block || chunk.chisel.contains_key(&index))
-                    }),
+                    Some(e) => self
+                        .data
+                        .ecs
+                        .chunk
+                        .try_get(e)
+                        .as_ref()
+                        .is_some_and(|chunk| {
+                            let index = BlockIndex::from_xyz(bx, by, bz);
+                            let current = chunk.blocks.get(index);
+                            !self.is_bedrock(coords, current)
+                                && (current != block || chunk.chisel.contains_key(&index))
+                        }),
                     None => self
                         .implied_block(coords, (bx, by, bz))
-                        .is_none_or(|current| current != block && !self.is_bedrock(coords, current)),
+                        .is_none_or(|current| {
+                            current != block && !self.is_bedrock(coords, current)
+                        }),
                 }
             };
             if writable {
@@ -578,32 +778,53 @@ impl Rollback {
                 written.extend(blocks.values().copied());
                 continue;
             };
-            let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else { continue };
+            let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else {
+                continue;
+            };
             let mut olds = Vec::with_capacity(blocks.len());
-            let mut old_cells = crate::ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+            let mut old_cells = crate::ColliderCells {
+                blocks: Vec::new(),
+                halves: Vec::new(),
+                voxels: Vec::new(),
+            };
             for &index in blocks.keys() {
                 let cells = crate::collider_cells_of_block(chunk, index);
                 old_cells.blocks.extend(cells.blocks);
                 old_cells.halves.extend(cells.halves);
                 old_cells.voxels.extend(cells.voxels);
-                olds.push(BlockDelta { index, block: chunk.blocks.get(index), chisel: chunk.chisel.get(&index).cloned() });
+                olds.push(BlockDelta {
+                    index,
+                    block: chunk.blocks.get(index),
+                    chisel: chunk.chisel.get(&index).cloned(),
+                });
             }
-            let news: Vec<BlockDelta> = blocks.keys().map(|&index| BlockDelta { index, block, chisel: None }).collect();
+            let news: Vec<BlockDelta> = blocks
+                .keys()
+                .map(|&index| BlockDelta {
+                    index,
+                    block,
+                    chisel: None,
+                })
+                .collect();
             // LIFO: registered before the write, so the old blocks are
             // re-sent after the chunk value is restored.
             self.data.ecs.chunk.emit_on_undo(GameDataUpdate::new(
                 GameDataTransactionKind::Undo,
                 GameDataUpdateKind::SetBlocks(e, olds),
             ));
-            self.data
-                .ecs
-                .chunk
-                .set_chunk_blocks_safe(e, blocks.keys().map(|&index| (index, block, None)).collect());
+            self.data.ecs.chunk.set_chunk_blocks_safe(
+                e,
+                blocks.keys().map(|&index| (index, block, None)).collect(),
+            );
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetBlocks(e, news),
             ));
-            let mut new_cells = crate::ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+            let mut new_cells = crate::ColliderCells {
+                blocks: Vec::new(),
+                halves: Vec::new(),
+                voxels: Vec::new(),
+            };
             if !breaking {
                 let chunk = self.data.ecs.chunk.get(e);
                 for &index in blocks.keys() {
@@ -623,7 +844,14 @@ impl Rollback {
         // real.
         let mut neighbours = BTreeSet::new();
         for &(coords, pos) in &cleared {
-            for d in [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] {
+            for d in [
+                [1, 0, 0],
+                [-1, 0, 0],
+                [0, 1, 0],
+                [0, -1, 0],
+                [0, 0, 1],
+                [0, 0, -1],
+            ] {
                 let n = [pos[0] + d[0], pos[1] + d[1], pos[2] + d[2]];
                 if let Some((nc, _)) = locate(n).filter(|(nc, _)| *nc != coords) {
                     neighbours.insert(crate::chunk_index_key(nc));
@@ -678,13 +906,28 @@ impl Rollback {
     /// whether one was sent. Edits seen to be invalid (nothing in reach, the
     /// target cell occupied, a body in the way) send nothing; the owner
     /// checks again.
-    pub fn player_edit_safe(&mut self, client: ClientId, action: EditAction, out: &mut Vec<crate::IntentMsg>) -> bool {
+    pub fn player_edit_safe(
+        &mut self,
+        client: ClientId,
+        action: EditAction,
+        out: &mut Vec<crate::IntentMsg>,
+    ) -> bool {
         use crate::intents::Effects as _;
-        let Some(hit) = self.eye_hit(client) else { return false };
+        let Some(hit) = self.eye_hit(client) else {
+            return false;
+        };
         let (pos, intent) = match action {
             EditAction::Break => {
-                let Some(by) = self.client_body_id(client) else { return false };
-                (hit.block, crate::Intent::BreakBlock { by, survival: false })
+                let Some(by) = self.client_body_id(client) else {
+                    return false;
+                };
+                (
+                    hit.block,
+                    crate::Intent::BreakBlock {
+                        by,
+                        survival: false,
+                    },
+                )
             }
             EditAction::Place => {
                 if hit.normal == [0; 3] {
@@ -698,11 +941,23 @@ impl Rollback {
                 if self.block_solid(target) || self.block_overlaps_body(target) {
                     return false;
                 }
-                let Some(by) = self.client_body_id(client) else { return false };
-                (target, crate::Intent::PlaceBlock { block: PLACE_BLOCK, by, survival: false })
+                let Some(by) = self.client_body_id(client) else {
+                    return false;
+                };
+                (
+                    target,
+                    crate::Intent::PlaceBlock {
+                        block: PLACE_BLOCK,
+                        by,
+                        survival: false,
+                    },
+                )
             }
         };
-        let p = crate::WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(pos[0], pos[1], pos[2]));
+        let p = crate::WorldBlockPos::from_local(
+            *self.data.region,
+            crate::BlockPos::new(pos[0], pos[1], pos[2]),
+        );
         crate::intents::RegionEffects { data: self, out }.send(crate::Target::Block(p), intent);
         true
     }
@@ -764,4 +1019,3 @@ pub fn raycast_blocks(
         t_max[axis] += t_delta[axis];
     }
 }
-

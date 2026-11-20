@@ -100,12 +100,16 @@ pub fn render(forged: &Forged, layer: PreviewLayer) -> Rgba {
             artifact_image(w, &artifact, layer)
         }
         PreviewLayer::Temperature => {
-            let mut img = shaded(w, |i| tile_map::temperature_color(f64::from(forged.climate.temperature_c[i])));
+            let mut img = shaded(w, |i| {
+                tile_map::temperature_color(f64::from(forged.climate.temperature_c[i]))
+            });
             draw_water(&mut img, w, a);
             img
         }
         PreviewLayer::Drainage => {
-            let mut img = shaded(w, |i| tile_map::drainage_color(f64::from(forged.fields.drainage[i])));
+            let mut img = shaded(w, |i| {
+                tile_map::drainage_color(f64::from(forged.fields.drainage[i]))
+            });
             draw_water(&mut img, w, a);
             img
         }
@@ -115,14 +119,20 @@ pub fn render(forged: &Forged, layer: PreviewLayer) -> Rgba {
     for p in img.pixels() {
         pixels.extend_from_slice(&[p.0[0], p.0[1], p.0[2], 255]);
     }
-    Rgba { width, height, pixels }
+    Rgba {
+        width,
+        height,
+        pixels,
+    }
 }
 
 pub fn encode_png(img: &Rgba) -> Vec<u8> {
-    let buf = ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(img.width, img.height, &img.pixels[..])
-        .expect("pixel buffer matches dimensions");
+    let buf =
+        ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(img.width, img.height, &img.pixels[..])
+            .expect("pixel buffer matches dimensions");
     let mut bytes = std::io::Cursor::new(Vec::new());
-    buf.write_to(&mut bytes, image::ImageFormat::Png).expect("encode png");
+    buf.write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode png");
     bytes.into_inner()
 }
 
@@ -130,14 +140,22 @@ type Image = ImageBuffer<Rgb<u8>, Vec<u8>>;
 
 fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     let t = t.clamp(0.0, 1.0);
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 fn ramp(stops: &[(f64, [f64; 3])], v: f64) -> [f64; 3] {
     let mut prev = stops[0];
     for &stop in stops {
         if v <= stop.0 {
-            return lerp3(prev.1, stop.1, (v - prev.0) / (stop.0 - prev.0).max(f64::EPSILON));
+            return lerp3(
+                prev.1,
+                stop.1,
+                (v - prev.0) / (stop.0 - prev.0).max(f64::EPSILON),
+            );
         }
         prev = stop;
     }
@@ -186,7 +204,11 @@ fn shaded(w: &World, land_color: impl Fn(usize) -> [f64; 3]) -> Image {
     for z in 0..w.nz {
         for x in 0..w.nx {
             let i = w.index(x, z);
-            let (c, s) = if w.ocean[i] { (sea_color(-w.h[i]), 1.0) } else { (land_color(i), shade(w, x, z)) };
+            let (c, s) = if w.ocean[i] {
+                (sea_color(-w.h[i]), 1.0)
+            } else {
+                (land_color(i), shade(w, x, z))
+            };
             let px = |v: f64| (v * s).clamp(0.0, 255.0) as u8;
             img.put_pixel(x as u32, z as u32, Rgb([px(c[0]), px(c[1]), px(c[2])]));
         }
@@ -225,8 +247,14 @@ fn draw_water(img: &mut Image, w: &World, a: &Analysis) {
             }
             let (px, pz, qx, qz) = (p.x / w.dx, p.z / w.dx, q.x / w.dx, q.z / w.dx);
             // A pair across a wrapping world's seam: the shorter way round.
-            let qx = if w.wrap_x { px + crate::forge::hydrology::seam_dx(qx - px, w.nx as f64) } else { qx };
-            let steps = (((qx - px).powi(2) + (qz - pz).powi(2)).sqrt() * 2.0).ceil().max(1.0) as usize;
+            let qx = if w.wrap_x {
+                px + crate::forge::hydrology::seam_dx(qx - px, w.nx as f64)
+            } else {
+                qx
+            };
+            let steps = (((qx - px).powi(2) + (qz - pz).powi(2)).sqrt() * 2.0)
+                .ceil()
+                .max(1.0) as usize;
             for s in 0..=steps {
                 let t = s as f64 / steps as f64;
                 let (cx, cz) = (px + (qx - px) * t, pz + (qz - pz) * t);
@@ -234,8 +262,13 @@ fn draw_water(img: &mut Image, w: &World, a: &Analysis) {
                 for oz in -r..=r {
                     for ox in -r..=r {
                         let (x, z) = (cx.floor() as i64 + ox, cz.floor() as i64 + oz);
-                        let d = ((x as f64 + 0.5 - cx).powi(2) + (z as f64 + 0.5 - cz).powi(2)).sqrt();
-                        let x = if w.wrap_x { x.rem_euclid(w.nx as i64) } else { x };
+                        let d =
+                            ((x as f64 + 0.5 - cx).powi(2) + (z as f64 + 0.5 - cz).powi(2)).sqrt();
+                        let x = if w.wrap_x {
+                            x.rem_euclid(w.nx as i64)
+                        } else {
+                            x
+                        };
                         if x < 0 || z < 0 || x >= w.nx as i64 || z >= w.nz as i64 {
                             continue;
                         }
@@ -267,14 +300,18 @@ fn relief_image(w: &World, a: Option<&Analysis>) -> Image {
 }
 
 fn geology_image(w: &World, a: &Analysis) -> Image {
-    let mut img = shaded(w, |i| ROCKS[a.surface_rock[i] as usize].rgb.map(|c| c as f64));
+    let mut img = shaded(w, |i| {
+        ROCKS[a.surface_rock[i] as usize].rgb.map(|c| c as f64)
+    });
     draw_water(&mut img, w, a);
     img
 }
 
 /// Precipitation on the shared ramp (`tile_map::PRECIP_RAMP`).
 fn rainfall_image(w: &World, a: &Analysis, precip_mm: &[f32]) -> Image {
-    let mut img = shaded(w, |i| tile_map::precipitation_color(f64::from(precip_mm[i])));
+    let mut img = shaded(w, |i| {
+        tile_map::precipitation_color(f64::from(precip_mm[i]))
+    });
     draw_water(&mut img, w, a);
     img
 }
@@ -306,11 +343,21 @@ fn artifact_image(w: &World, art: &crate::forged::WorldArtifact, layer: PreviewL
                     let id = art.region[i];
                     tile_map::region_color(id, art.regions.get(usize::from(id)).map(|r| r.kind))
                 }
-                _ => game::Biome::from_u8(art.biome[i]).unwrap_or(game::Biome::Ocean).map_rgb(),
+                _ => game::Biome::from_u8(art.biome[i])
+                    .unwrap_or(game::Biome::Ocean)
+                    .map_rgb(),
             };
-            let s = if w.ocean[i] { 1.0 } else { PREVIEW_FLAT_SHADE + (1.0 - PREVIEW_FLAT_SHADE) * shade(w, x, z).min(1.0) };
+            let s = if w.ocean[i] {
+                1.0
+            } else {
+                PREVIEW_FLAT_SHADE + (1.0 - PREVIEW_FLAT_SHADE) * shade(w, x, z).min(1.0)
+            };
             let px = |v: u8| (f64::from(v) * s).clamp(0.0, 255.0) as u8;
-            img.put_pixel(x as u32, z as u32, Rgb([px(rgb[0]), px(rgb[1]), px(rgb[2])]));
+            img.put_pixel(
+                x as u32,
+                z as u32,
+                Rgb([px(rgb[0]), px(rgb[1]), px(rgb[2])]),
+            );
         }
     }
     img
@@ -319,4 +366,3 @@ fn artifact_image(w: &World, art: &crate::forged::WorldArtifact, layer: PreviewL
 /// Brightness floor of the shaded biome and region layers, so the palette
 /// stays readable on lee slopes.
 const PREVIEW_FLAT_SHADE: f64 = 0.6;
-

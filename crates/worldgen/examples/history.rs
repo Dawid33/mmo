@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use game::history::bootstrap::{bootstrap, BootstrapParams};
-use game::history::{persist, History, SocietyGrid};
+use game::history::bootstrap::{BootstrapParams, bootstrap};
+use game::history::{History, SocietyGrid, persist};
 
 const DEFAULT_WORLD: &str = "worlds/default.world";
 
@@ -50,9 +50,15 @@ fn main() {
         std::process::exit(2);
     }
     let t = Instant::now();
-    let forged = worldgen::forged::ForgedWorld::load(&world).unwrap_or_else(|e| panic!("{}: {e}", world.display()));
+    let forged = worldgen::forged::ForgedWorld::load(&world)
+        .unwrap_or_else(|e| panic!("{}: {e}", world.display()));
     let map = worldgen::tile_map::build_world_map(&forged);
-    println!("world {} loaded, {} tiles ({:.1?})", world.display(), map.tiles.len(), t.elapsed());
+    println!(
+        "world {} loaded, {} tiles ({:.1?})",
+        world.display(),
+        map.tiles.len(),
+        t.elapsed()
+    );
 
     let history: History = if let Some(path) = dump {
         let grid = SocietyGrid::from_world_map(&map);
@@ -68,7 +74,12 @@ fn main() {
             eprintln!("bootstrap failed: {e}");
             std::process::exit(1);
         });
-        println!("bootstrapped {} years, seed {} ({:.1?})", params.years, params.seed, t.elapsed());
+        println!(
+            "bootstrapped {} years, seed {} ({:.1?})",
+            params.years,
+            params.seed,
+            t.elapsed()
+        );
         if save {
             persist::save(&h, &out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
             println!("saved {}", out.display());
@@ -78,7 +89,11 @@ fn main() {
 
     println!("{}", history.stats());
     let skip = history.log.len().saturating_sub(log_lines);
-    println!("log (last {} of {}):", history.log.len() - skip, history.log.len());
+    println!(
+        "log (last {} of {}):",
+        history.log.len() - skip,
+        history.log.len()
+    );
     for e in &history.log[skip..] {
         println!("  {}", e.describe(&history));
     }

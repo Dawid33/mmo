@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::records::*;
 use super::History;
+use super::records::*;
 
 pub const LEGENDS_PAGE_MAX: u16 = 200;
 pub const LEGENDS_PAGE_DEFAULT: u16 = 100;
@@ -44,15 +44,23 @@ pub struct LegendsPage {
 }
 
 impl History {
-    fn legends_matches(&self, filter: &LegendsFilter, people: &[PersonId], sites: &[SiteId]) -> bool {
+    fn legends_matches(
+        &self,
+        filter: &LegendsFilter,
+        people: &[PersonId],
+        sites: &[SiteId],
+    ) -> bool {
         let citizen_site = |p: &PersonId| self.person(*p).and_then(|p| p.site);
         match filter {
             LegendsFilter::All => true,
             LegendsFilter::Person(p) => people.contains(p),
-            LegendsFilter::Site(s) => sites.contains(s) || people.iter().any(|p| citizen_site(p) == Some(*s)),
+            LegendsFilter::Site(s) => {
+                sites.contains(s) || people.iter().any(|p| citizen_site(p) == Some(*s))
+            }
             LegendsFilter::Civ(c) => {
                 let of_civ = |s: &SiteId| self.site(*s).is_some_and(|s| s.civ == *c);
-                sites.iter().any(of_civ) || people.iter().filter_map(citizen_site).any(|s| of_civ(&s))
+                sites.iter().any(of_civ)
+                    || people.iter().filter_map(citizen_site).any(|s| of_civ(&s))
             }
         }
     }
@@ -60,7 +68,9 @@ impl History {
     /// One page of the log, newest first, filtered; see [`LegendsPage`].
     pub fn legends(&self, q: &LegendsQuery) -> LegendsPage {
         let limit = usize::from(q.limit.clamp(1, LEGENDS_PAGE_MAX));
-        let end = q.before.map_or(self.log.len(), |b| (b as usize).min(self.log.len()));
+        let end = q
+            .before
+            .map_or(self.log.len(), |b| (b as usize).min(self.log.len()));
         let mut lines: Vec<LegendLine> = Vec::new();
         let mut total = 0u32;
         let mut older = false;
@@ -75,12 +85,26 @@ impl History {
                 continue;
             }
             if lines.len() < limit {
-                lines.push(LegendLine { index: index as u32, text: entry.describe(self), sites, people });
+                lines.push(LegendLine {
+                    index: index as u32,
+                    text: entry.describe(self),
+                    sites,
+                    people,
+                });
             } else {
                 older = true;
             }
         }
-        let next = if older { lines.last().map(|l| l.index) } else { None };
-        LegendsPage { query: q.clone(), lines, next, total }
+        let next = if older {
+            lines.last().map(|l| l.index)
+        } else {
+            None
+        };
+        LegendsPage {
+            query: q.clone(),
+            lines,
+            next,
+            total,
+        }
     }
 }

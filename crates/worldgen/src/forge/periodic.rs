@@ -18,7 +18,7 @@
 //! an artifact read its own edges (`for_edges`, `from_globals`) and keep a
 //! `None` (no wrap): the runtime sampler and hand-built grids.
 
-use crate::forge::world::{smoothstep, EdgeKind, ForgeParams};
+use crate::forge::world::{EdgeKind, ForgeParams, smoothstep};
 use crate::forged::WorldGlobals;
 
 /// x is periodic with period `period_m`; a noise blends over the last
@@ -53,13 +53,19 @@ impl PeriodicX {
     }
 
     fn new(period_m: f64) -> PeriodicX {
-        PeriodicX { period_m, band_m: 0.25 * period_m }
+        PeriodicX {
+            period_m,
+            band_m: 0.25 * period_m,
+        }
     }
 
     /// This period with the blend band of a noise whose longest wavelength is
     /// `wavelength_m`: `min(period / 4, 4 × wavelength)`.
     pub fn for_noise(&self, wavelength_m: f64) -> PeriodicX {
-        PeriodicX { period_m: self.period_m, band_m: (0.25 * self.period_m).min(4.0 * wavelength_m) }
+        PeriodicX {
+            period_m: self.period_m,
+            band_m: (0.25 * self.period_m).min(4.0 * wavelength_m),
+        }
     }
 
     /// `x` folded into `[0, period)`.
@@ -72,7 +78,11 @@ impl PeriodicX {
     /// The shortest signed `b − a` round the circle, in `(−period/2, period/2]`.
     pub fn dx(&self, a: f64, b: f64) -> f64 {
         let d = self.fold(b - a);
-        if d > 0.5 * self.period_m { d - self.period_m } else { d }
+        if d > 0.5 * self.period_m {
+            d - self.period_m
+        } else {
+            d
+        }
     }
 
     /// `f` made periodic in x: `f(x, z)` (x folded) outside the last `band_m`
@@ -109,7 +119,12 @@ impl PeriodicX {
     /// Each item plus its copies at x − period and x + period
     /// (`shift(item, ∓period)`), in that order per item: entry `j` is a copy
     /// of `items[j / 3]`. `x_of` says where an item stands (checked finite).
-    pub fn with_images<T: Clone>(&self, items: &[T], x_of: impl Fn(&T) -> f64, shift: impl Fn(&T, f64) -> T) -> Vec<T> {
+    pub fn with_images<T: Clone>(
+        &self,
+        items: &[T],
+        x_of: impl Fn(&T) -> f64,
+        shift: impl Fn(&T, f64) -> T,
+    ) -> Vec<T> {
         let mut out = Vec::with_capacity(3 * items.len());
         for item in items {
             debug_assert!(x_of(item).is_finite(), "an item with no position");

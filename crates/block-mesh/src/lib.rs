@@ -78,8 +78,8 @@
 //! ```
 
 mod bounds;
-mod extent;
 mod buffer;
+mod extent;
 pub mod geometry;
 mod greedy;
 mod simple;

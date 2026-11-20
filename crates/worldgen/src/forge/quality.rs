@@ -6,8 +6,8 @@
 
 use game::{Biome, RegionType};
 
-use super::world::smoothstep;
 use super::Forged;
+use super::world::smoothstep;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Quality {
@@ -108,7 +108,9 @@ impl Quality {
         let mut v = [f64::NAN; 11];
         for line in text.lines() {
             let line = line.trim().trim_end_matches(',');
-            let Some((k, val)) = line.split_once(':') else { continue };
+            let Some((k, val)) = line.split_once(':') else {
+                continue;
+            };
             let Some(i) = FIELDS.iter().position(|f| *f == k.trim()) else {
                 return Err(format!("unknown field {k:?}"));
             };
@@ -145,7 +147,17 @@ pub fn within(a: &Quality, baseline: &Quality, tol: &QualityTolerance) -> Result
     let cnt = Kind::Rel(tol.relative_counts);
     let exp = Kind::Abs(tol.absolute_exponents);
     let kinds = [
-        &rel, &rel, &rel, &rel, &rel, &exp, &exp, &cnt, &rel, &Kind::Abs(tol.absolute_strahler), &cnt,
+        &rel,
+        &rel,
+        &rel,
+        &rel,
+        &rel,
+        &exp,
+        &exp,
+        &cnt,
+        &rel,
+        &Kind::Abs(tol.absolute_strahler),
+        &cnt,
     ];
     let mut bad = Vec::new();
     for (i, kind) in kinds.iter().enumerate() {
@@ -162,7 +174,10 @@ pub fn within(a: &Quality, baseline: &Quality, tol: &QualityTolerance) -> Result
     if bad.is_empty() {
         Ok(())
     } else {
-        Err(format!("forge quality out of tolerance: {}", bad.join("; ")))
+        Err(format!(
+            "forge quality out of tolerance: {}",
+            bad.join("; ")
+        ))
     }
 }
 
@@ -208,7 +223,11 @@ pub struct BiomeSummary {
 
 impl BiomeSummary {
     fn regions(&self, kind: RegionType) -> u32 {
-        self.regions_by_type.iter().filter(|(t, _)| *t == kind).map(|(_, c)| *c).sum()
+        self.regions_by_type
+            .iter()
+            .filter(|(t, _)| *t == kind)
+            .map(|(_, c)| *c)
+            .sum()
     }
 }
 
@@ -226,7 +245,9 @@ pub fn summarise(a: &crate::forged::WorldArtifact) -> BiomeSummary {
         if me == other {
             return;
         }
-        let (Some(k), Some(o)) = (kind_of(me), kind_of(other)) else { return };
+        let (Some(k), Some(o)) = (kind_of(me), kind_of(other)) else {
+            return;
+        };
         if k == RegionType::Mountains && !o.is_water() && o != RegionType::Mountains {
             bordering[usize::from(me)] = true;
         }
@@ -258,10 +279,18 @@ pub fn summarise(a: &crate::forged::WorldArtifact) -> BiomeSummary {
         let (lines, len) = if horizontal { (nz, nx) } else { (nx, nz) };
         for line in 0..lines {
             for k in 0..len {
-                let at = |j: usize| if horizontal { src[line * nx + j] } else { src[j * nx + line] };
+                let at = |j: usize| {
+                    if horizontal {
+                        src[line * nx + j]
+                    } else {
+                        src[j * nx + line]
+                    }
+                };
                 let m = if horizontal && wrap_x {
                     // Round the seam: columns k - r ..= k + r mod nx.
-                    (0..=2 * r).map(|o| at((k + len * (r / len + 1) + o - r) % len)).fold(f32::MIN, f32::max)
+                    (0..=2 * r)
+                        .map(|o| at((k + len * (r / len + 1) + o - r) % len))
+                        .fold(f32::MIN, f32::max)
                 } else {
                     let (lo, hi) = (k.saturating_sub(r), (k + r).min(len - 1));
                     (lo..=hi).map(at).fold(f32::MIN, f32::max)
@@ -276,11 +305,16 @@ pub fn summarise(a: &crate::forged::WorldArtifact) -> BiomeSummary {
         out
     };
     let wmax = window_max(&window_max(&h, true), false);
-    let peaks_above_snow = count_peaks(&h, &wmax, nx, nz, wrap_x, |i| a.temperature_c.get(i) < crate::forged::SNOW_LINE_C);
+    let peaks_above_snow = count_peaks(&h, &wmax, nx, nz, wrap_x, |i| {
+        a.temperature_c.get(i) < crate::forged::SNOW_LINE_C
+    });
 
     BiomeSummary {
         shares: biome_shares(&a.biome),
-        regions_by_type: region_counts(&a.regions).into_iter().map(|(t, c)| (t, c as u32)).collect(),
+        regions_by_type: region_counts(&a.regions)
+            .into_iter()
+            .map(|(t, c)| (t, c as u32))
+            .collect(),
         peaks_above_snow,
         mountain_regions_bordering_land: bordering.iter().filter(|&&b| b).count() as u32,
     }
@@ -289,7 +323,14 @@ pub fn summarise(a: &crate::forged::WorldArtifact) -> BiomeSummary {
 /// Summits: 8-connected groups of land cells equal to their window maximum
 /// (a flat, quantised summit is one peak, not one per cell), counted when
 /// `cold` holds for the group's first cell.
-fn count_peaks(h: &[f32], wmax: &[f32], nx: usize, nz: usize, wrap_x: bool, cold: impl Fn(usize) -> bool) -> u32 {
+fn count_peaks(
+    h: &[f32],
+    wmax: &[f32],
+    nx: usize,
+    nz: usize,
+    wrap_x: bool,
+    cold: impl Fn(usize) -> bool,
+) -> u32 {
     let is_max = |i: usize| h[i] > 0.0 && h[i] >= wmax[i];
     let mut seen = vec![false; nx * nz];
     let mut peaks = 0;
@@ -301,7 +342,16 @@ fn count_peaks(h: &[f32], wmax: &[f32], nx: usize, nz: usize, wrap_x: bool, cold
         seen[start] = true;
         while let Some(i) = stack.pop() {
             let (x, z) = ((i % nx) as i64, (i / nx) as i64);
-            for (dx, dz) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+            for (dx, dz) in [
+                (-1, -1),
+                (0, -1),
+                (1, -1),
+                (-1, 0),
+                (1, 0),
+                (-1, 1),
+                (0, 1),
+                (1, 1),
+            ] {
                 let (jx, jz) = (x + dx, z + dz);
                 let jx = if wrap_x { jx.rem_euclid(nx as i64) } else { jx };
                 if jx < 0 || jz < 0 || jx >= nx as i64 || jz >= nz as i64 {
@@ -327,22 +377,50 @@ pub fn world_score(q: &Quality, biomes: &BiomeSummary) -> (f64, Vec<(&'static st
     let count = |have: u32, want: u32| (f64::from(have) / f64::from(want)).min(1.0);
     let present = biomes.shares.iter().filter(|(_, s)| *s > 0.0).count();
     let regions: u32 = biomes.regions_by_type.iter().map(|(_, c)| *c).sum();
-    let glacier = biomes.shares.iter().any(|(b, s)| *b == Biome::Glacier && *s > 0.0);
+    let glacier = biomes
+        .shares
+        .iter()
+        .any(|(b, s)| *b == Biome::Glacier && *s > 0.0);
     let terms = vec![
         ("land share", {
             let (rise, fall) = LAND_BAND;
-            smoothstep(rise.0, rise.1, q.land_share) * (1.0 - smoothstep(fall.0, fall.1, q.land_share))
+            smoothstep(rise.0, rise.1, q.land_share)
+                * (1.0 - smoothstep(fall.0, fall.1, q.land_share))
         }),
-        ("snow peaks", count(biomes.peaks_above_snow, WANTED_SNOW_PEAKS)),
-        ("mountain starts", count(biomes.mountain_regions_bordering_land, WANTED_MOUNTAIN_REGIONS)),
-        ("forests", count(biomes.regions(RegionType::Forest), WANTED_FOREST_REGIONS)),
+        (
+            "snow peaks",
+            count(biomes.peaks_above_snow, WANTED_SNOW_PEAKS),
+        ),
+        (
+            "mountain starts",
+            count(
+                biomes.mountain_regions_bordering_land,
+                WANTED_MOUNTAIN_REGIONS,
+            ),
+        ),
+        (
+            "forests",
+            count(biomes.regions(RegionType::Forest), WANTED_FOREST_REGIONS),
+        ),
         ("big river", (q.max_strahler / WANTED_RIVER_ORDER).min(1.0)),
-        ("biome variety", (present as f64 / WANTED_BIOMES as f64).min(1.0)),
+        (
+            "biome variety",
+            (present as f64 / WANTED_BIOMES as f64).min(1.0),
+        ),
         // Both poles are on the map: a glacier is expected.
         ("glacier", if glacier { 1.0 } else { 0.0 }),
-        ("region cap", 1.0 - smoothstep(f64::from(REGION_CAP), 2.0 * f64::from(REGION_CAP), f64::from(regions))),
+        (
+            "region cap",
+            1.0 - smoothstep(
+                f64::from(REGION_CAP),
+                2.0 * f64::from(REGION_CAP),
+                f64::from(regions),
+            ),
+        ),
     ];
-    let score = terms.iter().map(|(_, v)| TERM_FLOOR + (1.0 - TERM_FLOOR) * v).product();
+    let score = terms
+        .iter()
+        .map(|(_, v)| TERM_FLOOR + (1.0 - TERM_FLOOR) * v)
+        .product();
     (score, terms)
 }
-

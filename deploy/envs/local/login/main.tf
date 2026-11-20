@@ -15,6 +15,23 @@ provider "aws" {
   skip_region_validation      = true
 }
 
+variable "use_management_db" {
+  type    = bool
+  default = false
+}
+
+variable "own_postgres" {
+  type    = string
+  default = "running"
+}
+
+data "terraform_remote_state" "pg_management" {
+  backend = "local"
+  config = {
+    path = "../../../../target/twin/pg-management.tfstate"
+  }
+}
+
 module "login" {
   source = "../../../modules/login"
   providers = {
@@ -30,6 +47,16 @@ module "login" {
   replicas          = 1
   metrics           = false
   manage_dns_record = false
+  database          = var.use_management_db ? data.terraform_remote_state.pg_management.outputs.databases["login"] : null
+  own_postgres      = var.own_postgres
+  telemetry = {
+    otlp_endpoint       = "http://host.k3d.internal:4318"
+    trace_sampler_ratio = 1
+    profile_enabled     = true
+    profile_endpoint    = "http://host.k3d.internal:4040"
+    environment         = "twin"
+    cluster             = "k3d-mmo"
+  }
 }
 
 output "service_token" {

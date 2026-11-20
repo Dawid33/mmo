@@ -80,9 +80,12 @@ struct Box3 {
 fn shapes() -> &'static BTreeMap<String, CreatureShape> {
     static SHAPES: OnceLock<BTreeMap<String, CreatureShape>> = OnceLock::new();
     SHAPES.get_or_init(|| {
-        let entries: BTreeMap<String, Collider> =
-            serde_json::from_str(COLLIDERS).expect("creature_colliders.json is malformed (regenerate: just creatures)");
-        entries.into_iter().map(|(id, c)| (id, shape_of(c))).collect()
+        let entries: BTreeMap<String, Collider> = serde_json::from_str(COLLIDERS)
+            .expect("creature_colliders.json is malformed (regenerate: just creatures)");
+        entries
+            .into_iter()
+            .map(|(id, c)| (id, shape_of(c)))
+            .collect()
     })
 }
 
@@ -92,11 +95,19 @@ fn shape_of(c: Collider) -> CreatureShape {
         .iter()
         .map(|b| {
             let [lo, hi] = [Vector::from_array(b.min), Vector::from_array(b.max)];
-            (Pose::from_translation((lo + hi) * 0.5), ColliderSpec::Cuboid { half_extents: (hi - lo) * 0.5 })
+            (
+                Pose::from_translation((lo + hi) * 0.5),
+                ColliderSpec::Cuboid {
+                    half_extents: (hi - lo) * 0.5,
+                },
+            )
         })
         .collect();
     CreatureShape {
-        move_shape: ColliderSpec::CapsuleY { half_height: c.move_shape.half_height, radius: c.move_shape.radius },
+        move_shape: ColliderSpec::CapsuleY {
+            half_height: c.move_shape.half_height,
+            radius: c.move_shape.radius,
+        },
         body: ColliderSpec::Compound(body),
     }
 }

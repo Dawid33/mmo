@@ -54,7 +54,7 @@ use std::path::PathBuf;
 use worldgen::forge::hydrology;
 use worldgen::forge::knobs;
 use worldgen::forge::play;
-use worldgen::forge::{forge, ForgeParams};
+use worldgen::forge::{ForgeParams, forge};
 
 const DEFAULT_OUT: &str = "target/world-forge/f1";
 
@@ -106,7 +106,10 @@ impl DerefMut for Params {
 impl Params {
     pub fn parse() -> Params {
         let mut p = Params {
-            forge: ForgeParams { quiet: false, ..ForgeParams::default() },
+            forge: ForgeParams {
+                quiet: false,
+                ..ForgeParams::default()
+            },
             out: PathBuf::from(DEFAULT_OUT),
             search: 0,
             serve: None,
@@ -134,7 +137,9 @@ impl Params {
                 "--planet" => p.planet = true,
                 "--no-retry" => p.no_retry = true,
                 "--frames" => p.frames = value().parse().expect("--frames <count>"),
-                "--key" => p.planet_keys.push(planet_view::parse_key(&value()).unwrap_or_else(|e| panic!("{e}"))),
+                "--key" => p
+                    .planet_keys
+                    .push(planet_view::parse_key(&value()).unwrap_or_else(|e| panic!("{e}"))),
                 "--seeds" => p.seeds = value().parse().expect("--seeds <count>"),
                 "--cell" => p.cell_m = value().parse().expect("--cell <meters>"),
                 "--iters" => p.knobs.iters = value().parse().expect("--iters <count>"),
@@ -150,7 +155,9 @@ impl Params {
                 "--dt" => p.knobs.dt_years = value().parse().expect("--dt <years>"),
                 "--uplift" => p.knobs.uplift = value().parse().expect("--uplift <m/yr>"),
                 "--k" => p.knobs.erodibility = value().parse().expect("--k <erodibility>"),
-                "--diffusivity" => p.knobs.diffusivity = value().parse().expect("--diffusivity <m^2/yr>"),
+                "--diffusivity" => {
+                    p.knobs.diffusivity = value().parse().expect("--diffusivity <m^2/yr>")
+                }
                 "--no-geology" => p.knobs.geology_strength = 0.0,
                 "--no-climate" => p.knobs.climate_strength = 0.0,
                 "--spawn" => {
@@ -167,7 +174,9 @@ impl Params {
                     let preset = worldgen::forge::presets::PRESETS
                         .iter()
                         .find(|p| p.name.eq_ignore_ascii_case(&name))
-                        .unwrap_or_else(|| panic!("--preset: no preset named {name} (see forge/presets.rs)"));
+                        .unwrap_or_else(|| {
+                            panic!("--preset: no preset named {name} (see forge/presets.rs)")
+                        });
                     p.knobs = worldgen::forge::presets::apply(preset);
                 }
                 // Any knob by its key (knobs.rs; the tuning page's "Copy as flags").
@@ -181,11 +190,11 @@ impl Params {
                 ),
             }
         }
-        (p.width_m, p.height_m) = play::sides_flags(width, height, (p.width_m, p.height_m)).unwrap_or_else(|e| panic!("{e}"));
+        (p.width_m, p.height_m) = play::sides_flags(width, height, (p.width_m, p.height_m))
+            .unwrap_or_else(|e| panic!("{e}"));
         p
     }
 }
-
 
 fn main() {
     let p = Params::parse();
@@ -219,10 +228,18 @@ fn main() {
     let (nx, nz) = (p.nx(), p.nz());
     println!(
         "forge: seed {:#018X}, {} x {} m world, {} m cells ({nx}x{nz}), {} iterations x {} yr over {} level(s), rock contrast {}, rain shadow {}",
-        p.seed, p.width_m, p.height_m, p.cell_m,
-        worldgen::forge::schedule(&p).iter().map(|&(_, i)| i).sum::<usize>(), p.knobs.dt_years,
+        p.seed,
+        p.width_m,
+        p.height_m,
+        p.cell_m,
+        worldgen::forge::schedule(&p)
+            .iter()
+            .map(|&(_, i)| i)
+            .sum::<usize>(),
+        p.knobs.dt_years,
         worldgen::forge::schedule(&p).len(),
-        p.knobs.geology_strength, p.knobs.climate_strength,
+        p.knobs.geology_strength,
+        p.knobs.climate_strength,
     );
     let changed: Vec<String> = knobs::SPECS
         .iter()
@@ -276,13 +293,19 @@ fn main() {
     render::heightmap(w, &format!("{stem}-height.png"));
     let objects = format!("{stem}-water.json");
     std::fs::write(&objects, hydrology::objects_json(w, a)).expect("write water objects");
-    println!("wrote {objects} ({} lakes, {} river reaches)", a.lakes.len(), a.rivers.len());
+    println!(
+        "wrote {objects} ({} lakes, {} river reaches)",
+        a.lakes.len(),
+        a.rivers.len()
+    );
 
     print_biomes(&artifact);
     print_rivers_and_peaks(&forged, &artifact);
     render::biomes(&artifact, &format!("{stem}-biome.png"));
     let world_file = format!("{stem}.world");
-    artifact.save(std::path::Path::new(&world_file)).expect("write world file");
+    artifact
+        .save(std::path::Path::new(&world_file))
+        .expect("write world file");
     let bytes = std::fs::metadata(&world_file).map(|m| m.len()).unwrap_or(0);
     println!(
         "wrote {world_file} ({:.1} MiB), spawn at ({:.0}, {:.0}) m — serve it with {}={world_file}",
@@ -298,12 +321,14 @@ fn main() {
 /// The climate in eight latitude bands (north to south): wind, land
 /// temperature and precipitation ranges.
 fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgeParams) {
-    use worldgen::forge::climate::{wind, Wind};
+    use worldgen::forge::climate::{Wind, wind};
     let (w, c) = (&forged.world, &forged.climate);
     let (nx, nz) = (w.nx, w.nz);
     let land: Vec<usize> = (0..w.cells()).filter(|&i| !w.ocean[i]).collect();
     let range = |v: &[f32], cells: &[usize]| {
-        cells.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| (lo.min(v[i]), hi.max(v[i])))
+        cells.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| {
+            (lo.min(v[i]), hi.max(v[i]))
+        })
     };
     let (t, r) = (range(&c.temperature_c, &land), range(&c.precip_mm, &land));
     println!(
@@ -314,8 +339,16 @@ fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgePar
     for b in 0..BANDS {
         let rows = b * nz / BANDS..(b + 1) * nz / BANDS;
         let lat = c.latitude_deg[(rows.start + rows.end) / 2];
-        let cells: Vec<usize> = land.iter().copied().filter(|i| rows.contains(&(i / nx))).collect();
-        let dir = if wind(lat as f64, p) == Wind::FromWest { "W" } else { "E" };
+        let cells: Vec<usize> = land
+            .iter()
+            .copied()
+            .filter(|i| rows.contains(&(i / nx)))
+            .collect();
+        let dir = if wind(lat as f64, p) == Wind::FromWest {
+            "W"
+        } else {
+            "E"
+        };
         if cells.is_empty() {
             println!("  lat {lat:5.1}  wind from {dir}  (sea)");
             continue;
@@ -324,7 +357,12 @@ fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgePar
         let (t, r) = (range(&c.temperature_c, &cells), range(&c.precip_mm, &cells));
         println!(
             "  lat {lat:5.1}  wind from {dir}  land T {:5.1} ({:5.1}..{:5.1}) C  precip {:5.0} ({:4.0}..{:4.0}) mm/yr",
-            mean(&c.temperature_c), t.0, t.1, mean(&c.precip_mm), r.0, r.1
+            mean(&c.temperature_c),
+            t.0,
+            t.1,
+            mean(&c.precip_mm),
+            r.0,
+            r.1
         );
     }
 }
@@ -333,22 +371,43 @@ fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgePar
 /// precipitation ranges of the world file, and the peaks above the snow line.
 fn print_rivers_and_peaks(forged: &worldgen::forge::Forged, a: &worldgen::forged::WorldArtifact) {
     use worldgen::forged::SNOW_LINE_C;
-    let top = forged.analysis.rivers.iter().map(|r| r.order).max().unwrap_or(0);
+    let top = forged
+        .analysis
+        .rivers
+        .iter()
+        .map(|r| r.order)
+        .max()
+        .unwrap_or(0);
     let by_order: Vec<String> = (1..=top)
         .rev()
         .map(|o| {
             let rs = forged.analysis.rivers.iter().filter(|r| r.order == o);
-            let km: f64 = rs.clone().map(|r| r.points.windows(2).map(|w| ((w[1].x - w[0].x).hypot(w[1].z - w[0].z)) / 1000.0).sum::<f64>()).sum();
+            let km: f64 = rs
+                .clone()
+                .map(|r| {
+                    r.points
+                        .windows(2)
+                        .map(|w| ((w[1].x - w[0].x).hypot(w[1].z - w[0].z)) / 1000.0)
+                        .sum::<f64>()
+                })
+                .sum();
             format!("order {o}: {} ({km:.0} km)", rs.count())
         })
         .collect();
     println!("rivers by Strahler order: {}", by_order.join(", "));
-    let land: Vec<usize> = (0..a.biome.len()).filter(|&i| a.height.get(i) > 0.0).collect();
+    let land: Vec<usize> = (0..a.biome.len())
+        .filter(|&i| a.height.get(i) > 0.0)
+        .collect();
     let range = |r: &worldgen::forged::QRaster| {
-        land.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| (lo.min(r.get(i)), hi.max(r.get(i))))
+        land.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| {
+            (lo.min(r.get(i)), hi.max(r.get(i)))
+        })
     };
     let (t, r) = (range(&a.temperature_c), range(&a.precip_mm));
-    println!("world file land: temperature {:.1}..{:.1} C, precipitation {:.0}..{:.0} mm/yr", t.0, t.1, r.0, r.1);
+    println!(
+        "world file land: temperature {:.1}..{:.1} C, precipitation {:.0}..{:.0} mm/yr",
+        t.0, t.1, r.0, r.1
+    );
     let s = worldgen::forge::quality::summarise(a);
     println!(
         "peaks above the snow line (temperature < {SNOW_LINE_C} C): {}; mountain regions bordering other land: {}",
@@ -363,16 +422,38 @@ fn print_biomes(a: &worldgen::forged::WorldArtifact) {
     let total = a.biome.len() as f64;
     println!("biomes (share of all cells / of land):");
     for (b, share, land) in report::biome_shares_with_land(a) {
-        let land = land.map_or_else(|| String::from("     -"), |land| format!("{:5.1}%", 100.0 * land));
+        let land = land.map_or_else(
+            || String::from("     -"),
+            |land| format!("{:5.1}%", 100.0 * land),
+        );
         println!("  {:<26} {:5.1}%  {land}", b.name(), 100.0 * share);
     }
     let counts = region_counts(&a.regions);
-    let list: Vec<String> = counts.iter().map(|(t, c)| format!("{} {c}", t.name())).collect();
+    let list: Vec<String> = counts
+        .iter()
+        .map(|(t, c)| format!("{} {c}", t.name()))
+        .collect();
     let min = worldgen::forge::regions::min_region_cells(a.cell_m);
     let under = a.regions.iter().filter(|r| r.cells < min).count();
-    println!("regions: {} ({}); {under} under the merge area (water or frozen with no same-class neighbour)", a.regions.len(), list.join(", "));
-    let cells = |al: i8| a.regions.iter().filter(|r| r.alignment == al).map(|r| r.cells as f64).sum::<f64>();
-    let aligned: f64 = a.regions.iter().filter(|r| r.kind != game::RegionType::Ocean).map(|r| r.cells as f64).sum::<f64>().max(1.0);
+    println!(
+        "regions: {} ({}); {under} under the merge area (water or frozen with no same-class neighbour)",
+        a.regions.len(),
+        list.join(", ")
+    );
+    let cells = |al: i8| {
+        a.regions
+            .iter()
+            .filter(|r| r.alignment == al)
+            .map(|r| r.cells as f64)
+            .sum::<f64>()
+    };
+    let aligned: f64 = a
+        .regions
+        .iter()
+        .filter(|r| r.kind != game::RegionType::Ocean)
+        .map(|r| r.cells as f64)
+        .sum::<f64>()
+        .max(1.0);
     println!(
         "alignment (share of non-ocean cells): good {:.1}% ({} regions), evil {:.1}% ({} regions)",
         100.0 * cells(1) / aligned,
@@ -380,6 +461,18 @@ fn print_biomes(a: &worldgen::forged::WorldArtifact) {
         100.0 * cells(-1) / aligned,
         a.regions.iter().filter(|r| r.alignment == -1).count(),
     );
-    let third = |lo: u8, hi: u8| 100.0 * a.savagery.iter().filter(|&&s| (lo..=hi).contains(&s)).count() as f64 / total;
-    println!("savagery: calm {:.0}%, neutral {:.0}%, savage {:.0}%", third(0, 32), third(33, 66), third(67, 100));
+    let third = |lo: u8, hi: u8| {
+        100.0
+            * a.savagery
+                .iter()
+                .filter(|&&s| (lo..=hi).contains(&s))
+                .count() as f64
+            / total
+    };
+    println!(
+        "savagery: calm {:.0}%, neutral {:.0}%, savage {:.0}%",
+        third(0, 32),
+        third(33, 66),
+        third(67, 100)
+    );
 }

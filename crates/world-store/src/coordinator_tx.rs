@@ -35,14 +35,14 @@
 //! lookups (a host's `cut_decided`, a start's `resolve_prepared`, the listeners' poll).
 
 use game::coordinator::{
-    AddHost, AssignLand, Assigned, CallStamp, DecisionAnswer, DrainHost, HostAdded, HostDrained, HostRemoved, MailboxDrop, RemoveHost,
-    ReplicaId, StoreDecision,
+    AddHost, AssignLand, Assigned, CallStamp, DecisionAnswer, DrainHost, HostAdded, HostDrained,
+    HostRemoved, MailboxDrop, RemoveHost, ReplicaId, StoreDecision,
 };
 use game::{CutId, Declared, HostId, LandlessEnd, Tick};
 use sqlx::{PgPool, Row};
 
 use crate::StoreError;
-use crate::succession::{self, DECLARING, ENDING, ROLLING_BACK, PG_NOW_MS};
+use crate::succession::{self, DECLARING, ENDING, PG_NOW_MS, ROLLING_BACK};
 use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 
 /// One transition of the coordinator to write ([`crate::StoreHandle::write_transition_later`]):
@@ -94,7 +94,11 @@ pub enum AfterCommit {
     /// Every staged part of `cut` finished as `committed` says; committed, the terrain
     /// listeners are then told (`pg_notify`: only once the parts' rows are visible) and the
     /// checks for entities stored twice and settles not adopted run.
-    FinishCut { cut: CutId, tick: Tick, committed: bool },
+    FinishCut {
+        cut: CutId,
+        tick: Tick,
+        committed: bool,
+    },
     /// The terrain listeners told a cut committed (`pg_notify`) on its own. A committed
     /// transition never queues it (its `FinishCut` announces); kept for a caller that knows the
     /// parts are finished.
@@ -114,16 +118,42 @@ pub enum Bootstrapped {
 /// answers carry its text).
 #[derive(Debug)]
 pub(crate) enum Decided {
-    Cut { cut: CutId, tick: Tick, committed: Result<bool, StoreError> },
-    Begin { cut: CutId, bound: Result<HostId, StoreError> },
+    Cut {
+        cut: CutId,
+        tick: Tick,
+        committed: Result<bool, StoreError>,
+    },
+    Begin {
+        cut: CutId,
+        bound: Result<HostId, StoreError>,
+    },
     Declared(Result<Declared, StoreError>),
-    Ended { end: game::coordinator::EndLandless, outcome: Result<LandlessEnd, StoreError> },
+    Ended {
+        end: game::coordinator::EndLandless,
+        outcome: Result<LandlessEnd, StoreError>,
+    },
     RolledBack(Result<u64, StoreError>),
-    ReplicaEnded { replica: ReplicaId, #[allow(dead_code)] outcome: Result<(), StoreError> },
-    Assigned { assign: AssignLand, outcome: Result<Assigned, StoreError> },
-    HostAdded { add: AddHost, outcome: Result<HostAdded, StoreError> },
-    HostDrained { drain: DrainHost, outcome: Result<HostDrained, StoreError> },
-    HostRemoved { remove: RemoveHost, outcome: Result<HostRemoved, StoreError> },
+    ReplicaEnded {
+        replica: ReplicaId,
+        #[allow(dead_code)]
+        outcome: Result<(), StoreError>,
+    },
+    Assigned {
+        assign: AssignLand,
+        outcome: Result<Assigned, StoreError>,
+    },
+    HostAdded {
+        add: AddHost,
+        outcome: Result<HostAdded, StoreError>,
+    },
+    HostDrained {
+        drain: DrainHost,
+        outcome: Result<HostDrained, StoreError>,
+    },
+    HostRemoved {
+        remove: RemoveHost,
+        outcome: Result<HostRemoved, StoreError>,
+    },
 }
 
 /// The dials a decision runs with (the store thread's).
@@ -170,8 +200,13 @@ pub(crate) async fn write_pg(
         }
         // Nothing durable changed: the same fence, the row's bytes untouched.
         None => {
-            let sql = format!("UPDATE coordinator SET version = version + 1 WHERE id = 1 AND version = $1 RETURNING version, {PG_NOW_MS}");
-            sqlx::query(&sql).bind(crate::rows::i(w.version)).fetch_optional(&mut *tx).await?
+            let sql = format!(
+                "UPDATE coordinator SET version = version + 1 WHERE id = 1 AND version = $1 RETURNING version, {PG_NOW_MS}"
+            );
+            sqlx::query(&sql)
+                .bind(crate::rows::i(w.version))
+                .fetch_optional(&mut *tx)
+                .await?
         }
     };
     let Some(row) = row else {
@@ -181,16 +216,27 @@ pub(crate) async fn write_pg(
     let (version, store_ms): (i64, i64) = (row.try_get(0)?, row.try_get(1)?);
     let mut out = Vec::with_capacity(w.decisions.len());
     if !w.decisions.is_empty() {
-        sqlx::query(&format!("SET LOCAL lock_timeout = '{}ms'", dials.lock_timeout_ms)).execute(&mut *tx).await?;
+        sqlx::query(&format!(
+            "SET LOCAL lock_timeout = '{}ms'",
+            dials.lock_timeout_ms
+        ))
+        .execute(&mut *tx)
+        .await?;
     }
     for (n, d) in w.decisions.iter().enumerate() {
         if injected_failures.get(n).copied().unwrap_or(false) {
             out.push(refused(d, injected()));
             continue;
         }
-        sqlx::query(&format!("SAVEPOINT decision_{n}")).execute(&mut *tx).await?;
+        sqlx::query(&format!("SAVEPOINT decision_{n}"))
+            .execute(&mut *tx)
+            .await?;
         let (decided, keep) = run_one(&mut tx, d, dials).await;
-        let end = if keep { format!("RELEASE SAVEPOINT decision_{n}") } else { format!("ROLLBACK TO SAVEPOINT decision_{n}") };
+        let end = if keep {
+            format!("RELEASE SAVEPOINT decision_{n}")
+        } else {
+            format!("ROLLBACK TO SAVEPOINT decision_{n}")
+        };
         sqlx::query(&end).execute(&mut *tx).await?;
         out.push(decided);
     }
@@ -200,8 +246,16 @@ pub(crate) async fn write_pg(
     // ONE statement for every drop: a `NULL` boot deletes all the host's rows, a boot only that
     // boot's (the orphan rule: never a row of another boot of the host).
     if !w.outbox_drop.is_empty() {
-        let hosts: Vec<i64> = w.outbox_drop.iter().map(|d| crate::rows::i(d.host.0)).collect();
-        let boots: Vec<Option<i64>> = w.outbox_drop.iter().map(|d| d.boot.map(crate::rows::i)).collect();
+        let hosts: Vec<i64> = w
+            .outbox_drop
+            .iter()
+            .map(|d| crate::rows::i(d.host.0))
+            .collect();
+        let boots: Vec<Option<i64>> = w
+            .outbox_drop
+            .iter()
+            .map(|d| d.boot.map(crate::rows::i))
+            .collect();
         sqlx::query(
             "DELETE FROM outbox o USING UNNEST($1::bigint[], $2::bigint[]) AS d(host, boot) \
              WHERE o.host = d.host AND (d.boot IS NULL OR o.boot = d.boot)",
@@ -211,7 +265,9 @@ pub(crate) async fn write_pg(
         .execute(&mut *tx)
         .await?;
     }
-    let insert = format!("INSERT INTO outbox (version, host, boot, msg, at_ms) VALUES ($1, $2, $3, $4, {PG_NOW_MS})");
+    let insert = format!(
+        "INSERT INTO outbox (version, host, boot, msg, at_ms) VALUES ($1, $2, $3, $4, {PG_NOW_MS})"
+    );
     for (host, boot, msg) in &w.outbox {
         sqlx::query(&insert)
             .bind(version)
@@ -226,7 +282,10 @@ pub(crate) async fn write_pg(
         sqlx::query(&insert).bind(msg).execute(&mut *tx).await?;
     }
     if let Some(before) = w.login_prune_before_ms {
-        sqlx::query("DELETE FROM login_outbox WHERE at_ms < $1").bind(crate::rows::i(before)).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM login_outbox WHERE at_ms < $1")
+            .bind(crate::rows::i(before))
+            .execute(&mut *tx)
+            .await?;
     }
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(crate::listen::COORDINATOR_ROW_CHANNEL)
@@ -240,22 +299,51 @@ pub(crate) async fn write_pg(
 /// Decision `d` refused with `e` before it ran.
 fn refused(d: &StoreDecision, e: StoreError) -> Decided {
     match d {
-        StoreDecision::DecideCut(c) => Decided::Cut { cut: c.cut, tick: c.tick, committed: Err(e) },
-        StoreDecision::BeginCut { cut } => Decided::Begin { cut: *cut, bound: Err(e) },
+        StoreDecision::DecideCut(c) => Decided::Cut {
+            cut: c.cut,
+            tick: c.tick,
+            committed: Err(e),
+        },
+        StoreDecision::BeginCut { cut } => Decided::Begin {
+            cut: *cut,
+            bound: Err(e),
+        },
         StoreDecision::Declare(_) => Decided::Declared(Err(e)),
-        StoreDecision::EndLandless(end) => Decided::Ended { end: *end, outcome: Err(e) },
+        StoreDecision::EndLandless(end) => Decided::Ended {
+            end: *end,
+            outcome: Err(e),
+        },
         StoreDecision::Rollback { .. } => Decided::RolledBack(Err(e)),
-        StoreDecision::EndReplica(replica) => Decided::ReplicaEnded { replica: *replica, outcome: Err(e) },
-        StoreDecision::AssignLand(a) => Decided::Assigned { assign: *a, outcome: Err(e) },
-        StoreDecision::AddHost(a) => Decided::HostAdded { add: *a, outcome: Err(e) },
-        StoreDecision::DrainHost(d) => Decided::HostDrained { drain: d.clone(), outcome: Err(e) },
-        StoreDecision::RemoveHost(r) => Decided::HostRemoved { remove: r.clone(), outcome: Err(e) },
+        StoreDecision::EndReplica(replica) => Decided::ReplicaEnded {
+            replica: *replica,
+            outcome: Err(e),
+        },
+        StoreDecision::AssignLand(a) => Decided::Assigned {
+            assign: *a,
+            outcome: Err(e),
+        },
+        StoreDecision::AddHost(a) => Decided::HostAdded {
+            add: *a,
+            outcome: Err(e),
+        },
+        StoreDecision::DrainHost(d) => Decided::HostDrained {
+            drain: d.clone(),
+            outcome: Err(e),
+        },
+        StoreDecision::RemoveHost(r) => Decided::HostRemoved {
+            remove: r.clone(),
+            outcome: Err(e),
+        },
     }
 }
 
 /// One decision's body inside the transition's transaction (its savepoint open): its outcome,
 /// and whether what it wrote stays (`false`: rolled back to the savepoint).
-async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: DecisionDials) -> (Decided, bool) {
+async fn run_one(
+    tx: &mut sqlx::PgConnection,
+    d: &StoreDecision,
+    dials: DecisionDials,
+) -> (Decided, bool) {
     match d {
         StoreDecision::DecideCut(c) => {
             let committed = two_phase::decide_in(
@@ -273,7 +361,14 @@ async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: Decision
             )
             .await;
             let keep = committed.is_ok();
-            (Decided::Cut { cut: c.cut, tick: c.tick, committed }, keep)
+            (
+                Decided::Cut {
+                    cut: c.cut,
+                    tick: c.tick,
+                    committed,
+                },
+                keep,
+            )
         }
         StoreDecision::BeginCut { cut } => {
             let bound = two_phase::begin_in(&mut *tx, *cut).await;
@@ -283,11 +378,17 @@ async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: Decision
         StoreDecision::Declare(dc) => {
             let declared = match succession::check_declare(&dc.dead, &dc.heirs) {
                 Err(e) => Err(e),
-                Ok(predecessors) => {
-                    succession::declare_in(&mut *tx, &dc.dead, &dc.heirs, &predecessors, dc.kind, dc.generation, dials.lease_ms)
-                        .await
-                        .map_err(|e| e.into_store(DECLARING, dials.lock_timeout_ms))
-                }
+                Ok(predecessors) => succession::declare_in(
+                    &mut *tx,
+                    &dc.dead,
+                    &dc.heirs,
+                    &predecessors,
+                    dc.kind,
+                    dc.generation,
+                    dials.lease_ms,
+                )
+                .await
+                .map_err(|e| e.into_store(DECLARING, dials.lock_timeout_ms)),
             };
             let keep = matches!(declared, Ok(Declared::Done(_)));
             (Decided::Declared(declared), keep)
@@ -308,24 +409,44 @@ async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: Decision
             (Decided::Ended { end: *end, outcome }, keep)
         }
         StoreDecision::Rollback { from } => {
-            let rolled = succession::rollback_world_in(&mut *tx, *from).await.map_err(|e| e.into_store(ROLLING_BACK, dials.lock_timeout_ms));
+            let rolled = succession::rollback_world_in(&mut *tx, *from)
+                .await
+                .map_err(|e| e.into_store(ROLLING_BACK, dials.lock_timeout_ms));
             let keep = matches!(rolled, Ok((_, Some(_))));
             (Decided::RolledBack(rolled.map(|(g, _)| g)), keep)
         }
         StoreDecision::EndReplica(replica) => {
             let ended = crate::replicas::end_replica_in(&mut *tx, *replica).await;
             match &ended {
-                Ok(true) => log::warn!("[world-store] coordinator replica {replica} lapsed: its row is ended (with the transition)"),
-                Ok(false) => log::info!("[world-store] coordinator replica {replica}: no live row to end (ended already)"),
-                Err(e) => log::warn!("[world-store] coordinator replica {replica}: its row could not be ended: {e}"),
+                Ok(true) => log::warn!(
+                    "[world-store] coordinator replica {replica} lapsed: its row is ended (with the transition)"
+                ),
+                Ok(false) => log::info!(
+                    "[world-store] coordinator replica {replica}: no live row to end (ended already)"
+                ),
+                Err(e) => log::warn!(
+                    "[world-store] coordinator replica {replica}: its row could not be ended: {e}"
+                ),
             }
             let keep = ended.is_ok();
-            (Decided::ReplicaEnded { replica: *replica, outcome: ended.map(|_| ()) }, keep)
+            (
+                Decided::ReplicaEnded {
+                    replica: *replica,
+                    outcome: ended.map(|_| ()),
+                },
+                keep,
+            )
         }
         StoreDecision::AssignLand(a) => {
             let outcome = crate::assign::assign_land_in(&mut *tx, a).await;
             let keep = matches!(outcome, Ok(Assigned::Done { .. }));
-            (Decided::Assigned { assign: *a, outcome }, keep)
+            (
+                Decided::Assigned {
+                    assign: *a,
+                    outcome,
+                },
+                keep,
+            )
         }
         // Elastic 4 (`fleet.rs`): kept only when it wrote something.
         StoreDecision::AddHost(a) => {
@@ -336,41 +457,101 @@ async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: Decision
         StoreDecision::DrainHost(d) => {
             let outcome = crate::fleet::drain_host_in(&mut *tx, d).await;
             let keep = matches!(outcome, Ok(HostDrained::Marked | HostDrained::RowOnly));
-            (Decided::HostDrained { drain: d.clone(), outcome }, keep)
+            (
+                Decided::HostDrained {
+                    drain: d.clone(),
+                    outcome,
+                },
+                keep,
+            )
         }
         StoreDecision::RemoveHost(r) => {
             let outcome = crate::fleet::remove_host_in(&mut *tx, r).await;
             let keep = matches!(outcome, Ok(HostRemoved::Done));
-            (Decided::HostRemoved { remove: r.clone(), outcome }, keep)
+            (
+                Decided::HostRemoved {
+                    remove: r.clone(),
+                    outcome,
+                },
+                keep,
+            )
         }
     }
 }
 
 /// The answers of a committed transition `w` (at `version`) and its post-commit effects.
-pub(crate) fn answers(w: &TransitionWrite, version: u64, decided: Vec<Decided>) -> (Vec<DecisionAnswer>, Vec<AfterCommit>) {
-    let stamp = CallStamp { replica: w.replica, version };
+pub(crate) fn answers(
+    w: &TransitionWrite,
+    version: u64,
+    decided: Vec<Decided>,
+) -> (Vec<DecisionAnswer>, Vec<AfterCommit>) {
+    let stamp = CallStamp {
+        replica: w.replica,
+        version,
+    };
     let text = |e: StoreError| e.to_string();
     let mut answers = Vec::with_capacity(decided.len());
     let mut after = Vec::new();
     for d in decided {
         answers.push(match d {
-            Decided::Cut { cut, tick, committed } => {
+            Decided::Cut {
+                cut,
+                tick,
+                committed,
+            } => {
                 if let Ok(committed) = committed {
                     // One effect: a committed cut is announced by its finish, after its parts
                     // are committed (never beside it: a listener would read the old versions).
-                    after.push(AfterCommit::FinishCut { cut, tick, committed });
+                    after.push(AfterCommit::FinishCut {
+                        cut,
+                        tick,
+                        committed,
+                    });
                 }
-                DecisionAnswer::Cut { stamp, cut, committed: committed.map_err(text) }
+                DecisionAnswer::Cut {
+                    stamp,
+                    cut,
+                    committed: committed.map_err(text),
+                }
             }
-            Decided::Begin { cut, bound } => DecisionAnswer::Begin { cut, bound: bound.map_err(text) },
-            Decided::Declared(outcome) => DecisionAnswer::Declared { stamp, outcome: outcome.map_err(text) },
-            Decided::Ended { end, outcome } => DecisionAnswer::Ended { stamp, end, outcome: outcome.map_err(text) },
-            Decided::RolledBack(outcome) => DecisionAnswer::RolledBack { stamp, outcome: outcome.map_err(text) },
+            Decided::Begin { cut, bound } => DecisionAnswer::Begin {
+                cut,
+                bound: bound.map_err(text),
+            },
+            Decided::Declared(outcome) => DecisionAnswer::Declared {
+                stamp,
+                outcome: outcome.map_err(text),
+            },
+            Decided::Ended { end, outcome } => DecisionAnswer::Ended {
+                stamp,
+                end,
+                outcome: outcome.map_err(text),
+            },
+            Decided::RolledBack(outcome) => DecisionAnswer::RolledBack {
+                stamp,
+                outcome: outcome.map_err(text),
+            },
             Decided::ReplicaEnded { replica, .. } => DecisionAnswer::ReplicaEnded { replica },
-            Decided::Assigned { assign, outcome } => DecisionAnswer::Assigned { stamp, assign, outcome: outcome.map_err(text) },
-            Decided::HostAdded { add, outcome } => DecisionAnswer::HostAdded { stamp, add, outcome: outcome.map_err(text) },
-            Decided::HostDrained { drain, outcome } => DecisionAnswer::HostDrained { stamp, drain, outcome: outcome.map_err(text) },
-            Decided::HostRemoved { remove, outcome } => DecisionAnswer::HostRemoved { stamp, remove, outcome: outcome.map_err(text) },
+            Decided::Assigned { assign, outcome } => DecisionAnswer::Assigned {
+                stamp,
+                assign,
+                outcome: outcome.map_err(text),
+            },
+            Decided::HostAdded { add, outcome } => DecisionAnswer::HostAdded {
+                stamp,
+                add,
+                outcome: outcome.map_err(text),
+            },
+            Decided::HostDrained { drain, outcome } => DecisionAnswer::HostDrained {
+                stamp,
+                drain,
+                outcome: outcome.map_err(text),
+            },
+            Decided::HostRemoved { remove, outcome } => DecisionAnswer::HostRemoved {
+                stamp,
+                remove,
+                outcome: outcome.map_err(text),
+            },
         });
     }
     (answers, after)
@@ -379,10 +560,20 @@ pub(crate) fn answers(w: &TransitionWrite, version: u64, decided: Vec<Decided>) 
 /// The post-commit effect `a` (Postgres): a cut's staged parts finished (`stop_after`: the
 /// test hook, fail after that many `COMMIT PREPARED`s), or the listeners told. Whether a
 /// committed cut was finished (the caller then runs its checks).
-pub(crate) async fn after_commit_pg(pool: &PgPool, world_tag: Option<u32>, a: AfterCommit, stop_after: Option<u32>) -> Result<bool, StoreError> {
+pub(crate) async fn after_commit_pg(
+    pool: &PgPool,
+    world_tag: Option<u32>,
+    a: AfterCommit,
+    stop_after: Option<u32>,
+) -> Result<bool, StoreError> {
     match a {
-        AfterCommit::FinishCut { cut, tick, committed } => {
-            let tag = world_tag.ok_or_else(|| StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into()))?;
+        AfterCommit::FinishCut {
+            cut,
+            tick,
+            committed,
+        } => {
+            let tag =
+                world_tag.ok_or_else(|| StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into()))?;
             two_phase::finish_staged(pool, tag, cut, committed, stop_after).await?;
             if committed {
                 // Only now are its parts' rows visible: the terrain listeners re-read on it. A

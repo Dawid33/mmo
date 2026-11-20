@@ -6,7 +6,7 @@ use bevy::{
     render::render_resource::{BindGroup, Buffer, BufferUsages, RawBufferVec},
 };
 
-use super::super::meshing::records::{QuadRecord, QUAD_INDEX_PATTERN};
+use super::super::meshing::records::{QUAD_INDEX_PATTERN, QuadRecord};
 
 /// One stable, shader-readable chunk record indexed by `chunk_slot`.
 ///
@@ -116,7 +116,10 @@ impl RangeAllocator {
 
     /// Free-list fragments and the records they hold, for `[pull-arena]`.
     pub fn free_stats(&self) -> (usize, u64) {
-        (self.free.len(), self.free.values().map(|&len| len as u64).sum())
+        (
+            self.free.len(),
+            self.free.values().map(|&len| len as u64).sum(),
+        )
     }
 }
 
@@ -309,7 +312,7 @@ impl GpuQuadArena {
         };
         // Counted for the crossing timeline (`crossing_timeline::GPU`).
         {
-            use super::super::crossing_timeline::{GpuCounters, GPU};
+            use super::super::crossing_timeline::{GPU, GpuCounters};
             GpuCounters::add(&GPU.pull_releases, 1);
             GpuCounters::add(&GPU.pull_release_quads, u64::from(allocation.quad_count));
         }
@@ -352,4 +355,3 @@ impl SlotAllocator {
         self.high_water
     }
 }
-

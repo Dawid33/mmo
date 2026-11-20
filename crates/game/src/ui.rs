@@ -19,7 +19,11 @@ impl IconId {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum UiAction {
     /// A click on an inventory slot (`inventory::click`).
-    Click { slot: crate::SlotRef, button: crate::ClickButton, shift: bool },
+    Click {
+        slot: crate::SlotRef,
+        button: crate::ClickButton,
+        shift: bool,
+    },
     /// Open/close the inventory (drives cursor grab).
     ToggleInventory,
     /// Close the inventory if it is open (a no-op when it is closed): Esc,
@@ -73,7 +77,10 @@ pub struct InventoryView {
 }
 
 fn slot_view(stack: &Option<crate::ItemStack>) -> Option<SlotView> {
-    stack.map(|s| SlotView { icon: IconId::of(s.item), count: s.count })
+    stack.map(|s| SlotView {
+        icon: IconId::of(s.item),
+        count: s.count,
+    })
 }
 
 /// The inventory screen for a client: closed = the default (empty) view.
@@ -103,7 +110,11 @@ pub fn play_mode_update(
     data: &crate::GameData,
     client: crate::ClientId,
 ) -> Option<UiUpdate> {
-    let mode = data.clients.get(&client).map(|c| c.mode).unwrap_or_default();
+    let mode = data
+        .clients
+        .get(&client)
+        .map(|c| c.mode)
+        .unwrap_or_default();
     (mode != *prev).then(|| {
         *prev = mode;
         UiUpdate::PlayMode(mode)
@@ -122,8 +133,15 @@ pub fn build_hotbar(data: &crate::GameData, client: crate::ClientId) -> HotbarVi
         .slots
         .iter()
         .take(crate::HOTBAR_SLOTS)
-        .map(|slot| slot.map(|stack| SlotView { icon: IconId::of(stack.item), count: stack.count }))
+        .map(|slot| {
+            slot.map(|stack| SlotView {
+                icon: IconId::of(stack.item),
+                count: stack.count,
+            })
+        })
         .collect();
-    HotbarView { slots, selected: c.selected }
+    HotbarView {
+        slots,
+        selected: c.selected,
+    }
 }
-

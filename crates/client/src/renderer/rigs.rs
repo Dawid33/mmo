@@ -37,17 +37,28 @@ pub fn attach_rig_models(
     for (e, anim) in &added {
         let rig = game::anim::rig(anim.0.rig);
         let model = commands
-            .spawn((BbModel(assets.load(rig.asset_path)), Transform::default(), Visibility::default(), ChildOf(e)))
+            .spawn((
+                BbModel(assets.load(rig.asset_path)),
+                Transform::default(),
+                Visibility::default(),
+                ChildOf(e),
+            ))
             .id();
         commands
             .entity(e)
-            .insert(RigModel { model, updated_at: time.elapsed_secs() })
+            .insert(RigModel {
+                model,
+                updated_at: time.elapsed_secs(),
+            })
             .remove::<(Mesh3d, MeshMaterial3d<StandardMaterial>)>();
     }
 }
 
 /// An entity that lost its animator loses its model.
-pub fn detach_rig_models(mut commands: Commands, orphaned: Query<(Entity, &RigModel), Without<SimAnimator>>) {
+pub fn detach_rig_models(
+    mut commands: Commands,
+    orphaned: Query<(Entity, &RigModel), Without<SimAnimator>>,
+) {
     for (e, rig) in &orphaned {
         commands.entity(rig.model).despawn();
         commands.entity(e).remove::<RigModel>();
@@ -59,7 +70,10 @@ pub fn detach_rig_models(mut commands: Commands, orphaned: Query<(Entity, &RigMo
 pub fn pose_rig_models(
     time: Res<Time>,
     mut rigged: Query<(&Transform, Ref<SimAnimator>, &mut RigModel), Without<BbModelPart>>,
-    mut models: Query<(&mut Transform, Option<&BbModelSpawned>), (With<BbModel>, Without<SimAnimator>)>,
+    mut models: Query<
+        (&mut Transform, Option<&BbModelSpawned>),
+        (With<BbModel>, Without<SimAnimator>),
+    >,
     mut parts: Query<&mut Transform, (With<BbModelPart>, Without<BbModel>, Without<SimAnimator>)>,
 ) {
     let now = time.elapsed_secs();
@@ -67,7 +81,9 @@ pub fn pose_rig_models(
         if anim.is_changed() {
             rig_model.updated_at = now;
         }
-        let Ok((mut tf, spawned)) = models.get_mut(rig_model.model) else { continue };
+        let Ok((mut tf, spawned)) = models.get_mut(rig_model.model) else {
+            continue;
+        };
         // Body frame -> model frame: keep the body's yaw, drop its pitch.
         let forward = body.rotation * Vec3::NEG_Z;
         let yaw = Quat::from_rotation_y((-forward.x).atan2(-forward.z));

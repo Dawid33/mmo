@@ -7,21 +7,23 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 
 use crate::HostId;
 use crate::coordinator::{
-    Claim, CoordMsg, HostMsg, OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest,
+    Claim, CoordMsg, HostMsg, OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply,
+    WorldRequest,
 };
 use crate::history::{AdventureRefusal, CalendarTick, PersonId, SiteId, SocietyGrid};
-use crate::{
-    Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
-    LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, LodWater, PortableRegion, Region, RegionCoords, RegionInput,
-    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, WorldMap,
-    Order, PlayMode, PlayerId, PlayerRecord,
-};
 use crate::save_cut::{
-    CutId, InFlightRow, PendingCut, Uncommitted, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS,
+    CUT_DEADLINE_LEADS, CutId, InFlightRow, PendingCut, SAVE_CUT_LEAD_MAX_TICKS,
+    SAVE_CUT_LEAD_TICKS, Uncommitted, WorldCut,
+};
+use crate::{
+    Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, GameEventKind,
+    LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, LodWater, Order, PlayMode, PlayerId,
+    PlayerRecord, PortableRegion, Region, RegionCoords, RegionInput, RegionOutput, RegionRunner,
+    RegionSeed, SerializedRegion, ServerPacket, TerrainSnapshot, WorldMap,
 };
 
 mod drain;
@@ -32,15 +34,17 @@ mod placement;
 mod succession;
 mod world_cut;
 mod world_link;
-pub use drain::{drain_remaining_secs, DRAIN_RETELL_TOLERANCE_TICKS};
+pub use drain::{DRAIN_RETELL_TOLERANCE_TICKS, drain_remaining_secs};
 pub use land::{LAND_IDLE_MS, LAND_IDLE_SCAN_MS, LAND_NEEDED_EVERY_MS};
 pub use peers::intents_in;
-pub use succession::{SuccessionReportIn, SUCCESSION_WAIT_LOG_MS};
 pub use placement::{
-    KickIn, LoginOrder, LoginOut, Placement, SpawnRequest, KICK_MEMORY_MS, KICK_UNACKED_WARN_MS, SPAWN_PIN_MS, SPAWN_RELAY_MAX_HOPS,
-    SPAWN_SYNC_WAIT_MS,
+    KICK_MEMORY_MS, KICK_UNACKED_WARN_MS, KickIn, LoginOrder, LoginOut, Placement, SPAWN_PIN_MS,
+    SPAWN_RELAY_MAX_HOPS, SPAWN_SYNC_WAIT_MS, SpawnRequest, TracedLoginOrder,
 };
-pub use world_link::{WorldLinkCounters, ATTACH_WAIT_MS, LOGIN_ENDS_QUEUED_MAX, WORLD_REQUEST_TIMEOUT_SECS};
+pub use succession::{SUCCESSION_WAIT_LOG_MS, SuccessionReportIn};
+pub use world_link::{
+    ATTACH_WAIT_MS, LOGIN_ENDS_QUEUED_MAX, WORLD_REQUEST_TIMEOUT_SECS, WorldLinkCounters,
+};
 use world_link::{PendingRequest, Step, WorldAttach, WorldViewCache};
 
 /// Level hint for an adventure landing: above any surface, so it clamps to the
@@ -153,12 +157,18 @@ pub enum ServerEvent {
     /// session of the player is refused with `reason` and parked, as a
     /// takeover does. The new login's session, when it connects, is restored
     /// from that park. No session: nothing happens.
-    Supersede { player: crate::PlayerId, reason: String },
+    Supersede {
+        player: crate::PlayerId,
+        reason: String,
+    },
     /// A session to this host that does not hold the client's body (an observer: its
     /// subscriptions only), admitted with the ticket the client's home host handed out.
     /// `client` is the id the home host knows the session by; `player` its player. When
     /// the body arrives here ([`crate::PlayerHandoff`]) the session becomes the home.
-    ObserverConnected { client: ClientId, player: crate::PlayerId },
+    ObserverConnected {
+        client: ClientId,
+        player: crate::PlayerId,
+    },
     /// The login service ordered a spawn of `player` (role `host`: the coordinator gave the
     /// order to this host, the gate host, whose server resolved the token and read the stored
     /// record's region; `None` = no record). Entered at host `origin`, forwarded `hops` times so far. The manager places it
@@ -182,17 +192,28 @@ pub enum ServerEvent {
     },
     /// The login service's kick, applied to the gate host's admission state already: a
     /// session of the login handed here is parked, and every other host is told.
-    Kick { player_token: String, session_epoch: u64, reason: String },
+    Kick {
+        player_token: String,
+        session_epoch: u64,
+        reason: String,
+    },
     /// A login session ended at the edge before the manager knew it (refused on connect):
     /// the login service is told.
-    SessionEnded { player_token: String, session_epoch: u64 },
+    SessionEnded {
+        player_token: String,
+        session_epoch: u64,
+    },
 }
 
 impl ServerEvent {
     /// A session for an in-process harness or test: the player id is the
     /// client id and there is no saved record.
     pub fn connected(client: ClientId) -> Self {
-        Self::ClientConnected { client, player: crate::PlayerId(client as u64), record: None }
+        Self::ClientConnected {
+            client,
+            player: crate::PlayerId(client as u64),
+            record: None,
+        }
     }
 }
 
@@ -274,7 +295,13 @@ impl InlineSchedule {
     /// Permuted tick order only — every region still ticks once per round and
     /// nothing arrives late.
     pub fn shuffled(seed: u64) -> Self {
-        Self { rng: seed, seed, coordinator_delay_steps: 0, late_per_mille: 0, skip_per_mille: 0 }
+        Self {
+            rng: seed,
+            seed,
+            coordinator_delay_steps: 0,
+            late_per_mille: 0,
+            skip_per_mille: 0,
+        }
     }
 
     /// Also delay each output of an inline coordinator link
@@ -292,12 +319,18 @@ impl InlineSchedule {
     /// Permuted order plus late inputs; tick counts stay in lockstep (for
     /// harnesses that align client and server by tick).
     pub fn late(seed: u64) -> Self {
-        Self { late_per_mille: SCHEDULE_LATE_PER_MILLE, ..Self::shuffled(seed) }
+        Self {
+            late_per_mille: SCHEDULE_LATE_PER_MILLE,
+            ..Self::shuffled(seed)
+        }
     }
 
     /// Everything: permuted order, late inputs and missed ticks.
     pub fn jittery(seed: u64) -> Self {
-        Self { skip_per_mille: SCHEDULE_SKIP_PER_MILLE, ..Self::late(seed) }
+        Self {
+            skip_per_mille: SCHEDULE_SKIP_PER_MILLE,
+            ..Self::late(seed)
+        }
     }
 
     /// splitmix64 — the schedule must not depend on a platform RNG.
@@ -368,8 +401,9 @@ pub struct InlineSpawner {
 
 /// A host test's world store, as a region thread reads it: the stored state of a region
 /// (`None`: never stored), or why it could not be read.
-pub type RegionStoreRead =
-    std::sync::Arc<dyn Fn(RegionCoords) -> Result<Option<crate::StoredRegion>, String> + Send + Sync>;
+pub type RegionStoreRead = std::sync::Arc<
+    dyn Fn(RegionCoords) -> Result<Option<crate::StoredRegion>, String> + Send + Sync,
+>;
 
 /// The drop set handed to a host test's store reader ([`RegionSpawner::forget_entities`]).
 pub type RegionStoreForget = std::sync::Arc<dyn Fn(&BTreeSet<crate::EntityId>) + Send + Sync>;
@@ -388,13 +422,21 @@ impl InlineSpawner {
     pub fn take_slot_start_hashes(&mut self) -> Vec<(RegionCoords, crate::Tick, u32)> {
         let mut all = Vec::new();
         for (id, (_, runner)) in self.runners.iter_mut() {
-            all.extend(runner.take_slot_start_hashes().into_iter().map(|(t, h)| (*id, t, h)));
+            all.extend(
+                runner
+                    .take_slot_start_hashes()
+                    .into_iter()
+                    .map(|(t, h)| (*id, t, h)),
+            );
         }
         all
     }
 
     pub fn with_schedule(schedule: InlineSchedule) -> Self {
-        Self { schedule: Some(schedule), ..Self::default() }
+        Self {
+            schedule: Some(schedule),
+            ..Self::default()
+        }
     }
 
     /// Every runner reads [`RegionInput::SeedHaloFromStore`]'s terrain from `stored`
@@ -411,7 +453,11 @@ impl InlineSpawner {
     /// latest stored region's tick, as the server's restored world clock.
     pub fn with_portable(regions: BTreeMap<RegionCoords, crate::StoredRegion>) -> Self {
         let rounds = regions.values().map(|r| r.meta.tick).max().unwrap_or(0);
-        Self { portable: regions, rounds, ..Self::default() }
+        Self {
+            portable: regions,
+            rounds,
+            ..Self::default()
+        }
     }
 
     /// Test support: a region that has not run here and is not in `portable` starts from
@@ -488,7 +534,11 @@ impl InlineSpawner {
             .runners
             .keys()
             .copied()
-            .filter(|id| !self.late.contains(id) && !self.held.contains_key(id) && !self.inputs_held.contains_key(id))
+            .filter(|id| {
+                !self.late.contains(id)
+                    && !self.held.contains_key(id)
+                    && !self.inputs_held.contains_key(id)
+            })
             .collect();
         for id in ids {
             let mut stopped = false;
@@ -540,8 +590,12 @@ impl InlineSpawner {
             }
             return;
         };
-        let mut ids: Vec<RegionCoords> =
-            self.runners.keys().copied().filter(|id| !held.contains(id)).collect();
+        let mut ids: Vec<RegionCoords> = self
+            .runners
+            .keys()
+            .copied()
+            .filter(|id| !held.contains(id))
+            .collect();
         schedule.shuffle(&mut ids);
         // Last round's late regions tick here without having seen their
         // inputs, then catch up at the next `pump()`.
@@ -590,12 +644,19 @@ impl RegionSpawner for InlineSpawner {
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
         if self.fail_starts.remove(&id) {
-            let _ = out.send((id, RegionOutput::LoadFailed("test: the load was made to fail".into())));
+            let _ = out.send((
+                id,
+                RegionOutput::LoadFailed("test: the load was made to fail".into()),
+            ));
             self.failed.insert(id, recv);
             return send;
         }
         let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
-        let mut stored = if never_ran { self.portable.remove(&id) } else { None };
+        let mut stored = if never_ran {
+            self.portable.remove(&id)
+        } else {
+            None
+        };
         let mut filter = true;
         if let (true, None, Some(read)) = (never_ran, &stored, &self.region_store) {
             match read(id) {
@@ -621,7 +682,9 @@ impl RegionSpawner for InlineSpawner {
                 runner.set_saved_terms(terms);
                 runner
             }
-            None => match seed.into_region_with(id, &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})")) {
+            None => match seed.into_region_with(id, &|rc| {
+                unreachable!("InlineSpawner never generates columns ({rc:?})")
+            }) {
                 Ok(region) => RegionRunner::new(id, region, out),
                 // It does not run, and is never regenerated.
                 Err(why) => {
@@ -794,11 +857,13 @@ pub const DUPLICATE_SESSION_REFUSAL: &str = "this login is already connected; lo
 /// (`departed`): it places nothing here. The login relay sends a spawn order to the host
 /// holding the player (`placement.rs`); only a session whose player left after its order
 /// was taken here (a park on its way out) still lands here, and logs in again.
-pub const PLAYER_ELSEWHERE_REFUSAL: &str = "your character is on another server of this world; log in again";
+pub const PLAYER_ELSEWHERE_REFUSAL: &str =
+    "your character is on another server of this world; log in again";
 
 /// The refusal that ends a session observing a player whose body the host it was handed
 /// to parked, the client never having connected there ([`crate::Reliable::PlayerParked`]).
-pub const PLAYER_PARKED_ELSEWHERE: &str = "your character was parked on another server of this world; log in again";
+pub const PLAYER_PARKED_ELSEWHERE: &str =
+    "your character was parked on another server of this world; log in again";
 
 /// What the client sees when its server was fenced (another host took its land). Here, not
 /// in `server`, so the client can match it: a client joined through the login service
@@ -823,7 +888,8 @@ pub const STORE_LOAD_RETRY_TICKS: crate::Tick = STORE_LOAD_RETRY_SECS * 1000 / c
 
 /// Why a session whose body was to be in a region that could not be loaded
 /// is ended ([`ServerPacket::Refused`]).
-pub const REGION_UNAVAILABLE_REFUSAL: &str = "your region could not be loaded from the world store; try again shortly";
+pub const REGION_UNAVAILABLE_REFUSAL: &str =
+    "your region could not be loaded from the world store; try again shortly";
 
 /// A park in flight (`WorldManager::parking`).
 #[derive(Clone, Copy, Debug)]
@@ -1478,7 +1544,7 @@ pub struct WorldManager<S: RegionSpawner> {
     inbound_accounted: Option<CutId>,
     /// The login service's orders the coordinator gave this host (the gate host), for the
     /// server to resolve ([`Self::take_login_orders`]; `placement.rs`).
-    login_orders: Vec<LoginOrder>,
+    login_orders: Vec<TracedLoginOrder>,
     /// The login (token, session epoch) of each session whose player this host holds, from
     /// [`ServerEvent::LoginConnected`] or a hand-off (`placement.rs`).
     logins: BTreeMap<ClientId, (String, u64)>,
@@ -1597,7 +1663,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             items_destroyed: 0,
             clock_ms: 0,
             unavailable: BTreeMap::new(),
-            ownership: (Box::new(crate::AllInOne), crate::DEFAULT_SUPER_REGION_REGIONS),
+            ownership: (
+                Box::new(crate::AllInOne),
+                crate::DEFAULT_SUPER_REGION_REGIONS,
+            ),
             creating: BTreeMap::new(),
             out,
             region_out_send,
@@ -1670,7 +1739,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             foreign_running: BTreeMap::new(),
             foreign_halo_stale: BTreeSet::new(),
             higher_generation: None,
-            endpoint: crate::HostEndpoint { id: HostId::SOLO, quic: None, webtransport: None, cert_hash: None },
+            endpoint: crate::HostEndpoint {
+                id: HostId::SOLO,
+                quic: None,
+                webtransport: None,
+                cert_hash: None,
+            },
             peer_endpoints: BTreeMap::new(),
             departed: BTreeMap::new(),
             awaiting_session: BTreeMap::new(),
@@ -1793,12 +1867,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                     IntentReply::Granted(i) => IntentReply::Granted(i.canonical(map)),
                     IntentReply::Refused(i, why) => IntentReply::Refused(i.canonical(map), why),
                 };
-                IntentMsg::Reply(crate::SentReply { reply, hint: crate::canonical(map, s.hint), ..s })
+                IntentMsg::Reply(crate::SentReply {
+                    reply,
+                    hint: crate::canonical(map, s.hint),
+                    ..s
+                })
             }
         };
         if folded != msg {
             self.seam_fixed += 1;
-            debug_assert!(!self.holds_map(from), "seam_fixed: region {from:?} sent the non-canonical {msg:?}");
+            debug_assert!(
+                !self.holds_map(from),
+                "seam_fixed: region {from:?} sent the non-canonical {msg:?}"
+            );
         }
         folded
     }
@@ -1824,11 +1905,23 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A client's input with every world position it names canonical: a
     /// `MoveTo` goal's column and a `DevBreakBlock`'s block.
     fn canonical_input(&self, kind: GameEventKind) -> GameEventKind {
-        let Some(map) = self.map_extent() else { return kind };
+        let Some(map) = self.map_extent() else {
+            return kind;
+        };
         match kind {
             GameEventKind::Order(c, crate::Order::MoveTo(goal)) => {
-                let at = map.canonical_block(crate::WorldBlockPos { x: goal.column[0], y: 0, z: goal.column[1] });
-                GameEventKind::Order(c, crate::Order::MoveTo(crate::Goal { column: [at.x, at.z], ..goal }))
+                let at = map.canonical_block(crate::WorldBlockPos {
+                    x: goal.column[0],
+                    y: 0,
+                    z: goal.column[1],
+                });
+                GameEventKind::Order(
+                    c,
+                    crate::Order::MoveTo(crate::Goal {
+                        column: [at.x, at.z],
+                        ..goal
+                    }),
+                )
             }
             GameEventKind::Order(c, crate::Order::DevBreakBlock(pos)) => {
                 GameEventKind::Order(c, crate::Order::DevBreakBlock(map.canonical_block(pos)))
@@ -1858,7 +1951,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let home = self.homes.get(&id).copied();
         if home == Some(target) {
-            let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
+            let _ = self
+                .out
+                .send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
             return;
         }
         let foreign = self.is_foreign(target);
@@ -1867,7 +1962,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             m.landing = landing;
             self.ensure_running(target);
         } else if let Some(home) = home {
-            self.moving.insert(id, Moving { from: home, target, landing, then: Vec::new() });
+            self.moving.insert(
+                id,
+                Moving {
+                    from: home,
+                    target,
+                    landing,
+                    then: Vec::new(),
+                },
+            );
             self.send_play_event(home, GameEventKind::ParkPlayer(id));
             self.ensure_running(target);
         } else {
@@ -1878,7 +1981,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.homes.remove(&id);
         } else {
             self.homes.insert(id, target);
-            let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
+            let _ = self
+                .out
+                .send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
         }
         if let Some(home) = home {
             self.refresh_keepalive(home, now_ms);
@@ -1890,13 +1995,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// observes a body on another host, nor into another host's region with no body here
     /// to hand over (none is ever made here for such a region).
     fn can_move(&mut self, id: ClientId, target: RegionCoords) -> bool {
-        if self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
-            log::debug!("client {id}: a move to {target:?} from a session whose body is on another host: refused");
+        if self
+            .sessions
+            .get(&id)
+            .is_some_and(|s| s.kind == SessionKind::Observer)
+        {
+            log::debug!(
+                "client {id}: a move to {target:?} from a session whose body is on another host: refused"
+            );
             return false;
         }
         if !self.owns(target) && !self.is_foreign(target) {
             let owner = self.owner_of(target);
-            log::debug!("client {id}: a move to {target:?}, whose owner this host does not know ({owner:?}): refused");
+            log::debug!(
+                "client {id}: a move to {target:?}, whose owner this host does not know ({owner:?}): refused"
+            );
             // Wanted for a claim: the player's next try may go through.
             self.note_unowned(target);
             return false;
@@ -1908,7 +2021,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let bodiless = !self.homes.contains_key(&id) && !self.moving.contains_key(&id);
         if bodiless && self.is_foreign(target) {
-            log::debug!("client {id}: a move to {target:?}, another host's, with no body here: refused");
+            log::debug!(
+                "client {id}: a move to {target:?}, another host's, with no body here: refused"
+            );
             return false;
         }
         true
@@ -1933,22 +2048,40 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// nobody is known to own any more (its owner released it meanwhile: `!reaches`) is
     /// unavailable: the record parks here, never handed to a host that no longer owns it.
     fn finish_move(&mut self, client: ClientId, record: Option<Box<PlayerRecord>>, now_ms: u64) {
-        let Some(m) = self.moving.remove(&client) else { return };
+        let Some(m) = self.moving.remove(&client) else {
+            return;
+        };
         if self.is_foreign(m.target) {
             return self.move_to_peer(client, m, record, now_ms);
         }
         if let (Some(record), Some((player, adventure))) = (&record, self.player_for(client)) {
             // In no region while its creation is on its way to the target.
-            self.cut_transit(player, &PlayerRecord { adventure, ..(**record).clone() });
+            self.cut_transit(
+                player,
+                &PlayerRecord {
+                    adventure,
+                    ..(**record).clone()
+                },
+            );
         }
         let full = match (&record, self.player_for(client)) {
-            (Some(record), Some((player, adventure))) => Some((player, PlayerRecord { adventure, ..(**record).clone() })),
+            (Some(record), Some((player, adventure))) => Some((
+                player,
+                PlayerRecord {
+                    adventure,
+                    ..(**record).clone()
+                },
+            )),
             _ => None,
         };
         if self.is_unavailable(m.target) {
             // Its target could not be loaded meanwhile: the record stays parked.
             if let Some((player, record)) = full {
-                log::warn!("move of client {client}: {:?} is unavailable; player {} parked", m.target, player.0);
+                log::warn!(
+                    "move of client {client}: {:?} is unavailable; player {} parked",
+                    m.target,
+                    player.0
+                );
                 self.parked_players.insert(player, record);
             }
             return;
@@ -1956,14 +2089,20 @@ impl<S: RegionSpawner> WorldManager<S> {
         let carried = match record {
             Some(record) => record.client,
             None => {
-                log::error!("move of client {client} out of {:?}: no body came back; its items are lost", m.from);
+                log::error!(
+                    "move of client {client} out of {:?}: no body came back; its items are lost",
+                    m.from
+                );
                 crate::Client::default()
             }
         };
         if let Some((player, record)) = full {
             self.creating.insert(client, (m.target, player, record));
         }
-        self.send_play_event(m.target, GameEventKind::CreateClientAt(client, m.landing, Some(Box::new(carried))));
+        self.send_play_event(
+            m.target,
+            GameEventKind::CreateClientAt(client, m.landing, Some(Box::new(carried))),
+        );
         // Behind the creation, held with it if it is.
         for kind in m.then {
             self.send_play_event_held(m.target, kind, true);
@@ -1977,7 +2116,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn landing_in(&self, rc: RegionCoords) -> [u32; 2] {
         let rc = self.canonical(rc);
         let edge = crate::REGION_BLOCKS as u32;
-        let on_map = self.world_map.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing);
+        let on_map = self
+            .world_map
+            .as_ref()
+            .and_then(|m| m.tile(rc))
+            .and_then(|t| t.landing);
         let on_grid = self.society_grid.as_ref().and_then(|g| g.landing(rc));
         on_map
             .or(on_grid)
@@ -1996,7 +2139,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn send_play_event(&mut self, rc: RegionCoords, kind: GameEventKind) {
         let creates = matches!(
             kind,
-            GameEventKind::CreateClient(_) | GameEventKind::CreateClientAt(..) | GameEventKind::RestorePlayer(..)
+            GameEventKind::CreateClient(_)
+                | GameEventKind::CreateClientAt(..)
+                | GameEventKind::RestorePlayer(..)
         );
         self.send_play_event_held(rc, kind, creates);
     }
@@ -2021,18 +2166,44 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn handle_server_event(&mut self, ev: ServerEvent, now_ms: u64) -> bool {
         self.clock_ms = self.clock_ms.max(now_ms);
         match ev {
-            ServerEvent::ClientConnected { client: id, player, record } => {
+            ServerEvent::ClientConnected {
+                client: id,
+                player,
+                record,
+            } => {
                 if !self.client_connected(id, player, record, now_ms) {
                     return true;
                 }
             }
             ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),
             ServerEvent::Supersede { player, reason } => self.supersede(player, &reason, now_ms),
-            ServerEvent::ObserverConnected { client, player } => self.observer_connected(client, player, now_ms),
-            ServerEvent::SpawnOrder { origin, hops, player_token, session_epoch, player, record_region } => {
-                self.spawn_order(SpawnRequest { origin, hops, player_token, session_epoch, player, record_region });
+            ServerEvent::ObserverConnected { client, player } => {
+                self.observer_connected(client, player, now_ms)
             }
-            ServerEvent::LoginConnected { client, player, record, player_token, session_epoch } => {
+            ServerEvent::SpawnOrder {
+                origin,
+                hops,
+                player_token,
+                session_epoch,
+                player,
+                record_region,
+            } => {
+                self.spawn_order(SpawnRequest {
+                    origin,
+                    hops,
+                    player_token,
+                    session_epoch,
+                    player,
+                    record_region,
+                });
+            }
+            ServerEvent::LoginConnected {
+                client,
+                player,
+                record,
+                player_token,
+                session_epoch,
+            } => {
                 // Known before it is placed: a placement that ends the session (a region it
                 // cannot reach) reports its end there, once.
                 let login = (player_token, session_epoch);
@@ -2051,14 +2222,27 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            ServerEvent::Kick { player_token, session_epoch, reason } => self.login_kick(player_token, session_epoch, reason),
-            ServerEvent::SessionEnded { player_token, session_epoch } => self.login_session_ended(player_token, session_epoch),
+            ServerEvent::Kick {
+                player_token,
+                session_epoch,
+                reason,
+            } => self.login_kick(player_token, session_epoch, reason),
+            ServerEvent::SessionEnded {
+                player_token,
+                session_epoch,
+            } => self.login_session_ended(player_token, session_epoch),
             ServerEvent::ClientPacket(packet, id) if self.observer_drops(id, &packet) => {
-                log::debug!("client {id}: a {} packet from an observer session dropped", client_packet_name(&packet));
+                log::debug!(
+                    "client {id}: a {} packet from an observer session dropped",
+                    client_packet_name(&packet)
+                );
             }
             // Elastic 5 (final review F-C1): a session parked for a move keeps its session and has no
             // body until the move's cut is decided: what would make it a body waits too.
-            ServerEvent::ClientPacket(packet, id) if (self.restore_pending(id) || self.kept_for_move(id)) && defers_until_restored(&packet) => {
+            ServerEvent::ClientPacket(packet, id)
+                if (self.restore_pending(id) || self.kept_for_move(id))
+                    && defers_until_restored(&packet) =>
+            {
                 self.deferred_packets.entry(id).or_default().push(packet);
             }
             ServerEvent::ClientPacket(packet, id) => match packet {
@@ -2067,12 +2251,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::Hello { .. } => {}
                 ClientPacket::RequestPlayerRegion => {
                     let home = self.homes.get(&id).copied();
-                    let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(home, id)));
+                    let _ = self
+                        .out
+                        .send((Some(id), ServerPacket::PlayerRegion(home, id)));
                 }
                 // Every region a client names is folded onto the map first (the
                 // regions, the host path and the store see only canonical ones).
                 ClientPacket::RequestRegionConnection(rc) => self.subscribe(id, self.canonical(rc)),
-                ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, self.canonical(rc), now_ms),
+                ClientPacket::ReleaseRegionConnection(rc) => {
+                    self.unsubscribe(id, self.canonical(rc), now_ms)
+                }
                 ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
                 // Unsent since the region spawn went (the world map's site choice replaced it).
@@ -2102,83 +2290,94 @@ impl<S: RegionSpawner> WorldManager<S> {
                         ..event
                     };
                     match event.kind {
-                    GameEventKind::Tick => {}
-                    // No client stops the server: a client quits its own session, and a
-                    // single-player server exits when its last client leaves.
-                    GameEventKind::Quit => log::debug!("client {id}: a Quit from a client dropped"),
-                    // A session sends input for its own client only.
-                    kind @ (GameEventKind::PlayerInput(..)
-                    | GameEventKind::UiAction(..)
-                    | GameEventKind::Order(..))
-                        if kind.origin_client() != Some(id) =>
-                    {
-                        let now = self.clock_ms;
-                        if self.foreign_input_warned_ms.is_none_or(|at| now.saturating_sub(at) >= FOREIGN_INPUT_WARN_MS) {
-                            self.foreign_input_warned_ms = Some(now);
-                            log::warn!("client {id}: input naming client {:?} dropped", kind.origin_client());
+                        GameEventKind::Tick => {}
+                        // No client stops the server: a client quits its own session, and a
+                        // single-player server exits when its last client leaves.
+                        GameEventKind::Quit => {
+                            log::debug!("client {id}: a Quit from a client dropped")
                         }
-                    }
-                    kind @ (GameEventKind::PlayerInput(..)
-                    | GameEventKind::UiAction(..)
-                    | GameEventKind::Order(..)) => {
-                        // Manager-authoritative routing: the client's stamp
-                        // lags its own predicted handoff; homes is truth.
-                        // UiAction and Order ride the same path as
-                        // PlayerInput — all must follow the player across a
-                        // region handoff.
-                        let cid = kind.origin_client().expect("PlayerInput/UiAction/Order carry a client");
-                        let home = self.homes.get(&cid).copied();
-                        match home {
-                            Some(home) if self.regions.contains_key(&home) => {
-                                // DEBUG: one line per player input drowned the
-                                // server log (1618 of 1648 lines in a 60 s capture).
-                                log::debug!(
-                                    "[server] recv {kind:?} from cid={cid:?} -> route to home {home:?}"
+                        // A session sends input for its own client only.
+                        kind @ (GameEventKind::PlayerInput(..)
+                        | GameEventKind::UiAction(..)
+                        | GameEventKind::Order(..))
+                            if kind.origin_client() != Some(id) =>
+                        {
+                            let now = self.clock_ms;
+                            if self
+                                .foreign_input_warned_ms
+                                .is_none_or(|at| now.saturating_sub(at) >= FOREIGN_INPUT_WARN_MS)
+                            {
+                                self.foreign_input_warned_ms = Some(now);
+                                log::warn!(
+                                    "client {id}: input naming client {:?} dropped",
+                                    kind.origin_client()
                                 );
-                                // Regions share one tick numbering, so the
-                                // stamp holds in whichever region the input
-                                // reaches; that region makes it follow the
-                                // body if the body is crossing (`Forward`).
-                                let input = match after_tick {
-                                    Some(tick) => RegionInput::EventAfterTick(kind, tick),
-                                    None => RegionInput::Event(kind),
-                                };
-                                self.send_to_region(home, input);
                             }
-                            // Its body went to another host: the input follows it there.
-                            None if self.departed_host(cid).is_some() => {
-                                let stamp = after_tick.unwrap_or_else(|| self.spawner.world_tick());
-                                self.forward_input(cid, kind, stamp);
-                            }
-                            _ => log::info!(
-                                "[server] DROP {kind:?} from cid={cid:?}: home={home:?} not running (loaded regions: {:?})",
-                                self.regions.keys().collect::<Vec<_>>()
-                            ),
                         }
-                    }
-                    // Manager-internal / server-authored event kinds: a client
-                    // must never inject these directly (sessions are created
-                    // and moved by the manager). Drop rather than forward.
-                    GameEventKind::EntityArrived(_)
-                    | GameEventKind::HaloEntity(_)
-                    | GameEventKind::HaloEntityGone(_)
-                    | GameEventKind::HaloSourceGone(_)
-                    | GameEventKind::HaloUpdate(_)
-                    | GameEventKind::Intent(_)
-                    | GameEventKind::CreateClient(_)
-                    | GameEventKind::CreateClientAt(..)
-                    | GameEventKind::SpawnPerson(_)
-                    | GameEventKind::DespawnPerson(_)
-                    | GameEventKind::WalkOut(..)
-                    | GameEventKind::ClientLeft(_)
-                    | GameEventKind::ParkPlayer(_)
-                    | GameEventKind::RestorePlayer(..)
-                    | GameEventKind::PlaceBody(..) => {
-                        log::debug!(
-                            "dropping internal event kind sent by client {id} for {:?}",
-                            event.region_id
-                        );
-                    }
+                        kind @ (GameEventKind::PlayerInput(..)
+                        | GameEventKind::UiAction(..)
+                        | GameEventKind::Order(..)) => {
+                            // Manager-authoritative routing: the client's stamp
+                            // lags its own predicted handoff; homes is truth.
+                            // UiAction and Order ride the same path as
+                            // PlayerInput — all must follow the player across a
+                            // region handoff.
+                            let cid = kind
+                                .origin_client()
+                                .expect("PlayerInput/UiAction/Order carry a client");
+                            let home = self.homes.get(&cid).copied();
+                            match home {
+                                Some(home) if self.regions.contains_key(&home) => {
+                                    // DEBUG: one line per player input drowned the
+                                    // server log (1618 of 1648 lines in a 60 s capture).
+                                    log::debug!(
+                                        "[server] recv {kind:?} from cid={cid:?} -> route to home {home:?}"
+                                    );
+                                    // Regions share one tick numbering, so the
+                                    // stamp holds in whichever region the input
+                                    // reaches; that region makes it follow the
+                                    // body if the body is crossing (`Forward`).
+                                    let input = match after_tick {
+                                        Some(tick) => RegionInput::EventAfterTick(kind, tick),
+                                        None => RegionInput::Event(kind),
+                                    };
+                                    self.send_to_region(home, input);
+                                }
+                                // Its body went to another host: the input follows it there.
+                                None if self.departed_host(cid).is_some() => {
+                                    let stamp =
+                                        after_tick.unwrap_or_else(|| self.spawner.world_tick());
+                                    self.forward_input(cid, kind, stamp);
+                                }
+                                _ => log::info!(
+                                    "[server] DROP {kind:?} from cid={cid:?}: home={home:?} not running (loaded regions: {:?})",
+                                    self.regions.keys().collect::<Vec<_>>()
+                                ),
+                            }
+                        }
+                        // Manager-internal / server-authored event kinds: a client
+                        // must never inject these directly (sessions are created
+                        // and moved by the manager). Drop rather than forward.
+                        GameEventKind::EntityArrived(_)
+                        | GameEventKind::HaloEntity(_)
+                        | GameEventKind::HaloEntityGone(_)
+                        | GameEventKind::HaloSourceGone(_)
+                        | GameEventKind::HaloUpdate(_)
+                        | GameEventKind::Intent(_)
+                        | GameEventKind::CreateClient(_)
+                        | GameEventKind::CreateClientAt(..)
+                        | GameEventKind::SpawnPerson(_)
+                        | GameEventKind::DespawnPerson(_)
+                        | GameEventKind::WalkOut(..)
+                        | GameEventKind::ClientLeft(_)
+                        | GameEventKind::ParkPlayer(_)
+                        | GameEventKind::RestorePlayer(..)
+                        | GameEventKind::PlaceBody(..) => {
+                            log::debug!(
+                                "dropping internal event kind sent by client {id} for {:?}",
+                                event.region_id
+                            );
+                        }
                     }
                 }
             },
@@ -2207,7 +2406,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         // yet = the region's first runner, or an output injected by a test.)
         if let Some(seen) = self.incarnation_seen.get(&rc) {
             if self.incarnation.get(&rc) != Some(seen) {
-                log::info!("[server] late output of a dead incarnation of {rc:?} dropped: {}", output.name());
+                log::info!(
+                    "[server] late output of a dead incarnation of {rc:?} dropped: {}",
+                    output.name()
+                );
                 return;
             }
         }
@@ -2215,22 +2417,43 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::Incarnation(_) => unreachable!("handled above"),
             RegionOutput::EventProcessed(event) => {
                 if let GameEventKind::Intent(msg) = &event.kind {
-                    if let Some(i) = self.in_flight_intents.iter().position(|f| f.target == rc && f.msg == *msg) {
+                    if let Some(i) = self
+                        .in_flight_intents
+                        .iter()
+                        .position(|f| f.target == rc && f.msg == *msg)
+                    {
                         let f = self.in_flight_intents.remove(i);
                         self.cut_confirmed_intent(f);
                     }
                 }
-                if let GameEventKind::CreateClientAt(c, ..) | GameEventKind::RestorePlayer(c, _) = &event.kind {
+                if let GameEventKind::CreateClientAt(c, ..) | GameEventKind::RestorePlayer(c, _) =
+                    &event.kind
+                {
                     // The body exists: its record is no longer only in transit.
-                    if self.creating.get(c).is_some_and(|(target, ..)| *target == rc) {
+                    if self
+                        .creating
+                        .get(c)
+                        .is_some_and(|(target, ..)| *target == rc)
+                    {
                         self.creating.remove(c);
                     }
                 }
                 if let GameEventKind::EntityArrived(bundle) = &event.kind {
                     if let EntityKind::Person { person } = bundle.kind {
-                        self.note_moved(person, rc, Step::Into { to: rc, at: bundle_at(bundle) });
+                        self.note_moved(
+                            person,
+                            rc,
+                            Step::Into {
+                                to: rc,
+                                at: bundle_at(bundle),
+                            },
+                        );
                     }
-                    if self.in_flight.get(&bundle.id).is_some_and(|f| f.target == rc) {
+                    if self
+                        .in_flight
+                        .get(&bundle.id)
+                        .is_some_and(|f| f.target == rc)
+                    {
                         let f = self.in_flight.remove(&bundle.id).expect("checked");
                         self.cut_confirmed_arrival(f);
                     }
@@ -2254,16 +2477,21 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::EventProcessedHashed(event, tick, hash) => {
                 if let Some(link) = self.regions.get(&rc) {
                     for client in &link.subscribers {
-                        let _ = self
-                            .out
-                            .send((Some(*client), ServerPacket::HashedGameEvent(event.clone(), tick, hash)));
+                        let _ = self.out.send((
+                            Some(*client),
+                            ServerPacket::HashedGameEvent(event.clone(), tick, hash),
+                        ));
                     }
                 }
             }
             RegionOutput::Snapshot(client, rollback) => {
-                let _ = self.out.send((Some(client), ServerPacket::Region(rc, rollback)));
+                let _ = self
+                    .out
+                    .send((Some(client), ServerPacket::Region(rc, rollback)));
             }
-            RegionOutput::CutSnapshot(id, tick, portable) => self.cut_answer(rc, Some((id, tick)), *portable),
+            RegionOutput::CutSnapshot(id, tick, portable) => {
+                self.cut_answer(rc, Some((id, tick)), *portable)
+            }
             RegionOutput::CutMissed(id) => self.cut_missed(rc, id),
             RegionOutput::LoadFailed(why) => self.region_load_failed(rc, why, now_ms),
             RegionOutput::PeopleListed(epoch, people) => self.note_listed(rc, Some(epoch), &people),
@@ -2272,7 +2500,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.world_send(HostMsg::Positions(people));
                 }
             }
-            RegionOutput::PlayerParked(client, record, body) => self.player_parked(rc, client, record, body, now_ms),
+            RegionOutput::PlayerParked(client, record, body) => {
+                self.player_parked(rc, client, record, body, now_ms)
+            }
             RegionOutput::SyncClock { tick_rate, tick } => {
                 if let Some(link) = self.regions.get(&rc) {
                     for client in &link.subscribers {
@@ -2310,8 +2540,17 @@ impl<S: RegionSpawner> WorldManager<S> {
                 for n in self.halo_neighbours(rc) {
                     if self.is_foreign(n) {
                         // Another host's: only when it runs it (`foreign_running`).
-                        if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.map_extent(), rc, n, &far) {
-                            self.halo_to_peer(n, crate::Volatile::HaloUpdate { to: n, update: seed, stamp });
+                        if let Some(seed) =
+                            crate::halo::halo_seed_from_snapshot(self.map_extent(), rc, n, &far)
+                        {
+                            self.halo_to_peer(
+                                n,
+                                crate::Volatile::HaloUpdate {
+                                    to: n,
+                                    update: seed,
+                                    stamp,
+                                },
+                            );
                         }
                         continue;
                     }
@@ -2319,8 +2558,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if !running {
                         continue;
                     }
-                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.map_extent(), rc, n, &far) {
-                        self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloUpdate(seed), stamp));
+                    if let Some(seed) =
+                        crate::halo::halo_seed_from_snapshot(self.map_extent(), rc, n, &far)
+                    {
+                        self.send_to_region(
+                            n,
+                            RegionInput::Transfer(GameEventKind::HaloUpdate(seed), stamp),
+                        );
                     }
                 }
                 // After its final halo: parked, not lost (the other hosts' mirrors of it
@@ -2375,9 +2619,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // history absorbs. A player crosses to another host when its owner is
                     // reachable (`peers.rs`, `can_hand_off`); a person does not yet.
                     let waking = client.is_some()
-                        || (matches!(bundle.kind, EntityKind::Person { .. }) && self.world.is_none());
-                    let hand_off = client.is_some_and(|c| self.is_foreign(target) && self.can_hand_off(c, target));
-                    if off_map || (waking && (self.is_unavailable(target) || (self.is_foreign(target) && !hand_off))) {
+                        || (matches!(bundle.kind, EntityKind::Person { .. })
+                            && self.world.is_none());
+                    let hand_off = client
+                        .is_some_and(|c| self.is_foreign(target) && self.can_hand_off(c, target));
+                    if off_map
+                        || (waking
+                            && (self.is_unavailable(target)
+                                || (self.is_foreign(target) && !hand_off)))
+                    {
                         // Off the map: regions hold bodies at the outer seam, so
                         // this is a region that was not bounded. Unavailable: its
                         // stored state could not be read, so it cannot take the
@@ -2390,18 +2640,27 @@ impl<S: RegionSpawner> WorldManager<S> {
                             self.note_unowned(target);
                         }
                         if off_map {
-                            log::error!("departure from {rc:?} into off-map {target:?} refused: returned");
-                        } else if client.is_some_and(|c| self.is_foreign(target) && self.note_pinned_clamp(c)) {
+                            log::error!(
+                                "departure from {rc:?} into off-map {target:?} refused: returned"
+                            );
+                        } else if client
+                            .is_some_and(|c| self.is_foreign(target) && self.note_pinned_clamp(c))
+                        {
                             // Kept for the login ordered here (`placement.rs`): told once per pin.
                         } else {
-                            log::warn!("departure from {rc:?} into unavailable {target:?} refused: returned");
+                            log::warn!(
+                                "departure from {rc:?} into unavailable {target:?} refused: returned"
+                            );
                         }
                         let t = &mut bundle.body.pose.translation;
                         t.x = t.x.clamp(0.0, crate::REGION_SIZE);
                         t.z = t.z.clamp(0.0, crate::REGION_SIZE);
                         self.enter_in_flight(rc, rc, stamp, &bundle, view);
                         self.locations.insert(bundle.id, rc);
-                        self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
+                        self.send_to_region(
+                            rc,
+                            RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp),
+                        );
                         continue;
                     }
                     // Where it left, in `rc`'s frame (a person absorbed at the seam is
@@ -2437,7 +2696,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     None if client.is_some_and(|c| self.departed_host(c).is_some()) => {
                         self.forward_input(client.expect("checked"), kind, stamp);
                     }
-                    home => log::info!("[server] forward of {kind:?} from {rc:?} dropped: home {home:?}"),
+                    home => log::info!(
+                        "[server] forward of {kind:?} from {rc:?} dropped: home {home:?}"
+                    ),
                 }
             }
             RegionOutput::HaloDeltas(list, stamp) => {
@@ -2445,14 +2706,24 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let target = self.fold_target(rc, target);
                     if self.is_foreign(target) {
                         // Only to a region its owner runs (`foreign_running`).
-                        self.halo_to_peer(target, crate::Volatile::HaloUpdate { to: target, update, stamp });
+                        self.halo_to_peer(
+                            target,
+                            crate::Volatile::HaloUpdate {
+                                to: target,
+                                update,
+                                stamp,
+                            },
+                        );
                         continue;
                     }
                     // Halo updates never wake a region (a starting one is
                     // seeded afresh).
                     let running = self.regions.get(&target).is_some_and(|link| !link.stopping);
                     if running {
-                        self.send_to_region(target, RegionInput::Transfer(GameEventKind::HaloUpdate(update), stamp));
+                        self.send_to_region(
+                            target,
+                            RegionInput::Transfer(GameEventKind::HaloUpdate(update), stamp),
+                        );
                     }
                 }
             }
@@ -2482,13 +2753,24 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::HaloEntities(list, stamp) => {
                 // Late output of a region already lost is dropped: its
                 // mirrors were ended (`halo_source_lost`); none comes back.
-                let list = if self.regions.contains_key(&rc) { list } else { Vec::new() };
+                let list = if self.regions.contains_key(&rc) {
+                    list
+                } else {
+                    Vec::new()
+                };
                 for (mut msg, target) in list {
                     let target = self.fold_target(rc, target);
                     let delta = crate::region_delta(self.map_extent(), rc, target);
                     if self.is_foreign(target) {
                         msg.rebase_by(delta);
-                        self.halo_to_peer(target, crate::Volatile::HaloEntity { to: target, msg, stamp });
+                        self.halo_to_peer(
+                            target,
+                            crate::Volatile::HaloEntity {
+                                to: target,
+                                msg,
+                                stamp,
+                            },
+                        );
                         continue;
                     }
                     // Entity-halo messages NEVER wake a region (a starting one
@@ -2535,7 +2817,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             .map(|(c, _)| *c)
             .collect();
         for c in lapsed {
-            log::warn!("[server] client {c} never connected to this host after its hand-off: parked");
+            log::warn!(
+                "[server] client {c} never connected to this host after its hand-off: parked"
+            );
             self.tell_awaited_parked(c);
             self.client_disconnected(c, now_ms);
         }
@@ -2699,12 +2983,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                 cut.regions.insert(*rc, (u.region.clone(), u.seq));
             }
         }
-        log::debug!("[server] save cut {} at tick {tick}: {} regions asked", id.0, cut.waiting.len());
+        log::debug!(
+            "[server] save cut {} at tick {tick}: {} regions asked",
+            id.0,
+            cut.waiting.len()
+        );
         self.pending_cut = Some(cut);
         if !dead.is_empty() {
             // A region thread that died: its state is lost, so this cut cannot
             // hold it. Aborted; the respawn comes with the next send to it.
-            log::error!("save cut {}: regions {dead:?} died before they could be asked; aborted", id.0);
+            log::error!(
+                "save cut {}: regions {dead:?} died before they could be asked; aborted",
+                id.0
+            );
             self.pending_cut = None;
             self.world_cut_dropped(id, crate::CutFailure::Aborted);
             return None;
@@ -2746,7 +3037,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         // been built from the older stored (or pristine) terrain.
         let mut stale = Vec::new();
         for (rc, version) in versions {
-            let rose = self.stored_regions.get(&rc).is_none_or(|old| *old < version);
+            let rose = self
+                .stored_regions
+                .get(&rc)
+                .is_none_or(|old| *old < version);
             let running = self.regions.get(&rc).is_some_and(|l| !l.stopping);
             if rose && !running {
                 stale.push(rc);
@@ -2858,21 +3152,49 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn restore_in_flight(&mut self, rows: Vec<InFlightRow>) {
         for row in rows {
             match row {
-                InFlightRow::Transfer { target, bundle, stamp } if self.is_foreign(target) => {
+                InFlightRow::Transfer {
+                    target,
+                    bundle,
+                    stamp,
+                } if self.is_foreign(target) => {
                     // Another host's region: to its owner again.
                     let owner = self.foreign_host(target).expect("checked");
-                    self.queue_to_peer(owner, crate::Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None });
+                    self.queue_to_peer(
+                        owner,
+                        crate::Reliable::Transfer {
+                            target,
+                            stamp,
+                            bundle: Box::new(bundle),
+                            player: None,
+                        },
+                    );
                 }
-                InFlightRow::Transfer { target, bundle, stamp } if !self.owns(target) => {
+                InFlightRow::Transfer {
+                    target,
+                    bundle,
+                    stamp,
+                } if !self.owns(target) => {
                     // No owner this host knows: it waits here for one, as it did.
-                    let msg = crate::Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None };
+                    let msg = crate::Reliable::Transfer {
+                        target,
+                        stamp,
+                        bundle: Box::new(bundle),
+                        player: None,
+                    };
                     self.wait_for_owner(target, msg, false, None);
                 }
-                InFlightRow::Transfer { target, bundle, stamp } => {
+                InFlightRow::Transfer {
+                    target,
+                    bundle,
+                    stamp,
+                } => {
                     self.locations.insert(bundle.id, target);
                     if self.regions.get(&target).is_some_and(|l| !l.stopping) {
                         self.enter_in_flight(target, target, stamp, &bundle, false);
-                        self.send_to_region(target, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
+                        self.send_to_region(
+                            target,
+                            RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp),
+                        );
                     } else {
                         // The same cap as any waiting arrival (cut rows never
                         // hold a player or a person).
@@ -2888,7 +3210,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if self.regions.get(&target).is_some_and(|l| !l.stopping) {
                         self.send_intent_to(target, msg, false);
                     } else {
-                        self.intent_mailbox.entry(target).or_default().push(Mail { msg, in_source_view: false, accounted_in: None });
+                        self.intent_mailbox.entry(target).or_default().push(Mail {
+                            msg,
+                            in_source_view: false,
+                            accounted_in: None,
+                        });
                     }
                 }
             }
@@ -2914,7 +3240,10 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: the regions the pending cut still waits for.
     pub fn awaiting_cut(&self) -> Vec<RegionCoords> {
-        self.pending_cut.as_ref().map(|c| c.waiting.iter().copied().collect()).unwrap_or_default()
+        self.pending_cut
+            .as_ref()
+            .map(|c| c.waiting.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Test support: the regions with snapshots not committed yet.
@@ -2926,7 +3255,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// running when the cut began): what it sends now is not in the cut.
     /// `false` with no cut pending.
     fn in_cut_view(&self, rc: RegionCoords) -> bool {
-        self.pending_cut.as_ref().is_some_and(|c| !c.waiting.contains(&rc))
+        self.pending_cut
+            .as_ref()
+            .is_some_and(|c| !c.waiting.contains(&rc))
     }
 
     /// The stamp a body's creation in `rc` is held to: the slot after the
@@ -2947,7 +3278,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 u.seq = seq;
             }
             None => {
-                self.uncommitted.insert(rc, Uncommitted { region: portable, seq });
+                self.uncommitted.insert(
+                    rc,
+                    Uncommitted {
+                        region: portable,
+                        seq,
+                    },
+                );
             }
         }
         seq
@@ -2957,31 +3294,53 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `Stopped` one (`None`). Always merged into the uncommitted entry (a
     /// stale cut's too: the region's terms moved on); the answer of the
     /// pending cut when it waits for `rc`.
-    fn cut_answer(&mut self, rc: RegionCoords, cut: Option<(CutId, crate::Tick)>, portable: PortableRegion) {
+    fn cut_answer(
+        &mut self,
+        rc: RegionCoords,
+        cut: Option<(CutId, crate::Tick)>,
+        portable: PortableRegion,
+    ) {
         let players = portable.players.clone();
         let at = portable.meta.tick;
         let seq = self.merge_uncommitted(rc, portable);
-        let Some(pending) = self.pending_cut.as_ref() else { return };
+        let Some(pending) = self.pending_cut.as_ref() else {
+            return;
+        };
         let answers = pending.waiting.contains(&rc) && cut.is_none_or(|(id, _)| id == pending.id);
         if !answers {
             return;
         }
-        debug_assert!(cut.is_none_or(|(_, t)| t == pending.tick), "a cut snapshot at another tick");
+        debug_assert!(
+            cut.is_none_or(|(_, t)| t == pending.tick),
+            "a cut snapshot at another tick"
+        );
         if cut.is_none() && at > pending.tick {
             // A `Stopped` answer past the cut tick is not the region at it.
             let id = self.pending_cut.take().expect("checked").id;
-            log::error!("save cut {}: {rc:?} parked at tick {at}, past the cut tick; aborted", id.0);
+            log::error!(
+                "save cut {}: {rc:?} parked at tick {at}, past the cut tick; aborted",
+                id.0
+            );
             self.world_cut_dropped(id, crate::CutFailure::Aborted);
             return;
         }
         let mut records = Vec::new();
         for (client, record) in players {
             let Some((player, adventure)) = self.player_for(client) else {
-                log::warn!("save cut: {rc:?} holds client {client}'s body, but no player is known for it; not saved");
+                log::warn!(
+                    "save cut: {rc:?} holds client {client}'s body, but no player is known for it; not saved"
+                );
                 continue;
             };
             self.cut_order += 1;
-            records.push((self.cut_order, player, PlayerRecord { adventure, ..record }));
+            records.push((
+                self.cut_order,
+                player,
+                PlayerRecord {
+                    adventure,
+                    ..record
+                },
+            ));
         }
         let entry = self.uncommitted[&rc].region.clone();
         let pending = self.pending_cut.as_mut().expect("checked");
@@ -3021,10 +3380,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// still waiting for one of them is aborted, so the exit's own cut can
     /// save the rest. Returns those regions.
     pub fn give_up_unparked(&mut self) -> Vec<RegionCoords> {
-        let stuck: Vec<RegionCoords> =
-            self.regions.iter().filter(|(_, l)| l.stopping).map(|(rc, _)| *rc).collect();
+        let stuck: Vec<RegionCoords> = self
+            .regions
+            .iter()
+            .filter(|(_, l)| l.stopping)
+            .map(|(rc, _)| *rc)
+            .collect();
         self.silent_stopping.extend(stuck.iter().copied());
-        if self.pending_cut.as_ref().is_some_and(|c| stuck.iter().any(|rc| c.waiting.contains(rc))) {
+        if self
+            .pending_cut
+            .as_ref()
+            .is_some_and(|c| stuck.iter().any(|rc| c.waiting.contains(rc)))
+        {
             let cut = self.pending_cut.take().expect("checked");
             log::error!(
                 "save cut {} at tick {}: still waiting for {:?} at exit; aborted",
@@ -3046,7 +3413,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         let tick = self.pending_cut.as_ref().map_or(0, |c| c.tick);
         self.pending_cut = None;
         self.cut_lead = (self.cut_lead * 2).min(SAVE_CUT_LEAD_MAX_TICKS);
-        log::warn!("save cut {} at tick {tick}: {rc:?} was already past it; aborted (next lead {})", id.0, self.cut_lead);
+        log::warn!(
+            "save cut {} at tick {tick}: {rc:?} was already past it; aborted (next lead {})",
+            id.0,
+            self.cut_lead
+        );
         self.world_cut_dropped(id, crate::CutFailure::Missed);
     }
 
@@ -3055,7 +3426,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// respawn is not the state the cut saw.
     fn cut_region_lost(&mut self, rc: RegionCoords) {
         if let Some(cut) = self.pending_cut.take() {
-            log::error!("save cut {}: {rc:?} was lost while it was pending; aborted", cut.id.0);
+            log::error!(
+                "save cut {}: {rc:?} was lost while it was pending; aborted",
+                cut.id.0
+            );
             self.world_cut_dropped(cut.id, crate::CutFailure::Aborted);
         }
     }
@@ -3063,8 +3437,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A region started (`ensure_running`) at world tick `start`: a pending
     /// cut whose tick it has not passed asks it too (its answer replaces a
     /// `Stopped` one).
-    fn cut_region_started(&mut self, rc: RegionCoords, start: crate::Tick, input: &Sender<RegionInput>) {
-        let Some(cut) = self.pending_cut.as_mut() else { return };
+    fn cut_region_started(
+        &mut self,
+        rc: RegionCoords,
+        start: crate::Tick,
+        input: &Sender<RegionInput>,
+    ) {
+        let Some(cut) = self.pending_cut.as_mut() else {
+            return;
+        };
         if start <= cut.tick && input.send(RegionInput::SaveAt(cut.id, cut.tick)).is_ok() {
             cut.waiting.insert(rc);
         }
@@ -3088,10 +3469,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// A player crossing in `bundle` (in `target`'s frame) as its record.
-    fn crossing_record(&self, target: RegionCoords, bundle: &crate::EntityBundle) -> Option<(PlayerId, PlayerRecord)> {
+    fn crossing_record(
+        &self,
+        target: RegionCoords,
+        bundle: &crate::EntityBundle,
+    ) -> Option<(PlayerId, PlayerRecord)> {
         let (client, c) = bundle.client.as_ref()?;
         let (player, adventure) = self.player_for(*client)?;
-        let record = PlayerRecord { client: crate::parked_client(c), pose: bundle.body.pose, region: target, adventure };
+        let record = PlayerRecord {
+            client: crate::parked_client(c),
+            pose: bundle.body.pose,
+            region: target,
+            adventure,
+        };
         Some((player, record))
     }
 
@@ -3111,7 +3501,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         if let Some(cut) = self.pending_cut.as_mut() {
-            cut.rows.push(InFlightRow::Transfer { target: f.target, bundle: f.bundle.clone(), stamp: f.stamp });
+            cut.rows.push(InFlightRow::Transfer {
+                target: f.target,
+                bundle: f.bundle.clone(),
+                stamp: f.stamp,
+            });
         }
     }
 
@@ -3128,7 +3522,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn cut_confirmed_intent(&mut self, f: InFlightIntent) {
         if !f.in_source_view && self.in_cut_view(f.target) {
             if let Some(cut) = self.pending_cut.as_mut() {
-                cut.rows.push(InFlightRow::Intent { target: f.target, msg: f.msg });
+                cut.rows.push(InFlightRow::Intent {
+                    target: f.target,
+                    msg: f.msg,
+                });
             }
         }
     }
@@ -3136,7 +3533,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Every region asked has answered: the cut is complete — its regions,
     /// what is still on its way and in no snapshot, and the players.
     fn try_complete_cut(&mut self) {
-        if self.pending_cut.as_ref().is_none_or(|c| !c.waiting.is_empty()) {
+        if self
+            .pending_cut
+            .as_ref()
+            .is_none_or(|c| !c.waiting.is_empty())
+        {
             return;
         }
         // A world cut: every region answered, so this host's marks go now; the part is
@@ -3146,10 +3547,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         // failed, or it is waiting for its retry): the part fails, the coordinator aborts
         // the cut, and a later one is taken once the region runs (R4, `succession.rs`).
         if self.world_cut.as_ref().is_some_and(|r| r.cut == id) {
-            let held = self.pending_cut.as_ref().map(|c| c.regions.keys().copied().collect::<BTreeSet<_>>()).unwrap_or_default();
+            let held = self
+                .pending_cut
+                .as_ref()
+                .map(|c| c.regions.keys().copied().collect::<BTreeSet<_>>())
+                .unwrap_or_default();
             if let Some(rc) = self.pinned_missing(|rc| held.contains(rc)) {
                 // One warning per aborted settle cut (the failure's own line says it).
-                let reason = format!("{rc:?}, pinned for an adoption, is not in it (aborted; a later cut takes it)");
+                let reason = format!(
+                    "{rc:?}, pinned for an adoption, is not in it (aborted; a later cut takes it)"
+                );
                 self.world_cut_fail_saying(crate::CutFailure::Aborted, Some(&reason));
                 return;
             }
@@ -3160,18 +3567,30 @@ impl<S: RegionSpawner> WorldManager<S> {
         // Hosts whose in-transit messages another part writes (`cut_peer_rows`).
         let participants = self.world_cut_peers(id);
         // Still in flight and in neither view.
-        let crossings: Vec<InFlight> = self.in_flight.values().filter(|f| !f.in_source_view).cloned().collect();
+        let crossings: Vec<InFlight> = self
+            .in_flight
+            .values()
+            .filter(|f| !f.in_source_view)
+            .cloned()
+            .collect();
         for f in &crossings {
             self.cut_crossing(f);
         }
         let mut cut = self.pending_cut.take().expect("checked");
         for (target, list) in &self.pending_arrivals {
             for p in list.iter().filter(|p| !p.in_source_view) {
-                cut.rows.push(InFlightRow::Transfer { target: *target, bundle: p.bundle.clone(), stamp: p.stamp });
+                cut.rows.push(InFlightRow::Transfer {
+                    target: *target,
+                    bundle: p.bundle.clone(),
+                    stamp: p.stamp,
+                });
             }
         }
         for f in self.in_flight_intents.iter().filter(|f| !f.in_source_view) {
-            cut.rows.push(InFlightRow::Intent { target: f.target, msg: f.msg });
+            cut.rows.push(InFlightRow::Intent {
+                target: f.target,
+                msg: f.msg,
+            });
         }
         // Transfers to other hosts not acknowledged yet (`cut_peer_rows`): to a host that is
         // absent from the cut only. What this host sent a participant is in exactly one part
@@ -3189,27 +3608,41 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         for (target, list) in &self.intent_mailbox {
             for m in list.iter().filter(|m| !m.in_source_view) {
-                cut.rows.push(InFlightRow::Intent { target: *target, msg: m.msg });
+                cut.rows.push(InFlightRow::Intent {
+                    target: *target,
+                    msg: m.msg,
+                });
             }
         }
         // Players: the latest record of each in the snapshots and crossings,
         // then the parked ones, then those that passed through meanwhile.
         // A crossing the cut caught is in no snapshot (the in-flight rule).
         debug_assert!(
-            cut.crossing_players.iter().all(|(_, p, _)| !cut.region_players.values().flatten().any(|(_, q, _)| q == p)),
+            cut.crossing_players.iter().all(|(_, p, _)| !cut
+                .region_players
+                .values()
+                .flatten()
+                .any(|(_, q, _)| q == p)),
             "a player crossing in the cut is also in a region snapshot"
         );
         // A body is in one region at the cut tick.
         debug_assert!(
             {
                 let mut seen = BTreeSet::new();
-                cut.region_players.values().flatten().all(|(_, p, _)| seen.insert(*p))
+                cut.region_players
+                    .values()
+                    .flatten()
+                    .all(|(_, p, _)| seen.insert(*p))
             },
             "a player's body is in two snapshots of one cut"
         );
         self.last_cut_caught = cut.crossing_players.iter().map(|(_, p, _)| *p).collect();
-        let mut ordered: Vec<(u64, PlayerId, PlayerRecord)> =
-            cut.region_players.into_values().flatten().chain(cut.crossing_players).collect();
+        let mut ordered: Vec<(u64, PlayerId, PlayerRecord)> = cut
+            .region_players
+            .into_values()
+            .flatten()
+            .chain(cut.crossing_players)
+            .collect();
         ordered.sort_by_key(|(order, _, _)| *order);
         let mut players: BTreeMap<PlayerId, PlayerRecord> = BTreeMap::new();
         for (_, player, record) in ordered {
@@ -3234,7 +3667,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 players.entry(player).or_insert(record);
             }
         }
-        for (player, record) in cut.parked_at_t.iter().chain(self.parked_players.iter()).chain(cut.transit_players.iter()) {
+        for (player, record) in cut
+            .parked_at_t
+            .iter()
+            .chain(self.parked_players.iter())
+            .chain(cut.transit_players.iter())
+        {
             if !cut.not_ours.contains_key(player) {
                 players.entry(*player).or_insert_with(|| record.clone());
             }
@@ -3251,7 +3689,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         // by the seeded rig's `prepare_part`). A violation on Postgres is the second part
         // waiting on the first's prepared row lock until its lock timeout (10 s): the cut
         // aborts.
-        let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
+        let carried: BTreeMap<RegionCoords, u64> = cut
+            .regions
+            .iter()
+            .map(|(rc, (_, seq))| (*rc, *seq))
+            .collect();
         // A clean leave releases all this host's land in its part, decided only now that the
         // part's in-flight list is known (`land.rs`, `leave_release`).
         if self.leaving_cut == Some(cut.id) {
@@ -3274,14 +3716,21 @@ impl<S: RegionSpawner> WorldManager<S> {
                 .collect();
             if !parked.is_empty() {
                 // Merged: a record handed here wrapped in this cut is noted already.
-                self.parked_written.entry(cut.id).or_default().extend(parked);
+                self.parked_written
+                    .entry(cut.id)
+                    .or_default()
+                    .extend(parked);
             }
         }
         let world_cut = WorldCut {
             host: self.ordinal(),
             id: cut.id,
             tick: cut.tick,
-            regions: cut.regions.into_iter().map(|(rc, (p, _))| (rc, p)).collect(),
+            regions: cut
+                .regions
+                .into_iter()
+                .map(|(rc, (p, _))| (rc, p))
+                .collect(),
             in_flight: cut.rows,
             players: players.into_iter().collect(),
             // The coordinator saves the history itself (durable before visible).
@@ -3337,7 +3786,10 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: every arrival waiting in the mailbox, with its target.
     pub fn pending_arrival_ids(&self) -> Vec<(crate::EntityId, RegionCoords)> {
-        self.pending_arrivals.iter().flat_map(|(rc, list)| list.iter().map(|p| (p.bundle.id, *rc))).collect()
+        self.pending_arrivals
+            .iter()
+            .flat_map(|(rc, list)| list.iter().map(|p| (p.bundle.id, *rc)))
+            .collect()
     }
 
     /// `bundle` (in `target`'s frame), departed from `source` at `stamp`,
@@ -3357,7 +3809,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         );
         self.locations.insert(bundle.id, target);
         let list = self.pending_arrivals.entry(target).or_default();
-        list.push(PendingArrival { source, stamp, bundle, in_source_view, accounted_in: self.inbound_accounted });
+        list.push(PendingArrival {
+            source,
+            stamp,
+            bundle,
+            in_source_view,
+            accounted_in: self.inbound_accounted,
+        });
         if list.len() <= PENDING_ARRIVALS_PER_REGION_MAX {
             return;
         }
@@ -3383,8 +3841,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `DropItems` body's, in `Carried::drops`) put down at the seam cell on
     /// the source's side, like a mailbox overflow's ([`Self::put_down_drops`]);
     /// a `Despawn` body leaves nothing.
-    fn settle_at_seam(&mut self, source: RegionCoords, target: RegionCoords, bundle: crate::EntityBundle, view: bool) {
-        log::debug!("[server] voxel body {:?} into {target:?}, not running: settled at the seam", bundle.id);
+    fn settle_at_seam(
+        &mut self,
+        source: RegionCoords,
+        target: RegionCoords,
+        bundle: crate::EntityBundle,
+        view: bool,
+    ) {
+        log::debug!(
+            "[server] voxel body {:?} into {target:?}, not running: settled at the seam",
+            bundle.id
+        );
         self.locations.remove(&bundle.id);
         self.put_down_drops(source, target, bundle, view);
     }
@@ -3397,7 +3864,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// source not running) comes back to the source, which puts them down
     /// itself when it next runs. `view`: the body was in its source's view of
     /// the pending cut (its deposits are then not in the cut either).
-    fn put_down_drops(&mut self, source: RegionCoords, target: RegionCoords, mut bundle: crate::EntityBundle, view: bool) {
+    fn put_down_drops(
+        &mut self,
+        source: RegionCoords,
+        target: RegionCoords,
+        mut bundle: crate::EntityBundle,
+        view: bool,
+    ) {
         if bundle.carried.drops.is_empty() {
             return;
         }
@@ -3405,13 +3878,21 @@ impl<S: RegionSpawner> WorldManager<S> {
         let t = bundle.body.pose.translation;
         let b = crate::BLOCK_VOXELS as f32;
         let n = crate::REGION_BLOCKS as i32;
-        let local = [(t.x / b).floor() as i32, (t.y / b).floor() as i32, (t.z / b).floor() as i32];
+        let local = [
+            (t.x / b).floor() as i32,
+            (t.y / b).floor() as i32,
+            (t.z / b).floor() as i32,
+        ];
         let cell = crate::WorldBlockPos::from_local(
             source,
             crate::BlockPos::new(local[0].clamp(0, n - 1), local[1], local[2].clamp(0, n - 1)),
         );
         let due = self.spawner.world_tick();
-        log::info!("[server] {:?} gone on its way to {target:?}: its drops {:?} put down at {cell:?}", bundle.id, bundle.carried.drops);
+        log::info!(
+            "[server] {:?} gone on its way to {target:?}: its drops {:?} put down at {cell:?}",
+            bundle.id,
+            bundle.carried.drops
+        );
         for stack in bundle.carried.drops {
             let sent = crate::SentIntent {
                 target: crate::Target::Pile(cell),
@@ -3442,10 +3923,17 @@ impl<S: RegionSpawner> WorldManager<S> {
                 accounted_in: p.accounted_in,
             };
             if let Some(old) = self.in_flight.insert(p.bundle.id, entry) {
-                log::error!("{:?} waited for {rc:?} while in flight to {:?}", p.bundle.id, old.target);
+                log::error!(
+                    "{:?} waited for {rc:?} while in flight to {:?}",
+                    p.bundle.id,
+                    old.target
+                );
             }
             self.locations.insert(p.bundle.id, rc);
-            self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(p.bundle), p.stamp));
+            self.send_to_region(
+                rc,
+                RegionInput::Transfer(GameEventKind::EntityArrived(p.bundle), p.stamp),
+            );
         }
     }
 
@@ -3470,7 +3958,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         // An inbound transfer is in this host's part unless its sender accounts for it in the
         // pending world cut (it came wrapped, `world_cut.rs`).
         let view = source.map_or_else(
-            || self.inbound_accounted.is_some_and(|c| self.accounted_now(c)),
+            || {
+                self.inbound_accounted
+                    .is_some_and(|c| self.accounted_now(c))
+            },
             |(s, _)| self.in_cut_view(s),
         );
         self.accept_arrival_in_view(source, target, stamp, bundle, now_ms, view);
@@ -3497,14 +3988,25 @@ impl<S: RegionSpawner> WorldManager<S> {
             // absorbs anyone walking into one that is not (no wake).
             let delivered = self.regions.get(&target).is_some_and(|l| !l.stopping);
             if delivered {
-                self.note_moved(person, from, Step::Into { to: target, at: bundle_at(&bundle) });
+                self.note_moved(
+                    person,
+                    from,
+                    Step::Into {
+                        to: target,
+                        at: bundle_at(&bundle),
+                    },
+                );
             } else {
                 // Where it left its source; an inbound one where it stands (no region of
                 // this host is its source).
                 let at = left.unwrap_or_else(|| bundle_at(&bundle));
                 self.note_moved(person, from, Step::Absorbed { at });
             }
-            self.world_send(HostMsg::PersonCrossed { person, to: target, delivered });
+            self.world_send(HostMsg::PersonCrossed {
+                person,
+                to: target,
+                delivered,
+            });
             if !delivered {
                 self.locations.remove(&bundle.id);
                 return;
@@ -3530,9 +4032,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.ensure_running(target);
         self.enter_in_flight(from, target, stamp, &bundle, view);
         self.locations.insert(bundle.id, target);
-        self.send_to_region(target, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
+        self.send_to_region(
+            target,
+            RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp),
+        );
         // Never backwards: an inbound stamp may be older than a local one recorded.
-        let latest = self.directive_stamps.get(&target).map_or(stamp, |&s| s.max(stamp));
+        let latest = self
+            .directive_stamps
+            .get(&target)
+            .map_or(stamp, |&s| s.max(stamp));
         self.directive_stamps.insert(target, latest);
         let refresh = |m: &mut Self| {
             if let Some(s) = source {
@@ -3546,7 +4054,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             m.from = target;
             let c = client.expect("moving is keyed by client");
             // Behind the arrival, in its slot.
-            self.send_to_region(target, RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp));
+            self.send_to_region(
+                target,
+                RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp),
+            );
             refresh(self);
         } else if let Some(p) = client.and_then(|c| self.parking.get_mut(&c)) {
             // The body crossed a seam while its park was on the way: the old
@@ -3554,11 +4065,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             p.region = target;
             let c = client.expect("parking is keyed by client");
             // Behind the arrival, in its slot.
-            self.send_to_region(target, RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp));
+            self.send_to_region(
+                target,
+                RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp),
+            );
             refresh(self);
         } else if let Some(c) = client {
             self.homes.insert(c, target);
-            let _ = self.out.send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
+            let _ = self
+                .out
+                .send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
             // The old home may have just lost its keep-alive reason; the new one
             // just gained it.
             refresh(self);
@@ -3567,7 +4083,10 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: every crossing in flight, with its target.
     pub fn in_flight_ids(&self) -> Vec<(crate::EntityId, RegionCoords)> {
-        self.in_flight.iter().map(|(id, f)| (*id, f.target)).collect()
+        self.in_flight
+            .iter()
+            .map(|(id, f)| (*id, f.target))
+            .collect()
     }
 
     /// `bundle` (in `target`'s frame) is on its way from `source` to `target`.
@@ -3579,9 +4098,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         bundle: &crate::EntityBundle,
         in_source_view: bool,
     ) {
-        let entry = InFlight { target, stamp, bundle: bundle.clone(), in_source_view, accounted_in: self.inbound_accounted };
+        let entry = InFlight {
+            target,
+            stamp,
+            bundle: bundle.clone(),
+            in_source_view,
+            accounted_in: self.inbound_accounted,
+        };
         if let Some(old) = self.in_flight.insert(bundle.id, entry) {
-            log::error!("{:?} departed {source:?} while still in flight to {:?}", bundle.id, old.target);
+            log::error!(
+                "{:?} departed {source:?} while still in flight to {:?}",
+                bundle.id,
+                old.target
+            );
         }
     }
 
@@ -3592,19 +4121,31 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// waiting on `rc` gets its `ParkPlayer` again behind the body; returns
     /// those clients (their parks are still in flight).
     fn restart_for_in_flight(&mut self, rc: RegionCoords) -> BTreeSet<ClientId> {
-        let intents: Vec<InFlightIntent> = self.in_flight_intents.iter().filter(|f| f.target == rc).cloned().collect();
+        let intents: Vec<InFlightIntent> = self
+            .in_flight_intents
+            .iter()
+            .filter(|f| f.target == rc)
+            .cloned()
+            .collect();
         self.in_flight_intents.retain(|f| f.target != rc);
         if !intents.is_empty() {
             self.ensure_running(rc);
-            log::warn!("{} intent(s) were in flight to lost region {rc:?}: sent again", intents.len());
+            log::warn!(
+                "{} intent(s) were in flight to lost region {rc:?}: sent again",
+                intents.len()
+            );
             for f in intents {
                 let lineage = std::mem::replace(&mut self.inbound_accounted, f.accounted_in);
                 self.send_intent_to(rc, f.msg, f.in_source_view);
                 self.inbound_accounted = lineage;
             }
         }
-        let ids: Vec<crate::EntityId> =
-            self.in_flight.iter().filter(|(_, f)| f.target == rc).map(|(id, _)| *id).collect();
+        let ids: Vec<crate::EntityId> = self
+            .in_flight
+            .iter()
+            .filter(|(_, f)| f.target == rc)
+            .map(|(id, _)| *id)
+            .collect();
         let mut parks = BTreeSet::new();
         if ids.is_empty() {
             return parks;
@@ -3613,18 +4154,26 @@ impl<S: RegionSpawner> WorldManager<S> {
         for id in ids {
             let f = self.in_flight[&id].clone();
             if matches!(f.bundle.kind, EntityKind::Person { .. }) && self.world.is_some() {
-                log::warn!("{id:?} was in flight to lost region {rc:?}: the history places that person again");
+                log::warn!(
+                    "{id:?} was in flight to lost region {rc:?}: the history places that person again"
+                );
                 self.in_flight.remove(&id);
                 continue;
             }
             log::warn!("{id:?} was in flight to lost region {rc:?}: sent again");
             let client = f.bundle.client.as_ref().map(|(c, _)| *c);
-            self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(f.bundle), f.stamp));
+            self.send_to_region(
+                rc,
+                RegionInput::Transfer(GameEventKind::EntityArrived(f.bundle), f.stamp),
+            );
             let Some(c) = client else { continue };
             let parked_here = self.parking.get(&c).is_some_and(|p| p.region == rc)
                 || self.moving.get(&c).is_some_and(|m| m.from == rc);
             if parked_here {
-                self.send_to_region(rc, RegionInput::Transfer(GameEventKind::ParkPlayer(c), f.stamp));
+                self.send_to_region(
+                    rc,
+                    RegionInput::Transfer(GameEventKind::ParkPlayer(c), f.stamp),
+                );
                 parks.insert(c);
             }
         }
@@ -3633,7 +4182,10 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The incarnation `rc` runs (a fresh number per start), if it runs.
     pub fn region_incarnation(&self, rc: RegionCoords) -> Option<u64> {
-        self.regions.contains_key(&rc).then(|| self.incarnation.get(&rc).copied()).flatten()
+        self.regions
+            .contains_key(&rc)
+            .then(|| self.incarnation.get(&rc).copied())
+            .flatten()
     }
 
     pub fn running_regions(&self) -> Vec<RegionCoords> {
@@ -3665,7 +4217,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// (e.g. `Leave` then the transport closing) finds no session.
     fn client_disconnected(&mut self, id: ClientId, now_ms: u64) {
         self.observer_tickets.retain(|(c, _), _| *c != id);
-        if self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
+        if self
+            .sessions
+            .get(&id)
+            .is_some_and(|s| s.kind == SessionKind::Observer)
+        {
             // Another host holds the body: only the session's subscriptions end.
             self.end_session(id, now_ms);
             self.deferred_packets.remove(&id);
@@ -3692,7 +4248,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             // the body is; it becomes this park (the record keeps the old region).
             let target = self.homes.remove(&id);
             if let Some(player) = player {
-                self.parking.insert(id, Parking { player, region: m.from, adventure });
+                self.parking.insert(
+                    id,
+                    Parking {
+                        player,
+                        region: m.from,
+                        adventure,
+                    },
+                );
             }
             self.refresh_keepalive(m.from, now_ms);
             if let Some(target) = target {
@@ -3709,18 +4272,31 @@ impl<S: RegionSpawner> WorldManager<S> {
         }) {
             match player {
                 Some(player) => {
-                    self.parking.insert(id, Parking { player, region: home, adventure });
+                    self.parking.insert(
+                        id,
+                        Parking {
+                            player,
+                            region: home,
+                            adventure,
+                        },
+                    );
                     // A body still on its way into its home (a crossing, a hand-off from
                     // another host) is parked behind its arrival, in its slot — as one
                     // whose park was on the way when it crossed (`accept_arrival`).
                     let arriving = self
                         .in_flight
                         .values()
-                        .find(|f| f.target == home && f.bundle.client.as_ref().is_some_and(|(c, _)| *c == id))
+                        .find(|f| {
+                            f.target == home
+                                && f.bundle.client.as_ref().is_some_and(|(c, _)| *c == id)
+                        })
                         .map(|f| f.stamp);
                     match arriving {
                         Some(stamp) => {
-                            self.send_to_region(home, RegionInput::Transfer(GameEventKind::ParkPlayer(id), stamp));
+                            self.send_to_region(
+                                home,
+                                RegionInput::Transfer(GameEventKind::ParkPlayer(id), stamp),
+                            );
                         }
                         None => self.send_play_event(home, GameEventKind::ParkPlayer(id)),
                     }
@@ -3736,11 +4312,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// may only subscribe, release, and send input for its own body (forwarded to the host
     /// holding it, `peers.rs`) — never play, leave or anything else.
     fn observer_drops(&self, id: ClientId, packet: &ClientPacket) -> bool {
-        if !self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
+        if !self
+            .sessions
+            .get(&id)
+            .is_some_and(|s| s.kind == SessionKind::Observer)
+        {
             return false;
         }
         match packet {
-            ClientPacket::RequestRegionConnection(_) | ClientPacket::ReleaseRegionConnection(_) => false,
+            ClientPacket::RequestRegionConnection(_) | ClientPacket::ReleaseRegionConnection(_) => {
+                false
+            }
             ClientPacket::GameEventAfterTick(event, _) => !matches!(
                 &event.kind,
                 kind @ (GameEventKind::PlayerInput(..)
@@ -3773,7 +4355,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             .collect();
         for c in idle {
             log::info!("client {c}: observer session idle for {OBSERVER_IDLE_CLOSE_MS} ms; closed");
-            let _ = self.out.send((Some(c), ServerPacket::Refused(OBSERVER_IDLE_REFUSAL.to_string())));
+            let _ = self.out.send((
+                Some(c),
+                ServerPacket::Refused(OBSERVER_IDLE_REFUSAL.to_string()),
+            ));
             self.client_disconnected(c, now_ms);
         }
     }
@@ -3787,7 +4372,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             let _ = self.out.send((Some(client), ServerPacket::Calendar(now)));
         }
         if self.world.is_some() {
-            let _ = self.out.send((Some(client), ServerPacket::Sites(self.world_sites())));
+            let _ = self
+                .out
+                .send((Some(client), ServerPacket::Sites(self.world_sites())));
         }
     }
 
@@ -3796,7 +4383,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         // What it was sent elsewhere for goes with it (its `asked_elsewhere` with the session).
         self.redirected.retain(|(c, _), _| *c != id);
         self.drain_forget(id);
-        let Some(session) = self.sessions.remove(&id) else { return };
+        let Some(session) = self.sessions.remove(&id) else {
+            return;
+        };
         for rc in session.subscribed {
             self.unsubscribe_link(id, rc, now_ms);
         }
@@ -3810,7 +4399,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// process ends. Then [`Self::shutdown_all`]; regions answer `ParkPlayer` first.
     pub fn park_all_players(&mut self, now_ms: u64) {
         // And the players handed here whose session has not come yet.
-        let online: BTreeSet<ClientId> = self.sessions.keys().chain(self.awaiting_session.keys()).copied().collect();
+        let online: BTreeSet<ClientId> = self
+            .sessions
+            .keys()
+            .chain(self.awaiting_session.keys())
+            .copied()
+            .collect();
         for id in online {
             self.client_disconnected(id, now_ms);
         }
@@ -3820,12 +4414,26 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// closes it); its player parks.
     fn supersede(&mut self, player: PlayerId, reason: &str, now_ms: u64) {
         // Observer sessions of it too (they are not in `player_of`).
-        let mut sessions: BTreeSet<ClientId> =
-            self.player_of.iter().filter(|(_, p)| **p == player).map(|(c, _)| *c).collect();
-        sessions.extend(self.sessions.iter().filter(|(_, s)| s.player == Some(player)).map(|(c, _)| *c));
+        let mut sessions: BTreeSet<ClientId> = self
+            .player_of
+            .iter()
+            .filter(|(_, p)| **p == player)
+            .map(|(c, _)| *c)
+            .collect();
+        sessions.extend(
+            self.sessions
+                .iter()
+                .filter(|(_, s)| s.player == Some(player))
+                .map(|(c, _)| *c),
+        );
         for id in sessions {
-            log::info!("client {id}: player {} superseded by the login service ({reason})", player.0);
-            let _ = self.out.send((Some(id), ServerPacket::Refused(reason.to_string())));
+            log::info!(
+                "client {id}: player {} superseded by the login service ({reason})",
+                player.0
+            );
+            let _ = self
+                .out
+                .send((Some(id), ServerPacket::Refused(reason.to_string())));
             self.client_disconnected(id, now_ms);
         }
     }
@@ -3834,28 +4442,54 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// id) is ended in its favour. `false` = refused ([`DUPLICATE_SESSION_REFUSAL`]): the
     /// id still has state here (a session, a park, a move, a creation), which stays as it
     /// was — nothing is sent to the id, the live session owns it.
-    fn client_connected(&mut self, id: ClientId, player: PlayerId, record: Option<PlayerRecord>, now_ms: u64) -> bool {
+    fn client_connected(
+        &mut self,
+        id: ClientId,
+        player: PlayerId,
+        record: Option<PlayerRecord>,
+        now_ms: u64,
+    ) -> bool {
         if self.client_id_live(id) {
-            log::warn!("client {id}: {DUPLICATE_SESSION_REFUSAL} (a duplicate ClientConnected is ignored)");
+            log::warn!(
+                "client {id}: {DUPLICATE_SESSION_REFUSAL} (a duplicate ClientConnected is ignored)"
+            );
             return false;
         }
         if let Some(&host) = self.departed.get(&player) {
             // Its body (or its parked record) is on that host: nothing is placed here.
-            log::warn!("client {id}: player {} is on host {host}; login refused here", player.0);
-            let _ = self.out.send((Some(id), ServerPacket::Refused(PLAYER_ELSEWHERE_REFUSAL.to_string())));
+            log::warn!(
+                "client {id}: player {} is on host {host}; login refused here",
+                player.0
+            );
+            let _ = self.out.send((
+                Some(id),
+                ServerPacket::Refused(PLAYER_ELSEWHERE_REFUSAL.to_string()),
+            ));
             return false;
         }
         // The first packet of every session: which host this is.
-        let _ = self.out.send((Some(id), ServerPacket::Host(self.endpoint.clone())));
-        let elsewhere: Vec<ClientId> =
-            self.player_of.iter().filter(|(c, p)| **p == player && **c != id).map(|(c, _)| *c).collect();
+        let _ = self
+            .out
+            .send((Some(id), ServerPacket::Host(self.endpoint.clone())));
+        let elsewhere: Vec<ClientId> = self
+            .player_of
+            .iter()
+            .filter(|(c, p)| **p == player && **c != id)
+            .map(|(c, _)| *c)
+            .collect();
         for old in elsewhere {
             // The new session takes over (a crashed client's session lingers
             // until the transport times out): the old one is told why and
             // ended — the server edge closes it — and its player parks, so the
             // new session is restored once the park is back.
-            log::info!("client {id}: player {} takes over from client {old}", player.0);
-            let _ = self.out.send((Some(old), ServerPacket::Refused(LOGGED_IN_ELSEWHERE.to_string())));
+            log::info!(
+                "client {id}: player {} takes over from client {old}",
+                player.0
+            );
+            let _ = self.out.send((
+                Some(old),
+                ServerPacket::Refused(LOGGED_IN_ELSEWHERE.to_string()),
+            ));
             self.client_disconnected(old, now_ms);
         }
         self.sessions.entry(id).or_default().player = Some(player);
@@ -3867,7 +4501,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         let in_flight = self.parking.values().any(|p| p.player == player);
         if in_flight {
             // Reconnected faster than the park: restore once it is back.
-            log::info!("client {id}: player {} is still parking; restore deferred", player.0);
+            log::info!(
+                "client {id}: player {} is still parking; restore deferred",
+                player.0
+            );
             self.awaiting_park.insert(player, (id, record));
             self.deferred_packets.entry(id).or_default();
         } else {
@@ -3876,7 +4513,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.place_player(id, record, held_here, now_ms);
         }
         if let Some(map) = &self.world_map {
-            let _ = self.out.send((Some(id), ServerPacket::WorldMap(map.clone())));
+            let _ = self
+                .out
+                .send((Some(id), ServerPacket::WorldMap(map.clone())));
         }
         if self.world.is_some() {
             // Before the coordinator's first view arrives there is no calendar to tell;
@@ -3884,8 +4523,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             if let Some(now) = self.calendar_now(now_ms) {
                 let _ = self.out.send((Some(id), ServerPacket::Calendar(now)));
             }
-            let _ = self.out.send((Some(id), ServerPacket::Sites(self.world_sites())));
-            let _ = self.out.send((Some(id), ServerPacket::Civs(self.world_civs())));
+            let _ = self
+                .out
+                .send((Some(id), ServerPacket::Sites(self.world_sites())));
+            let _ = self
+                .out
+                .send((Some(id), ServerPacket::Civs(self.world_civs())));
             if !self.restore_pending(id) {
                 self.send_claims(id);
                 self.world_player_online(id);
@@ -3916,9 +4559,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `Client` (no claims); no record = a fresh player at the spawn region.
     ///
     /// `held_here`: the record was this host's parked one (not the store's, read by the edge).
-    fn place_player(&mut self, id: ClientId, record: Option<PlayerRecord>, held_here: bool, now_ms: u64) {
+    fn place_player(
+        &mut self,
+        id: ClientId,
+        record: Option<PlayerRecord>,
+        held_here: bool,
+        now_ms: u64,
+    ) {
         // Its region canonical (a record is stored so; folded again here).
-        let record = record.map(|r| PlayerRecord { region: self.canonical(r.region), ..r });
+        let record = record.map(|r| PlayerRecord {
+            region: self.canonical(r.region),
+            ..r
+        });
         let target = match &record {
             Some(r) if !crate::off_map(self.map_extent(), r.region) => r.region,
             _ => SPAWN_REGION,
@@ -3926,14 +4578,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         // A record parked here whose land another host owns now (released here, assigned there):
         // this host holds its newest copy, so the player goes there as a move ([`Self::move_to_peer`]:
         // queued, conserved; the session follows as an observer of the new home).
-        if held_here && self.is_foreign(target) && record.as_ref().is_some_and(|r| r.region == target) {
+        if held_here
+            && self.is_foreign(target)
+            && record.as_ref().is_some_and(|r| r.region == target)
+        {
             // Its claim, as a restore here would take it up: `move_to_peer` hands over the
             // session's claim (`adventurer_of`), not the record's.
             if let Some(site) = record.as_ref().and_then(|r| self.restored_adventure(r)) {
                 self.adventurer_of.insert(id, site);
             }
             let landing = self.landing_in(target);
-            let m = Moving { from: target, target, landing, then: Vec::new() };
+            let m = Moving {
+                from: target,
+                target,
+                landing,
+                then: Vec::new(),
+            };
             return self.move_to_peer(id, m, record.map(Box::new), now_ms);
         }
         // A login whose record lies on another host is placed there by the login relay
@@ -3961,28 +4621,41 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            let _ = self.out.send((Some(id), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+            let _ = self.out.send((
+                Some(id),
+                ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string()),
+            ));
             self.client_disconnected(id, now_ms);
             return;
         }
         match record {
-            Some(record) if !crate::off_map(self.map_extent(), record.region) => self.restore_player(id, record, now_ms),
+            Some(record) if !crate::off_map(self.map_extent(), record.region) => {
+                self.restore_player(id, record, now_ms)
+            }
             Some(record) => {
-                log::warn!("client {id}: its record's region {:?} is off the map; placed at spawn", record.region);
+                log::warn!(
+                    "client {id}: its record's region {:?} is off the map; placed at spawn",
+                    record.region
+                );
                 let landing = self.landing_in(SPAWN_REGION);
                 self.homes.insert(id, SPAWN_REGION);
                 self.send_play_event(
                     SPAWN_REGION,
                     GameEventKind::CreateClientAt(id, landing, Some(Box::new(record.client))),
                 );
-                let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(SPAWN_REGION), id)));
+                let _ = self
+                    .out
+                    .send((Some(id), ServerPacket::PlayerRegion(Some(SPAWN_REGION), id)));
                 self.refresh_keepalive(SPAWN_REGION, now_ms);
             }
             None => {
                 // Server-authoritative player creation, once per session.
                 self.ensure_running(SPAWN_REGION);
                 self.homes.insert(id, SPAWN_REGION);
-                self.send_to_region(SPAWN_REGION, RegionInput::Event(GameEventKind::CreateClient(id)));
+                self.send_to_region(
+                    SPAWN_REGION,
+                    RegionInput::Event(GameEventKind::CreateClient(id)),
+                );
             }
         }
     }
@@ -3992,7 +4665,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// claim stands. The filter is only this host's early guess: the coordinator's answer to
     /// `PlayerOnline` is final (`ClaimIs`).
     fn restored_adventure(&self, record: &PlayerRecord) -> Option<SiteId> {
-        record.adventure.filter(|site| self.world_view.is_none() || self.site_regions.contains_key(site))
+        record
+            .adventure
+            .filter(|site| self.world_view.is_none() || self.site_regions.contains_key(site))
     }
 
     /// Put a returning player back: its body and `Client` in the record's region
@@ -4009,9 +4684,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(site) = adventure {
             self.adventurer_of.insert(id, site);
         }
-        let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(region), id)));
+        let _ = self
+            .out
+            .send((Some(id), ServerPacket::PlayerRegion(Some(region), id)));
         self.refresh_keepalive(region, now_ms);
-        crate::perf_event!("player_restored", "client={id} to={},{}", region.x, region.z);
+        crate::perf_event!(
+            "player_restored",
+            "client={id} to={},{}",
+            region.x,
+            region.z
+        );
     }
 
     /// A region answered `ParkPlayer`. The record (with the claims the manager
@@ -4045,7 +4727,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.parking.remove(&client);
         match record {
             Some(record) => {
-                let record = PlayerRecord { adventure: p.adventure, ..*record };
+                let record = PlayerRecord {
+                    adventure: p.adventure,
+                    ..*record
+                };
                 self.parked_players.insert(p.player, record.clone());
                 self.cut_transit(p.player, &record);
                 if let Some(body) = body {
@@ -4062,7 +4747,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// edge read from the store, else as a fresh player — and its held
     /// requests are replayed.
     fn park_settled(&mut self, player: PlayerId, now_ms: u64) {
-        let Some((waiting, edge_record)) = self.awaiting_park.remove(&player) else { return };
+        let Some((waiting, edge_record)) = self.awaiting_park.remove(&player) else {
+            return;
+        };
         if !self.sessions.contains_key(&waiting) {
             return;
         }
@@ -4091,7 +4778,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             .map(|(c, p)| (*c, p.player))
             .collect();
         for (client, player) in lost {
-            log::error!("region {rc:?} was lost with client {client}'s park in flight (player {})", player.0);
+            log::error!(
+                "region {rc:?} was lost with client {client}'s park in flight (player {})",
+                player.0
+            );
             self.parking.remove(&client);
             self.park_settled(player, self.clock_ms);
         }
@@ -4117,7 +4807,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             running: self.regions.len(),
             parked: self.parked.len(),
             lod_in_flight: self.lod_in_flight.len(),
-            lod_waiting_terrain: self.lod_pending_terrain.values().map(BTreeSet::len).sum::<usize>()
+            lod_waiting_terrain: self
+                .lod_pending_terrain
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
                 + self.lod_tile_waiting.len(),
             lod_cache: self.lod_cache.len(),
             terrain_cache: self.terrain_cache.len(),
@@ -4151,7 +4845,8 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     fn mark_lod_in_flight(&mut self, key: LodKey) {
         self.lod_in_flight.insert(key);
-        self.lod_submitted_at.insert(key, crate::perf::Stopwatch::start());
+        self.lod_submitted_at
+            .insert(key, crate::perf::Stopwatch::start());
         self.perf.lod_submitted += 1;
     }
 
@@ -4160,7 +4855,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// serving at once (fenced) and saves nothing.
     pub fn refuse_all_sessions(&mut self, why: &str) {
         for client in self.sessions.keys().copied() {
-            let _ = self.out.send((Some(client), ServerPacket::Refused(why.to_string())));
+            let _ = self
+                .out
+                .send((Some(client), ServerPacket::Refused(why.to_string())));
         }
     }
 
@@ -4172,9 +4869,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Ends `clients` (sessions this host had, parked meanwhile) and every session still open
     /// with `Refused(why)` (the server edge closes the connections); changes nothing else.
     pub fn refuse_sessions(&mut self, clients: &[ClientId], why: &str) {
-        let all: BTreeSet<ClientId> = clients.iter().copied().chain(self.sessions.keys().copied()).collect();
+        let all: BTreeSet<ClientId> = clients
+            .iter()
+            .copied()
+            .chain(self.sessions.keys().copied())
+            .collect();
         for client in all {
-            let _ = self.out.send((Some(client), ServerPacket::Refused(why.to_string())));
+            let _ = self
+                .out
+                .send((Some(client), ServerPacket::Refused(why.to_string())));
         }
     }
 
@@ -4193,12 +4896,20 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// not reachable ([`Self::reaches`]), or its stored state could not be read and its
     /// retry tick has not come ([`STORE_LOAD_RETRY_SECS`]).
     pub fn is_unavailable(&self, rc: RegionCoords) -> bool {
-        !self.reaches(rc) || self.unavailable.get(&rc).is_some_and(|&retry| self.spawner.world_tick() < retry)
+        !self.reaches(rc)
+            || self
+                .unavailable
+                .get(&rc)
+                .is_some_and(|&retry| self.spawner.world_tick() < retry)
     }
 
     /// The regions that are unavailable now (tests, the `[server]` line).
     pub fn unavailable_regions(&self) -> Vec<RegionCoords> {
-        self.unavailable.keys().copied().filter(|rc| self.is_unavailable(*rc)).collect()
+        self.unavailable
+            .keys()
+            .copied()
+            .filter(|rc| self.is_unavailable(*rc))
+            .collect()
     }
 
     /// Regions whose retry tick has come are started again if a session
@@ -4208,13 +4919,25 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         let now = self.spawner.world_tick();
-        let due: Vec<RegionCoords> = self.unavailable.iter().filter(|(_, &t)| now >= t).map(|(rc, _)| *rc).collect();
+        let due: Vec<RegionCoords> = self
+            .unavailable
+            .iter()
+            .filter(|(_, &t)| now >= t)
+            .map(|(rc, _)| *rc)
+            .collect();
         for rc in due {
             self.unavailable.remove(&rc);
-            let subscribers: Vec<ClientId> =
-                self.sessions.iter().filter(|(_, s)| s.subscribed.contains(&rc)).map(|(c, _)| *c).collect();
+            let subscribers: Vec<ClientId> = self
+                .sessions
+                .iter()
+                .filter(|(_, s)| s.subscribed.contains(&rc))
+                .map(|(c, _)| *c)
+                .collect();
             if !subscribers.is_empty() {
-                log::info!("[server] retrying {rc:?} for {} subscriber(s)", subscribers.len());
+                log::info!(
+                    "[server] retrying {rc:?} for {} subscriber(s)",
+                    subscribers.len()
+                );
             }
             if self.succession_pinned.contains(&rc) {
                 // Loaded for an adoption (R4): its settle cut waits for it.
@@ -4253,13 +4976,26 @@ impl<S: RegionSpawner> WorldManager<S> {
             cut.waiting.remove(&rc);
         }
         self.history_region_lost(rc);
-        let intents: Vec<InFlightIntent> = self.in_flight_intents.iter().filter(|f| f.target == rc).cloned().collect();
+        let intents: Vec<InFlightIntent> = self
+            .in_flight_intents
+            .iter()
+            .filter(|f| f.target == rc)
+            .cloned()
+            .collect();
         self.in_flight_intents.retain(|f| f.target != rc);
         for f in intents {
-            self.intent_mailbox.entry(rc).or_default().push(Mail { msg: f.msg, in_source_view: f.in_source_view, accounted_in: f.accounted_in });
+            self.intent_mailbox.entry(rc).or_default().push(Mail {
+                msg: f.msg,
+                in_source_view: f.in_source_view,
+                accounted_in: f.accounted_in,
+            });
         }
-        let ids: Vec<crate::EntityId> =
-            self.in_flight.iter().filter(|(_, f)| f.target == rc).map(|(id, _)| *id).collect();
+        let ids: Vec<crate::EntityId> = self
+            .in_flight
+            .iter()
+            .filter(|(_, f)| f.target == rc)
+            .map(|(id, _)| *id)
+            .collect();
         for id in ids {
             let f = self.in_flight.remove(&id).expect("listed");
             if matches!(f.bundle.kind, EntityKind::Person { .. }) && self.world.is_some() {
@@ -4268,10 +5004,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             if f.bundle.client.is_some() {
                 match self.crossing_record(rc, &f.bundle) {
                     Some((player, record)) => {
-                        log::error!("player {} was crossing into unavailable {rc:?}: parked", player.0);
+                        log::error!(
+                            "player {} was crossing into unavailable {rc:?}: parked",
+                            player.0
+                        );
                         self.parked_players.insert(player, record);
                     }
-                    None => log::error!("{id:?}, a player crossing into unavailable {rc:?}, has no player: lost"),
+                    None => log::error!(
+                        "{id:?}, a player crossing into unavailable {rc:?}, has no player: lost"
+                    ),
                 }
                 continue;
             }
@@ -4287,10 +5028,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.forget_locations(rc);
         // Bodies created there never existed: the records they carried are
         // parked again (the next cut carries them, a reconnect restores them).
-        let lost: Vec<ClientId> = self.creating.iter().filter(|(_, (t, ..))| *t == rc).map(|(c, _)| *c).collect();
+        let lost: Vec<ClientId> = self
+            .creating
+            .iter()
+            .filter(|(_, (t, ..))| *t == rc)
+            .map(|(c, _)| *c)
+            .collect();
         for client in lost {
             let (_, player, record) = self.creating.remove(&client).expect("listed");
-            log::warn!("player {}'s body was to be created in unavailable {rc:?}: its record is parked", player.0);
+            log::warn!(
+                "player {}'s body was to be created in unavailable {rc:?}: its record is parked",
+                player.0
+            );
             self.parked_players.insert(player, record);
         }
         // Players handed here whose session has not come too: they have no body either.
@@ -4303,7 +5052,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             .collect();
         for client in homed {
             if self.sessions.contains_key(&client) {
-                let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+                let _ = self.out.send((
+                    Some(client),
+                    ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string()),
+                ));
             } else {
                 // Its record is parked above (`creating`): the host it came from is told.
                 self.tell_awaited_parked(client);
@@ -4356,7 +5108,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         // another host (an heir's, R4) gets a higher incarnation than any it had there.
         self.next_incarnation = (self.next_incarnation + 1).max(self.spawner.world_tick());
         self.incarnation.insert(rc, self.next_incarnation);
-        let _ = self.region_out_send.send((rc, RegionOutput::Incarnation(self.next_incarnation)));
+        let _ = self
+            .region_out_send
+            .send((rc, RegionOutput::Incarnation(self.next_incarnation)));
         let input = self.spawner.spawn(rc, seed, self.region_out_send.clone());
         // Very first: join the world's tick numbering before anything else.
         let start = self.spawner.world_tick();
@@ -4429,7 +5183,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             let running = self.regions.get(&n).is_some_and(|l| !l.stopping);
             if let Some(snap) = self.terrain_cache.get(&n) {
-                if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.map_extent(), n, rc, &snap) {
+                if let Some(seed) =
+                    crate::halo::halo_seed_from_snapshot(self.map_extent(), n, rc, &snap)
+                {
                     let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
                 }
             } else if running {
@@ -4441,7 +5197,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             } else {
                 // Not cached: LOD keeps its own choice of pristine sources.
                 let snap = TerrainSnapshot::from_columns(self.generate_timed(n));
-                if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.map_extent(), n, rc, &snap) {
+                if let Some(seed) =
+                    crate::halo::halo_seed_from_snapshot(self.map_extent(), n, rc, &snap)
+                {
                     let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
                 }
             }
@@ -4488,7 +5246,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         session.subscribed.insert(rc);
         self.ensure_running(rc);
         // Unavailable (its store read failed): subscribed again at its retry.
-        let Some(link) = self.regions.get_mut(&rc) else { return };
+        let Some(link) = self.regions.get_mut(&rc) else {
+            return;
+        };
         if link.stopping {
             // Recorded in session.subscribed above, so a disconnect (or
             // release) before Stopped arrives still reaches
@@ -4514,7 +5274,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     fn unsubscribe_link(&mut self, client: ClientId, rc: RegionCoords, now_ms: u64) {
-        let Some(link) = self.regions.get_mut(&rc) else { return };
+        let Some(link) = self.regions.get_mut(&rc) else {
+            return;
+        };
         link.subscribers.remove(&client);
         // The client may only exist as a pending intent (subscribed during
         // the stopping window); clear that too so a Stopped-replay can't
@@ -4532,7 +5294,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             .chain(self.awaiting_session.keys())
             .any(|c| self.homes.get(c) == Some(&rc))
             || self.moving.values().any(|m| m.from == rc);
-        let Some(link) = self.regions.get_mut(&rc) else { return };
+        let Some(link) = self.regions.get_mut(&rc) else {
+            return;
+        };
         if link.subscribers.is_empty() && !is_home {
             link.empty_since_ms.get_or_insert(now_ms);
         } else {
@@ -4565,7 +5329,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         let stamp = self.spawner.world_tick();
         for n in self.halo_neighbours(rc) {
             if self.regions.get(&n).is_some_and(|l| !l.stopping) {
-                self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloSourceGone(rc), stamp));
+                self.send_to_region(
+                    n,
+                    RegionInput::Transfer(GameEventKind::HaloSourceGone(rc), stamp),
+                );
             }
         }
     }
@@ -4635,14 +5402,32 @@ impl<S: RegionSpawner> WorldManager<S> {
         match (running, msg) {
             (_, IntentMsg::Reply(s)) if s.hops > crate::intents::MAX_INTENT_REPLY_HOPS => {
                 self.intent_replies_lost += 1;
-                log::warn!("[server] intent reply {:?} for {:?} given up after {} hops", s.reply, s.reply.to(), s.hops);
+                log::warn!(
+                    "[server] intent reply {:?} for {:?} given up after {} hops",
+                    s.reply,
+                    s.reply.to(),
+                    s.hops
+                );
                 self.items_lost(&s.reply);
             }
             (Some(rc), msg) => self.send_intent_to(rc, msg, view),
             (None, IntentMsg::Intent(s)) => {
-                log::debug!("[server] intent {:?} at {:?}: owner {owner:?} not running; refused", s.intent, s.target);
+                log::debug!(
+                    "[server] intent {:?} at {:?}: owner {owner:?} not running; refused",
+                    s.intent,
+                    s.target
+                );
                 let reply = IntentReply::Refused(s.intent, IntentRefusal::OwnerNotRunning);
-                self.route_intent(IntentMsg::Reply(SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 }), emitter, view);
+                self.route_intent(
+                    IntentMsg::Reply(SentReply {
+                        reply,
+                        hint: s.from,
+                        due: s.due + 1,
+                        hops: 0,
+                    }),
+                    emitter,
+                    view,
+                );
             }
             (None, IntentMsg::Reply(s)) => {
                 // Held for a region that ran here, or one whose owner this host does not
@@ -4650,16 +5435,27 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let unowned = |rc: &RegionCoords| !self.owns(*rc) && !self.is_foreign(*rc);
                 // A region pinned for an adoption (R4) runs again at its retry.
                 let waiting = owner.filter(|rc| {
-                    self.parked.contains_key(rc) || self.regions.contains_key(rc) || unowned(rc) || self.succession_pinned.contains(rc)
+                    self.parked.contains_key(rc)
+                        || self.regions.contains_key(rc)
+                        || unowned(rc)
+                        || self.succession_pinned.contains(rc)
                 });
                 match waiting {
                     Some(rc) => {
                         let accounted_in = self.inbound_accounted;
-                        self.intent_mailbox.entry(rc).or_default().push(Mail { msg, in_source_view: view, accounted_in })
+                        self.intent_mailbox.entry(rc).or_default().push(Mail {
+                            msg,
+                            in_source_view: view,
+                            accounted_in,
+                        })
                     }
                     None => {
                         self.intent_replies_lost += 1;
-                        log::warn!("[server] intent reply {:?} for {:?} lost: {owner:?} never ran", s.reply, s.reply.to());
+                        log::warn!(
+                            "[server] intent reply {:?} for {:?} lost: {owner:?} never ran",
+                            s.reply,
+                            s.reply.to()
+                        );
                         self.items_lost(&s.reply);
                     }
                 }
@@ -4678,11 +5474,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Returns whether the reply was dealt with here.
     fn salvage_reply(&mut self, s: crate::SentReply, emitter: RegionCoords, view: bool) -> bool {
         let to = s.reply.to();
-        let Some((cell, mut stack)) = s.reply.carried_items() else { return false };
+        let Some((cell, mut stack)) = s.reply.carried_items() else {
+            return false;
+        };
         if to.is_region() || self.locations.contains_key(&to) || self.in_flight.contains_key(&to) {
             return false;
         }
-        let parked = self.parked_bodies.get(&to).copied().filter(|p| self.parked_players.contains_key(p));
+        let parked = self
+            .parked_bodies
+            .get(&to)
+            .copied()
+            .filter(|p| self.parked_players.contains_key(p));
         if let Some(player) = parked {
             // Sent after its region answered the pending cut, the items are
             // still in that region's snapshot: the cut keeps the record as
@@ -4699,7 +5501,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 record.client.cursor = Some(stack);
                 stack.count = 0;
             }
-            log::info!("[server] reply {:?} for parked {to:?}: folded into player {}'s record", s.reply, player.0);
+            log::info!(
+                "[server] reply {:?} for parked {to:?}: folded into player {}'s record",
+                s.reply,
+                player.0
+            );
             let record = record.clone();
             if !view {
                 self.cut_transit(player, &record);
@@ -4714,7 +5520,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         // A refused place's block has no cell to go to: given up, counted.
         let Some(cell) = cell else { return false };
         let owner = cell.to_local().0;
-        log::info!("[server] reply {:?} for gone {to:?}: {stack:?} put down at {cell:?}", s.reply);
+        log::info!(
+            "[server] reply {:?} for gone {to:?}: {stack:?} put down at {cell:?}",
+            s.reply
+        );
         let sent = crate::SentIntent {
             target: crate::Target::Pile(cell),
             intent: crate::Intent::DepositItems {
@@ -4736,7 +5545,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn items_lost(&mut self, reply: &crate::IntentReply) {
         if let Some((cell, stack)) = reply.carried_items() {
             self.items_destroyed += u64::from(stack.count);
-            log::warn!("[server] {stack:?} of pile {cell:?} destroyed: their reply {reply:?} had nowhere to go");
+            log::warn!(
+                "[server] {stack:?} of pile {cell:?} destroyed: their reply {reply:?} had nowhere to go"
+            );
         }
     }
 
@@ -4760,7 +5571,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Test support: the players whose body's creation (a move, a restore) is on its way
     /// to a region of this host — their record is only here meanwhile.
     pub fn creating_players(&self) -> Vec<(ClientId, PlayerId)> {
-        self.creating.iter().map(|(c, (_, player, _))| (*c, *player)).collect()
+        self.creating
+            .iter()
+            .map(|(c, (_, player, _))| (*c, *player))
+            .collect()
     }
 
     /// Test support: `player`'s parked record.
@@ -4781,21 +5595,36 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: the replies waiting for a parked or stopping region.
     pub fn intent_mailbox(&self, rc: RegionCoords) -> Vec<crate::IntentMsg> {
-        self.intent_mailbox.get(&rc).into_iter().flatten().map(|m| m.msg).collect()
+        self.intent_mailbox
+            .get(&rc)
+            .into_iter()
+            .flatten()
+            .map(|m| m.msg)
+            .collect()
     }
 
     /// Test support: every intent and reply this manager holds on its way to one of its
     /// regions — in flight to a running one, or waiting in a mailbox.
     pub fn intents_held(&self) -> Vec<crate::IntentMsg> {
         let in_flight = self.in_flight_intents.iter().map(|f| f.msg);
-        in_flight.chain(self.intent_mailbox.values().flatten().map(|m| m.msg)).collect()
+        in_flight
+            .chain(self.intent_mailbox.values().flatten().map(|m| m.msg))
+            .collect()
     }
 
     /// `msg` to running `rc`, held there to its due tick, and in flight until
     /// `rc` confirms it (`in_source_view`: see [`InFlightIntent`]).
     fn send_intent_to(&mut self, rc: RegionCoords, msg: crate::IntentMsg, in_source_view: bool) {
-        self.in_flight_intents.push(InFlightIntent { msg, target: rc, in_source_view, accounted_in: self.inbound_accounted });
-        self.send_to_region(rc, RegionInput::Transfer(GameEventKind::Intent(msg), msg.due()));
+        self.in_flight_intents.push(InFlightIntent {
+            msg,
+            target: rc,
+            in_source_view,
+            accounted_in: self.inbound_accounted,
+        });
+        self.send_to_region(
+            rc,
+            RegionInput::Transfer(GameEventKind::Intent(msg), msg.due()),
+        );
     }
 
     fn send_to_region(&mut self, rc: RegionCoords, input: RegionInput) -> bool {
@@ -4809,7 +5638,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 | RegionInput::EventAfterTick(GameEventKind::PlayerInput(..), _) => {
                     log::debug!("send_to_region: {rc:?} is stopping; player input dropped");
                 }
-                input @ (RegionInput::Event(_) | RegionInput::EventAfterTick(..) | RegionInput::Transfer(..)) => {
+                input @ (RegionInput::Event(_)
+                | RegionInput::EventAfterTick(..)
+                | RegionInput::Transfer(..)) => {
                     // A transfer keeps its stamp for the region's next run.
                     self.pending_events.entry(rc).or_default().push(input);
                 }
@@ -4867,9 +5698,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some((payload, water, access)) = self.lod_cache.get_mut(&key) {
             *access = stamp;
             self.perf.lod_cache_hits += 1;
-            let _ = self
-                .out
-                .send((Some(client), ServerPacket::LodData(key, payload.clone(), water.clone())));
+            let _ = self.out.send((
+                Some(client),
+                ServerPacket::LodData(key, payload.clone(), water.clone()),
+            ));
             return;
         }
         if !self.lod_in_flight.contains(&key) {
@@ -4900,7 +5732,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                     keys.remove(&key);
                     !keys.is_empty()
                 });
-                if self.lod_key_images(key).is_some_and(|images| !images.is_empty()) {
+                if self
+                    .lod_key_images(key)
+                    .is_some_and(|images| !images.is_empty())
+                {
                     self.lod_cache.remove(&key);
                 }
             }
@@ -4913,11 +5748,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// a wrapping map's west or east edge.
     fn lod_key_images(&self, key: LodKey) -> Option<Vec<i64>> {
         let span = key.region_span();
-        let fits = |c: i32| c.checked_mul(span).and_then(|o| o.checked_add(span - 1)).is_some();
+        let fits = |c: i32| {
+            c.checked_mul(span)
+                .and_then(|o| o.checked_add(span - 1))
+                .is_some()
+        };
         if !fits(key.coords[0]) || !fits(key.coords[1]) {
             return None;
         }
-        let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) else { return Some(Vec::new()) };
+        let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) else {
+            return Some(Vec::new());
+        };
         let x0 = i64::from(key.coords[0]) * i64::from(span);
         let image = |x: i64| (x - i64::from(map.origin.x)).div_euclid(i64::from(map.width));
         let (lo, hi) = (image(x0), image(x0 + i64::from(span) - 1));
@@ -4957,14 +5798,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // builder reads the store (pristine if it cannot). Nothing is
                 // kept here, as for `Pristine`.
                 self.mark_lod_in_flight(key);
-                self.lod_builder.submit(LodBuildJob::Stored { key, region: rc });
+                self.lod_builder
+                    .submit(LodBuildJob::Stored { key, region: rc });
             } else if self.lod_builder.generates_pristine() {
                 // Never-run region: the builder's own threads generate it.
                 // Nothing full-resolution is kept here — the LOD payload is
                 // what gets cached (`lod_cache`), and a region that later
                 // runs or parks reports authoritative terrain itself.
                 self.mark_lod_in_flight(key);
-                self.lod_builder.submit(LodBuildJob::Pristine { key, region: rc });
+                self.lod_builder
+                    .submit(LodBuildJob::Pristine { key, region: rc });
             } else {
                 let columns = self.generate_timed(rc);
                 let snap = TerrainSnapshot::from_columns(columns);
@@ -4973,8 +5816,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.pristine_terrain.insert(rc, self.lod_access_counter);
                 self.evict_pristine_terrain();
                 self.mark_lod_in_flight(key);
-                self.lod_builder
-                    .submit(LodBuildJob::Region { key, chunks: snap.chunks });
+                self.lod_builder.submit(LodBuildJob::Region {
+                    key,
+                    chunks: snap.chunks,
+                });
             }
         } else {
             self.start_tile_build(key, client);
@@ -4996,8 +5841,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         // `(canonical, unwrapped)`: terrain from the first, placed in the
         // tile at the second (the key's own region, maybe past the seam).
         let map = self.map_extent();
-        let regions: Vec<(RegionCoords, RegionCoords)> =
-            key.regions().into_iter().map(|at| (crate::canonical(map, at), at)).collect();
+        let regions: Vec<(RegionCoords, RegionCoords)> = key
+            .regions()
+            .into_iter()
+            .map(|at| (crate::canonical(map, at), at))
+            .collect();
         let mut waiting = BTreeSet::new();
         for &(rc, _) in &regions {
             let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
@@ -5013,7 +5861,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)> = regions
             .iter()
-            .filter_map(|(rc, at)| self.terrain_cache.get(rc).map(|snap| (*at, snap.chunks.clone())))
+            .filter_map(|(rc, at)| {
+                self.terrain_cache
+                    .get(rc)
+                    .map(|snap| (*at, snap.chunks.clone()))
+            })
             .collect();
         // Saved regions with no terrain here: the builder overlays them from
         // the store (none of them is running — those were waited for above).
@@ -5022,7 +5874,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|(rc, _)| !self.terrain_cache.contains_key(rc) && self.lod_reads_stored(*rc))
             .collect();
         self.mark_lod_in_flight(key);
-        self.lod_builder.submit(LodBuildJob::Tile { key, overlays, stored });
+        self.lod_builder.submit(LodBuildJob::Tile {
+            key,
+            overlays,
+            stored,
+        });
     }
 
     /// Whether LOD of `rc` comes from the world store: the store holds it,
@@ -5037,7 +5893,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A region's terrain just landed in terrain_cache: submit any LOD builds
     /// that were waiting on it, region- or tile-keyed.
     fn lod_terrain_ready(&mut self, rc: RegionCoords, client: ClientId) {
-        let Some(keys) = self.lod_pending_terrain.remove(&rc) else { return };
+        let Some(keys) = self.lod_pending_terrain.remove(&rc) else {
+            return;
+        };
         for key in keys {
             if let Some(waiting) = self.lod_tile_waiting.get_mut(&key) {
                 waiting.remove(&rc);
@@ -5064,16 +5922,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         // A wrap-image key whose subscribers all left while it was built is
         // not cached (as `lod_drop_subscriber` drops one): no edit would reach it.
         let unheld_image = !self.lod_subscribers.contains_key(&key)
-            && self.lod_key_images(key).is_some_and(|images| !images.is_empty());
+            && self
+                .lod_key_images(key)
+                .is_some_and(|images| !images.is_empty());
         if !unheld_image {
-            self.lod_cache.insert(key, (payload.clone(), water.clone(), self.lod_access_counter));
+            self.lod_cache.insert(
+                key,
+                (payload.clone(), water.clone(), self.lod_access_counter),
+            );
             self.evict_lod_cache();
         }
         if let Some(subs) = self.lod_subscribers.get(&key) {
             for client in subs {
-                let _ = self
-                    .out
-                    .send((Some(*client), ServerPacket::LodData(key, payload.clone(), water.clone())));
+                let _ = self.out.send((
+                    Some(*client),
+                    ServerPacket::LodData(key, payload.clone(), water.clone()),
+                ));
             }
         }
     }
@@ -5093,7 +5957,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// clients requested ([`Self::lod_wrap_images`]) are stale too.
     fn invalidate_region_lod(&mut self, rc: RegionCoords) {
         self.invalidate_lod_at(rc);
-        let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) else { return };
+        let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) else {
+            return;
+        };
         let images: Vec<i64> = self.lod_wrap_images.keys().copied().collect();
         for k in images {
             let x = i64::from(rc.x) + k * i64::from(map.width);
@@ -5109,7 +5975,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         for factor in crate::lod::LOD_FACTORS {
             let key = LodKey::for_region(factor, at);
             self.lod_cache.remove(&key);
-            let has_subs = self.lod_subscribers.get(&key).is_some_and(|s| !s.is_empty());
+            let has_subs = self
+                .lod_subscribers
+                .get(&key)
+                .is_some_and(|s| !s.is_empty());
             if has_subs && !self.lod_in_flight.contains(&key) {
                 // Any subscriber works as the terrain-request correlator.
                 let client = *self.lod_subscribers[&key].iter().next().unwrap();
@@ -5183,4 +6052,3 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 }
-

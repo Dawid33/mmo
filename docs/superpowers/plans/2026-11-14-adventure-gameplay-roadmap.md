@@ -5,6 +5,12 @@ task-level plan: each stage below becomes its own implementation plan once the d
 Out of scope here: site generation (towns, dungeons, dwarven fortresses — next plan, another agent),
 the Minecraft import step, the code rename, fortress-mode visits/ratings.
 
+**Partly superseded 2026-11-16** (`docs/game-design.md`, revision of that date): quests are authored in
+packages and instantiated by the coordinator (`specs/2026-11-16-quests-in-the-world-design.md`), not
+generated as coordinator world objects (§5.1); renown is a place in history, not a number (§5.4); the
+fortress is a settlement its mayor runs in a body, and embark is going (§7, §8's `debug embarked`).
+The character, combat, site-fixture and challenge-tag sections still stand as proposals.
+
 Everything marked **(call)** is a decision made while writing this, not something Dawid said. Section 9
 lists the ones that change the most if they are wrong.
 

@@ -26,11 +26,7 @@
 //! there): a scenario starts on the +x/+z side of the origin and moves toward
 //! −x/−z through it, so its motion crosses the seam / the corner.
 
-use game::{
-    Chunk, ColumnCoords, Column,
-    RegionCoords, SubChunk, BLOCK_VOXELS,
-    REGION_CHUNKS,
-};
+use game::{BLOCK_VOXELS, Chunk, Column, ColumnCoords, REGION_CHUNKS, RegionCoords, SubChunk};
 
 /// A one-block floor under every chunk column of every region: the same
 /// ground in the world frame wherever a scenario is placed.
@@ -45,4 +41,3 @@ pub fn uniform_floor(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
     }
     out
 }
-

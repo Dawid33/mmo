@@ -191,14 +191,20 @@ impl<'a> Reader<'a> {
             11 => {
                 let n = self.checked_len(4)?;
                 let raw = self.take(n * 4)?;
-                Tag::IntArray(raw.chunks_exact(4).map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect())
+                Tag::IntArray(
+                    raw.chunks_exact(4)
+                        .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect(),
+                )
             }
             12 => {
                 let n = self.checked_len(8)?;
                 let raw = self.take(n * 8)?;
                 Tag::LongArray(
                     raw.chunks_exact(8)
-                        .map(|c| i64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .map(|c| {
+                            i64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                        })
                         .collect(),
                 )
             }
@@ -210,7 +216,11 @@ impl<'a> Reader<'a> {
 /// Parses one uncompressed, big-endian (Java) named root tag. Every length is checked against the bytes
 /// remaining before anything is allocated.
 pub fn parse_nbt(bytes: &[u8]) -> Result<(String, Tag), ImportError> {
-    let mut r = Reader { bytes, pos: 0, tags: 0 };
+    let mut r = Reader {
+        bytes,
+        pos: 0,
+        tags: 0,
+    };
     let id = r.u8()?;
     if id == 0 {
         return Err(ImportError::BadNbt("root tag is End".into()));
@@ -227,13 +237,16 @@ pub fn parse_gzip_nbt(bytes: &[u8], max_bytes: usize) -> Result<(String, Tag), I
     }
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut out = Vec::new();
-    decoder.take((max_bytes as u64).saturating_add(1)).read_to_end(&mut out).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            ImportError::Truncated
-        } else {
-            ImportError::Io(e.to_string())
-        }
-    })?;
+    decoder
+        .take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut out)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                ImportError::Truncated
+            } else {
+                ImportError::Io(e.to_string())
+            }
+        })?;
     if out.len() > max_bytes {
         return Err(ImportError::TooLarge);
     }

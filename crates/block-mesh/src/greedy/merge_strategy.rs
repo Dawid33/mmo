@@ -1,5 +1,5 @@
-use crate::greedy::face_needs_mesh;
 use crate::Voxel;
+use crate::greedy::face_needs_mesh;
 
 use super::MergeVoxel;
 

@@ -153,7 +153,10 @@ pub fn parse(bytes: &[u8]) -> Result<Model, Error> {
 /// Parse a `.bbmodel`; `resolve` is asked for the bytes of a texture that is
 /// not embedded, by its `relative_path` (falling back to `path`), and may
 /// return `None` (then the texture is an error).
-pub fn parse_with(bytes: &[u8], resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Model, Error> {
+pub fn parse_with(
+    bytes: &[u8],
+    resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<Model, Error> {
     let file: File = serde_json::from_slice(bytes).map_err(Error::Json)?;
     Reader::new(file, Some(resolve))?.read()
 }
@@ -275,13 +278,16 @@ enum FaceTexture {
 fn face_texture(v: Option<&Value>) -> FaceTexture {
     match v {
         Some(Value::Null) => FaceTexture::Absent,
-        Some(Value::Number(n)) => n.as_u64().map_or(FaceTexture::Untextured, |i| FaceTexture::Index(i as usize)),
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .map_or(FaceTexture::Untextured, |i| FaceTexture::Index(i as usize)),
         _ => FaceTexture::Untextured,
     }
 }
 
 fn shown(v: &Value) -> bool {
-    v.get("visibility").and_then(Value::as_bool) != Some(false) && v.get("export").and_then(Value::as_bool) != Some(false)
+    v.get("visibility").and_then(Value::as_bool) != Some(false)
+        && v.get("export").and_then(Value::as_bool) != Some(false)
 }
 
 fn vec3(v: Option<&Value>) -> [f32; 3] {
@@ -316,8 +322,14 @@ struct Reader {
 
 impl Reader {
     /// `resolve` `None` reads the rig only (placeholder textures).
-    fn new(file: File, mut resolve: Option<&mut dyn FnMut(&str) -> Option<Vec<u8>>>) -> Result<Self, Error> {
-        let res = file.resolution.unwrap_or(Resolution { width: 16.0, height: 16.0 });
+    fn new(
+        file: File,
+        mut resolve: Option<&mut dyn FnMut(&str) -> Option<Vec<u8>>>,
+    ) -> Result<Self, Error> {
+        let res = file.resolution.unwrap_or(Resolution {
+            width: 16.0,
+            height: 16.0,
+        });
         let default_uv_space = [res.width, res.height];
         let mut textures = Vec::new();
         let mut uv_space = Vec::new();
@@ -326,13 +338,24 @@ impl Reader {
                 Some(resolve) => decode_texture(t, resolve)?,
                 None => placeholder_texture(t),
             });
-            uv_space.push([t.uv_width.unwrap_or(res.width), t.uv_height.unwrap_or(res.height)]);
+            uv_space.push([
+                t.uv_width.unwrap_or(res.width),
+                t.uv_height.unwrap_or(res.height),
+            ]);
         }
-        let key = |v: &Value| v.get("uuid").and_then(Value::as_str).unwrap_or_default().to_string();
+        let key = |v: &Value| {
+            v.get("uuid")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
         let elements = file.elements.iter().map(|e| (key(e), e.clone())).collect();
         let groups = file.groups.iter().map(|g| (key(g), g.clone())).collect();
         // Formats without bones (Java block/item) place every element absolutely.
-        let bone_rig = !matches!(file.meta.model_format.as_str(), "java_block" | "optifine_part");
+        let bone_rig = !matches!(
+            file.meta.model_format.as_str(),
+            "java_block" | "optifine_part"
+        );
         Ok(Self {
             file,
             textures,
@@ -361,13 +384,21 @@ impl Reader {
             self.outliner_item(item, 0);
         }
         // Elements no outliner entry points to still belong to the model.
-        let mut stray: Vec<String> = self.elements.keys().filter(|k| !self.placed.contains(*k)).cloned().collect();
+        let mut stray: Vec<String> = self
+            .elements
+            .keys()
+            .filter(|k| !self.placed.contains(*k))
+            .cloned()
+            .collect();
         stray.sort();
         for uuid in stray {
             self.element(&uuid, 0);
         }
-        let (animations, warnings) =
-            animation::read(&self.file.animations, &self.bones, &self.file.meta.format_version);
+        let (animations, warnings) = animation::read(
+            &self.file.animations,
+            &self.bones,
+            &self.file.meta.format_version,
+        );
         self.warnings.extend(warnings);
         for node in &mut self.nodes {
             node.parts.retain(|p| !p.indices.is_empty());
@@ -394,7 +425,8 @@ impl Reader {
                 } else if let Some(g) = self.groups.get(uuid) {
                     g.clone()
                 } else {
-                    self.warnings.push(format!("outliner group {uuid} not in groups[]: skipped"));
+                    self.warnings
+                        .push(format!("outliner group {uuid} not in groups[]: skipped"));
                     return;
                 };
                 if !shown(&group) {
@@ -406,13 +438,22 @@ impl Reader {
                 let index = self.nodes.len();
                 self.bones.insert(uuid.to_string(), index);
                 self.nodes.push(Node {
-                    name: group.get("name").and_then(Value::as_str).unwrap_or("group").to_string(),
+                    name: group
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("group")
+                        .to_string(),
                     parent: Some(parent),
-                    translation: if self.bone_rig { sub(origin, parent_origin) } else { [0.0; 3] },
+                    translation: if self.bone_rig {
+                        sub(origin, parent_origin)
+                    } else {
+                        [0.0; 3]
+                    },
                     rotation_deg: if self.bone_rig { rotation } else { [0.0; 3] },
                     parts: Vec::new(),
                 });
-                self.origins.push(if self.bone_rig { origin } else { [0.0; 3] });
+                self.origins
+                    .push(if self.bone_rig { origin } else { [0.0; 3] });
                 if let Some(Value::Array(children)) = item.get("children") {
                     for child in children {
                         self.outliner_item(child, index);
@@ -428,7 +469,9 @@ impl Reader {
             return;
         }
         let Some(e) = self.elements.get(uuid).cloned() else {
-            self.warnings.push(format!("outliner element {uuid} not in elements[]: skipped"));
+            self.warnings.push(format!(
+                "outliner element {uuid} not in elements[]: skipped"
+            ));
             return;
         };
         if !shown(&e) {
@@ -450,7 +493,12 @@ impl Reader {
 
     /// Where an element-local point lands in its node's space: rotate about
     /// the element's origin, then offset by the origin relative to the node.
-    fn placer(&self, node: usize, origin: [f32; 3], rotation: [f32; 3]) -> impl Fn([f32; 3]) -> [f32; 3] + use<> {
+    fn placer(
+        &self,
+        node: usize,
+        origin: [f32; 3],
+        rotation: [f32; 3],
+    ) -> impl Fn([f32; 3]) -> [f32; 3] + use<> {
         let q = euler_zyx_quat(rotation);
         let offset = sub(origin, self.origins[node]);
         move |p| add(quat_rotate(q, p), offset)
@@ -461,7 +509,10 @@ impl Reader {
         let i = match parts.iter().position(|p| p.texture == texture) {
             Some(i) => i,
             None => {
-                parts.push(Part { texture, ..Default::default() });
+                parts.push(Part {
+                    texture,
+                    ..Default::default()
+                });
                 parts.len() - 1
             }
         };
@@ -474,14 +525,18 @@ impl Reader {
             FaceTexture::Untextured => Some(None),
             FaceTexture::Index(i) if i < self.textures.len() => Some(Some(i)),
             FaceTexture::Index(i) => {
-                self.warnings.push(format!("{what}: texture index {i} out of range, drawn untextured"));
+                self.warnings.push(format!(
+                    "{what}: texture index {i} out of range, drawn untextured"
+                ));
                 Some(None)
             }
         }
     }
 
     fn uv_space(&self, texture: Option<usize>) -> [f32; 2] {
-        texture.and_then(|t| self.uv_space.get(t).copied()).unwrap_or(self.default_uv_space)
+        texture
+            .and_then(|t| self.uv_space.get(t).copied())
+            .unwrap_or(self.default_uv_space)
     }
 
     fn cube(&mut self, c: &Cube, node: usize) {
@@ -502,17 +557,75 @@ impl Reader {
 
         // setShape's vertex order per face, and its outward normal.
         let faces: [(&str, [[f32; 3]; 4], [f32; 3]); 6] = [
-            ("east", [[t[0], t[1], t[2]], [t[0], t[1], f[2]], [t[0], f[1], t[2]], [t[0], f[1], f[2]]], [1.0, 0.0, 0.0]),
-            ("west", [[f[0], t[1], f[2]], [f[0], t[1], t[2]], [f[0], f[1], f[2]], [f[0], f[1], t[2]]], [-1.0, 0.0, 0.0]),
-            ("up", [[f[0], t[1], f[2]], [t[0], t[1], f[2]], [f[0], t[1], t[2]], [t[0], t[1], t[2]]], [0.0, 1.0, 0.0]),
-            ("down", [[f[0], f[1], t[2]], [t[0], f[1], t[2]], [f[0], f[1], f[2]], [t[0], f[1], f[2]]], [0.0, -1.0, 0.0]),
-            ("south", [[f[0], t[1], t[2]], [t[0], t[1], t[2]], [f[0], f[1], t[2]], [t[0], f[1], t[2]]], [0.0, 0.0, 1.0]),
-            ("north", [[t[0], t[1], f[2]], [f[0], t[1], f[2]], [t[0], f[1], f[2]], [f[0], f[1], f[2]]], [0.0, 0.0, -1.0]),
+            (
+                "east",
+                [
+                    [t[0], t[1], t[2]],
+                    [t[0], t[1], f[2]],
+                    [t[0], f[1], t[2]],
+                    [t[0], f[1], f[2]],
+                ],
+                [1.0, 0.0, 0.0],
+            ),
+            (
+                "west",
+                [
+                    [f[0], t[1], f[2]],
+                    [f[0], t[1], t[2]],
+                    [f[0], f[1], f[2]],
+                    [f[0], f[1], t[2]],
+                ],
+                [-1.0, 0.0, 0.0],
+            ),
+            (
+                "up",
+                [
+                    [f[0], t[1], f[2]],
+                    [t[0], t[1], f[2]],
+                    [f[0], t[1], t[2]],
+                    [t[0], t[1], t[2]],
+                ],
+                [0.0, 1.0, 0.0],
+            ),
+            (
+                "down",
+                [
+                    [f[0], f[1], t[2]],
+                    [t[0], f[1], t[2]],
+                    [f[0], f[1], f[2]],
+                    [t[0], f[1], f[2]],
+                ],
+                [0.0, -1.0, 0.0],
+            ),
+            (
+                "south",
+                [
+                    [f[0], t[1], t[2]],
+                    [t[0], t[1], t[2]],
+                    [f[0], f[1], t[2]],
+                    [t[0], f[1], t[2]],
+                ],
+                [0.0, 0.0, 1.0],
+            ),
+            (
+                "north",
+                [
+                    [t[0], t[1], f[2]],
+                    [f[0], t[1], f[2]],
+                    [t[0], f[1], f[2]],
+                    [f[0], f[1], f[2]],
+                ],
+                [0.0, 0.0, -1.0],
+            ),
         ];
         for (dir, corners, normal) in faces {
-            let Some(face) = c.faces.get(dir) else { continue };
+            let Some(face) = c.faces.get(dir) else {
+                continue;
+            };
             let what = format!("cube {:?} {dir}", c.name);
-            let Some(texture) = self.texture_for(&what, &face_texture(face.get("texture"))) else { continue };
+            let Some(texture) = self.texture_for(&what, &face_texture(face.get("texture"))) else {
+                continue;
+            };
             let mut uv = match box_uvs.as_ref().and_then(|b| b.get(dir)) {
                 Some(rect) => *rect,
                 None => {
@@ -528,7 +641,11 @@ impl Reader {
             if box_uv {
                 // updateUV's anti-bleed margin.
                 for si in 0..2 {
-                    let margin = if uv[si] > uv[si + 2] { -1.0 / 64.0 } else { 1.0 / 64.0 };
+                    let margin = if uv[si] > uv[si + 2] {
+                        -1.0 / 64.0
+                    } else {
+                        1.0 / 64.0
+                    };
                     uv[si] += margin;
                     uv[si + 2] -= margin;
                 }
@@ -551,9 +668,12 @@ impl Reader {
             }
             let n = quat_rotate(q, normal);
             let part = self.part(node, texture);
-            let base: Vec<u32> = (0..4).map(|i| part.push_vertex(place(corners[i]), n, arr[i])).collect();
+            let base: Vec<u32> = (0..4)
+                .map(|i| part.push_vertex(place(corners[i]), n, arr[i]))
+                .collect();
             // three.js index order (0,2,1)(2,3,1): counter-clockwise from outside.
-            part.indices.extend([base[0], base[2], base[1], base[2], base[3], base[1]]);
+            part.indices
+                .extend([base[0], base[2], base[1], base[2], base[3], base[1]]);
         }
     }
 
@@ -567,15 +687,27 @@ impl Reader {
                 continue;
             }
             let what = format!("mesh {:?} face {key}", m.name);
-            let Some(texture) = self.texture_for(&what, &face_texture(Some(&face.texture))) else { continue };
-            let Some(pos) = face.vertices.iter().map(|k| m.vertices.get(k).copied()).collect::<Option<Vec<_>>>()
-            else {
-                self.warnings.push(format!("{what}: unknown vertex key, skipped"));
+            let Some(texture) = self.texture_for(&what, &face_texture(Some(&face.texture))) else {
                 continue;
             };
-            let order: Vec<usize> = if pos.len() == 4 { sorted_quad(&pos) } else { (0..pos.len()).collect() };
+            let Some(pos) = face
+                .vertices
+                .iter()
+                .map(|k| m.vertices.get(k).copied())
+                .collect::<Option<Vec<_>>>()
+            else {
+                self.warnings
+                    .push(format!("{what}: unknown vertex key, skipped"));
+                continue;
+            };
+            let order: Vec<usize> = if pos.len() == 4 {
+                sorted_quad(&pos)
+            } else {
+                (0..pos.len()).collect()
+            };
             if pos.len() > 4 {
-                self.warnings.push(format!("{what}: {} vertices, fanned", pos.len()));
+                self.warnings
+                    .push(format!("{what}: {} vertices, fanned", pos.len()));
             }
             let p = |i: usize| pos[order[i]];
             let normal = normalize(cross(sub(p(1), p(0)), sub(p(2), p(0))));
@@ -586,9 +718,13 @@ impl Reader {
                 let uv = face.uv.get(k).copied().unwrap_or([0.0, 0.0]);
                 [uv[0] / w, uv[1] / h]
             };
-            let corners: Vec<([f32; 3], [f32; 2])> = (0..pos.len()).map(|i| (place(p(i)), uv_of(i))).collect();
+            let corners: Vec<([f32; 3], [f32; 2])> =
+                (0..pos.len()).map(|i| (place(p(i)), uv_of(i))).collect();
             let part = self.part(node, texture);
-            let base: Vec<u32> = corners.iter().map(|(pp, uv)| part.push_vertex(*pp, n, *uv)).collect();
+            let base: Vec<u32> = corners
+                .iter()
+                .map(|(pp, uv)| part.push_vertex(*pp, n, *uv))
+                .collect();
             for i in 1..base.len() - 1 {
                 part.indices.extend([base[0], base[i], base[i + 1]]);
             }
@@ -599,7 +735,9 @@ impl Reader {
 /// Box-UV face rectangles `[x1, y1, x2, y2]` (Blockbench `updateUV`).
 fn box_uv_rects(c: &Cube) -> HashMap<&'static str, [f32; 4]> {
     // Cube.size(undefined, floored): box UV uses whole pixels.
-    let size: Vec<f32> = (0..3).map(|i| (c.to[i] - c.from[i] + 1e-7).floor()).collect();
+    let size: Vec<f32> = (0..3)
+        .map(|i| (c.to[i] - c.from[i] + 1e-7).floor())
+        .collect();
     let (x, y, z) = (size[0], size[1], size[2]);
     let mut list = [
         ("east", [0.0, z], [z, y]),
@@ -621,7 +759,15 @@ fn box_uv_rects(c: &Cube) -> HashMap<&'static str, [f32; 4]> {
     list.iter()
         .map(|(name, from, size)| {
             let [ox, oy] = c.uv_offset;
-            (*name, [from[0] + ox, from[1] + oy, from[0] + size[0] + ox, from[1] + size[1] + oy])
+            (
+                *name,
+                [
+                    from[0] + ox,
+                    from[1] + oy,
+                    from[0] + size[0] + ox,
+                    from[1] + size[1] + oy,
+                ],
+            )
         })
         .collect()
 }
@@ -633,7 +779,11 @@ fn sorted_quad(p: &[[f32; 3]]) -> Vec<usize> {
     let test = |b1: [f32; 3], b2: [f32; 3], top: [f32; 3], check: [f32; 3]| {
         let d = sub(b2, b1);
         let len2 = dot(d, d);
-        let t = if len2 > 0.0 { dot(sub(top, b1), d) / len2 } else { 0.0 };
+        let t = if len2 > 0.0 {
+            dot(sub(top, b1), d) / len2
+        } else {
+            0.0
+        };
         let closest = add(b1, scale(d, t));
         let normal = sub(closest, top);
         dot(normal, sub(check, b2)) > 0.0
@@ -648,11 +798,20 @@ fn sorted_quad(p: &[[f32; 3]]) -> Vec<usize> {
 }
 
 fn placeholder_texture(t: &TextureEntry) -> Texture {
-    Texture { name: t.name.clone(), width: 0, height: 0, rgba: Vec::new(), alpha: AlphaKind::Opaque }
+    Texture {
+        name: t.name.clone(),
+        width: 0,
+        height: 0,
+        rgba: Vec::new(),
+        alpha: AlphaKind::Opaque,
+    }
 }
 
 #[cfg(not(feature = "textures"))]
-fn decode_texture(t: &TextureEntry, _resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Texture, Error> {
+fn decode_texture(
+    t: &TextureEntry,
+    _resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<Texture, Error> {
     Err(Error::Texture {
         name: t.name.clone(),
         reason: "built without the `textures` feature (use parse_rig)".into(),
@@ -660,19 +819,36 @@ fn decode_texture(t: &TextureEntry, _resolve: &mut dyn FnMut(&str) -> Option<Vec
 }
 
 #[cfg(feature = "textures")]
-fn decode_texture(t: &TextureEntry, resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Texture, Error> {
-    let err = |reason: String| Error::Texture { name: t.name.clone(), reason };
+fn decode_texture(
+    t: &TextureEntry,
+    resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<Texture, Error> {
+    let err = |reason: String| Error::Texture {
+        name: t.name.clone(),
+        reason,
+    };
     let bytes = match t.source.as_deref().and_then(|s| s.strip_prefix("data:")) {
         Some(data) => {
-            let (_, b64) = data.split_once(";base64,").ok_or_else(|| err("source is not base64".into()))?;
-            base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| err(e.to_string()))?
+            let (_, b64) = data
+                .split_once(";base64,")
+                .ok_or_else(|| err("source is not base64".into()))?;
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| err(e.to_string()))?
         }
         None => {
-            let path = t.relative_path.as_deref().or(t.path.as_deref()).unwrap_or_default();
-            resolve(path).ok_or_else(|| err(format!("not embedded and {path:?} could not be read")))?
+            let path = t
+                .relative_path
+                .as_deref()
+                .or(t.path.as_deref())
+                .unwrap_or_default();
+            resolve(path)
+                .ok_or_else(|| err(format!("not embedded and {path:?} could not be read")))?
         }
     };
-    let img = image::load_from_memory(&bytes).map_err(|e| err(e.to_string()))?.to_rgba8();
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| err(e.to_string()))?
+        .to_rgba8();
     let (width, height) = img.dimensions();
     let rgba = img.into_raw();
     let mut partial = false;
@@ -691,7 +867,13 @@ fn decode_texture(t: &TextureEntry, resolve: &mut dyn FnMut(&str) -> Option<Vec<
     } else {
         AlphaKind::Opaque
     };
-    Ok(Texture { name: t.name.clone(), width, height, rgba, alpha })
+    Ok(Texture {
+        name: t.name.clone(),
+        width,
+        height,
+        rgba,
+        alpha,
+    })
 }
 
 // --- Math -----------------------------------------------------------------------
@@ -709,7 +891,11 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 fn normalize(a: [f32; 3]) -> [f32; 3] {
     let l = dot(a, a).sqrt();
@@ -791,18 +977,31 @@ impl Model {
     /// added to the rest Euler angles (Blockbench adds them per component),
     /// positions added, scales multiplied. Nodes without a pose keep rest.
     pub fn local_pose(&self, poses: &[(usize, BonePose)]) -> Vec<([f32; 3], [f32; 4], [f32; 3])> {
-        let mut out: Vec<_> =
-            self.nodes.iter().map(|n| (n.translation, n.rotation_quat(), [1.0f32; 3])).collect();
+        let mut out: Vec<_> = self
+            .nodes
+            .iter()
+            .map(|n| (n.translation, n.rotation_quat(), [1.0f32; 3]))
+            .collect();
         for (node, pose) in poses {
-            let Some(n) = self.nodes.get(*node) else { continue };
+            let Some(n) = self.nodes.get(*node) else {
+                continue;
+            };
             // Groups of bone-less formats carry no transform to animate.
             let euler = [0, 1, 2].map(|i| n.rotation_deg[i] + pose.rotation[i]);
-            out[*node] = (add(n.translation, pose.position), euler_zyx_quat(euler), pose.scale);
+            out[*node] = (
+                add(n.translation, pose.position),
+                euler_zyx_quat(euler),
+                pose.scale,
+            );
         }
         out
     }
 
     pub fn triangle_count(&self) -> usize {
-        self.nodes.iter().flat_map(|n| &n.parts).map(Part::triangle_count).sum()
+        self.nodes
+            .iter()
+            .flat_map(|n| &n.parts)
+            .map(Part::triangle_count)
+            .sum()
     }
 }

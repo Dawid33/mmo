@@ -18,10 +18,13 @@
 
 use rapier3d::math::{Pose, Vector};
 
-use crate::mass_props::{mass_properties, BODY_DEFAULT_DENSITY};
+use crate::mass_props::{BODY_DEFAULT_DENSITY, mass_properties};
 use crate::movement::UNITS_PER_METER;
 use crate::protocol::{BodyKind, BodyState, ColliderSpec};
-use crate::{EntityKey, EntityKind, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback, TICK_RATE};
+use crate::{
+    EntityKey, EntityKind, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback,
+    TICK_RATE,
+};
 
 /// How long a body dropped from a few metres takes to land and fall asleep,
 /// ms (rapier sleeps a body still for 2 s).
@@ -50,7 +53,12 @@ pub const DEV_DROP_SPIN_RAD_PER_S: f32 = 1.0;
 pub const DEV_DROP_SALT: u64 = 0xD20B_B0D1;
 
 /// The state a new body of `collider` starts in at `pose`.
-pub fn body_state(pose: Pose, collider: &ColliderSpec, linvel: Vector, angvel: Vector) -> BodyState {
+pub fn body_state(
+    pose: Pose,
+    collider: &ColliderSpec,
+    linvel: Vector,
+    angvel: Vector,
+) -> BodyState {
     let mass = mass_properties(collider, BODY_DEFAULT_DENSITY);
     BodyState {
         kind: BodyKind::Dynamic,
@@ -71,7 +79,13 @@ pub fn body_state(pose: Pose, collider: &ColliderSpec, linvel: Vector, angvel: V
 impl Rollback {
     /// Spawns a [`EntityKind::Body`] of `collider` at region-local `pose`,
     /// moving at `linvel` / `angvel`, undo-safely (as `spawn_slime_safe`).
-    pub fn spawn_body_safe(&mut self, pose: Pose, collider: ColliderSpec, linvel: Vector, angvel: Vector) -> EntityKey {
+    pub fn spawn_body_safe(
+        &mut self,
+        pose: Pose,
+        collider: ColliderSpec,
+        linvel: Vector,
+        angvel: Vector,
+    ) -> EntityKey {
         let e = self.data.ecs.create_entity_safe();
         self.assign_entity_id_safe(e);
         self.build_body_safe(e, &body_state(pose, &collider, linvel, angvel), &collider);
@@ -107,17 +121,28 @@ impl Rollback {
             return false;
         }
         let b = crate::BLOCK_VOXELS as f32;
-        let centre =
-            Vector::new((at[0] as f32 + 0.5) * b, (at[1] + DEV_DROP_HEIGHT_BLOCKS) as f32 * b + b / 2.0, (at[2] as f32 + 0.5) * b);
+        let centre = Vector::new(
+            (at[0] as f32 + 0.5) * b,
+            (at[1] + DEV_DROP_HEIGHT_BLOCKS) as f32 * b + b / 2.0,
+            (at[2] as f32 + 0.5) * b,
+        );
         let tick = *self.data.tick;
         // Per axis a roll in [-1, 1] (a 2001-step lattice) of the tile.
-        let subject = |axis: u64| ((at[0] as u32 as u64) << 32 | at[2] as u32 as u64) ^ (axis << 62);
+        let subject =
+            |axis: u64| ((at[0] as u32 as u64) << 32 | at[2] as u32 as u64) ^ (axis << 62);
         let spin = |axis: u64| {
             let r = crate::slime::roll(tick, subject(axis), DEV_DROP_SALT) % 2001;
             (r as f32 - 1000.0) / 1000.0 * DEV_DROP_SPIN_RAD_PER_S
         };
-        let cube = ColliderSpec::Cuboid { half_extents: Vector::splat(b / 2.0) };
-        self.spawn_body_safe(Pose::from_translation(centre), cube, Vector::ZERO, Vector::new(spin(0), spin(1), spin(2)));
+        let cube = ColliderSpec::Cuboid {
+            half_extents: Vector::splat(b / 2.0),
+        };
+        self.spawn_body_safe(
+            Pose::from_translation(centre),
+            cube,
+            Vector::ZERO,
+            Vector::new(spin(0), spin(1), spin(2)),
+        );
         true
     }
 
@@ -128,9 +153,19 @@ impl Rollback {
     /// joints); it is as rare (a mirror upgraded into a body of another
     /// kind).
     pub(crate) fn remove_body_safe(&mut self, e: EntityKey) {
-        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return };
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else {
+            return;
+        };
         let p = self.data.physics.snapshot_raw();
-        p.bodies.remove(handle, p.islands, p.colliders, p.implules_joint_set, p.multi_body_joint_set, p.soft_bodies, true);
+        p.bodies.remove(
+            handle,
+            p.islands,
+            p.colliders,
+            p.implules_joint_set,
+            p.multi_body_joint_set,
+            p.soft_bodies,
+            true,
+        );
         self.data.ecs.rigidbody.set_safe(e, None);
     }
 
@@ -140,13 +175,26 @@ impl Rollback {
     /// becoming a dynamic body) is replaced — [`Self::remove_body_safe`] +
     /// `build_body_safe` with `collider` — so it is built exactly like a
     /// fresh arrival and `set_body_type` never runs on a live body.
-    pub(crate) fn restate_body_safe(&mut self, e: EntityKey, state: &BodyState, collider: &ColliderSpec) {
+    pub(crate) fn restate_body_safe(
+        &mut self,
+        e: EntityKey,
+        state: &BodyState,
+        collider: &ColliderSpec,
+    ) {
         let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else {
             return self.build_body_safe(e, state, collider);
         };
-        let same = self.data.physics.bodies.get(handle).is_some_and(|b| state.same_kind_as(b));
+        let same = self
+            .data
+            .physics
+            .bodies
+            .get(handle)
+            .is_some_and(|b| state.same_kind_as(b));
         if same {
-            self.data.physics.bodies.mutate_body_safe(handle, |b| state.apply_to(b));
+            self.data
+                .physics
+                .bodies
+                .mutate_body_safe(handle, |b| state.apply_to(b));
         } else {
             self.remove_body_safe(e);
             self.build_body_safe(e, state, collider);

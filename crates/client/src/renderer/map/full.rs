@@ -11,17 +11,19 @@ use bevy::math::DVec2;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::map_tile::MapTileKey;
-use game::{RegionCoords, WorldMap, REGION_BLOCKS};
+use game::{REGION_BLOCKS, RegionCoords, WorldMap};
 use slint_ui::slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
 use slint_ui::{GameUi, MapMarker, WorldMapConfig};
 use worldgen::tile_map::MapLayer;
 
 use super::store::MapTiles;
-use super::views::{top_level, MapLayerKind, MapView, MINIMAP_M_PER_PX};
+use super::views::{MINIMAP_M_PER_PX, MapLayerKind, MapView, top_level};
 use crate::renderer::bridge::LocalBody;
 use crate::renderer::history_view::HistoryView;
 use crate::renderer::hud::HudStatus;
-use crate::renderer::slint_overlay::{map_tile, site_color, tile_region, GameUiActions, SlintLayer, UiAction};
+use crate::renderer::slint_overlay::{
+    GameUiActions, SlintLayer, UiAction, map_tile, site_color, tile_region,
+};
 use crate::renderer::world_map::WorldMapState;
 use crate::session::{SessionLocal, SessionScoped};
 
@@ -40,12 +42,18 @@ pub const SITE_EASE_M_PER_PX: f32 = 1.5;
 
 /// The layer button captions: the block surface first, then the world map's layers.
 pub fn layer_names() -> Vec<SharedString> {
-    std::iter::once("Surface".into()).chain(MapLayer::ALL.iter().map(|l| l.label().into())).collect()
+    std::iter::once("Surface".into())
+        .chain(MapLayer::ALL.iter().map(|l| l.label().into()))
+        .collect()
 }
 
 /// The layer of button `index` ([`layer_names`]'s order); the surface for an unknown one.
 pub fn layer_kind(index: i32) -> MapLayerKind {
-    match usize::try_from(index).ok().and_then(|i| i.checked_sub(1)).and_then(|i| MapLayer::ALL.get(i)) {
+    match usize::try_from(index)
+        .ok()
+        .and_then(|i| i.checked_sub(1))
+        .and_then(|i| MapLayer::ALL.get(i))
+    {
         Some(l) => MapLayerKind::Theme(*l),
         None => MapLayerKind::Surface,
     }
@@ -84,7 +92,8 @@ pub fn connect(ui: &GameUi, world: &mut World) {
 
 pub(super) fn build(app: &mut App) {
     use crate::session::SessionResetExt as _;
-    app.add_session_reset::<FullMapOpen>().add_systems(Update, drive_full_map);
+    app.add_session_reset::<FullMapOpen>()
+        .add_systems(Update, drive_full_map);
 }
 
 /// The player in world blocks (x, z; the render frame's unwrapped copy): the body, else the commander
@@ -134,7 +143,9 @@ fn drive_full_map(
     time: Res<Time>,
     mut full_open: ResMut<FullMapOpen>,
 ) {
-    let (Some(slint), Some(inputs)) = (slint, inputs) else { return };
+    let (Some(slint), Some(inputs)) = (slint, inputs) else {
+        return;
+    };
     let Ok(mut view) = views.single_mut() else {
         commands.spawn((FullMapView, MapView::default(), SessionScoped));
         return;
@@ -152,7 +163,10 @@ fn drive_full_map(
     if full_open.0 != open {
         full_open.0 = open;
     }
-    let max_m = state.map.as_ref().map_or(1.0, |m| (1u64 << top_level_of(m)) as f32);
+    let max_m = state
+        .map
+        .as_ref()
+        .map_or(1.0, |m| (1u64 << top_level_of(m)) as f32);
     if open && !pushed.open {
         // Opening: centred on the player at the minimap's zoom.
         if let Some(at) = player_block(&body, cam.as_deref()) {
@@ -177,14 +191,17 @@ fn drive_full_map(
             Input::Wheel(x, y, notches) => {
                 let p = to_px(x, y);
                 let anchor = view.screen_to_world(p);
-                let m = (view.m_per_px * FULL_MAP_ZOOM_STEP.powf(-notches)).clamp(FULL_MAP_MIN_M_PER_PX, max_m);
+                let m = (view.m_per_px * FULL_MAP_ZOOM_STEP.powf(-notches))
+                    .clamp(FULL_MAP_MIN_M_PER_PX, max_m);
                 view.m_per_px = m;
                 // Keep the block under the pointer under the pointer.
                 let after = view.screen_to_world(p);
                 view.centre += anchor - after;
             }
             Input::Click(x, y) => {
-                let Some(map) = state.map.as_ref() else { continue };
+                let Some(map) = state.map.as_ref() else {
+                    continue;
+                };
                 let b = view.screen_to_world(to_px(x, y));
                 // A click on (or near) a site marker is that site's region: in the Adventure tab
                 // selecting it picks the site (`UiAction::SelectTile`).
@@ -193,7 +210,8 @@ fn drive_full_map(
                     .iter()
                     .filter_map(|site| {
                         let at = site_at(map, site.region, view.centre)?;
-                        let d = (view.world_to_screen(at) / scale - origin).distance(Vec2::new(x, y));
+                        let d =
+                            (view.world_to_screen(at) / scale - origin).distance(Vec2::new(x, y));
                         (d <= SITE_PICK_PX).then_some((d, site.region))
                     })
                     .min_by(|a, b| a.0.total_cmp(&b.0));
@@ -212,7 +230,9 @@ fn drive_full_map(
     if !open {
         return;
     }
-    let Some(map) = state.map.as_ref() else { return };
+    let Some(map) = state.map.as_ref() else {
+        return;
+    };
     // A newly picked site (from the list or the map): ease onto its landing at a readable zoom.
     let now = time.elapsed_secs();
     let picked = history.adventure.site;
@@ -262,7 +282,12 @@ fn drive_full_map(
     }
     // Markers, in the view's logical pixels, only when what they follow changed.
     let hover = if ui.get_map_pointer_in() {
-        map_tile(map, region_of_block(view.screen_to_world(to_px(ui.get_map_pointer_x(), ui.get_map_pointer_y()))))
+        map_tile(
+            map,
+            region_of_block(
+                view.screen_to_world(to_px(ui.get_map_pointer_x(), ui.get_map_pointer_y())),
+            ),
+        )
     } else {
         None
     }
@@ -290,8 +315,11 @@ fn drive_full_map(
         // The copy of the region nearest the view (a wrapping map).
         let rc = nearest_copy(map, rc, view.centre);
         let rb = REGION_BLOCKS as f64;
-        let a = view.world_to_screen(DVec2::new(rc.x as f64 * rb, rc.z as f64 * rb)) / scale - origin;
-        let b = view.world_to_screen(DVec2::new((rc.x + 1) as f64 * rb, (rc.z + 1) as f64 * rb)) / scale - origin;
+        let a =
+            view.world_to_screen(DVec2::new(rc.x as f64 * rb, rc.z as f64 * rb)) / scale - origin;
+        let b = view.world_to_screen(DVec2::new((rc.x + 1) as f64 * rb, (rc.z + 1) as f64 * rb))
+            / scale
+            - origin;
         Some(MapMarker {
             x: a.x + inset,
             y: a.y + inset,
@@ -310,7 +338,9 @@ fn drive_full_map(
         marks.extend(frame(hover.0, hover.1, config.get_hover_color(), 1.0, 0.0));
     }
     for site in &history.sites {
-        let Some(at) = site_at(map, site.region, view.centre) else { continue };
+        let Some(at) = site_at(map, site.region, view.centre) else {
+            continue;
+        };
         let c = view.world_to_screen(at) / scale - origin;
         let half = SITE_MARKER_PX / 2.0;
         let color = site_color(site.civ);
@@ -342,7 +372,9 @@ pub fn site_at(map: &WorldMap, region: RegionCoords, centre: DVec2) -> Option<DV
     let tile = map.tile(region)?;
     let rc = nearest_copy(map, map.extent().canonical(region), centre);
     let rb = REGION_BLOCKS as f64;
-    let (lx, lz) = tile.landing.map_or((rb / 2.0, rb / 2.0), |[x, z]| (x as f64 + 0.5, z as f64 + 0.5));
+    let (lx, lz) = tile.landing.map_or((rb / 2.0, rb / 2.0), |[x, z]| {
+        (x as f64 + 0.5, z as f64 + 0.5)
+    });
     Some(DVec2::new(rc.x as f64 * rb + lx, rc.z as f64 * rb + lz))
 }
 

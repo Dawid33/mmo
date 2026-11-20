@@ -14,13 +14,12 @@
 use std::{net::IpAddr, sync::Arc};
 
 use quinn::rustls::{
-    self,
+    self, DigitallySignedStruct, RootCertStore, SignatureScheme,
     client::{
-        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
         WebPkiServerVerifier,
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     },
     pki_types::{CertificateDer, ServerName, UnixTime},
-    DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 use sha2::{Digest, Sha256};
 
@@ -58,13 +57,16 @@ pub fn host_of(target: &str) -> &str {
         return rest.split_once(']').map_or(rest, |(host, _)| host);
     }
     match target.rsplit_once(':') {
-        Some((host, port)) if !host.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        Some((host, port)) if !host.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) => {
+            host
+        }
         _ => target,
     }
 }
 
 fn is_loopback(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The TLS client configuration for `policy`. The `ring` provider is named, never
@@ -74,11 +76,19 @@ pub fn client_crypto(policy: &VerifyPolicy) -> rustls::ClientConfig {
         .with_safe_default_protocol_versions()
         .expect("ring supports the default TLS versions");
     let verifier: Arc<dyn ServerCertVerifier> = match policy {
-        VerifyPolicy::Pin(hash) => Arc::new(PinVerifier { hash: hash.clone(), provider: provider() }),
+        VerifyPolicy::Pin(hash) => Arc::new(PinVerifier {
+            hash: hash.clone(),
+            provider: provider(),
+        }),
         VerifyPolicy::WebPki => web_pki_verifier(),
-        VerifyPolicy::Insecure => Arc::new(SkipServerVerification { provider: provider() }),
+        VerifyPolicy::Insecure => Arc::new(SkipServerVerification {
+            provider: provider(),
+        }),
     };
-    builder.dangerous().with_custom_certificate_verifier(verifier).with_no_client_auth()
+    builder
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth()
 }
 
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
@@ -96,10 +106,12 @@ fn web_pki_verifier() -> Arc<dyn ServerCertVerifier> {
 /// Lower-case hex SHA-256 of a certificate's DER.
 fn leaf_hash(cert: &CertificateDer<'_>) -> String {
     use std::fmt::Write;
-    Sha256::digest(cert.as_ref()).iter().fold(String::with_capacity(64), |mut hex, byte| {
-        let _ = write!(hex, "{byte:02x}");
-        hex
-    })
+    Sha256::digest(cert.as_ref())
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 /// The host's certificate is not the one its endpoint pinned. `Debug` is the sentence too:
@@ -166,9 +178,9 @@ impl ServerCertVerifier for PinVerifier {
             // A certificate error (alert certificate_unknown), not `General` (handshake_failure):
             // [`refused_certificate`] tells it from other handshake failures and the connect
             // fails at once instead of retrying.
-            Err(rustls::Error::InvalidCertificate(rustls::CertificateError::Other(rustls::OtherError(Arc::new(
-                NotPinned,
-            )))))
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Other(rustls::OtherError(Arc::new(NotPinned))),
+            ))
         }
     }
 
@@ -178,7 +190,12 @@ impl ServerCertVerifier for PinVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -187,11 +204,18 @@ impl ServerCertVerifier for PinVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -220,7 +244,12 @@ impl ServerCertVerifier for SkipServerVerification {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -229,11 +258,17 @@ impl ServerCertVerifier for SkipServerVerification {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
-

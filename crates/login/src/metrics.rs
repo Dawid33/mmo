@@ -8,8 +8,10 @@
 use std::sync::Arc;
 
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Request-duration buckets, seconds.
 const DURATION_BUCKETS: [f64; 6] = [0.005, 0.025, 0.1, 0.5, 2.0, 10.0];
@@ -69,6 +71,11 @@ struct Inner {
     host_link_up: IntGaugeVec,
     pending_kicks: IntGauge,
     jwks_refetches: IntCounterVec,
+    telemetry_export_attempts: IntCounter,
+    telemetry_export_failures: IntCounter,
+    telemetry_profile_starts: IntCounter,
+    telemetry_profile_failures: IntCounter,
+    telemetry_seen: [AtomicU64; 4],
 }
 
 /// The service's metrics. Cheap to clone.
@@ -83,7 +90,9 @@ impl Default for Metrics {
 
 fn outcome_counter(registry: &Registry, name: &str, help: &str) -> IntCounterVec {
     let c = IntCounterVec::new(Opts::new(name, help), &["outcome"]).expect("valid metric");
-    registry.register(Box::new(c.clone())).expect("metric registered once");
+    registry
+        .register(Box::new(c.clone()))
+        .expect("metric registered once");
     c
 }
 
@@ -91,64 +100,180 @@ impl Metrics {
     pub fn new() -> Metrics {
         let registry = Registry::new();
         let requests = IntCounterVec::new(
-            Opts::new("login_http_requests_total", "HTTP requests by matched route template and status."),
+            Opts::new(
+                "login_http_requests_total",
+                "HTTP requests by matched route template and status.",
+            ),
             &["route", "status"],
         )
         .expect("valid metric");
         let duration = HistogramVec::new(
-            HistogramOpts::new("login_http_request_duration_seconds", "HTTP request duration by matched route template.")
-                .buckets(DURATION_BUCKETS.to_vec()),
+            HistogramOpts::new(
+                "login_http_request_duration_seconds",
+                "HTTP request duration by matched route template.",
+            )
+            .buckets(DURATION_BUCKETS.to_vec()),
             &["route"],
         )
         .expect("valid metric");
         let host_link_up = IntGaugeVec::new(
-            Opts::new("login_host_link_up", "1 while the world coordinator's login answers are read."),
+            Opts::new(
+                "login_host_link_up",
+                "1 while the world coordinator's login answers are read.",
+            ),
             &["world"],
         )
         .expect("valid metric");
-        let pending_kicks = IntGauge::new("login_pending_kicks", "Kicks queued and not yet acknowledged by a host.")
-            .expect("valid metric");
-        let build_info = IntGaugeVec::new(Opts::new("login_build_info", "Build of the running service (always 1)."), &["version"])
-            .expect("valid metric");
-        let oidc_logins = outcome_counter(&registry, "login_oidc_logins_total", "Identity-provider logins by outcome.");
-        let refreshes = outcome_counter(&registry, "login_refresh_total", "Refresh-token rotations by outcome.");
+        let pending_kicks = IntGauge::new(
+            "login_pending_kicks",
+            "Kicks queued and not yet acknowledged by a host.",
+        )
+        .expect("valid metric");
+        let build_info = IntGaugeVec::new(
+            Opts::new(
+                "login_build_info",
+                "Build of the running service (always 1).",
+            ),
+            &["version"],
+        )
+        .expect("valid metric");
+        let oidc_logins = outcome_counter(
+            &registry,
+            "login_oidc_logins_total",
+            "Identity-provider logins by outcome.",
+        );
+        let refreshes = outcome_counter(
+            &registry,
+            "login_refresh_total",
+            "Refresh-token rotations by outcome.",
+        );
         let joins = outcome_counter(&registry, "login_joins_total", "Joins by outcome.");
-        let jwks_refetches =
-            outcome_counter(&registry, "login_jwks_refetch_total", "Refetches of the identity provider's keys by outcome.");
+        let jwks_refetches = outcome_counter(
+            &registry,
+            "login_jwks_refetch_total",
+            "Refetches of the identity provider's keys by outcome.",
+        );
+        let telemetry_export_attempts = IntCounter::new(
+            "mmo_telemetry_export_attempts_total",
+            "OTLP batch export attempts.",
+        )
+        .expect("valid metric");
+        let telemetry_export_failures = IntCounter::new(
+            "mmo_telemetry_export_failures_total",
+            "OTLP batch exports that failed without affecting readiness.",
+        )
+        .expect("valid metric");
+        let telemetry_profile_starts = IntCounter::new(
+            "mmo_telemetry_profile_starts_total",
+            "Pyroscope profile starts attempted.",
+        )
+        .expect("valid metric");
+        let telemetry_profile_failures = IntCounter::new(
+            "mmo_telemetry_profile_failures_total",
+            "Pyroscope profile starts that failed without affecting readiness.",
+        )
+        .expect("valid metric");
         for c in [
             Box::new(requests.clone()) as Box<dyn prometheus::core::Collector>,
             Box::new(duration.clone()),
             Box::new(host_link_up.clone()),
             Box::new(pending_kicks.clone()),
             Box::new(build_info.clone()),
+            Box::new(telemetry_export_attempts.clone()),
+            Box::new(telemetry_export_failures.clone()),
+            Box::new(telemetry_profile_starts.clone()),
+            Box::new(telemetry_profile_failures.clone()),
         ] {
             registry.register(c).expect("metric registered once");
         }
-        build_info.with_label_values(&[env!("CARGO_PKG_VERSION")]).set(1);
-        Metrics(Arc::new(Inner { registry, requests, duration, oidc_logins, refreshes, joins, host_link_up, pending_kicks, jwks_refetches }))
+        build_info
+            .with_label_values(&[env!("CARGO_PKG_VERSION")])
+            .set(1);
+        Metrics(Arc::new(Inner {
+            registry,
+            requests,
+            duration,
+            oidc_logins,
+            refreshes,
+            joins,
+            host_link_up,
+            pending_kicks,
+            jwks_refetches,
+            telemetry_export_attempts,
+            telemetry_export_failures,
+            telemetry_profile_starts,
+            telemetry_profile_failures,
+            telemetry_seen: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+        }))
     }
 
     /// The text exposition format.
     pub fn render(&self) -> String {
+        let telemetry = observability::counters();
+        sync_counter(
+            &self.0.telemetry_export_attempts,
+            &self.0.telemetry_seen[0],
+            telemetry.export_attempts,
+        );
+        sync_counter(
+            &self.0.telemetry_export_failures,
+            &self.0.telemetry_seen[1],
+            telemetry.export_failures,
+        );
+        sync_counter(
+            &self.0.telemetry_profile_starts,
+            &self.0.telemetry_seen[2],
+            telemetry.profile_starts,
+        );
+        sync_counter(
+            &self.0.telemetry_profile_failures,
+            &self.0.telemetry_seen[3],
+            telemetry.profile_failures,
+        );
         let mut out = Vec::new();
         if let Err(e) = TextEncoder::new().encode(&self.0.registry.gather(), &mut out) {
             log::error!("[login] encoding metrics: {e}");
+        }
+
+        fn sync_counter(counter: &IntCounter, seen: &AtomicU64, value: u64) {
+            let previous = seen.load(Ordering::Relaxed);
+            if value > previous
+                && seen
+                    .compare_exchange(previous, value, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                counter.inc_by(value - previous);
+            }
         }
         String::from_utf8(out).unwrap_or_default()
     }
 
     /// One finished HTTP request. `route` is a matched route template or `other`.
     pub fn http_request(&self, route: &str, status: u16, seconds: f64) {
-        self.0.requests.with_label_values(&[route, &status.to_string()]).inc();
+        self.0
+            .requests
+            .with_label_values(&[route, &status.to_string()])
+            .inc();
         self.0.duration.with_label_values(&[route]).observe(seconds);
     }
 
     pub fn oidc_login(&self, outcome: OidcOutcome) {
-        self.0.oidc_logins.with_label_values(&[outcome.label()]).inc();
+        self.0
+            .oidc_logins
+            .with_label_values(&[outcome.label()])
+            .inc();
     }
 
     pub fn refresh(&self, ok: bool) {
-        self.0.refreshes.with_label_values(&[if ok { "ok" } else { "refused" }]).inc();
+        self.0
+            .refreshes
+            .with_label_values(&[if ok { "ok" } else { "refused" }])
+            .inc();
     }
 
     pub fn join(&self, outcome: JoinOutcome) {
@@ -156,14 +281,22 @@ impl Metrics {
     }
 
     pub fn host_link(&self, world: &str, up: bool) {
-        self.0.host_link_up.with_label_values(&[world]).set(i64::from(up));
+        self.0
+            .host_link_up
+            .with_label_values(&[world])
+            .set(i64::from(up));
     }
 
     pub fn pending_kicks(&self, n: u64) {
-        self.0.pending_kicks.set(i64::try_from(n).unwrap_or(i64::MAX));
+        self.0
+            .pending_kicks
+            .set(i64::try_from(n).unwrap_or(i64::MAX));
     }
 
     pub fn jwks_refetch(&self, ok: bool) {
-        self.0.jwks_refetches.with_label_values(&[if ok { "ok" } else { "failed" }]).inc();
+        self.0
+            .jwks_refetches
+            .with_label_values(&[if ok { "ok" } else { "failed" }])
+            .inc();
     }
 }

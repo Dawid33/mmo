@@ -10,7 +10,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use super::super::block_textures::BlockTextureLayers;
 use super::super::voxel_material;
 use super::ao::ao_flips_quad;
-use super::binary::{cross_axes, Face, Quad};
+use super::binary::{Face, Quad, cross_axes};
 use super::pack;
 
 /// Index patterns by (winding reversed?, ao flipped?). Corner order is
@@ -44,8 +44,14 @@ impl MeshData {
         // CPU copy freed after GPU extraction; colliders come from rapier, tests never extract
         // (MinimalPlugins), and the entity Aabb is inserted constant by `apply_meshed_chunks`
         // so nothing reads mesh data main-world after upload.
-        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
-        mesh.insert_attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED, VertexAttributeValues::Uint32x2(self.packed));
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(
+            voxel_material::ATTRIBUTE_VOXEL_PACKED,
+            VertexAttributeValues::Uint32x2(self.packed),
+        );
         mesh.insert_indices(Indices::U32(self.indices));
         mesh
     }
@@ -88,4 +94,3 @@ pub fn quads_to_mesh_data(quads: &[Quad], layers: &BlockTextureLayers) -> Option
 
     Some(MeshData { packed, indices })
 }
-

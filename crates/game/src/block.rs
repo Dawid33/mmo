@@ -9,7 +9,7 @@ use block_mesh::ndshape::ConstShape;
 use parry3d::math::IVector;
 
 use crate::registry::BlockId;
-use crate::voxel::{BrickShape, Chunk, Voxel, BRICK_VOXEL_COUNT};
+use crate::voxel::{BRICK_VOXEL_COUNT, BrickShape, Chunk, Voxel};
 
 pub const BLOCK_VOXELS: usize = 16; // 1 block = 16³ voxels = 1 m³
 /// Blocks per axis of a sim chunk — the unit that owns one entity, one rapier
@@ -31,7 +31,10 @@ const fn parse_chunk_blocks(var: Option<&str>) -> usize {
     let mut value = 0usize;
     let mut i = 0;
     while i < bytes.len() {
-        assert!(bytes[i].is_ascii_digit(), "VOXEL_CHUNK_BLOCKS must be a number");
+        assert!(
+            bytes[i].is_ascii_digit(),
+            "VOXEL_CHUNK_BLOCKS must be a number"
+        );
         value = value * 10 + (bytes[i] - b'0') as usize;
         i += 1;
     }
@@ -61,7 +64,17 @@ pub fn voxel_index(x: usize, y: usize, z: usize) -> usize {
 /// (x fastest, then y, then z). `u16` so it covers a 16³ chunk (4096).
 /// `Ord` so it can key a `BTreeMap` deterministically.
 #[derive(
-    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    state_hash::StateHash,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
 )]
 pub struct BlockIndex(pub u16);
 
@@ -70,7 +83,10 @@ const _: () = assert!(CHUNK_BLOCK_COUNT <= u16::MAX as usize + 1);
 impl BlockIndex {
     /// The block at linear position `i` (`0..CHUNK_BLOCK_COUNT`).
     pub fn from_linear(i: usize) -> Self {
-        debug_assert!(i < CHUNK_BLOCK_COUNT, "block index {i} out of a {CHUNK_BLOCK_COUNT}-block chunk");
+        debug_assert!(
+            i < CHUNK_BLOCK_COUNT,
+            "block index {i} out of a {CHUNK_BLOCK_COUNT}-block chunk"
+        );
         BlockIndex(i as u16)
     }
     /// Linear position of this block, `0..CHUNK_BLOCK_COUNT`.
@@ -101,7 +117,16 @@ pub const MAX_TREE_LIMB: u8 = 63;
 /// in bits 18..24 (0 = the trunk; little-endian), else zero. Hashes
 /// trivially.
 #[derive(
-    Copy, Clone, Default, PartialEq, Eq, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug,
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    state_hash::StateHash,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
 )]
 pub struct Block {
     pub id: BlockId,
@@ -122,10 +147,17 @@ impl Block {
     /// branch or leaves — on limb `limb` (0 = the trunk, at most
     /// [`MAX_TREE_LIMB`]), both in `data`.
     pub fn with_tree(id: BlockId, tree: u32, limb: u8) -> Self {
-        debug_assert!(tree <= TREE_ID_MASK, "tree id {tree:#X} wider than {TREE_ID_BITS} bits");
+        debug_assert!(
+            tree <= TREE_ID_MASK,
+            "tree id {tree:#X} wider than {TREE_ID_BITS} bits"
+        );
         debug_assert!(limb <= MAX_TREE_LIMB, "limb {limb} over {MAX_TREE_LIMB}");
-        let [a, b, c, _] = ((tree & TREE_ID_MASK) | u32::from(limb & MAX_TREE_LIMB) << TREE_ID_BITS).to_le_bytes();
-        Self { id, data: [a, b, c] }
+        let [a, b, c, _] =
+            ((tree & TREE_ID_MASK) | u32::from(limb & MAX_TREE_LIMB) << TREE_ID_BITS).to_le_bytes();
+        Self {
+            id,
+            data: [a, b, c],
+        }
     }
 
     fn data_u32(&self) -> u32 {
@@ -159,7 +191,17 @@ pub type ChiselGrid = Vec<Option<u8>>;
 /// hashes. Undo restores a block's whole chisel entry, so no per-voxel inverse is
 /// needed. Edit in bulk through the grid; [`ChiselData::set`] re-merges on
 /// every call.
-#[derive(Clone, Default, PartialEq, Eq, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug)]
+#[derive(
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    state_hash::StateHash,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+)]
 pub struct ChiselData {
     cuboids: Vec<u32>,
     palette: Vec<BlockId>, // ≤ 256 materials, indexed by a cuboid's top byte
@@ -170,22 +212,36 @@ pub(crate) fn local_index(vx: usize, vy: usize, vz: usize) -> usize {
 }
 
 fn pack_cuboid(min: [usize; 3], max: [usize; 3], material: u8) -> u32 {
-    (min[0] | min[1] << 4 | min[2] << 8 | (max[0] - 1) << 12 | (max[1] - 1) << 16 | (max[2] - 1) << 20)
-        as u32
+    (min[0]
+        | min[1] << 4
+        | min[2] << 8
+        | (max[0] - 1) << 12
+        | (max[1] - 1) << 16
+        | (max[2] - 1) << 20) as u32
         | (material as u32) << 24
 }
 
 /// (min, exclusive max, palette index) of a packed cuboid.
 fn unpack_cuboid(c: u32) -> ([usize; 3], [usize; 3], u8) {
     let f = |shift: u32| ((c >> shift) & 0xF) as usize;
-    ([f(0), f(4), f(8)], [f(12) + 1, f(16) + 1, f(20) + 1], (c >> 24) as u8)
+    (
+        [f(0), f(4), f(8)],
+        [f(12) + 1, f(16) + 1, f(20) + 1],
+        (c >> 24) as u8,
+    )
 }
 
 impl ChiselData {
     /// No voxels yet.
     pub fn new(palette: Vec<BlockId>) -> Self {
-        assert!(palette.len() <= 256, "a chisel palette holds at most 256 materials");
-        Self { cuboids: Vec::new(), palette }
+        assert!(
+            palette.len() <= 256,
+            "a chisel palette holds at most 256 materials"
+        );
+        Self {
+            cuboids: Vec::new(),
+            palette,
+        }
     }
 
     /// One solid cuboid of `material`, voxels `min..max` (exclusive). Packed
@@ -193,9 +249,19 @@ impl ChiselData {
     /// walk starts at its min corner and grows to exactly its bounds).
     pub fn cuboid(material: BlockId, min: [usize; 3], max: [usize; 3]) -> Self {
         let empty = (0..3).any(|a| min[a] >= max[a]);
-        debug_assert!(max.iter().all(|&m| m <= BLOCK_VOXELS), "cuboid past the block: {max:?}");
-        let cuboids = if empty { Vec::new() } else { vec![pack_cuboid(min, max, 0)] };
-        Self { cuboids, palette: vec![material] }
+        debug_assert!(
+            max.iter().all(|&m| m <= BLOCK_VOXELS),
+            "cuboid past the block: {max:?}"
+        );
+        let cuboids = if empty {
+            Vec::new()
+        } else {
+            vec![pack_cuboid(min, max, 0)]
+        };
+        Self {
+            cuboids,
+            palette: vec![material],
+        }
     }
 
     /// Built voxel by voxel: `f(x, y, z)` is the palette index there, or
@@ -217,7 +283,10 @@ impl ChiselData {
     /// grows +x, +y, +z in turn, one layer at a time, while the new layer is
     /// entirely uncovered voxels of the same palette index.
     pub fn from_grid(palette: Vec<BlockId>, grid: &ChiselGrid) -> Self {
-        assert!(palette.len() <= 256, "a chisel palette holds at most 256 materials");
+        assert!(
+            palette.len() <= 256,
+            "a chisel palette holds at most 256 materials"
+        );
         debug_assert_eq!(grid.len(), BLOCK_VOXEL_COUNT);
         let mut covered = vec![false; BLOCK_VOXEL_COUNT];
         let mut cuboids = Vec::new();
@@ -226,7 +295,11 @@ impl ChiselData {
             if covered[start] {
                 continue;
             }
-            let min = [start % BLOCK_VOXELS, (start / BLOCK_VOXELS) % BLOCK_VOXELS, start / (BLOCK_VOXELS * BLOCK_VOXELS)];
+            let min = [
+                start % BLOCK_VOXELS,
+                (start / BLOCK_VOXELS) % BLOCK_VOXELS,
+                start / (BLOCK_VOXELS * BLOCK_VOXELS),
+            ];
             let mut max = [min[0] + 1, min[1] + 1, min[2] + 1];
             // The layer just past `max` on `axis` is growable.
             let growable = |max: &[usize; 3], axis: usize| {
@@ -288,11 +361,17 @@ impl ChiselData {
     /// Per voxel (grid order) the material it shows: `AIR` where empty, or
     /// where its palette index has no material.
     pub fn materials(&self) -> Vec<BlockId> {
-        self.grid().into_iter().map(|m| m.map_or(BlockId::AIR, |m| self.material(m))).collect()
+        self.grid()
+            .into_iter()
+            .map(|m| m.map_or(BlockId::AIR, |m| self.material(m)))
+            .collect()
     }
 
     fn material(&self, index: u8) -> BlockId {
-        self.palette.get(index as usize).copied().unwrap_or(BlockId::AIR)
+        self.palette
+            .get(index as usize)
+            .copied()
+            .unwrap_or(BlockId::AIR)
     }
 
     pub fn palette(&self) -> &[BlockId] {
@@ -335,7 +414,8 @@ impl ChiselData {
     }
 
     pub fn material_at(&self, vx: usize, vy: usize, vz: usize) -> BlockId {
-        self.index_at(vx, vy, vz).map_or(BlockId::AIR, |m| self.material(m))
+        self.index_at(vx, vy, vz)
+            .map_or(BlockId::AIR, |m| self.material(m))
     }
 }
 
@@ -390,7 +470,11 @@ impl ColliderCells {
 /// Deterministic: blocks in `BlockIndex` order; within a chiseled block,
 /// octants x-fastest, and an octant's voxels x-outer/z-inner.
 pub fn collider_cells(chunk: &Chunk) -> ColliderCells {
-    let mut out = ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+    let mut out = ColliderCells {
+        blocks: Vec::new(),
+        halves: Vec::new(),
+        voxels: Vec::new(),
+    };
     let chisel = &chunk.chisel;
     // A uniform unchiseled chunk: one block key per block, or none for air.
     if let (Some(block), true) = (chunk.blocks.uniform(), chisel.is_empty()) {
@@ -414,7 +498,11 @@ pub fn collider_cells(chunk: &Chunk) -> ColliderCells {
 /// [`collider_cells`] uses: a block edit diffs these before and after the
 /// write instead of decomposing the whole chunk again.
 pub fn collider_cells_of_block(chunk: &Chunk, i: BlockIndex) -> ColliderCells {
-    let mut out = ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+    let mut out = ColliderCells {
+        blocks: Vec::new(),
+        halves: Vec::new(),
+        voxels: Vec::new(),
+    };
     push_block_cells(&mut out, i, chunk.blocks.get(i), chunk.chisel.get(&i));
     out
 }
@@ -424,7 +512,11 @@ pub fn collider_cells_of_block(chunk: &Chunk, i: BlockIndex) -> ColliderCells {
 /// wood on the half-block grid). For shapes built outside a chunk
 /// (`voxel_body`).
 pub fn block_collider_cells(block: Block, chisel: Option<&ChiselData>) -> ColliderCells {
-    let mut out = ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+    let mut out = ColliderCells {
+        blocks: Vec::new(),
+        halves: Vec::new(),
+        voxels: Vec::new(),
+    };
     push_block_cells(&mut out, BlockIndex::from_xyz(0, 0, 0), block, chisel);
     out
 }
@@ -434,20 +526,30 @@ pub fn block_collider_cells(block: Block, chisel: Option<&ChiselData>) -> Collid
 /// other solid voxels, or nothing for air. A `ColliderScale::Half` block
 /// (tree wood) has no voxel keys: an octant is one half key when at least
 /// `HALF_CELL_FILL_MIN` of its voxels are solid, else open.
-fn push_block_cells(out: &mut ColliderCells, bi: BlockIndex, block: Block, chisel: Option<&ChiselData>) {
+fn push_block_cells(
+    out: &mut ColliderCells,
+    bi: BlockIndex,
+    block: Block,
+    chisel: Option<&ChiselData>,
+) {
     let h = HALF_BLOCK_VOXELS;
     let (bx, by, bz) = bi.xyz();
     let Some(c) = chisel else {
         if block.id != BlockId::AIR && block_props().is_solid(block.id) {
-            out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
+            out.blocks
+                .push(IVector::new(bx as i32, by as i32, bz as i32));
         }
         return;
     };
     let props = block_props();
-    let solid: Vec<bool> =
-        c.materials().into_iter().map(|m| m != BlockId::AIR && props.is_solid(m)).collect();
+    let solid: Vec<bool> = c
+        .materials()
+        .into_iter()
+        .map(|m| m != BlockId::AIR && props.is_solid(m))
+        .collect();
     if solid.iter().all(|&s| s) {
-        out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
+        out.blocks
+            .push(IVector::new(bx as i32, by as i32, bz as i32));
         return;
     }
     let half_grid = props.collider_scale(block.id) == crate::ColliderScale::Half;
@@ -464,7 +566,11 @@ fn push_block_cells(out: &mut ColliderCells, bi: BlockIndex, block: Block, chise
         };
         let mut filled = 0u32;
         octant(&mut |x, y, z| filled += solid[local_index(x, y, z)] as u32);
-        let cell_min = if half_grid { crate::HALF_CELL_FILL_MIN } else { (h * h * h) as u32 };
+        let cell_min = if half_grid {
+            crate::HALF_CELL_FILL_MIN
+        } else {
+            (h * h * h) as u32
+        };
         if filled >= cell_min {
             out.halves.push(IVector::new(
                 (bx * 2 + ox) as i32,
@@ -525,4 +631,3 @@ pub fn derive_voxels(chunk: &Chunk, brick: [usize; 3]) -> Vec<Voxel> {
     }
     voxels
 }
-

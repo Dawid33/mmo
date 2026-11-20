@@ -1,0 +1,8 @@
+- Minecraft mining is boring, annoying that this is how i get resources to build with.
+- UI looks great
+- Infinite regeneration item is a good idea for this modpack
+- Server has performance problems with just 15 players
+- Tools take too much space in hotbar
+- backpacks confusing, can't figure out how to put it on with armour. Too many backpack mods now and in the past, too many unnamed trinket slots
+- Sophisticated storage is very poorly explained how it works, not explained at all actually.
+- No opportunities to meet players organically by playing the game, have to go out of my way and even then have nothing to do.

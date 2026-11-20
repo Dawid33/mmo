@@ -68,8 +68,7 @@ use core::ops::Deref;
 /// # }
 /// # }
 /// ```
-#[derive(Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct SharedShape(pub Arc<dyn Shape>);
 
 impl Deref for SharedShape {

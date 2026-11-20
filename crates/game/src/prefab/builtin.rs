@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use super::codec::{prefab_from_named_bytes, BIN_SUFFIX, RON_SUFFIX};
-use super::resolve::{prefab_name_key, resolve, ResolvedPrefab, Trust};
+use super::codec::{BIN_SUFFIX, RON_SUFFIX, prefab_from_named_bytes};
+use super::resolve::{ResolvedPrefab, Trust, prefab_name_key, resolve};
 use crate::registry::BlockId;
 
 pub const BUILTIN_PREFAB_DIR: &str = "assets/prefabs";
@@ -44,7 +44,9 @@ impl PrefabSet {
             hasher.update(bytes);
         }
         for (file_name, bytes) in sources {
-            let Some(decoded) = prefab_from_named_bytes(file_name, bytes, None) else { continue };
+            let Some(decoded) = prefab_from_named_bytes(file_name, bytes, None) else {
+                continue;
+            };
             let file = decoded.map_err(|e| format!("{file_name}: {e}"))?;
             let resolved = resolve(&file, block_named, Trust::Builtin).map_err(|problems| {
                 let all: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
@@ -55,10 +57,15 @@ impl PrefabSet {
                 .or_else(|| file_name.strip_suffix(BIN_SUFFIX))
                 .unwrap_or(file_name);
             if stem != resolved.name {
-                return Err(format!("{file_name}: the file stem must be the prefab's name \"{}\"", resolved.name));
+                return Err(format!(
+                    "{file_name}: the file stem must be the prefab's name \"{}\"",
+                    resolved.name
+                ));
             }
             if !resolved.meta.source.is_empty() && resolved.meta.licence.is_empty() {
-                return Err(format!("{file_name}: meta.source is set but meta.licence is empty"));
+                return Err(format!(
+                    "{file_name}: meta.source is set but meta.licence is empty"
+                ));
             }
             let key = resolved.name_key;
             if let Some(other) = by_key.get(&key) {
@@ -69,7 +76,10 @@ impl PrefabSet {
             }
             by_key.insert(key, Arc::new(resolved));
         }
-        Ok(Self { by_key, content_hash: hasher.finalize() })
+        Ok(Self {
+            by_key,
+            content_hash: hasher.finalize(),
+        })
     }
 
     /// crc32 over the sources in sorted file-name order (name bytes, a 0 byte, content bytes, per file):
@@ -126,8 +136,12 @@ fn read_dir_sorted(dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), S
         .map_err(|e| format!("{}: {e}", dir.display()))?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
-        let Ok(name) = e.file_name().into_string() else { continue };
-        let kind = e.file_type().map_err(|e| format!("{}: {e}", dir.display()))?;
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
+        let kind = e
+            .file_type()
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = e.path();
         if kind.is_dir() {
             if !name.starts_with('.') {
@@ -151,7 +165,10 @@ pub fn load_builtin_prefabs(
             let mut files = Vec::new();
             read_dir_sorted(dir, &mut files)?;
             files.sort_by(|a, b| a.0.cmp(&b.0));
-            PrefabSet::from_sources(files.iter().map(|(n, b)| (n.as_str(), b.as_slice())), block_named)
+            PrefabSet::from_sources(
+                files.iter().map(|(n, b)| (n.as_str(), b.as_slice())),
+                block_named,
+            )
         }
         None => PrefabSet::from_sources(embedded_prefab_sources().iter().copied(), block_named),
     }
@@ -168,7 +185,10 @@ pub fn load_prefab_dirs(
     for dir in dirs {
         read_dir_sorted(dir, &mut files)?;
     }
-    PrefabSet::from_sources(files.iter().map(|(n, b)| (n.as_str(), b.as_slice())), block_named)
+    PrefabSet::from_sources(
+        files.iter().map(|(n, b)| (n.as_str(), b.as_slice())),
+        block_named,
+    )
 }
 
 static PREFABS: OnceLock<PrefabSet> = OnceLock::new();
@@ -176,11 +196,17 @@ static PREFABS: OnceLock<PrefabSet> = OnceLock::new();
 /// Installs the process-global set. Idempotent for an equal set; panics on a different one.
 pub fn install_prefabs(set: PrefabSet) {
     let installed = PREFABS.get_or_init(|| set.clone());
-    assert_eq!(*installed, set, "conflicting prefab sets installed in one process");
+    assert_eq!(
+        *installed, set,
+        "conflicting prefab sets installed in one process"
+    );
 }
 
 /// The installed set, or an empty one when none was.
 pub fn prefabs() -> &'static PrefabSet {
-    static EMPTY: PrefabSet = PrefabSet { by_key: BTreeMap::new(), content_hash: 0 };
+    static EMPTY: PrefabSet = PrefabSet {
+        by_key: BTreeMap::new(),
+        content_hash: 0,
+    };
     PREFABS.get().unwrap_or(&EMPTY)
 }

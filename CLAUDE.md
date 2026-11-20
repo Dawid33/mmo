@@ -22,10 +22,12 @@ context, bucket and IAM names, the `orion` login theme folder, storage keys). Th
 `game.errantry.renownandruin.com`.
 
 **Direction (2026-10-20):** a **Dwarf Fortress–style** game on the multi-region engine — a huge world
-forged up front (geology, climate, biomes, history), players play regions from a top-down commander
-camera (fortress mode; adventure mode exists too). No phased plan: features land piece by piece,
+forged up front (geology, climate, biomes, history). No phased plan: features land piece by piece,
 roughly modelling DF. Research: `docs/superpowers/specs/2026-10-20-dwarf-fortress-research/00-synthesis.md`.
-Game design (the two loops, adventure and fortress; what is decided, proposed and open): `docs/game-design.md`.
+**Since 2026-11-16** one character plays in first person: quests (authored as content packages) move the
+world's story through acts; a player may claim land and grow it into a settlement they run as mayor (the
+commander camera is only the mayor's optional view); embark/return was deleted (2026-11-17, `docs/superpowers/plans/2026-11-17-embark-removal.md`); editor mode is
+admin-only. Game design (what is decided, proposed and open): `docs/game-design.md`.
 Old RTS pivot is on branch `ds/rtsPivot`. `TODO.md` tracks the current direction.
 
 ## Building and running
@@ -44,6 +46,13 @@ changed build/run/test command updates its recipe in the same change.
   own rapier→game→… copies ON PURPOSE (tests build at region 64, play at 256).
 - **CPU cap**: every `just` build/test is pinned to 80% of cores (`cap` = `nice -n 10 taskset …`;
   `cpu_percent=`, `jobs=`). Raw `cargo` is NOT pinned — go through `just` or prefix it yourself.
+- **Vsync** is a player setting (Settings → Graphics, on by default, `graphics_settings.rs`); `VOXEL_VSYNC=on|off|…`
+  pins it at start, and every measuring recipe/script sets `off` — a new one that reads frame times must too.
+- **Interface scale** is a player setting (Settings → General, `graphics_settings.rs` → `slint_overlay::OverlayScale`;
+  scale 0.75–3 in steps of 0.25, shown as a percentage of the default `UI_SCALE` 1.5 = "100 %"): the widgets are
+  pixel-exact only at a total scale of 1 and 2 (the 67 % and 133 % stops), hence the steps; a
+  layer draws at the wish fitted to the window (`fitted_ui_scale`). `VOXEL_UI_SCALE=<n>` pins it at start. A new
+  Bevy-side use of UI coordinates divides window pixels by the layer's `ui_scale` (the minimap alone stays in window pixels).
 - **GPU**: `just adapter=6700 …` / `$VOXEL_ADAPTER` pins wgpu; unpinned, `client::adapter_pick` picks the
   best adapter (never the slow NVK T600 if anything better exists). Check the `AdapterInfo` log line.
 - **Debug launches** (`crates/client/src/debug_launch.rs`): `client debug world [--reset] [--site N]` forges
@@ -92,27 +101,57 @@ at `<svc>.<ns>.svc.cluster.local` with no port-forward, and the kube context `or
 (`just orion-vpn-status|up|down`, a new device `just orion-vpn-peer <name> <octet>`; VPN down → `just tunnel` +
 `orion_context=orion-ssh`). VPN-only HTTPS names `<name>.vpn.errantry.renownandruin.com` (root `vpn-names`: a CoreDNS
 rewrite to the Service + DNS-01 issuer `letsencrypt-dns`): Keycloak's admin console/API is
-`https://keycloak.vpn.errantry.renownandruin.com/admin/`; Garage's admin API is `garage.garage.svc.cluster.local:3903`.
+`https://keycloak.vpn.errantry.renownandruin.com/admin/`; Grafana is `http://grafana.vpn.errantry.renownandruin.com` (VPN only,
+monitoring module `grafana_public = false`); Garage's admin API is `garage.garage.svc.cluster.local:3903`.
 As built: `docs/superpowers/plans/2026-11-15-orion-vpn.md`.
+
+**Deploying is two commands** (`docs/superpowers/plans/2026-11-15-two-command-deploy.md`, "As built"):
+`just deploy --infra` plans and applies every OpenTofu root in order (saved plans; confirmation for
+changes; `--yes`, `--dry-run`, `--only <root>`), and `just deploy --game` builds, pushes and releases
+login, world and panel, forges a first world and registers it with login. Both flags run infra then
+game; `just target=twin deploy …` does the same on the k3d twin. The stdlib-Python orchestrator is
+`scripts/deploy/` (`just deploy-test` runs its policy-compliant static checks); a local flock keeps two runs apart. `bootstrap`
+(the state bucket) stays manual. The `orion-*` / `twin-*` recipes below are escape hatches for doing
+one step by hand.
 
 OpenTofu (not Terraform) in `deploy/`: the k3d twin of orion (`deploy/envs/local/`, cluster `mmo`, context `k3d-mmo`:
 `just twin-up`, `twin-images`, `twin-apply`, `twin-check`, `twin-down`; never the inner loop);
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan
 first; roots `platform` → `dns` (the `renownandruin.com` records no module makes) → `garage` (+ `garage-buckets`) = https://s3.errantry.renownandruin.com, the S3-compatible
 object store on the box itself (one copy, no off-box backup; telemetry and Zulip files live there) → `monitoring`, `picoshare` = https://share.errantry.renownandruin.com, `zulip` = https://chat.errantry.renownandruin.com,
-`keycloak` (+ `keycloak-realm`) = https://auth.errantry.renownandruin.com, the identity provider → `registry` (the ECR repositories `mmo/login`, `mmo/server`, `mmo/web` and the cluster's pull-only IAM user) → `login` = https://login.errantry.renownandruin.com, the game's login service (two pods, its own PostgreSQL, metrics scraped; its image is `mmo/login` in ECR, pulled with a pull secret the CronJob `ecr-refresh` renews every 6 h; one tag, `latest`, and an image `latest` has moved past expires about a day later; a release is `just orion-login-push` — pushed as `latest` (git revision in an image label), set by digest with `kubectl set image`, never an apply — and the way back is `kubectl rollout undo` (works while the previous image is still in ECR or the node's cache); `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log; apply `registry` and push BEFORE the first apply) → `site` = https://www.errantry.renownandruin.com, the static website from `website/` with the `orion`
+`keycloak` (+ `keycloak-realm`) = https://auth.errantry.renownandruin.com, the identity provider → `registry` (the ECR repositories `mmo/login`, `mmo/server`, `mmo/web` and the cluster's pull-only IAM user) → `login` = https://login.errantry.renownandruin.com, the game's login service (two pods, the retained old PostgreSQL until its operator move to `pg-management`, metrics scraped; its image is `mmo/login` in ECR, pulled with a pull secret the CronJob `ecr-refresh` renews every 6 h; one tag, `latest`, and an image `latest` has moved past expires about a day later; a release is `just orion-login-push` — pushed as `latest` (git revision in an image label), set by digest with `kubectl set image`, never an apply — and the way back is `kubectl rollout undo` (works while the previous image is still in ECR or the node's cache); `just orion-login …` runs its operator commands in a pod, `orion-login-logs` follows its log; apply `registry` and push BEFORE the first apply) → `site` = https://www.errantry.renownandruin.com, the static website from `website/` with the `orion`
 Keycloak login theme beside it in `website/theme/` (`just site-dev|site-test|site-theme-check`; after a Keycloak image
 bump re-diff `website/theme/orion/login/template.ftl` against the new `base` theme and run `just site-theme-check`); monitoring stack
-handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
-the OLD compose game on the box, `just deploy` (`scripts/web_release.sh` — use the pinned binaryen under
-`target/tools`, never the distro's; the new game is the `world` root below, and a page from this tree shows "Play online" against a `/login` the compose game does not serve). `deploy/**/*.tfvars` and `.env` are git-ignored — never commit or
-print secrets.
+handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`). The old compose game's
+deploy path is gone; any compose containers still on the box are the owner's hand step. `web-release`
+(`scripts/web_release.sh`, with the pinned binaryen under `target/tools`) remains for the browser bundle.
+`deploy/**/*.tfvars` and `.env` are git-ignored — never commit or print secrets.
+
+PostgreSQL consolidation (Elastic 6): orion has two CloudNativePG clusters — `pg` in
+namespace `postgres` for one region/world database per world, and `pg-management` in
+namespace `pg-management` for login and Keycloak. Management has its own Garage tenant,
+bucket `management-backups`, role Secrets, CronJob and alert (`PostgresBackupFailed`).
+Zulip deliberately keeps its chart-bundled PostgreSQL and its full-text dictionaries.
+Infrastructure order is `registry` → `platform` → `garage-buckets` (including the
+management bucket) → `postgres` → `pg-management` → `dns` → `keycloak` → `login` → the
+remaining roots; the deploy driver waits for the two management `Database` CRs after
+`pg-management`. `orion-pg-mgmt-backup-now` runs the dump manually; `pg-move <ctx> <ns>
+<svc>` only prints the stopped-writer dump/restore, ownership/count checks, saved-plan
+apply, verification and rollback. `twin-pg-move-login` is the twin-only destructive
+rehearsal. Production moves were completed login first, then Keycloak. The Orion login and
+Keycloak roots now default to `use_management_db=true` and `own_postgres="absent"`,
+so a normal `just deploy --infra` stays on `pg-management` and does not recreate
+the retired StatefulSets. The old volumes and `*-db-old` Secrets were explicitly
+removed by the owner; the twin remains on the rehearsal defaults until a move is
+run there. Old-image/old-role cleanup is complete, but the dump restore drill and
+ordinary future backups remain part of operations.
 
 **The world on k8s (R5, built 2026-11-15; plan `docs/superpowers/plans/2026-11-15-r5-k8s.md`, "As built"; the
 hand steps are its Phase D) — the deployment chain**: apply order `registry` (+ `just orion-world-push`) →
-`platform` (carries the CloudNativePG operator) → `garage-buckets` (bucket `world-backups`) → `postgres` (cluster
-`pg`, a database and role per world, a nightly dump CronJob to `world-backups` — same disk as the data, no off-box
-copy) → `dns` → `login` → `monitoring` → `world` (`deploy/modules/world`, namespace `world-<id>`: Deployment
+`platform` (carries the CloudNativePG operator) → `garage-buckets` (buckets `world-backups` and
+`management-backups`) → `postgres` (region/world cluster `pg`) + `pg-management` (login and
+Keycloak, separate roles/Secrets/volume/dump) → `dns` → `login` → `monitoring` → `world`
+(`deploy/modules/world`, namespace `world-<id>`: Deployment
 `coordinator` (`var.coordinator_replicas` replicas, default 2, `Recreate`, every replica on the same identity
 Secret `coordinator-identity` — one pin for hosts and login — behind the Service `coordinator`: ClusterIP, TCP 6480 =
 the HTTPS API (`VOXEL_COORDINATOR_BIND=0.0.0.0:6480`) + the health port, each connection to a Ready replica — a world
@@ -250,14 +289,54 @@ already on the node); NOT a connected player, load-driven scale-up, a host
 dying while it owns land (a `Crash` succession), a browser pin, cert-manager, a real node drain, the nightly dump,
 the firewall's port range, an image pull at a cold start, or load.
 
+**The world panel (R5b first slice, `crates/panel`, plan `docs/superpowers/plans/2026-11-15-r5b-world-panel.md`)**: an
+operator page over every world namespace (label `app.kubernetes.io/name=world`) — state, pods, `/readyz`, metrics,
+forge Jobs, release history — that starts, stops and forges as the `world-*` recipes do. `panel/src/ops.rs` mirrors
+`world-start` / `world-stop` step for step: **change one, change the other**. Port-forward only, no login
+(`just orion-panel`, `twin-panel`; `just panel ctx=<ctx>` runs it from the checkout through `kubectl proxy` with your
+credentials); a world grants it access with the world module's `panel` RoleBinding (ClusterRole `world-panel`). It
+speaks to the API server with reqwest (ring), not kube-rs. Releases `just orion-panel-push` (by digest, as login).
+
 **Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
 token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
-HTTP API at https://grafana.errantry.renownandruin.com (`Authorization: Bearer $GRAFANA_SERVICE_TOKEN`;
+HTTP API at http://grafana.vpn.errantry.renownandruin.com — VPN-only since 2026-11-15, no public Ingress or record (`Authorization: Bearer $GRAFANA_SERVICE_TOKEN`;
 data sources: Prometheus (local), Thanos, Loki, Tempo, Pyroscope, Alertmanager; `just orion-grafana`
 gives a local port-forward). Load it with `set -a; . ./.env; set +a` inside the one command that needs it; never echo it,
 pass it on a command line that gets logged, or write it anywhere else. Reading is fine without asking;
 **ask before changing anything in Grafana** (dashboards, alerts, data sources, users, tokens) — durable
 changes belong in `deploy/modules/monitoring/`, not in the UI.
+
+The `Errantry telemetry` dashboard is the operator entry point for correlated traces, logs and CPU profiles
+(`deploy/modules/monitoring/dashboards/telemetry.json`). Select the environment, cluster, service
+(`errantry-login` / `errantry-world`), role (`login` / `coordinator` / `fleet` / `host`), world and pod before
+opening a trace. The world dashboard links here for its selected `world-*` namespace while keeping the time
+range. Paste the 32-digit ID from Tempo into `trace_id`; logs and the Tempo-to-Loki derived field use the exact
+`trace_id=<hex>` syntax. A trace's Explore page retains trace-to-log and trace-to-profile links. Profile views
+show the selected pod beside a role comparison for the same world; align the dashboard range with the trace.
+Tempo's p50/p95/p99 panels use TraceQL metrics and require the backend metrics generator to be enabled.
+
+Telemetry is non-authoritative: health/readiness, simulation, persistence and fencing never depend on an
+exporter. `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_PROTOCOL` select the Alloy OTLP HTTP ingest path;
+`OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` select parent-based head sampling. To force one diagnostic
+deployment to be sampled, set `OTEL_TRACES_SAMPLER=always_on` temporarily, restart only that workload, inspect
+the bounded interval, then restore its role default. `OTEL_BSP_*` bounds the batch queue. Continuous CPU profiles
+are runtime-controlled by `PYROSCOPE`, `PYROSCOPE_SERVER` and `PYROSCOPE_SAMPLE_RATE`; disabling `PYROSCOPE` or
+setting the sampler to `always_off` is the first telemetry rollback, not a game-binary rollback.
+`VOXEL_TELEMETRY_ENVIRONMENT` / `VOXEL_TELEMETRY_CLUSTER` and Downward-API pod/namespace values supply resource
+identity; login has no world id, while coordinator, fleet and host workloads carry the world id.
+
+The correlation allowlist is deliberately low-cardinality: service, role, environment, cluster, namespace, world,
+pod, build revision, fixed route/operation/status categories. Never add player/account/entity identifiers, host
+ordinal or numeric id, region coordinates, raw URLs/queries, certificate pins, service/Kubernetes tokens, SQL or
+binds, request/response bodies, issuer tokens or claims. Profile labels mirror only service, role, environment,
+cluster, namespace, world, pod and revision. Alloy already forwards the OTLP resource envelope unchanged and must
+retain its batch path and bounded resources; no tail sampler is part of this phase.
+
+Roll out dashboards/datasources through a separate `monitoring` plan/apply and review the resulting diff before any
+workload image release. Disable telemetry at runtime first if the backend/exporter fails. A code release that
+changes the tracing protocol is a coordinated login/world stop-update-start; Grafana JSON and datasource changes
+can be rolled back independently through OpenTofu. Never make live Grafana configuration changes or use a
+telemetry outage to bypass world release or fencing runbooks.
 
 ## Testing
 
@@ -860,7 +939,9 @@ Verify with:
   HTTP/2 connection to ONE replica until it breaks (kube-proxy balances connections, not requests). Role `all`
   (`jwt` + a service token) serves the two login routes itself on `VOXEL_HOST_LINK_BIND` (an in-memory answer queue,
   `LOGIN_ANSWERS_HELD_MAX` 4096): the login service has one transport; kicks are durable in its store until acked
-  (login migration 0003). `svc-link` carries host↔host peer links only. `LINK_PROTOCOL_VERSION` is 13 (Elastic 5:
+  (login migration 0003). `svc-link` carries host↔host peer links only. `LINK_PROTOCOL_VERSION` is 14
+  (`CoordMsg::LoginTraced` carries only a bounded sampled W3C carrier and opaque operation id through the durable
+  mailbox; the old `CoordMsg::Login` remains decodable; 13 was Elastic 5:
   `CoordMsg::BeginCut.moves`, `MoveLand`, `ExpectLand`, `MoveOff`, `CutFailure::MoveRefused`,
   `Reliable::PlayerMove.place`, `ServerPacket::LandMoving`; 12 was the coordinator as an HTTP service: the
   `X-Link-Version` header and the peer hello; 11 was Elastic 4:
@@ -978,7 +1059,7 @@ Verify with:
   unauthenticated, on the coordinator's HTTPS API (merged after the token guard) and on a plain `VOXEL_MAP_BIND`
   (the pod's 6470 for the web image's rate-limited `/map/<world>/` proxy; role `all` loopback only).
 - UI is **Slint only** (no `bevy_ui`, no egui). `CursorPolicy` is the only cursor-grab writer. `dev_ui`
-  (F3 Debug tab) is dev tooling only, never player-facing.
+  (F3 debug pane) is dev tooling only, never player-facing.
 - wasm: no shared-memory threads; work runs in Web Workers by bincode messages. New compute work goes in
   `renderer::compute::JobKind` and must carry everything it reads (workers have no ECS).
 - Bevy pinned at `0.19.1`; upgrades are deliberate migrations. Shader tests compose against stubs and miss

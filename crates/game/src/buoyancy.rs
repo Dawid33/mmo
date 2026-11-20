@@ -22,12 +22,13 @@
 use rapier3d::math::Vector;
 
 use crate::body::{BODY_ANGULAR_DAMPING, BODY_GRAVITY};
-use crate::mass_props::{mass_properties, BODY_DEFAULT_DENSITY};
+use crate::mass_props::{BODY_DEFAULT_DENSITY, mass_properties};
 use crate::movement::UNITS_PER_METER;
 use crate::voxel_body::{
-    model_mass_properties, VOXEL_BODY_ANGULAR_DAMPING, VOXEL_BODY_GRAVITY, VOXEL_BODY_LANDED_ANGULAR_DAMPING,
+    VOXEL_BODY_ANGULAR_DAMPING, VOXEL_BODY_GRAVITY, VOXEL_BODY_LANDED_ANGULAR_DAMPING,
+    model_mass_properties,
 };
-use crate::{BlockPos, ColliderSpec, EntityKey, EntityKind, Rollback, WorldBlockPos, BLOCK_VOXELS};
+use crate::{BLOCK_VOXELS, BlockPos, ColliderSpec, EntityKey, EntityKind, Rollback, WorldBlockPos};
 
 /// Density of water, kg/m³.
 pub const WATER_DENSITY: f32 = 1000.0;
@@ -54,7 +55,10 @@ pub fn submerged_fraction(rb: &Rollback, aabb_min: Vector, aabb_max: Vector, com
     }
     let here = *rb.data.region;
     let (x, z) = ((com.x / bv).floor() as i32, (com.z / bv).floor() as i32);
-    let (y0, y1) = ((aabb_min.y / bv).floor() as i32, (aabb_max.y / bv).floor() as i32);
+    let (y0, y1) = (
+        (aabb_min.y / bv).floor() as i32,
+        (aabb_max.y / bv).floor() as i32,
+    );
     let mut top = None;
     for y in y0..=y1 {
         if rb.water_units_at(WorldBlockPos::from_local(here, BlockPos::new(x, y, z))) > 0 {
@@ -80,12 +84,20 @@ impl Rollback {
             .filter_map(|(k, kind)| (*kind == Some(EntityKind::Body)).then_some(k))
             .collect();
         for e in bodies {
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else {
+                continue;
+            };
+            let Some(body) = self.data.physics.bodies.get(handle) else {
+                continue;
+            };
             if !body.is_dynamic() {
                 continue;
             }
-            let Some(collider) = body.colliders().first().and_then(|c| self.data.physics.colliders.get(*c)) else {
+            let Some(collider) = body
+                .colliders()
+                .first()
+                .and_then(|c| self.data.physics.colliders.get(*c))
+            else {
                 continue;
             };
             let aabb = collider.compute_aabb();
@@ -97,19 +109,33 @@ impl Rollback {
             if f == 0.0 && body.linear_damping() == 0.0 {
                 continue;
             }
-            let Some(spec) = ColliderSpec::of_shape(collider.shape()) else { continue };
+            let Some(spec) = ColliderSpec::of_shape(collider.shape()) else {
+                continue;
+            };
             // The kind's own mass, gravity and angular damping (as its spawn
             // code computes them, so dry is bit-exact).
             let (mass, gravity, base_angular) = match self.data.ecs.voxel_body.try_get(e) {
                 Some(vb) => (
                     model_mass_properties(&vb.model).mass(),
                     VOXEL_BODY_GRAVITY,
-                    if vb.landed { VOXEL_BODY_LANDED_ANGULAR_DAMPING } else { VOXEL_BODY_ANGULAR_DAMPING },
+                    if vb.landed {
+                        VOXEL_BODY_LANDED_ANGULAR_DAMPING
+                    } else {
+                        VOXEL_BODY_ANGULAR_DAMPING
+                    },
                 ),
-                None => (mass_properties(&spec, BODY_DEFAULT_DENSITY).mass(), BODY_GRAVITY, BODY_ANGULAR_DAMPING),
+                None => (
+                    mass_properties(&spec, BODY_DEFAULT_DENSITY).mass(),
+                    BODY_GRAVITY,
+                    BODY_ANGULAR_DAMPING,
+                ),
             };
             let (force, linear, angular) = if f == 0.0 {
-                (Vector::new(0.0, -mass * gravity * UNITS_PER_METER, 0.0), 0.0, base_angular)
+                (
+                    Vector::new(0.0, -mass * gravity * UNITS_PER_METER, 0.0),
+                    0.0,
+                    base_angular,
+                )
             } else {
                 let lift = f * spec.volume_m3() * WATER_DENSITY;
                 (

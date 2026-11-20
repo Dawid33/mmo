@@ -3,24 +3,24 @@
 //! which is what makes "cycle out = park, cycle in = restore-or-regenerate"
 //! safe for the multi-region world.
 
-mod noise;
-mod spline;
-mod density;
 pub mod cache;
+mod density;
 pub mod forge;
 pub mod forged;
 pub mod forged_tiles;
 pub mod habitat;
 pub mod islands;
-pub mod pipeline;
 pub mod material;
-pub mod tile_map;
-pub mod world_store;
+mod noise;
+pub mod pipeline;
 pub mod sites;
+mod slopes;
+mod spline;
 pub mod structures;
 pub mod surface;
+pub mod tile_map;
 pub mod trees;
-mod slopes;
+pub mod world_store;
 
 /// The world seed shared by every `generate_region` caller (server + offline
 /// client) so they produce the SAME world. Kept in one place so the server and
@@ -34,13 +34,14 @@ pub const WORLD_SEED: u64 = 0x00D5_C0DE_007B;
 use std::collections::BTreeMap;
 
 use game::{
-    Biome, Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkBlocks, Column, ColumnCoords, RegionCoords, SubChunk,
-    BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BRICK_VOXELS, BRICK_VOXEL_COUNT, REGION_CHUNKS,
+    BLOCK_VOXELS, BRICK_VOXEL_COUNT, BRICK_VOXELS, Biome, Block, BlockId, BlockIndex,
+    CHUNK_BLOCK_COUNT, CHUNK_BLOCKS, ChiselData, Chunk, ChunkBlocks, Column, ColumnCoords,
+    REGION_CHUNKS, RegionCoords, SubChunk,
 };
 
 use crate::forged::ColumnClimate;
 use crate::material::{GroundCover, Materials};
-use crate::pipeline::{ProfileGrid, TerrainPipeline, PROFILE_LATTICE_BLOCKS, SEA_TOP_BLOCK};
+use crate::pipeline::{PROFILE_LATTICE_BLOCKS, ProfileGrid, SEA_TOP_BLOCK, TerrainPipeline};
 
 // Region span in blocks (the game's dial, as i32 for coordinate math).
 const REGION_BLOCKS: i32 = game::REGION_BLOCKS as i32; // 64 at the test default
@@ -133,7 +134,11 @@ fn surface_from_profile(prof: &crate::pipeline::ColumnProfile) -> i32 {
 
 /// Whether column `c` has ground at all (a surface inside its scan band).
 fn has_ground(c: &ColSample) -> bool {
-    c.s >= if c.unbounded { FORGED_SCAN_BOTTOM } else { SCAN_BOTTOM }
+    c.s >= if c.unbounded {
+        FORGED_SCAN_BOTTOM
+    } else {
+        SCAN_BOTTOM
+    }
 }
 
 /// One block column as generation builds it (`column_sample`).
@@ -166,9 +171,20 @@ fn column_sample(patch: &dyn Patch, mats: &Materials, bx: i32, bz: i32) -> ColSa
 fn point_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> ColSample {
     let (prof, water_top, lake) = patch.sample(x, z);
     let s = surface_from_profile(&prof);
-    debug_assert!(s >= scan_band(&prof).1, "surface below the scan at ({x}, {z})");
+    debug_assert!(
+        s >= scan_band(&prof).1,
+        "surface below the scan at ({x}, {z})"
+    );
     let unbounded = prof.is_unbounded();
-    let plain = ColSample { s, water_top, top: s, ice_from: water_top + 1, cover: None, trees: true, unbounded };
+    let plain = ColSample {
+        s,
+        water_top,
+        top: s,
+        ice_from: water_top + 1,
+        cover: None,
+        trees: true,
+        unbounded,
+    };
     if !mats.biome.enabled() {
         return plain;
     }
@@ -233,7 +249,11 @@ fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample, lake: boo
     let ice = if !dry && frozen { c.ice_blocks() } else { 0 };
     ColSample {
         top: s + glacier,
-        ice_from: if ice > 0 { (water_top - ice + 1).max(s + 1) } else { water_top + 1 },
+        ice_from: if ice > 0 {
+            (water_top - ice + 1).max(s + 1)
+        } else {
+            water_top + 1
+        },
         cover: Some(cover),
         trees: glacier == 0 && !salt_flat && !treeless(c.biome) && (!snowy || forest(c.biome)),
         ..plain
@@ -264,7 +284,8 @@ fn column_material(mats: &Materials, c: &ColSample, by: i32) -> BlockId {
 
 /// Deepest soil (blocks) of column `c`: the band reaches below it.
 fn soil_depth(c: &ColSample) -> i32 {
-    c.cover.map_or(MAX_SOIL_DEPTH, |cover| cover.soil_depth.max(MAX_SOIL_DEPTH))
+    c.cover
+        .map_or(MAX_SOIL_DEPTH, |cover| cover.soil_depth.max(MAX_SOIL_DEPTH))
 }
 
 /// The surface a tree may stand on, from a `column_sample` and whether it
@@ -286,7 +307,11 @@ struct TreeSource<'a> {
 impl<'a> TreeSource<'a> {
     /// The trees of forged world `world`.
     fn forged(world: &'a forged::ForgedWorld) -> Self {
-        TreeSource { habitat: world, seed: world.seed(), wrap: tree_lattice_wrap(world) }
+        TreeSource {
+            habitat: world,
+            seed: world.seed(),
+            wrap: tree_lattice_wrap(world),
+        }
     }
 }
 
@@ -319,7 +344,10 @@ fn trees_for_window(
     surface: &dyn Fn(i32, i32) -> Option<i32>,
 ) -> Vec<trees::TreeSeed> {
     let (rx, rz) = (coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS);
-    let memo = MemoHabitat { inner: trees_from.habitat, memo: Default::default() };
+    let memo = MemoHabitat {
+        inner: trees_from.habitat,
+        memo: Default::default(),
+    };
     trees::trees_in(
         (x0 - TREE_REACH_BLOCKS).max(rx),
         (z0 - TREE_REACH_BLOCKS).max(rz),
@@ -370,13 +398,22 @@ pub(crate) trait Patch {
 /// bedrock (coarse LOD shows bare rock with it).
 fn strata_rock(strata: &[(i16, BlockId)], geo: i16, y: i32) -> BlockId {
     let s = y - i32::from(geo);
-    strata.iter().rev().find(|(top, _)| i32::from(*top) > s).or(strata.first()).map_or(BlockId::AIR, |&(_, id)| id)
+    strata
+        .iter()
+        .rev()
+        .find(|(top, _)| i32::from(*top) > s)
+        .or(strata.first())
+        .map_or(BlockId::AIR, |&(_, id)| id)
 }
 
 /// The formations of `strata` (top-down) that `s` in `lo_s..=hi_s` can hit
 /// under `ColumnGround::block_at`'s rule, plus one more above and below.
 fn footprint_strata(strata: &[(i16, BlockId)], lo_s: i32, hi_s: i32) -> Vec<(i16, BlockId)> {
-    let holding = |s: i32| strata.partition_point(|&(top, _)| i32::from(top) > s).saturating_sub(1);
+    let holding = |s: i32| {
+        strata
+            .partition_point(|&(top, _)| i32::from(top) > s)
+            .saturating_sub(1)
+    };
     let first = holding(hi_s).saturating_sub(1);
     let last = (holding(lo_s) + 1).min(strata.len() - 1);
     strata[first..=last].to_vec()
@@ -393,7 +430,11 @@ impl Patch for ProceduralPatch {
 /// The full REGION_CHUNKS x REGION_CHUNKS column grid for one region. Pure and
 /// deterministic. With `VOXEL_WORLD_FILE` set the region comes from that
 /// forged world and `seed` is ignored (see `forged.rs`).
-pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<(ColumnCoords, Column)> {
+pub fn generate_region(
+    coords: RegionCoords,
+    seed: u64,
+    mats: Materials,
+) -> Vec<(ColumnCoords, Column)> {
     generate_columns(coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, seed, mats)
 }
 
@@ -405,7 +446,14 @@ pub fn generate_region_with(
     mats: Materials,
     structures: &dyn structures::StructureSource,
 ) -> Vec<(ColumnCoords, Column)> {
-    generate_columns_with(coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, seed, mats, structures)
+    generate_columns_with(
+        coords,
+        0..REGION_CHUNKS,
+        0..REGION_CHUNKS,
+        seed,
+        mats,
+        structures,
+    )
 }
 
 /// The columns `xs × zs` (region-local chunk columns) of region `coords`:
@@ -421,7 +469,10 @@ pub fn generate_columns(
     if let Some(world) = forged::active() {
         let coords = canonical_region(world, coords);
         let cb = CHUNK_BLOCKS as i32;
-        let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
+        let (x, z) = (
+            coords.x * REGION_BLOCKS + xs.start as i32 * cb,
+            coords.z * REGION_BLOCKS + zs.start as i32 * cb,
+        );
         let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
         let trees_from = TreeSource::forged(world);
         let patch = world.patch(ox, oz, span);
@@ -442,12 +493,27 @@ pub fn generate_columns_with(
     structures: &dyn structures::StructureSource,
 ) -> Vec<(ColumnCoords, Column)> {
     let cb = CHUNK_BLOCKS as i32;
-    let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
+    let (x, z) = (
+        coords.x * REGION_BLOCKS + xs.start as i32 * cb,
+        coords.z * REGION_BLOCKS + zs.start as i32 * cb,
+    );
     let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
     let habitat = habitat::ProceduralHabitat::new(seed);
-    let trees_from = TreeSource { habitat: &habitat, seed, wrap: None };
-    columns_from_patch(&ProceduralPatch(grid), coords, xs, zs, mats, trees_from, structures)
+    let trees_from = TreeSource {
+        habitat: &habitat,
+        seed,
+        wrap: None,
+    };
+    columns_from_patch(
+        &ProceduralPatch(grid),
+        coords,
+        xs,
+        zs,
+        mats,
+        trees_from,
+        structures,
+    )
 }
 
 /// The y of the top ground block of world column (x, z) — the same value generation uses as the
@@ -481,7 +547,12 @@ pub fn is_wet(x: i32, z: i32, seed: u64, mats: Materials) -> bool {
         }
         None => {
             let (ox, oz, span) = chunk_window(x, z, &mats);
-            column_sample(&ProceduralPatch(TerrainPipeline::new(seed).profile_grid(ox, oz, span)), &mats, x, z)
+            column_sample(
+                &ProceduralPatch(TerrainPipeline::new(seed).profile_grid(ox, oz, span)),
+                &mats,
+                x,
+                z,
+            )
         }
     };
     c.water_top > c.top
@@ -518,7 +589,10 @@ fn wrapped_structures<'a>(
     world: &forged::ForgedWorld,
     structures: &'a dyn structures::StructureSource,
 ) -> structures::WrappedStructures<'a> {
-    structures::WrappedStructures { inner: structures, frame: wrap_frame(world) }
+    structures::WrappedStructures {
+        inner: structures,
+        frame: wrap_frame(world),
+    }
 }
 
 /// The tree lattice's wrap on `world` (`wrap_frame` in lattice columns; a
@@ -535,8 +609,15 @@ pub fn tree_lattice_wrap(world: &forged::ForgedWorld) -> Option<trees::LatticeWr
     let l = trees::TREE_LATTICE_BLOCKS;
     wrap_frame(world).map(|(origin, width)| {
         let period = width / l;
-        debug_assert_eq!(period % 64, 0, "tree id spacing across the seam needs a period of whole 64 cells, got {period}");
-        trees::LatticeWrap { origin: origin / l, period }
+        debug_assert_eq!(
+            period % 64,
+            0,
+            "tree id spacing across the seam needs a period of whole 64 cells, got {period}"
+        );
+        trees::LatticeWrap {
+            origin: origin / l,
+            period,
+        }
     })
 }
 
@@ -544,7 +625,11 @@ pub fn tree_lattice_wrap(world: &forged::ForgedWorld) -> Option<trees::LatticeWr
 /// them with no structure source (a forged world has none outside the dev
 /// tools), sorted by id, positioned in the frame `coords` is in. Empty when
 /// `mats` has trees off. For tools (the forge report).
-pub fn region_trees_forged(world: &forged::ForgedWorld, coords: RegionCoords, mats: Materials) -> Vec<trees::TreeSeed> {
+pub fn region_trees_forged(
+    world: &forged::ForgedWorld,
+    coords: RegionCoords,
+    mats: Materials,
+) -> Vec<trees::TreeSeed> {
     if !mats.trees.enabled() {
         return Vec::new();
     }
@@ -557,7 +642,10 @@ pub fn region_trees_forged(world: &forged::ForgedWorld, coords: RegionCoords, ma
     let sample = |x: i32, z: i32| column_sample(&patch, &mats, x, z);
     let surface = |x: i32, z: i32| {
         let c = sample(x, z);
-        tree_ground(c, slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz)).is_some())
+        tree_ground(
+            c,
+            slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz)).is_some(),
+        )
     };
     let window = [rx, rz, rx + REGION_BLOCKS, rz + REGION_BLOCKS];
     let mut out = trees_for_window(coords, window, TreeSource::forged(world), &surface);
@@ -583,7 +671,11 @@ fn chunk_window(x: i32, z: i32, mats: &Materials) -> (f64, f64, f64) {
 /// Patch margin (blocks) past a window: wider when trees are on, which read
 /// surfaces further out (`TREE_RING_BLOCKS`).
 fn patch_margin(mats: &Materials) -> i32 {
-    if mats.trees.enabled() { TREE_PATCH_MARGIN } else { PATCH_MARGIN }
+    if mats.trees.enabled() {
+        TREE_PATCH_MARGIN
+    } else {
+        PATCH_MARGIN
+    }
 }
 
 /// Patch origin and span (meters) for the window of `span` blocks at world
@@ -610,14 +702,23 @@ fn read_rect(x: f64, z: f64, span: f64, margin: i32) -> ([f64; 2], [f64; 2]) {
 /// is this `Err` (naming the tile), never terrain. Empty without a world or
 /// for a whole one.
 pub fn prefetch_region(rc: RegionCoords) -> Result<forged_tiles::TilePins, String> {
-    forged::active().map_or_else(|| Ok(Default::default()), |world| prefetch_region_forged(world, rc))
+    forged::active().map_or_else(
+        || Ok(Default::default()),
+        |world| prefetch_region_forged(world, rc),
+    )
 }
 
 /// [`prefetch_region`] for an explicit forged world.
-pub fn prefetch_region_forged(world: &forged::ForgedWorld, rc: RegionCoords) -> Result<forged_tiles::TilePins, String> {
+pub fn prefetch_region_forged(
+    world: &forged::ForgedWorld,
+    rc: RegionCoords,
+) -> Result<forged_tiles::TilePins, String> {
     let rc = canonical_region(world, rc);
     // The wider (trees on) margin, whatever the materials.
-    let (x, z) = (f64::from(rc.x * REGION_BLOCKS), f64::from(rc.z * REGION_BLOCKS));
+    let (x, z) = (
+        f64::from(rc.x * REGION_BLOCKS),
+        f64::from(rc.z * REGION_BLOCKS),
+    );
     let (min, max) = read_rect(x, z, f64::from(REGION_BLOCKS), TREE_PATCH_MARGIN);
     world.prefetch_rect(min, max)
 }
@@ -626,11 +727,17 @@ pub fn prefetch_region_forged(world: &forged::ForgedWorld, rc: RegionCoords) -> 
 /// key `key` reads ([`coarse_tile`] and [`coarse_water`]); see
 /// [`prefetch_region`].
 pub fn prefetch_lod(key: &game::lod::LodKey) -> Result<forged_tiles::TilePins, String> {
-    forged::active().map_or_else(|| Ok(Default::default()), |world| prefetch_lod_forged(world, key))
+    forged::active().map_or_else(
+        || Ok(Default::default()),
+        |world| prefetch_lod_forged(world, key),
+    )
 }
 
 /// [`prefetch_lod`] for an explicit forged world.
-pub fn prefetch_lod_forged(world: &forged::ForgedWorld, key: &game::lod::LodKey) -> Result<forged_tiles::TilePins, String> {
+pub fn prefetch_lod_forged(
+    world: &forged::ForgedWorld,
+    key: &game::lod::LodKey,
+) -> Result<forged_tiles::TilePins, String> {
     // `coarse_tile_forged`'s window with the trees' margin (it contains
     // `coarse_water_forged`'s).
     let (ox, oz, span) = coarse_window(key, coarse_shift(world, key));
@@ -656,11 +763,24 @@ pub fn generate_region_forged_with(
     structures: &dyn structures::StructureSource,
 ) -> Vec<(ColumnCoords, Column)> {
     let coords = canonical_region(world, coords);
-    let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS, &mats);
+    let (ox, oz, span) = patch_window(
+        coords.x * REGION_BLOCKS,
+        coords.z * REGION_BLOCKS,
+        REGION_BLOCKS,
+        &mats,
+    );
     let trees_from = TreeSource::forged(world);
     let patch = world.patch(ox, oz, span);
     let structures = wrapped_structures(world, structures);
-    columns_from_patch(&patch, coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats, trees_from, &structures)
+    columns_from_patch(
+        &patch,
+        coords,
+        0..REGION_CHUNKS,
+        0..REGION_CHUNKS,
+        mats,
+        trees_from,
+        &structures,
+    )
 }
 
 /// Material of a solid block: sand under standing water (lake and river
@@ -696,8 +816,13 @@ fn tree_blocks(
         let blocks = mats.trees.species[tree.species as usize];
         let sk = trees::skeleton(&trees::SPECIES[tree.species as usize], tree.seed, tree.age);
         for b in trees::rasterize(&sk) {
-            let p = [tree.base[0] + b.offset[0], tree.base[1] + b.offset[1], tree.base[2] + b.offset[2]];
-            if p[0] < x0 || p[0] >= x1 || p[2] < z0 || p[2] >= z1 || !in_region(coords, p[0], p[2]) {
+            let p = [
+                tree.base[0] + b.offset[0],
+                tree.base[1] + b.offset[1],
+                tree.base[2] + b.offset[2],
+            ];
+            if p[0] < x0 || p[0] >= x1 || p[2] < z0 || p[2] >= z1 || !in_region(coords, p[0], p[2])
+            {
                 continue;
             }
             let (id, wood) = match b.part {
@@ -705,7 +830,10 @@ fn tree_blocks(
                 trees::TreePart::Branch => (blocks.branch, true),
                 trees::TreePart::Leaves => (blocks.leaves, false),
             };
-            let placed = PlacedTreeBlock { block: Block::with_tree(id, tree.id, b.limb), wood };
+            let placed = PlacedTreeBlock {
+                block: Block::with_tree(id, tree.id, b.limb),
+                wood,
+            };
             match out.entry(p) {
                 std::collections::btree_map::Entry::Vacant(e) => {
                     e.insert(placed);
@@ -731,7 +859,11 @@ fn pad_samples(
     (x0, z0): (i32, i32),
     nz: usize,
 ) -> Vec<bool> {
-    samples.iter_mut().enumerate().map(|(k, c)| pad_sample(c, near, x0 + (k / nz) as i32, z0 + (k % nz) as i32)).collect()
+    samples
+        .iter_mut()
+        .enumerate()
+        .map(|(k, c)| pad_sample(c, near, x0 + (k / nz) as i32, z0 + (k % nz) as i32))
+        .collect()
 }
 
 /// Levels one sample, of world block column `(x, z)`, under the structures' pads and keeps trees off
@@ -756,7 +888,13 @@ fn pad_sample(c: &mut ColSample, near: &[&structures::StructurePlacement], x: i3
 /// and returns the block its top terrain block takes — `None` when no paint holds it, or it lies in a
 /// pad's box (`in_box`), or it has no ground, or water stands over it, or glacier ice tops it. Every
 /// place generation samples a ground column paints it with this, after [`pad_sample`].
-fn paint_sample(c: &mut ColSample, paints: &[structures::Paint], in_box: bool, x: i32, z: i32) -> Option<BlockId> {
+fn paint_sample(
+    c: &mut ColSample,
+    paints: &[structures::Paint],
+    in_box: bool,
+    x: i32,
+    z: i32,
+) -> Option<BlockId> {
     let block = structures::paint_at(paints, x, z)?;
     c.trees = false;
     (!in_box && has_ground(c) && c.water_top <= c.top && c.top == c.s).then_some(block)
@@ -804,7 +942,9 @@ fn stamp_structures(
         if (0..3).any(|a| min[a] >= lo[a] + cb || max[a] <= lo[a]) {
             continue;
         }
-        let Some(stamp) = game::prefab::layout_chunk(&p.prefab, &p.at, chunk) else { continue };
+        let Some(stamp) = game::prefab::layout_chunk(&p.prefab, &p.at, chunk) else {
+            continue;
+        };
         for bi in stamp.carve.into_iter().filter(|&bi| above_bedrock(bi)) {
             blocks[bi.linear()] = Block::new(BlockId::AIR);
             chisel.remove(&bi);
@@ -861,19 +1001,28 @@ fn columns_from_patch(
     // surfaces) — plus one more block, their slope's neighbours. Index
     // `[bx + ring][bz + ring]`, window-local blocks.
     let ring = if with_trees { TREE_RING_BLOCKS + 1 } else { 2 };
-    let (wx, wz) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
+    let (wx, wz) = (
+        coords.x * REGION_BLOCKS + xs.start as i32 * cb,
+        coords.z * REGION_BLOCKS + zs.start as i32 * cb,
+    );
     let (ww, wd) = (xs.len() as i32 * cb, zs.len() as i32 * cb);
     let (nx, nz) = ((ww + 2 * ring) as usize, (wd + 2 * ring) as usize);
     let mut samples = Vec::with_capacity(nx * nz);
     for i in 0..nx {
         for j in 0..nz {
-            samples.push(column_sample(patch, &mats, wx + i as i32 - ring, wz + j as i32 - ring));
+            samples.push(column_sample(
+                patch,
+                &mats,
+                wx + i as i32 - ring,
+                wz + j as i32 - ring,
+            ));
         }
     }
     // Structures reaching the sampled ring (their pads) or its trees (their keep-out). None: the terrain
     // is exactly what it is without a structure source.
     let near_owned = structures.placements_in(wx, wz, wx + ww, wz + wd, ring + TREE_REACH_BLOCKS);
-    let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
+    let near: Vec<&structures::StructurePlacement> =
+        near_owned.iter().map(|p| p.as_ref()).collect();
     // Paints over the sampled ring (the same query). None: the terrain is exactly what it is without.
     let paints = structures.paints_in(wx, wz, wx + ww, wz + wd, ring + TREE_REACH_BLOCKS);
     // Whether each sampled column lies in a pad's box, indexed like `samples` (empty: none does).
@@ -892,12 +1041,21 @@ fn columns_from_patch(
             .enumerate()
             .map(|(k, c)| {
                 let boxed = in_box.get(k).copied().unwrap_or(false);
-                paint_sample(c, &paints, boxed, wx - ring + (k / nz) as i32, wz - ring + (k % nz) as i32)
+                paint_sample(
+                    c,
+                    &paints,
+                    boxed,
+                    wx - ring + (k / nz) as i32,
+                    wz - ring + (k % nz) as i32,
+                )
             })
             .collect();
     }
     let paint_of = |bx: i32, bz: i32| {
-        paint_cells.get((bx + ring) as usize * nz + (bz + ring) as usize).copied().flatten()
+        paint_cells
+            .get((bx + ring) as usize * nz + (bz + ring) as usize)
+            .copied()
+            .flatten()
     };
     let at = |bx: i32, bz: i32| samples[(bx + ring) as usize * nz + (bz + ring) as usize];
     // Each column's slope, over the ring minus its outer block (`None`
@@ -933,7 +1091,13 @@ fn columns_from_patch(
             );
             tree_ground(at(bx, bz), slope_at(bx, bz).is_some())
         };
-        for ([x, y, z], placed) in tree_blocks(coords, [wx, wz, wx + ww, wz + wd], &mats, trees_from, &surface) {
+        for ([x, y, z], placed) in tree_blocks(
+            coords,
+            [wx, wz, wx + ww, wz + wd],
+            &mats,
+            trees_from,
+            &surface,
+        ) {
             let (bx, bz) = (x - wx, z - wz);
             let col = (bx / cb) as usize * zs.len() + (bz / cb) as usize;
             tree_cols[col].push(((bx % cb) as usize, (bz % cb) as usize, y, placed));
@@ -947,7 +1111,8 @@ fn columns_from_patch(
             // window-local block (fx, fz).
             let fx = (cx - xs.start) as i32 * cb;
             let fz = (cz - zs.start) as i32 * cb;
-            let col_trees = std::mem::take(&mut tree_cols[(cx - xs.start) * zs.len() + (cz - zs.start)]);
+            let col_trees =
+                std::mem::take(&mut tree_cols[(cx - xs.start) * zs.len() + (cz - zs.start)]);
 
             // Every footprint has samples, so these only seed the min/max
             // (procedural results equal the old SCAN_TOP / SCAN_BOTTOM - 1 seeds:
@@ -967,7 +1132,11 @@ fn columns_from_patch(
                     for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                         let (nbx, nbz) = (fx + lx + dx, fz + lz + dz);
                         let n = at(nbx, nbz);
-                        open_lo = open_lo.min(if slope_at(nbx, nbz).is_some() { n.top } else { n.top + 1 });
+                        open_lo = open_lo.min(if slope_at(nbx, nbz).is_some() {
+                            n.top
+                        } else {
+                            n.top + 1
+                        });
                     }
                 }
             }
@@ -993,8 +1162,9 @@ fn columns_from_patch(
             let n_sub = (top_sub_y - base_sub_y + 1) as usize;
             // Linear block grids + chisel maps per sub-chunk, made canonical
             // `Chunk`s once filled.
-            let mut chunks: Vec<(Vec<Block>, BTreeMap<BlockIndex, ChiselData>)> =
-                (0..n_sub).map(|_| (vec![Block::default(); CHUNK_BLOCK_COUNT], BTreeMap::new())).collect();
+            let mut chunks: Vec<(Vec<Block>, BTreeMap<BlockIndex, ChiselData>)> = (0..n_sub)
+                .map(|_| (vec![Block::default(); CHUNK_BLOCK_COUNT], BTreeMap::new()))
+                .collect();
 
             let mut surface = vec![0i16; game::COLUMN_FOOTPRINT].into_boxed_slice();
             let mut geo = vec![0i16; game::COLUMN_FOOTPRINT].into_boxed_slice();
@@ -1012,7 +1182,8 @@ fn columns_from_patch(
                     if c.water_top > c.top {
                         water_top[lx * CHUNK_BLOCKS + lz] = c.water_top as i16;
                     }
-                    geo[lx * CHUNK_BLOCKS + lz] = patch.geo(block_center_m(wx + bx), block_center_m(wz + bz));
+                    geo[lx * CHUNK_BLOCKS + lz] =
+                        patch.geo(block_center_m(wx + bx), block_center_m(wz + bz));
                 }
             }
             // Only the formations this footprint's ground can reach, from its
@@ -1087,17 +1258,28 @@ fn columns_from_patch(
             if !near.is_empty() {
                 let rc = REGION_CHUNKS as i32;
                 let chunk_xz = [coords.x * rc + cx as i32, coords.z * rc + cz as i32];
-                let bedrock = |lx: usize, lz: usize| at(fx + lx as i32, fz + lz as i32).top - game::UNDERGROUND_DEPTH;
+                let bedrock = |lx: usize, lz: usize| {
+                    at(fx + lx as i32, fz + lz as i32).top - game::UNDERGROUND_DEPTH
+                };
                 for (sub_i, (blocks, chisel)) in chunks.iter_mut().enumerate() {
                     let sub_y = base_sub_y + sub_i as i32;
-                    stamp_structures(&near, [chunk_xz[0], sub_y, chunk_xz[1]], blocks, chisel, &bedrock);
+                    stamp_structures(
+                        &near,
+                        [chunk_xz[0], sub_y, chunk_xz[1]],
+                        blocks,
+                        chisel,
+                        &bedrock,
+                    );
                 }
             }
 
             let subs: Vec<SubChunk> = chunks
                 .into_iter()
                 .map(|(blocks, chisel)| {
-                    SubChunk::Dense(Box::new(Chunk { blocks: ChunkBlocks::from_vec(blocks), chisel }))
+                    SubChunk::Dense(Box::new(Chunk {
+                        blocks: ChunkBlocks::from_vec(blocks),
+                        chisel,
+                    }))
                 })
                 .collect();
             // `above = air` trims air tops; the bottom is kept (`grounded`).
@@ -1119,11 +1301,7 @@ fn columns_from_patch(
 /// Point-sampling is NOT bit-consistent with downsampled full generation
 /// (accepted, sub-pixel at these distances — see the design spec §3);
 /// `coarse_tile_tracks_downsampled_full_generation` bounds the divergence.
-pub fn coarse_tile(
-    key: &game::lod::LodKey,
-    seed: u64,
-    mats: Materials,
-) -> Vec<game::lod::LodCell> {
+pub fn coarse_tile(key: &game::lod::LodKey, seed: u64, mats: Materials) -> Vec<game::lod::LodCell> {
     if let Some(world) = forged::active() {
         return coarse_tile_forged(world, key, mats);
     }
@@ -1141,7 +1319,18 @@ pub fn coarse_tile_with(
     let (ox, oz, span) = coarse_patch_window(key, &mats, 0);
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
     let habitat = habitat::ProceduralHabitat::new(seed);
-    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed, wrap: None }, structures, 0)
+    coarse_from_patch(
+        &ProceduralPatch(grid),
+        key,
+        mats,
+        TreeSource {
+            habitat: &habitat,
+            seed,
+            wrap: None,
+        },
+        structures,
+        0,
+    )
 }
 
 /// `coarse_tile` for an explicit forged world (tests, tools). A coarse cell is
@@ -1171,7 +1360,14 @@ pub fn coarse_tile_forged_with(
     let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
     let trees_from = TreeSource::forged(world);
     let structures = wrapped_structures(world, structures);
-    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from, &structures, shift)
+    coarse_from_patch(
+        &world.patch(ox, oz, span),
+        key,
+        mats,
+        trees_from,
+        &structures,
+        shift,
+    )
 }
 
 /// `wrap_shift_blocks` of a coarse key's window: LOD keys arrive in the
@@ -1239,7 +1435,13 @@ pub fn coarse_water_forged_with(
     let shift = coarse_shift(world, key);
     let (ox, oz, span) = coarse_window(key, shift);
     let structures = wrapped_structures(world, structures);
-    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats, &structures, shift)
+    water_from_patch(
+        &world.patch(ox as f64, oz as f64, span as f64),
+        key,
+        &mats,
+        &structures,
+        shift,
+    )
 }
 
 /// One LOD column's `(water_top, depth)` (see [`coarse_water`]).
@@ -1264,7 +1466,8 @@ fn water_from_patch(
     // Structures whose pads reach the key: every sample is inside it. None: the water is exactly what it
     // is without a structure source.
     let near_owned = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, 0);
-    let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
+    let near: Vec<&structures::StructurePlacement> =
+        near_owned.iter().map(|p| p.as_ref()).collect();
     let padded = |mut c: ColSample, x: i32, z: i32| {
         if !near.is_empty() {
             pad_sample(&mut c, &near, x, z);
@@ -1281,7 +1484,11 @@ fn water_from_patch(
         for cz in 0..i32::from(side) {
             for cx in 0..i32::from(side) {
                 let c = point_sample(patch, mats, centre(ox, cx), centre(oz, cz));
-                tops.push(lod_water_column(&padded(c, ox + cx * cb + cb / 2, oz + cz * cb + cb / 2)));
+                tops.push(lod_water_column(&padded(
+                    c,
+                    ox + cx * cb + cb / 2,
+                    oz + cz * cb + cb / 2,
+                )));
             }
         }
     } else {
@@ -1292,7 +1499,11 @@ fn water_from_patch(
         for bz in 0..span_blocks {
             row.clear();
             row.extend((0..span_blocks).map(|bx| {
-                lod_water_column(&padded(column_sample(patch, mats, ox + bx, oz + bz), ox + bx, oz + bz))
+                lod_water_column(&padded(
+                    column_sample(patch, mats, ox + bx, oz + bz),
+                    ox + bx,
+                    oz + bz,
+                ))
             }));
             for _ in 0..per {
                 for &top in &row {
@@ -1309,13 +1520,21 @@ fn water_from_patch(
 /// east–west; 0 otherwise).
 fn coarse_window(key: &game::lod::LodKey, shift: i32) -> (i32, i32, i32) {
     let origin = key.origin_region();
-    (origin.x * REGION_BLOCKS - shift, origin.z * REGION_BLOCKS, key.region_span() * REGION_BLOCKS)
+    (
+        origin.x * REGION_BLOCKS - shift,
+        origin.z * REGION_BLOCKS,
+        key.region_span() * REGION_BLOCKS,
+    )
 }
 
 /// The patch a coarse key samples: its window, plus the trees' margin.
 fn coarse_patch_window(key: &game::lod::LodKey, mats: &Materials, shift: i32) -> (f64, f64, f64) {
     let (ox, oz, span) = coarse_window(key, shift);
-    let m = if mats.trees.enabled() { TREE_PATCH_MARGIN } else { 0 };
+    let m = if mats.trees.enabled() {
+        TREE_PATCH_MARGIN
+    } else {
+        0
+    };
     ((ox - m) as f64, (oz - m) as f64, (span + 2 * m) as f64)
 }
 
@@ -1351,20 +1570,30 @@ fn coarse_from_patch(
     structures: &dyn structures::StructureSource,
     shift: i32,
 ) -> Vec<game::lod::LodCell> {
-    use game::lod::LodCell;
     use game::Voxel;
+    use game::lod::LodCell;
 
     // A LOD grid's edge in cells: the 32³ render/LOD brick.
     const G: i32 = BRICK_VOXELS as i32;
     /// The voxel of cell `[cx, cy, cz]` (key-local), its 32³ grid made (all air) if missing.
     fn cell_mut(grids: &mut BTreeMap<[i32; 3], Vec<Voxel>>, [cx, cy, cz]: [i32; 3]) -> &mut Voxel {
         let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
-        let (lx, ly, lz) = (cx.rem_euclid(G) as usize, cy.rem_euclid(G) as usize, cz.rem_euclid(G) as usize);
-        let g = grids.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
+        let (lx, ly, lz) = (
+            cx.rem_euclid(G) as usize,
+            cy.rem_euclid(G) as usize,
+            cz.rem_euclid(G) as usize,
+        );
+        let g = grids
+            .entry(group)
+            .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
         &mut g[lx + BRICK_VOXELS * ly + BRICK_VOXELS * BRICK_VOXELS * lz]
     }
     // Blocks per cell edge: 1 at factor 16, 2 at 32, 4 at 64, 16 at 256.
-    debug_assert!(key.factor >= game::lod::COARSE_MIN_FACTOR, "sub-block factor {}", key.factor);
+    debug_assert!(
+        key.factor >= game::lod::COARSE_MIN_FACTOR,
+        "sub-block factor {}",
+        key.factor
+    );
     let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
     let span_blocks = key.region_span() * REGION_BLOCKS;
     let cells = span_blocks / cb; // cell columns per key edge: 64 at factor 16, else 32
@@ -1381,20 +1610,28 @@ fn coarse_from_patch(
     // None: the tile is exactly what it is without a structure source.
     let margin = (tree_m + TREE_REACH_BLOCKS).max(cb);
     let near_owned = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, margin);
-    let near: Vec<&structures::StructurePlacement> = near_owned.iter().map(|p| p.as_ref()).collect();
+    let near: Vec<&structures::StructurePlacement> =
+        near_owned.iter().map(|p| p.as_ref()).collect();
     // Paints over the same columns. None: the tile is exactly what it is without.
     let paints = structures.paints_in(ox, oz, ox + span_blocks, oz + span_blocks, margin);
     // Pads and paints `c`, the sample of world block column (x, z); with whether the column lies in a
     // pad's box and its top block's paint.
     let padded = |mut c: ColSample, x: i32, z: i32| {
         let in_box = !near.is_empty() && pad_sample(&mut c, &near, x, z);
-        let paint = if paints.is_empty() { None } else { paint_sample(&mut c, &paints, in_box, x, z) };
+        let paint = if paints.is_empty() {
+            None
+        } else {
+            paint_sample(&mut c, &paints, in_box, x, z)
+        };
         (c, in_box, paint)
     };
 
     // Centre (world metres) of cell column (cx, cz).
     let centre = |cx: i32, cz: i32| {
-        ((ox + cx * cb) as f64 + cb as f64 * 0.5, (oz + cz * cb) as f64 + cb as f64 * 0.5)
+        (
+            (ox + cx * cb) as f64 + cb as f64 * 0.5,
+            (oz + cz * cb) as f64 + cb as f64 * 0.5,
+        )
     };
     // The block column holding that centre: where structures read the cell column.
     let centre_block = |cx: i32, cz: i32| (ox + cx * cb + cb / 2, oz + cz * cb + cb / 2);
@@ -1408,8 +1645,10 @@ fn coarse_from_patch(
         (c, paint)
     };
     // With each cell column's top-block paint.
-    let samples: Vec<(ColSample, Option<BlockId>)> =
-        (0..cells).flat_map(|cz| (0..cells).map(move |cx| (cx, cz))).map(|(cx, cz)| cell_sample(cx, cz)).collect();
+    let samples: Vec<(ColSample, Option<BlockId>)> = (0..cells)
+        .flat_map(|cz| (0..cells).map(move |cx| (cx, cz)))
+        .map(|(cx, cz)| cell_sample(cx, cz))
+        .collect();
     let surface_of = |cx: i32, cz: i32| {
         if (0..cells).contains(&cx) && (0..cells).contains(&cz) {
             samples[(cz * cells + cx) as usize].0.top
@@ -1489,7 +1728,10 @@ fn coarse_from_patch(
                     if x < min[0] || x >= max[0] || z < min[2] || z >= max[2] {
                         continue;
                     }
-                    let Some((top, mat)) = game::prefab::column_top_world(&p.prefab, &p.at, x, z) else { continue };
+                    let Some((top, mat)) = game::prefab::column_top_world(&p.prefab, &p.at, x, z)
+                    else {
+                        continue;
+                    };
                     for cy in first..=top.div_euclid(cb) {
                         profile.insert(cy, mat);
                     }
@@ -1525,27 +1767,45 @@ fn coarse_from_patch(
         let memo = std::cell::RefCell::new(std::collections::HashMap::new());
         let surface = |x: i32, z: i32| {
             assert!(
-                (ox - m..ox + span_blocks + m).contains(&x) && (oz - m..oz + span_blocks + m).contains(&z),
+                (ox - m..ox + span_blocks + m).contains(&x)
+                    && (oz - m..oz + span_blocks + m).contains(&z),
                 "tree placement read the surface at ({x}, {z}), outside the coarse patch"
             );
             let cached = memo.borrow().get(&(x, z)).copied();
             cached.unwrap_or_else(|| {
                 // A column in a pad's box is never a slope, as in full generation.
                 let (c, in_box, _) = sample(x, z);
-                let slope = !in_box && slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz).0).is_some();
+                let slope =
+                    !in_box && slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz).0).is_some();
                 let g = tree_ground(c, slope);
                 memo.borrow_mut().insert((x, z), g);
                 g
             })
         };
-        let memo_habitat = MemoHabitat { inner: trees_from.habitat, memo: Default::default() };
+        let memo_habitat = MemoHabitat {
+            inner: trees_from.habitat,
+            memo: Default::default(),
+        };
         let (x1, z1) = (ox + span_blocks, oz + span_blocks);
-        for tree in trees::trees_in(ox, oz, x1, z1, trees_from.seed, trees_from.wrap, &memo_habitat, &surface) {
-            let Some((lo, hi, radius)) = crown_extent(&tree) else { continue };
+        for tree in trees::trees_in(
+            ox,
+            oz,
+            x1,
+            z1,
+            trees_from.seed,
+            trees_from.wrap,
+            &memo_habitat,
+            &surface,
+        ) {
+            let Some((lo, hi, radius)) = crown_extent(&tree) else {
+                continue;
+            };
             let leaves = Voxel::new(mats.trees.species[tree.species as usize].leaves);
             let [bx, by, bz] = tree.base;
             let (cy0, cy1) = ((by + lo).div_euclid(cb), (by + hi).div_euclid(cb));
-            let cells_of = |a: i32, o: i32| ((a - radius).max(o) - o) / cb..=((a + radius).min(o + span_blocks - 1) - o) / cb;
+            let cells_of = |a: i32, o: i32| {
+                ((a - radius).max(o) - o) / cb..=((a + radius).min(o + span_blocks - 1) - o) / cb
+            };
             for cx in cells_of(bx, ox) {
                 for cz in cells_of(bz, oz) {
                     // Cell centre to trunk axis, blocks.
@@ -1573,4 +1833,3 @@ fn coarse_from_patch(
         .map(|(group, grid)| LodCell { group, grid })
         .collect()
 }
-

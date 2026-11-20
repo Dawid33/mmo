@@ -41,7 +41,8 @@ use std::time::{Duration, Instant};
 
 use game::coordinator::DesiredHost;
 use kube_api::{Kube, KubeError};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use tracing::Instrument;
 use world_store::{StoreHandle, StoreUrl};
 
 use crate::claims::ServerExit;
@@ -56,7 +57,8 @@ pub const FLEET_LOG_EVERY_MS: u64 = 10_000;
 /// How often the loop looks at the stop flag while it waits.
 const FLEET_STOP_POLL: Duration = Duration::from_millis(100);
 // One API request (the loop beats between them) never outlasts `/livez`'s stall limit.
-const _: () = assert!((kube_api::REQUEST_TIMEOUT.as_millis() as u64) < crate::health::LIVEZ_STALL_MS);
+const _: () =
+    assert!((kube_api::REQUEST_TIMEOUT.as_millis() as u64) < crate::health::LIVEZ_STALL_MS);
 
 /// Environment: the namespace of the world's objects (required).
 pub const FLEET_NAMESPACE_ENV: &str = "VOXEL_FLEET_NAMESPACE";
@@ -171,7 +173,9 @@ impl Objects {
     }
 
     fn has(&self, kind: Kind, host: &str) -> bool {
-        self.of(kind).iter().any(|o| o.host.as_deref() == Some(host))
+        self.of(kind)
+            .iter()
+            .any(|o| o.host.as_deref() == Some(host))
     }
 }
 
@@ -188,13 +192,18 @@ impl CoordinatorSeen {
     pub fn from_value(v: &Value) -> Result<CoordinatorSeen, String> {
         let image = container_image(v, COORDINATOR_CONTAINER)
             .ok_or_else(|| format!("the {COORDINATOR_DEPLOYMENT} Deployment has no `{COORDINATOR_CONTAINER}` container with an image"))?;
-        Ok(CoordinatorSeen { replicas: replicas_of(v), image })
+        Ok(CoordinatorSeen {
+            replicas: replicas_of(v),
+            image,
+        })
     }
 }
 
 /// `spec.replicas`, absent → 1 (the API's default).
 fn replicas_of(v: &Value) -> u32 {
-    v["spec"]["replicas"].as_u64().map_or(1, |n| u32::try_from(n).unwrap_or(u32::MAX))
+    v["spec"]["replicas"]
+        .as_u64()
+        .map_or(1, |n| u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 /// The image of the container `name` of a Deployment's pod template.
@@ -241,8 +250,16 @@ impl Rendered {
 impl Template {
     pub fn new(text: String, world: &str, port_base: u32) -> Template {
         use sha2::Digest;
-        let hash = sha2::Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
-        Template { text, hash, world: world.to_string(), port_base }
+        let hash = sha2::Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Template {
+            text,
+            hash,
+            world: world.to_string(),
+            port_base,
+        }
     }
 
     /// The ports of `slot`: QUIC `port_base + 2·slot`, WebTransport one above.
@@ -250,7 +267,10 @@ impl Template {
         let quic = u64::from(self.port_base) + 2 * u64::from(slot);
         match (u16::try_from(quic), u16::try_from(quic + 1)) {
             (Ok(q), Ok(w)) if q > 0 => Ok((q, w)),
-            _ => Err(format!("slot {slot} has no port: {FLEET_PORT_BASE_ENV}={} + 2·{slot} is out of range", self.port_base)),
+            _ => Err(format!(
+                "slot {slot} has no port: {FLEET_PORT_BASE_ENV}={} + 2·{slot} is out of range",
+                self.port_base
+            )),
         }
     }
 
@@ -265,11 +285,17 @@ impl Template {
     pub fn render(&self, name: &str, slot: u32, image: &str) -> Result<Rendered, String> {
         let name_ok = !name.is_empty()
             && name.len() + OBJECT_PREFIX.len() <= 63
-            && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
         if !name_ok {
             return Err(format!("the host name {name:?} is not a DNS label"));
         }
-        if image.is_empty() || image.chars().any(|c| c == '"' || c == '\\' || c.is_whitespace() || c.is_control()) {
+        if image.is_empty()
+            || image
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_whitespace() || c.is_control())
+        {
             return Err(format!("the image {image:?} cannot be put in the template"));
         }
         let (quic, wt) = self.ports(slot)?;
@@ -282,7 +308,8 @@ impl Template {
             .replace(WT_PORT_PLACEHOLDER, &wt.to_string())
             .replace(NAME_PLACEHOLDER, name)
             .replace(IMAGE_PLACEHOLDER, image);
-        let list: Value = serde_json::from_str(&text).map_err(|e| format!("the template is not JSON once rendered: {e}"))?;
+        let list: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("the template is not JSON once rendered: {e}"))?;
         let Some(items) = list.as_array() else {
             return Err("the template is not a JSON list".into());
         };
@@ -293,7 +320,10 @@ impl Template {
                 .find(|k| item["kind"].as_str() == Some(k.manifest_kind()))
                 .ok_or_else(|| format!("the template holds a `{}`, not a Deployment, Service or PodDisruptionBudget", item["kind"]))?;
             if found.insert(kind, item.clone()).is_some() {
-                return Err(format!("the template holds two of kind {}", kind.manifest_kind()));
+                return Err(format!(
+                    "the template holds two of kind {}",
+                    kind.manifest_kind()
+                ));
             }
         }
         let object = format!("{OBJECT_PREFIX}{name}");
@@ -303,26 +333,47 @@ impl Template {
             };
             let meta = &item["metadata"];
             if meta["name"].as_str() != Some(object.as_str()) {
-                return Err(format!("the template's {} is not named {object}", kind.manifest_kind()));
+                return Err(format!(
+                    "the template's {} is not named {object}",
+                    kind.manifest_kind()
+                ));
             }
             if meta["labels"][FLEET_LABEL].as_str() != Some(self.world.as_str()) {
-                return Err(format!("the template's {} lacks the label {FLEET_LABEL}={}", kind.manifest_kind(), self.world));
+                return Err(format!(
+                    "the template's {} lacks the label {FLEET_LABEL}={}",
+                    kind.manifest_kind(),
+                    self.world
+                ));
             }
             if meta["labels"][HOST_LABEL].as_str() != Some(name) {
-                return Err(format!("the template's {} lacks the label {HOST_LABEL}={name}", kind.manifest_kind()));
+                return Err(format!(
+                    "the template's {} lacks the label {HOST_LABEL}={name}",
+                    kind.manifest_kind()
+                ));
             }
         }
-        let take = |k: Kind, found: &mut BTreeMap<Kind, Value>| found.remove(&k).expect("checked above");
-        let rendered =
-            Rendered { service: take(Kind::Service, &mut found), pdb: take(Kind::Pdb, &mut found), deployment: take(Kind::Deployment, &mut found) };
+        let take =
+            |k: Kind, found: &mut BTreeMap<Kind, Value>| found.remove(&k).expect("checked above");
+        let rendered = Rendered {
+            service: take(Kind::Service, &mut found),
+            pdb: take(Kind::Pdb, &mut found),
+            deployment: take(Kind::Deployment, &mut found),
+        };
         if container_image(&rendered.deployment, HOST_CONTAINER).as_deref() != Some(image) {
-            return Err(format!("the template's Deployment has no `{HOST_CONTAINER}` container running {IMAGE_PLACEHOLDER}"));
+            return Err(format!(
+                "the template's Deployment has no `{HOST_CONTAINER}` container running {IMAGE_PLACEHOLDER}"
+            ));
         }
         Ok(rendered)
     }
 
     /// A rendered Deployment as it is sent: `replicas` and the [`TEMPLATE_ANNOTATION`] set.
-    fn deployment(&self, rendered: &Rendered, replicas: u32, resource_version: Option<&str>) -> Value {
+    fn deployment(
+        &self,
+        rendered: &Rendered,
+        replicas: u32,
+        resource_version: Option<&str>,
+    ) -> Value {
         let mut d = rendered.deployment.clone();
         d["spec"]["replicas"] = json!(replicas);
         if !d["metadata"]["annotations"].is_object() {
@@ -342,7 +393,11 @@ pub enum Action {
     /// `DELETE` the object `name` of `kind` (gone already is success).
     Delete { kind: Kind, name: String },
     /// `POST` `body` (named `name`) to `kind`'s collection (exists already is success).
-    Create { kind: Kind, name: String, body: Value },
+    Create {
+        kind: Kind,
+        name: String,
+        body: Value,
+    },
     /// `PUT` `body` over the Deployment `name` (a re-template at 0 replicas, its read
     /// `resourceVersion` inside: a change since the read is a conflict, retried next pass).
     Replace { name: String, body: Value },
@@ -352,7 +407,9 @@ impl Action {
     /// The object it acts on (`host-<name>`: the same for a host's three kinds).
     pub fn object(&self) -> &str {
         match self {
-            Action::Delete { name, .. } | Action::Create { name, .. } | Action::Replace { name, .. } => name,
+            Action::Delete { name, .. }
+            | Action::Create { name, .. }
+            | Action::Replace { name, .. } => name,
         }
     }
 
@@ -373,7 +430,12 @@ pub struct Plan {
 }
 
 /// One pass's actions (pure): [`plan`] without its refusals.
-pub fn plan_pass(desired: &[DesiredHost], objects: &Objects, coordinator: &CoordinatorSeen, template: &Template) -> Vec<Action> {
+pub fn plan_pass(
+    desired: &[DesiredHost],
+    objects: &Objects,
+    coordinator: &CoordinatorSeen,
+    template: &Template,
+) -> Vec<Action> {
     plan(desired, objects, coordinator, template).actions
 }
 
@@ -383,7 +445,12 @@ pub fn plan_pass(desired: &[DesiredHost], objects: &Objects, coordinator: &Coord
 /// PDB, Deployment at 1 replica on the coordinator's image, annotated with the template hash), and
 /// any row's Deployment at 0 replicas whose annotation is not the hash `Replace`d (the new
 /// template, still 0 replicas, its own image). A Deployment above 0 replicas is never touched.
-pub fn plan(desired: &[DesiredHost], objects: &Objects, coordinator: &CoordinatorSeen, template: &Template) -> Plan {
+pub fn plan(
+    desired: &[DesiredHost],
+    objects: &Objects,
+    coordinator: &CoordinatorSeen,
+    template: &Template,
+) -> Plan {
     let mut out = Plan::default();
     let wanted: BTreeSet<&str> = desired.iter().map(|r| r.name.as_str()).collect();
     let strays: BTreeSet<&str> = Kind::DELETE_ORDER
@@ -394,8 +461,15 @@ pub fn plan(desired: &[DesiredHost], objects: &Objects, coordinator: &Coordinato
         .collect();
     for host in strays {
         for kind in Kind::DELETE_ORDER {
-            for o in objects.of(kind).iter().filter(|o| o.host.as_deref() == Some(host)) {
-                out.actions.push(Action::Delete { kind, name: o.name.clone() });
+            for o in objects
+                .of(kind)
+                .iter()
+                .filter(|o| o.host.as_deref() == Some(host))
+            {
+                out.actions.push(Action::Delete {
+                    kind,
+                    name: o.name.clone(),
+                });
             }
         }
     }
@@ -406,7 +480,10 @@ pub fn plan(desired: &[DesiredHost], objects: &Objects, coordinator: &Coordinato
     rows.sort_by(|a, b| (a.slot, &a.name).cmp(&(b.slot, &b.name)));
     for row in rows {
         let object = format!("{OBJECT_PREFIX}{}", row.name);
-        let missing: Vec<Kind> = Kind::CREATE_ORDER.into_iter().filter(|&k| !objects.has(k, &row.name)).collect();
+        let missing: Vec<Kind> = Kind::CREATE_ORDER
+            .into_iter()
+            .filter(|&k| !objects.has(k, &row.name))
+            .collect();
         if !row.draining && !missing.is_empty() {
             match template.render(&row.name, row.slot, &coordinator.image) {
                 Ok(rendered) => {
@@ -415,18 +492,30 @@ pub fn plan(desired: &[DesiredHost], objects: &Objects, coordinator: &Coordinato
                             Kind::Deployment => template.deployment(&rendered, 1, None),
                             k => rendered.of(k).clone(),
                         };
-                        out.actions.push(Action::Create { kind, name: object.clone(), body });
+                        out.actions.push(Action::Create {
+                            kind,
+                            name: object.clone(),
+                            body,
+                        });
                     }
                 }
                 Err(why) => out.refused.push((row.name.clone(), why)),
             }
         }
         let stale = objects.deployments.iter().filter(|d| {
-            d.host.as_deref() == Some(row.name.as_str()) && d.replicas == 0 && d.template.as_deref() != Some(template.hash.as_str())
+            d.host.as_deref() == Some(row.name.as_str())
+                && d.replicas == 0
+                && d.template.as_deref() != Some(template.hash.as_str())
         });
         for d in stale {
             let Some(image) = d.image.as_deref() else {
-                out.refused.push((row.name.clone(), format!("the Deployment {} has no `{HOST_CONTAINER}` image to keep", d.name)));
+                out.refused.push((
+                    row.name.clone(),
+                    format!(
+                        "the Deployment {} has no `{HOST_CONTAINER}` image to keep",
+                        d.name
+                    ),
+                ));
                 continue;
             };
             match template.render(&row.name, row.slot, image) {
@@ -452,19 +541,39 @@ pub struct FleetConfig {
 
 impl FleetConfig {
     pub fn from_env(var: impl Fn(&str) -> Option<String>) -> Result<FleetConfig, String> {
-        let read = |name: &str| var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-        let namespace = read(FLEET_NAMESPACE_ENV).ok_or_else(|| format!("VOXEL_ROLE=fleet needs {FLEET_NAMESPACE_ENV}"))?;
+        let read = |name: &str| {
+            var(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let namespace = read(FLEET_NAMESPACE_ENV)
+            .ok_or_else(|| format!("VOXEL_ROLE=fleet needs {FLEET_NAMESPACE_ENV}"))?;
         let world_env = crate::auth_edge::WORLD_ID_ENV;
-        let world = read(world_env).ok_or_else(|| format!("VOXEL_ROLE=fleet needs {world_env}: the value of its {FLEET_LABEL} label"))?;
-        if world.len() > 63 || !world.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {
+        let world = read(world_env).ok_or_else(|| {
+            format!("VOXEL_ROLE=fleet needs {world_env}: the value of its {FLEET_LABEL} label")
+        })?;
+        if world.len() > 63
+            || !world
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        {
             return Err(format!("{world_env}={world:?} cannot be a label value"));
         }
-        let base = read(FLEET_PORT_BASE_ENV).ok_or_else(|| format!("VOXEL_ROLE=fleet needs {FLEET_PORT_BASE_ENV}"))?;
+        let base = read(FLEET_PORT_BASE_ENV)
+            .ok_or_else(|| format!("VOXEL_ROLE=fleet needs {FLEET_PORT_BASE_ENV}"))?;
         let port_base = match base.parse::<u32>() {
             Ok(n) if (1..=65_534).contains(&n) => n,
-            _ => return Err(format!("invalid {FLEET_PORT_BASE_ENV} value `{base}` (expected a port)")),
+            _ => {
+                return Err(format!(
+                    "invalid {FLEET_PORT_BASE_ENV} value `{base}` (expected a port)"
+                ));
+            }
         };
-        Ok(FleetConfig { namespace, world, port_base })
+        Ok(FleetConfig {
+            namespace,
+            world,
+            port_base,
+        })
     }
 }
 
@@ -493,7 +602,10 @@ struct Fleet {
 pub fn run(url: &StoreUrl, config: FleetConfig, kube: Kube, stop: &AtomicBool) -> ServerExit {
     let health = Health::global();
     health.require_fleet_passes();
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => crate::fatal(&format!("[fleet] the HTTP runtime: {e}")),
     };
@@ -508,7 +620,14 @@ pub fn run(url: &StoreUrl, config: FleetConfig, kube: Kube, stop: &AtomicBool) -
         config.port_base
     );
     health.set_registered(true);
-    let mut fleet = Fleet { store, kube, config, runtime, logged: BTreeMap::new(), stopped: None };
+    let mut fleet = Fleet {
+        store,
+        kube,
+        config,
+        runtime,
+        logged: BTreeMap::new(),
+        stopped: None,
+    };
     while !stop.load(Ordering::SeqCst) {
         let started = Instant::now();
         health.loop_beat();
@@ -533,7 +652,11 @@ fn wait_for_store(url: &StoreUrl, stop: &AtomicBool) -> Option<StoreHandle> {
     health.set_waiting(Some("forge"));
     let mut logged: Option<Instant> = None;
     loop {
-        let why = match StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::ReadOnly) {
+        let why = match StoreHandle::open(
+            url,
+            world_store::Dials::BUILT,
+            world_store::OpenMode::ReadOnly,
+        ) {
             Ok(store) => match store.world_info() {
                 Ok(info) if info.has_artifact => {
                     health.set_waiting(None);
@@ -568,17 +691,37 @@ fn wait_for_store(url: &StoreUrl, stop: &AtomicBool) -> Option<StoreHandle> {
 impl Fleet {
     /// One pass; `true` when every read succeeded, nothing was refused and no action failed.
     fn pass(&mut self) -> bool {
+        let span = tracing::info_span!(
+            "fleet.reconcile.pass",
+            outcome = tracing::field::Empty,
+            coordinator_stopped = tracing::field::Empty,
+            desired = tracing::field::Empty,
+            deployments = tracing::field::Empty,
+            actions = tracing::field::Empty
+        );
+        let ok = span.in_scope(|| self.pass_inner(&span));
+        span.record("outcome", if ok { "ok" } else { "error" });
+        ok
+    }
+
+    fn pass_inner(&mut self, span: &tracing::Span) -> bool {
         let health = Health::global();
         // 1. + 2. The coordinator, the template, the labelled objects — BEFORE the desired rows
         // (final review, B-M3): an object listed here whose name the later read no longer shows
         // was really removed (a removed row never comes back, a name is never issued twice), so
         // even two overlapping reconcilers (a deleted pod's replacement beside the old one in its
         // grace period) never delete a host the other just created for a newer row.
-        let read = self.runtime.block_on(read_cluster(&self.kube, &self.config));
+        let read = self.runtime.block_on(
+            read_cluster(&self.kube, &self.config)
+                .instrument(tracing::info_span!("fleet.reconcile.cluster_read")),
+        );
         let (coordinator, template, objects) = match read {
             Ok(read) => read,
             Err(why) => {
-                self.failed("read cluster", format!("{why}; nothing created or deleted this pass"));
+                self.failed(
+                    "read cluster",
+                    format!("{why}; nothing created or deleted this pass"),
+                );
                 return false;
             }
         };
@@ -586,27 +729,48 @@ impl Fleet {
         let desired = match self.store.desired_hosts() {
             Ok(rows) => rows,
             Err(e) => {
-                self.failed("read desired_hosts", format!("reading desired_hosts: {e}; nothing created or deleted this pass"));
+                self.failed(
+                    "read desired_hosts",
+                    format!("reading desired_hosts: {e}; nothing created or deleted this pass"),
+                );
                 return false;
             }
         };
+        span.record("desired", desired.len());
+        span.record("deployments", objects.deployments.len());
         health.fleet_seen(desired.len() as u64, objects.deployments.len() as u64);
         let stopped = coordinator.replicas == 0;
+        span.record("coordinator_stopped", stopped);
         health.set_waiting(stopped.then_some(STOPPED));
         if self.stopped != Some(stopped) {
             if stopped {
-                log::info!("[fleet] the {COORDINATOR_DEPLOYMENT} Deployment is at 0 replicas: creating and re-templating nothing");
+                log::info!(
+                    "[fleet] the {COORDINATOR_DEPLOYMENT} Deployment is at 0 replicas: creating and re-templating nothing"
+                );
             } else {
-                log::info!("[fleet] the {COORDINATOR_DEPLOYMENT} Deployment is at {} replicas: new hosts run {}", coordinator.replicas, coordinator.image);
+                log::info!(
+                    "[fleet] the {COORDINATOR_DEPLOYMENT} Deployment is at {} replicas: new hosts run {}",
+                    coordinator.replicas,
+                    coordinator.image
+                );
             }
             self.stopped = Some(stopped);
         }
         // 4. The plan.
-        let plan = plan(&desired, &objects, &coordinator, &template);
+        let plan = tracing::info_span!(
+            "fleet.reconcile.plan",
+            desired = desired.len(),
+            coordinator_stopped = stopped,
+        )
+        .in_scope(|| plan(&desired, &objects, &coordinator, &template));
+        span.record("actions", plan.actions.len());
         let mut ok = true;
         for (row, why) in plan.refused {
             ok = false;
-            self.failed(&format!("row {row}"), format!("host {row}: {why}; nothing created for it"));
+            self.failed(
+                &format!("row {row}"),
+                format!("host {row}: {why}; nothing created for it"),
+            );
         }
         // 5. The actions, in order; a failure skips the rest of that host's.
         let mut failed: BTreeSet<String> = BTreeSet::new();
@@ -614,7 +778,19 @@ impl Fleet {
             if failed.contains(action.object()) {
                 continue;
             }
-            let applied = self.runtime.block_on(apply(&self.kube, &self.config.namespace, action));
+            let manifest = action.kind().manifest_kind();
+            let action_kind = match action {
+                Action::Delete { .. } => "delete",
+                Action::Create { .. } => "create",
+                Action::Replace { .. } => "replace",
+            };
+            let applied = self.runtime.block_on(
+                apply(&self.kube, &self.config.namespace, action).instrument(tracing::info_span!(
+                    "fleet.reconcile.action",
+                    manifest,
+                    action = action_kind
+                )),
+            );
             health.loop_beat();
             let what = format!("{} {}", action.kind().manifest_kind(), action.object());
             match applied {
@@ -658,17 +834,25 @@ impl Fleet {
 /// Steps 2 and 3 of a pass: the coordinator Deployment, the template, the labelled objects. The
 /// loop beats after each request (each bounded by [`kube_api::REQUEST_TIMEOUT`], below
 /// [`crate::health::LIVEZ_STALL_MS`]): a slow API server is not a stalled loop.
-async fn read_cluster(kube: &Kube, config: &FleetConfig) -> Result<(CoordinatorSeen, Template, Objects), String> {
+async fn read_cluster(
+    kube: &Kube,
+    config: &FleetConfig,
+) -> Result<(CoordinatorSeen, Template, Objects), String> {
     let ns = &config.namespace;
     let beat = || Health::global().loop_beat();
     let coordinator = kube
-        .get(&format!("{}/{COORDINATOR_DEPLOYMENT}", Kind::Deployment.collection(ns)))
+        .get(&format!(
+            "{}/{COORDINATOR_DEPLOYMENT}",
+            Kind::Deployment.collection(ns)
+        ))
         .await
         .map_err(|e| format!("reading the {COORDINATOR_DEPLOYMENT} Deployment: {e}"))?;
     beat();
     let coordinator = CoordinatorSeen::from_value(&coordinator)?;
     let map = kube
-        .get(&format!("/api/v1/namespaces/{ns}/configmaps/{TEMPLATE_CONFIGMAP}"))
+        .get(&format!(
+            "/api/v1/namespaces/{ns}/configmaps/{TEMPLATE_CONFIGMAP}"
+        ))
         .await
         .map_err(|e| format!("reading the ConfigMap {TEMPLATE_CONFIGMAP}: {e}"))?;
     beat();
@@ -703,11 +887,16 @@ async fn apply(kube: &Kube, ns: &str, action: &Action) -> Result<Applied, KubeEr
             Err(e) => Err(e),
         },
         // Background: the Deployment's ReplicaSets and pods go after it (each pod: SIGTERM → its leave cut).
-        Action::Delete { kind, name } => {
-            kube.delete(&format!("{}/{name}?propagationPolicy=Background", kind.collection(ns))).await.map(|()| Applied::Deleted)
-        }
-        Action::Replace { name, body } => {
-            kube.put(&format!("{}/{name}", Kind::Deployment.collection(ns)), body).await.map(|_| Applied::Replaced)
-        }
+        Action::Delete { kind, name } => kube
+            .delete(&format!(
+                "{}/{name}?propagationPolicy=Background",
+                kind.collection(ns)
+            ))
+            .await
+            .map(|()| Applied::Deleted),
+        Action::Replace { name, body } => kube
+            .put(&format!("{}/{name}", Kind::Deployment.collection(ns)), body)
+            .await
+            .map(|_| Applied::Replaced),
     }
 }

@@ -5,8 +5,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::resolve::Problem;
 use super::Shape;
+use super::resolve::Problem;
 
 pub const PREFAB_FORMAT: u16 = 2;
 
@@ -85,9 +85,15 @@ pub struct FileShaped {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileShape {
-    Named { shape: Shape, mat: u16 },
+    Named {
+        shape: Shape,
+        mat: u16,
+    },
     /// `(min, exclusive max, index into mats)`.
-    Cuboids { cuboids: Vec<([u8; 3], [u8; 3], u8)>, mats: Vec<u16> },
+    Cuboids {
+        cuboids: Vec<([u8; 3], [u8; 3], u8)>,
+        mats: Vec<u16>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +140,15 @@ impl fmt::Display for PrefabError {
             PrefabError::NotAPrefab => write!(f, "not a prefab file"),
             PrefabError::TooLarge => write!(f, "prefab file too large"),
             PrefabError::Corrupt => write!(f, "prefab file is corrupt"),
-            PrefabError::Problems(p) => write!(f, "prefab has {} problem(s): {}", p.len(), p.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("; ")),
+            PrefabError::Problems(p) => write!(
+                f,
+                "prefab has {} problem(s): {}",
+                p.len(),
+                p.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
             PrefabError::Io(s) => write!(f, "prefab i/o error: {s}"),
         }
     }

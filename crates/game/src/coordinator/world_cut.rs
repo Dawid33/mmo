@@ -95,10 +95,18 @@ impl std::fmt::Display for CutsBlocked {
             )?;
         }
         if !self.unexpected.is_empty() {
-            write!(f, " hosts {:?} are attached but have no dirty `hosts` row (registered since the last read?);", self.unexpected.iter().map(|h| h.0).collect::<Vec<_>>())?;
+            write!(
+                f,
+                " hosts {:?} are attached but have no dirty `hosts` row (registered since the last read?);",
+                self.unexpected.iter().map(|h| h.0).collect::<Vec<_>>()
+            )?;
         }
-        let ids: Vec<u64> =
-            self.successions.iter().filter(|id| !self.awaiting_heir.iter().any(|(a, _)| a == *id)).map(|id| id.0).collect();
+        let ids: Vec<u64> = self
+            .successions
+            .iter()
+            .filter(|id| !self.awaiting_heir.iter().any(|(a, _)| a == *id))
+            .map(|id| id.0)
+            .collect();
         if !ids.is_empty() {
             write!(
                 f,
@@ -320,8 +328,18 @@ impl Coordinator {
     /// The newest store time the cuts recorded ([`Coordinator::clock_floor`]): the period's
     /// start, each leave request's first ask, the running cut's start.
     pub(super) fn cuts_clock_floor(&self) -> u64 {
-        let asks = self.cuts.leave_requests.values().copied().max().unwrap_or(0);
-        let run = self.cuts.run.as_ref().map_or(0, |r| r.deadline_ms.saturating_sub(WORLD_CUT_DEADLINE_MS));
+        let asks = self
+            .cuts
+            .leave_requests
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let run = self
+            .cuts
+            .run
+            .as_ref()
+            .map_or(0, |r| r.deadline_ms.saturating_sub(WORLD_CUT_DEADLINE_MS));
         self.cuts.last_ms.max(asks).max(run)
     }
     /// A loaded core's cut deadlines at store time `now_ms` ([`super::rebase_deadline`]):
@@ -335,7 +353,8 @@ impl Coordinator {
             *since = super::rebase_since(*since, now_ms);
         }
         if let Some(run) = self.cuts.run.as_mut() {
-            run.deadline_ms = super::rebase_deadline(run.deadline_ms, WORLD_CUT_DEADLINE_MS, now_ms);
+            run.deadline_ms =
+                super::rebase_deadline(run.deadline_ms, WORLD_CUT_DEADLINE_MS, now_ms);
         }
     }
 
@@ -443,16 +462,20 @@ impl Coordinator {
     }
 
     pub(super) fn set_host_boots_inner(&mut self, boots: &BTreeMap<HostId, u64>) {
-        self.cuts.left.retain(|h, left_as| match (boots.get(h), *left_as) {
-            (Some(b), Some(l)) if *b != l => {
-                log::info!("coordinator: host {h} registered again (boot {b}): expected again");
-                false
-            }
-            _ => true,
-        });
+        self.cuts
+            .left
+            .retain(|h, left_as| match (boots.get(h), *left_as) {
+                (Some(b), Some(l)) if *b != l => {
+                    log::info!("coordinator: host {h} registered again (boot {b}): expected again");
+                    false
+                }
+                _ => true,
+            });
         self.cuts.succeeded.retain(|h, dead| match boots.get(h) {
             Some(b) if b != dead => {
-                log::info!("coordinator: succeeded host {h} registered again (boot {b}): expected again");
+                log::info!(
+                    "coordinator: succeeded host {h} registered again (boot {b}): expected again"
+                );
                 false
             }
             _ => true,
@@ -513,7 +536,10 @@ impl Coordinator {
     /// verdict if taken.
     #[doc(hidden)]
     pub fn world_cut_progress(&self) -> Option<(CutId, Vec<HostId>, Option<bool>)> {
-        self.cuts.run.as_ref().map(|r| (r.cut, r.prepared.iter().copied().collect(), r.verdict))
+        self.cuts
+            .run
+            .as_ref()
+            .map(|r| (r.cut, r.prepared.iter().copied().collect(), r.verdict))
     }
 
     /// Host `host` asks to leave ([`crate::HostMsg::LeaveRequest`]): it is named `leaving` in
@@ -569,10 +595,23 @@ impl Coordinator {
     /// handed out, applied as the stored decision directly (outside the log).
     #[doc(hidden)]
     pub fn decided(&mut self, cut: CutId, committed: bool) {
-        match self.cuts.run.as_ref().filter(|r| r.cut == cut).and_then(|r| r.taken) {
+        match self
+            .cuts
+            .run
+            .as_ref()
+            .filter(|r| r.cut == cut)
+            .and_then(|r| r.taken)
+        {
             Some(stamp) => {
                 let now = self.clock_ms;
-                self.apply(super::Input::Decision(super::DecisionAnswer::Cut { stamp, cut, committed: Ok(committed) }), now);
+                self.apply(
+                    super::Input::Decision(super::DecisionAnswer::Cut {
+                        stamp,
+                        cut,
+                        committed: Ok(committed),
+                    }),
+                    now,
+                );
             }
             None => {
                 self.clean_checked = false;
@@ -589,23 +628,45 @@ impl Coordinator {
     /// nothing.
     /// Whether the running cut is `cut` and its decision's mark is `stamp`.
     pub(super) fn cut_mark_is(&self, cut: CutId, stamp: CallStamp) -> bool {
-        self.cuts.run.as_ref().is_some_and(|r| r.cut == cut && r.taken == Some(stamp))
+        self.cuts
+            .run
+            .as_ref()
+            .is_some_and(|r| r.cut == cut && r.taken == Some(stamp))
     }
 
-    pub(super) fn cut_answered(&mut self, stamp: CallStamp, cut: CutId, committed: Result<bool, String>) {
-        let Some(run) = self.cuts.run.as_mut().filter(|r| r.cut == cut && r.taken == Some(stamp)) else {
-            log::debug!("coordinator: an answer to cut {}'s decision ({stamp:?}) that no mark here awaits: ignored", cut.0);
+    pub(super) fn cut_answered(
+        &mut self,
+        stamp: CallStamp,
+        cut: CutId,
+        committed: Result<bool, String>,
+    ) {
+        let Some(run) = self
+            .cuts
+            .run
+            .as_mut()
+            .filter(|r| r.cut == cut && r.taken == Some(stamp))
+        else {
+            log::debug!(
+                "coordinator: an answer to cut {}'s decision ({stamp:?}) that no mark here awaits: ignored",
+                cut.0
+            );
             return;
         };
         match committed {
             Ok(committed) => {
                 if run.verdict == Some(true) && !committed {
-                    log::warn!("coordinator: world cut {}: a commit was asked, the store recorded an abort", cut.0);
+                    log::warn!(
+                        "coordinator: world cut {}: a commit was asked, the store recorded an abort",
+                        cut.0
+                    );
                 }
                 self.decided_as_stored(cut, committed);
             }
             Err(e) => {
-                log::warn!("coordinator: world cut {}: its decision could not be recorded ({e}); looking it up", cut.0);
+                log::warn!(
+                    "coordinator: world cut {}: its decision could not be recorded ({e}); looking it up",
+                    cut.0
+                );
                 run.lookup = true;
                 self.reread_successions();
             }
@@ -620,7 +681,11 @@ impl Coordinator {
         if !self.ticking_now() {
             return None;
         }
-        let run = self.cuts.run.as_mut().filter(|r| r.lookup && r.taken.is_some())?;
+        let run = self
+            .cuts
+            .run
+            .as_mut()
+            .filter(|r| r.lookup && r.taken.is_some())?;
         run.lookup = false;
         let found = (run.cut, run.tick);
         self.clean_checked = false;
@@ -631,7 +696,14 @@ impl Coordinator {
     #[doc(hidden)]
     pub fn decision_looked_up(&mut self, cut: CutId, committed: bool) {
         let now = self.clock_ms;
-        self.apply(super::Input::CutLookedUp { host: None, cut, committed }, now);
+        self.apply(
+            super::Input::CutLookedUp {
+                host: None,
+                cut,
+                committed,
+            },
+            now,
+        );
     }
 
     /// The decision of cut `cut` as the store holds it, read back ([`super::Input::CutLookedUp`]):
@@ -644,25 +716,53 @@ impl Coordinator {
                 self.remember_outcome(cut, committed);
                 self.push(Target::Host(host), CoordMsg::CutDone { cut, committed });
             }
-            None if self.cuts.run.as_ref().is_some_and(|r| r.cut == cut && r.taken.is_some()) => {
+            None if self
+                .cuts
+                .run
+                .as_ref()
+                .is_some_and(|r| r.cut == cut && r.taken.is_some()) =>
+            {
                 self.decided_as_stored(cut, committed);
             }
-            None => log::debug!("coordinator: cut {}'s looked-up decision ({committed}): not the running cut any more", cut.0),
+            None => log::debug!(
+                "coordinator: cut {}'s looked-up decision ({committed}): not the running cut any more",
+                cut.0
+            ),
         }
     }
 
     /// The marks of the running cut's decision whose stamp `matches` take `to`.
     pub(super) fn cuts_stamp_marks(&mut self, matches: &dyn Fn(&CallStamp) -> bool, to: CallStamp) {
-        if let Some(t) = self.cuts.run.as_mut().and_then(|r| r.taken.as_mut()).filter(|t| matches(t)) {
+        if let Some(t) = self
+            .cuts
+            .run
+            .as_mut()
+            .and_then(|r| r.taken.as_mut())
+            .filter(|t| matches(t))
+        {
             *t = to;
         }
     }
 
     /// The running cut's decision, if its mark `matches`, lost its answer: looked up
     /// ([`Coordinator::orphan_marks`]). Whether it matched.
-    pub(super) fn cuts_orphan_marks(&mut self, matches: &dyn Fn(&CallStamp) -> bool, why: &str) -> bool {
-        let Some(run) = self.cuts.run.as_mut().filter(|r| r.taken.as_ref().is_some_and(|t| matches(t))) else { return false };
-        log::warn!("coordinator: world cut {}: the answer to its decision is lost ({why}); looking it up", run.cut.0);
+    pub(super) fn cuts_orphan_marks(
+        &mut self,
+        matches: &dyn Fn(&CallStamp) -> bool,
+        why: &str,
+    ) -> bool {
+        let Some(run) = self
+            .cuts
+            .run
+            .as_mut()
+            .filter(|r| r.taken.as_ref().is_some_and(|t| matches(t)))
+        else {
+            return false;
+        };
+        log::warn!(
+            "coordinator: world cut {}: the answer to its decision is lost ({why}); looking it up",
+            run.cut.0
+        );
         run.lookup = true;
         true
     }
@@ -671,7 +771,10 @@ impl Coordinator {
     /// ([`CoordMsg::CutDone`]), and the next cut may start a period from now.
     fn decided_as_stored(&mut self, cut: CutId, committed: bool) {
         let Some(run) = self.cuts.run.take_if(|r| r.cut == cut) else {
-            log::warn!("coordinator: cut {} decided ({committed}), but it is not the cut running", cut.0);
+            log::warn!(
+                "coordinator: cut {} decided ({committed}), but it is not the cut running",
+                cut.0
+            );
             self.remember_outcome(cut, committed);
             return;
         };
@@ -688,7 +791,10 @@ impl Coordinator {
             self.cuts.lead = WORLD_CUT_LEAD_TICKS;
             // What a `Leave` declaration waits for (`succession.rs`, `LeaveGate`): a later cut
             // than the leave cut, committed with its heir in it.
-            let staying: BTreeSet<HostId> = run.participants().filter(|h| !run.leaving.contains(h)).collect();
+            let staying: BTreeSet<HostId> = run
+                .participants()
+                .filter(|h| !run.leaving.contains(h))
+                .collect();
             self.leave_gate.committed(cut, staying);
         }
         for &h in &run.leaving {
@@ -699,7 +805,10 @@ impl Coordinator {
                 log::info!("coordinator: host {h} left in world cut {}", cut.0);
                 self.cuts.left.insert(h, boot);
             } else {
-                log::warn!("coordinator: host {h}'s leave cut {} was aborted: it leaves without one", cut.0);
+                log::warn!(
+                    "coordinator: host {h}'s leave cut {} was aborted: it leaves without one",
+                    cut.0
+                );
             }
         }
         self.cuts.last_ms = self.clock_ms;
@@ -731,12 +840,24 @@ impl Coordinator {
     #[doc(hidden)]
     pub fn cut_outcome(&mut self, host: HostId, cut: CutId, committed: bool) {
         let now = self.clock_ms;
-        self.apply(super::Input::CutLookedUp { host: Some(host), cut, committed }, now);
+        self.apply(
+            super::Input::CutLookedUp {
+                host: Some(host),
+                cut,
+                committed,
+            },
+            now,
+        );
     }
 
     /// The successions running cut `cut` settles if it commits (none: not the running cut).
     pub fn settles_of_running(&self, cut: CutId) -> Vec<SuccessionId> {
-        self.cuts.run.as_ref().filter(|r| r.cut == cut).map(|r| r.settles.clone()).unwrap_or_default()
+        self.cuts
+            .run
+            .as_ref()
+            .filter(|r| r.cut == cut)
+            .map(|r| r.settles.clone())
+            .unwrap_or_default()
     }
 
     /// The world cut running (not decided yet): its id and tick.
@@ -777,18 +898,31 @@ impl Coordinator {
         self.cuts.attached.insert(host, boot);
         self.cuts.attached_ms.insert(host, self.clock_ms);
         self.cuts.boots.insert(host, boot);
-        if self.cuts.left.get(&host).is_some_and(|left_as| *left_as != Some(boot)) {
+        if self
+            .cuts
+            .left
+            .get(&host)
+            .is_some_and(|left_as| *left_as != Some(boot))
+        {
             log::info!("coordinator: host {host} is back (boot {boot}): expected again");
             self.cuts.left.remove(&host);
         }
-        if self.cuts.succeeded.get(&host).is_some_and(|dead| *dead != boot) {
+        if self
+            .cuts
+            .succeeded
+            .get(&host)
+            .is_some_and(|dead| *dead != boot)
+        {
             log::info!("coordinator: succeeded host {host} is back as boot {boot}: expected again");
             self.cuts.succeeded.remove(&host);
         }
         if self.cuts.run.as_ref().is_some_and(|r| r.has(host)) {
             self.abort_running(host, "re-attached");
         } else if let Some(run) = self.cuts.run.as_ref().filter(|r| r.verdict.is_none()) {
-            log::info!("coordinator: host {host} attached during world cut {}, which it is not in: it is in the next one", run.cut.0);
+            log::info!(
+                "coordinator: host {host} attached during world cut {}, which it is not in: it is in the next one",
+                run.cut.0
+            );
         }
         if let Some(cut) = pending {
             if self.cuts.run.as_ref().is_none_or(|r| r.cut != cut) {
@@ -801,7 +935,10 @@ impl Coordinator {
         match self.cuts.run.as_mut() {
             Some(run) if run.cut == cut => {
                 if !run.has(host) {
-                    log::warn!("coordinator: host {host} prepared cut {}, which it does not take part in", cut.0);
+                    log::warn!(
+                        "coordinator: host {host} prepared cut {}, which it does not take part in",
+                        cut.0
+                    );
                     return;
                 }
                 if run.verdict.is_none() {
@@ -822,7 +959,10 @@ impl Coordinator {
         match self.cuts.run.as_mut() {
             Some(run) if run.cut == cut => {
                 if run.verdict.is_none() && run.has(host) {
-                    log::warn!("coordinator: world cut {}: host {host} failed ({why:?}); aborted", cut.0);
+                    log::warn!(
+                        "coordinator: world cut {}: host {host} failed ({why:?}); aborted",
+                        cut.0
+                    );
                     run.verdict = Some(false);
                     if why == CutFailure::Missed {
                         self.cuts.lead = (self.cuts.lead * 2).min(WORLD_CUT_LEAD_MAX_TICKS);
@@ -841,21 +981,39 @@ impl Coordinator {
                 log::warn!(
                     "coordinator: world cut {} still waiting for {:?} past its deadline; aborted",
                     run.cut.0,
-                    run.participants().filter(|h| !run.prepared.contains(h)).collect::<Vec<_>>()
+                    run.participants()
+                        .filter(|h| !run.prepared.contains(h))
+                        .collect::<Vec<_>>()
                 );
                 run.verdict = Some(false);
             }
             return;
         }
-        let Some(every) = self.cuts.every_ms else { return };
+        let Some(every) = self.cuts.every_ms else {
+            return;
+        };
         // A leave batch due (its first request `LEAVE_BATCH_MS` old) begins at once.
-        let leave_due = self.cuts.leave_requests.values().min().is_some_and(|first| now_ms >= first + LEAVE_BATCH_MS);
+        let leave_due = self
+            .cuts
+            .leave_requests
+            .values()
+            .min()
+            .is_some_and(|first| now_ms >= first + LEAVE_BATCH_MS);
         // R4: an open succession every recipient answered is settled by the next cut — due
         // `SETTLE_CUT_RETRY_MS` after the last cut ended, not a save period.
-        let settle_due = self.settle_due() && now_ms >= self.cuts.last_ms.saturating_add(every.min(SETTLE_CUT_RETRY_MS));
+        let settle_due = self.settle_due()
+            && now_ms
+                >= self
+                    .cuts
+                    .last_ms
+                    .saturating_add(every.min(SETTLE_CUT_RETRY_MS));
         // Elastic 5: a move whose warning ends within the lead is carried by a cut begun at once.
         let move_due = self.move_due();
-        if !leave_due && !settle_due && !move_due && now_ms < self.cuts.last_ms.saturating_add(every) {
+        if !leave_due
+            && !settle_due
+            && !move_due
+            && now_ms < self.cuts.last_ms.saturating_add(every)
+        {
             return;
         }
         // Every expected host attached, and no attached host outside the set (one that
@@ -870,23 +1028,38 @@ impl Coordinator {
         // is being declared, a rollback is wanted, or the open ones are not known yet).
         let waiting = self.successions_block_cuts();
         let mismatch = self.cuts.expected_known && expected != attached;
-        if !self.cuts.expected_known || expected != attached || expected.is_empty() || waiting.is_some() {
+        if !self.cuts.expected_known
+            || expected != attached
+            || expected.is_empty()
+            || waiting.is_some()
+        {
             // A due cut blocked by a mismatch, or by successions waiting for answers, is
             // reported (after the grace, once a period); an unknown read is the runtime's own
             // warning, and no host at all is idle.
             let waiting = waiting.unwrap_or_default();
             if mismatch || !waiting.is_empty() {
                 let since = *self.cuts.blocked_since.get_or_insert(now_ms);
-                let noted = self.cuts.blocked_noted.is_some_and(|at| now_ms < at.saturating_add(every));
+                let noted = self
+                    .cuts
+                    .blocked_noted
+                    .is_some_and(|at| now_ms < at.saturating_add(every));
                 if now_ms >= since.saturating_add(WORLD_CUT_BLOCKED_GRACE_MS) && !noted {
                     self.cuts.blocked_noted = Some(now_ms);
                     let (missing, unexpected) = if mismatch {
-                        (expected.difference(&attached).copied().collect(), attached.difference(&expected).copied().collect())
+                        (
+                            expected.difference(&attached).copied().collect(),
+                            attached.difference(&expected).copied().collect(),
+                        )
                     } else {
                         (Vec::new(), Vec::new())
                     };
                     let awaiting_heir = self.successions_awaiting_heir(&waiting);
-                    self.cuts.blocked = Some(CutsBlocked { missing, unexpected, successions: waiting, awaiting_heir });
+                    self.cuts.blocked = Some(CutsBlocked {
+                        missing,
+                        unexpected,
+                        successions: waiting,
+                        awaiting_heir,
+                    });
                 }
             } else {
                 self.cuts.blocked_since = None;
@@ -902,7 +1075,9 @@ impl Coordinator {
         // The hosts leaving in this cut (among `hosts`); a request of a host not expected is
         // dropped (it is not in the cut; it exits without one).
         let leaving: Vec<HostId> = if leave_due {
-            let asked: Vec<HostId> = std::mem::take(&mut self.cuts.leave_requests).into_keys().collect();
+            let asked: Vec<HostId> = std::mem::take(&mut self.cuts.leave_requests)
+                .into_keys()
+                .collect();
             for h in asked.iter().filter(|h| !expected.contains(h)) {
                 log::warn!("coordinator: host {h} asks to leave, but it is not expected; ignored");
             }
@@ -921,7 +1096,14 @@ impl Coordinator {
             self.cuts.lead
         );
         for &h in &hosts {
-            let msg = CoordMsg::BeginCut { cut, tick, hosts: hosts.clone(), leaving: leaving.clone(), generation, moves: moves.clone() };
+            let msg = CoordMsg::BeginCut {
+                cut,
+                tick,
+                hosts: hosts.clone(),
+                leaving: leaving.clone(),
+                generation,
+                moves: moves.clone(),
+            };
             self.push(Target::Host(h), msg);
         }
         // Its begin is recorded by the transition that starts it (Elastic 1 Task 4: the decision
@@ -947,20 +1129,48 @@ impl Coordinator {
     /// ([`crate::HostMsg::CutPeerCount`]): relayed to `peer` while `cut` runs undecided and
     /// both are participants (two different ones); dropped otherwise — a count of a decided
     /// cut (an abort for a lapsed participant included) is never used.
-    pub(super) fn cut_peer_count(&mut self, host: HostId, cut: CutId, peer: HostId, received_through: u64, boot: u64) {
+    pub(super) fn cut_peer_count(
+        &mut self,
+        host: HostId,
+        cut: CutId,
+        peer: HostId,
+        received_through: u64,
+        boot: u64,
+    ) {
         if self.cut_not_made_yet(cut) {
             // Another replica began it: relayed from a refreshed cache (Elastic 2b Task 5).
-            log::info!("coordinator: host {host}'s count in cut {}, newer than this cache's last: refreshing first", cut.0);
+            log::info!(
+                "coordinator: host {host}'s count in cut {}, newer than this cache's last: refreshing first",
+                cut.0
+            );
             self.stale_seen = true;
             return;
         }
-        let running = self.cuts.run.as_ref().filter(|r| r.cut == cut && r.verdict.is_none());
+        let running = self
+            .cuts
+            .run
+            .as_ref()
+            .filter(|r| r.cut == cut && r.verdict.is_none());
         if !running.is_some_and(|r| host != peer && r.has(host) && r.has(peer)) {
-            log::debug!("coordinator: host {host}'s count toward host {peer} in cut {} dropped: not between participants of it running", cut.0);
+            log::debug!(
+                "coordinator: host {host}'s count toward host {peer} in cut {} dropped: not between participants of it running",
+                cut.0
+            );
             return;
         }
-        log::info!("coordinator: world cut {}: host {host} counts {received_through} from host {peer}; relayed", cut.0);
-        self.push(Target::Host(peer), CoordMsg::CutPeerCount { cut, from: host, received_through, boot });
+        log::info!(
+            "coordinator: world cut {}: host {host} counts {received_through} from host {peer}; relayed",
+            cut.0
+        );
+        self.push(
+            Target::Host(peer),
+            CoordMsg::CutPeerCount {
+                cut,
+                from: host,
+                received_through,
+                boot,
+            },
+        );
     }
 
     /// The participants of the running cut (decided or not, until its decision is
@@ -980,12 +1190,19 @@ impl Coordinator {
 
     /// Whether `host` asked to leave (its request waits, or the cut it leaves in runs).
     pub(super) fn leave_asked(&self, host: HostId) -> bool {
-        self.cuts.leave_requests.contains_key(&host) || self.cuts.run.as_ref().is_some_and(|r| r.leaving.contains(&host))
+        self.cuts.leave_requests.contains_key(&host)
+            || self
+                .cuts
+                .run
+                .as_ref()
+                .is_some_and(|r| r.leaving.contains(&host))
     }
 
     /// The hosts attached now that neither left nor were succeeded.
     pub(super) fn attached_live(&self) -> Vec<HostId> {
-        self.attached_hosts().filter(|h| !self.cuts.left.contains_key(h) && !self.cuts.succeeded.contains_key(h)).collect()
+        self.attached_hosts()
+            .filter(|h| !self.cuts.left.contains_key(h) && !self.cuts.succeeded.contains_key(h))
+            .collect()
     }
 
     /// The hosts attached, by id.
@@ -1006,7 +1223,9 @@ impl Coordinator {
     /// Whether a message of `host` comes from a succeeded boot of it (`boot`: the boot an
     /// `Attach` names; otherwise the boot of its latest `Attach`): a zombie, ignored.
     pub(super) fn from_succeeded_boot(&self, host: HostId, boot: Option<u64>) -> bool {
-        let Some(&dead) = self.cuts.succeeded.get(&host) else { return false };
+        let Some(&dead) = self.cuts.succeeded.get(&host) else {
+            return false;
+        };
         boot.or_else(|| self.cuts.boots.get(&host).copied()) == Some(dead)
     }
 
@@ -1039,7 +1258,12 @@ impl Coordinator {
     /// The successions a commit decided here and not yet answered by the runtime would
     /// settle: the store may hold them settled already.
     pub(super) fn settles_pending(&self) -> Vec<SuccessionId> {
-        self.cuts.run.as_ref().filter(|r| r.verdict == Some(true)).map(|r| r.settles.clone()).unwrap_or_default()
+        self.cuts
+            .run
+            .as_ref()
+            .filter(|r| r.verdict == Some(true))
+            .map(|r| r.settles.clone())
+            .unwrap_or_default()
     }
 
     /// Whether `host`'s latest known boot was succeeded and no other boot of it came since.
@@ -1066,7 +1290,10 @@ impl Coordinator {
     /// The running cut, not decided yet, is aborted because of `host` (`why`, for the log).
     fn abort_running(&mut self, host: HostId, why: &str) {
         if let Some(run) = self.cuts.run.as_mut().filter(|r| r.verdict.is_none()) {
-            log::warn!("coordinator: world cut {}: host {host} {why}; aborted", run.cut.0);
+            log::warn!(
+                "coordinator: world cut {}: host {host} {why}; aborted",
+                run.cut.0
+            );
             run.verdict = Some(false);
         }
     }
@@ -1080,7 +1307,10 @@ impl Coordinator {
     /// an undecided cut would be aborted (audit H3).
     fn answer_cut(&mut self, host: HostId, cut: CutId) {
         if self.cut_not_made_yet(cut) {
-            log::info!("coordinator: host {host} names cut {}, newer than this cache's last: refreshing first", cut.0);
+            log::info!(
+                "coordinator: host {host} names cut {}, newer than this cache's last: refreshing first",
+                cut.0
+            );
             self.stale_cuts.push((host, cut));
             return;
         }

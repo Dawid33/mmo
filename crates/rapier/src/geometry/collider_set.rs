@@ -56,7 +56,8 @@ pub struct ColliderSet {
     // mmo-fork: first-touch capture buffer, installed only for the duration of
     // a journaled step (`pipeline::step_journal`, upgrade plan Task 4.2).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — the journal's transient capture buffer, not state.
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — the journal's transient capture buffer, not state.
     pub(crate) capture:
         Option<Box<crate::pipeline::step_journal::Capture<ColliderHandle, Collider>>>,
 }
@@ -265,7 +266,10 @@ impl ColliderSet {
     /// Standalone colliders are useful for sensors or static collision geometry that doesn't need a body.
     pub fn insert(&mut self, coll: impl Into<Collider>) -> ColliderHandle {
         // mmo-fork: the journal restores values, not slots.
-        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
+        debug_assert!(
+            self.capture.is_none(),
+            "collider insert/removal during a journaled step"
+        );
         let mut coll = coll.into();
         // Make sure the internal links are reset, they may not be
         // if this rigid-body was obtained by cloning another one.
@@ -305,7 +309,10 @@ impl ColliderSet {
         bodies: &mut RigidBodySet,
     ) -> ColliderHandle {
         // mmo-fork: the journal restores values, not slots.
-        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
+        debug_assert!(
+            self.capture.is_none(),
+            "collider insert/removal during a journaled step"
+        );
         let mut coll = coll.into();
         // Make sure the internal links are reset, they may not be
         // if this collider was obtained by cloning another one.
@@ -539,7 +546,10 @@ impl ColliderSet {
         wake_up: bool,
     ) -> Option<Collider> {
         // mmo-fork: the journal restores values, not slots.
-        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
+        debug_assert!(
+            self.capture.is_none(),
+            "collider insert/removal during a journaled step"
+        );
         let collider = self.colliders.remove(handle.0)?;
 
         /*

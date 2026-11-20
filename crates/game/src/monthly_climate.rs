@@ -97,7 +97,11 @@ impl MonthlyClimate {
     /// `month < CLIMATE_MONTHS`.
     pub fn index(&self, month: usize, cx: i64, cz: i64) -> usize {
         let nx = i64::from(self.nx);
-        let x = if self.wrap_x { cx.rem_euclid(nx) } else { cx.clamp(0, nx - 1) };
+        let x = if self.wrap_x {
+            cx.rem_euclid(nx)
+        } else {
+            cx.clamp(0, nx - 1)
+        };
         let z = cz.clamp(0, i64::from(self.nz) - 1);
         month * self.cells() + z as usize * self.nx as usize + x as usize
     }
@@ -106,15 +110,26 @@ impl MonthlyClimate {
     /// error names what is wrong.
     pub fn validate(&self) -> Result<(), String> {
         if self.nx < 1 || self.nz < 1 {
-            return Err(format!("monthly climate grid {} × {} is empty", self.nx, self.nz));
+            return Err(format!(
+                "monthly climate grid {} × {} is empty",
+                self.nx, self.nz
+            ));
         }
         if !self.cell_m.is_finite() || self.cell_m <= 0.0 {
-            return Err(format!("monthly climate cell {} m is not a positive length", self.cell_m));
+            return Err(format!(
+                "monthly climate cell {} m is not a positive length",
+                self.cell_m
+            ));
         }
         let len = CLIMATE_MONTHS
             .checked_mul(self.nx as usize)
             .and_then(|n| n.checked_mul(self.nz as usize))
-            .ok_or_else(|| format!("monthly climate grid {} × {} × 12 overflows usize", self.nx, self.nz))?;
+            .ok_or_else(|| {
+                format!(
+                    "monthly climate grid {} × {} × 12 overflows usize",
+                    self.nx, self.nz
+                )
+            })?;
         let planes = [
             ("temp_sea_centi_c", self.temp_sea_centi_c.len()),
             ("diurnal_deci_c", self.diurnal_deci_c.len()),
@@ -125,7 +140,9 @@ impl MonthlyClimate {
         ];
         for (name, got) in planes {
             if got != len {
-                return Err(format!("monthly climate plane {name} holds {got} values, the grid needs {len}"));
+                return Err(format!(
+                    "monthly climate plane {name} holds {got} values, the grid needs {len}"
+                ));
             }
         }
         Ok(())
@@ -202,7 +219,11 @@ impl MonthlyClimate {
 fn extreme_month(v: &[f32; CLIMATE_MONTHS], greater: bool) -> usize {
     let mut best = 0;
     for m in 1..CLIMATE_MONTHS {
-        if if greater { v[m] > v[best] } else { v[m] < v[best] } {
+        if if greater {
+            v[m] > v[best]
+        } else {
+            v[m] < v[best]
+        } {
             best = m;
         }
     }

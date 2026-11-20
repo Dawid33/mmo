@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam::channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use game::{RegionCoords, RegionInput, RegionOutput, RegionRunner, RegionSeed, RegionSpawner};
 
 /// Worldgen shared by every region thread.
@@ -16,8 +16,9 @@ pub type SharedRegionGenerator =
 /// Loads and pins the forged-world tiles generating a region reads
 /// (`worldgen::prefetch_region` on the server). An `Err` (a tile that will
 /// not load) stops the region instead.
-pub type RegionPrefetch =
-    std::sync::Arc<dyn Fn(RegionCoords) -> Result<worldgen::forged_tiles::TilePins, String> + Send + Sync>;
+pub type RegionPrefetch = std::sync::Arc<
+    dyn Fn(RegionCoords) -> Result<worldgen::forged_tiles::TilePins, String> + Send + Sync,
+>;
 
 pub struct ThreadRegionSpawner {
     /// Server start: the base of the world clock's ms (the same base as the
@@ -73,7 +74,10 @@ impl ThreadRegionSpawner {
     /// region that generates but cannot seed its halo would have no floor
     /// past its seams.
     pub fn with_generator(generator: SharedRegionGenerator, halo: game::HaloGenerator) -> Self {
-        Self { generator: Some((generator, halo)), ..Self::default() }
+        Self {
+            generator: Some((generator, halo)),
+            ..Self::default()
+        }
     }
 
     /// [`Self::with_generator`] for tests and tools, whose generators make
@@ -83,7 +87,10 @@ impl ThreadRegionSpawner {
     pub fn with_region_generator(generator: SharedRegionGenerator) -> Self {
         let whole = generator.clone();
         let halo: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
-            whole(rc).into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect()
+            whole(rc)
+                .into_iter()
+                .filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z))
+                .collect()
         });
         Self::with_generator(generator, halo)
     }
@@ -259,7 +266,8 @@ impl RegionSpawner for ThreadRegionSpawner {
     /// The world clock: one tick per `TICK_RATE` ms of wall time since the
     /// server's start, from the persisted world tick.
     fn world_tick(&self) -> game::Tick {
-        self.clock.tick_at(self.started.elapsed().as_millis() as u64)
+        self.clock
+            .tick_at(self.started.elapsed().as_millis() as u64)
     }
 
     /// The drop set goes to the claims every region thread loads through
@@ -330,7 +338,9 @@ pub fn region_thread_loop(
                         );
                     }
                 }
-                metrics.lag_ticks = clock.tick_at(now_ms()).saturating_sub(runner.current_tick());
+                metrics.lag_ticks = clock
+                    .tick_at(now_ms())
+                    .saturating_sub(runner.current_tick());
                 metrics.maybe_report(id, &mut runner);
             }
             Err(RecvTimeoutError::Disconnected) => return,

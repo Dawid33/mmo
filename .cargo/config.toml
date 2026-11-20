@@ -41,6 +41,10 @@ VOXEL_REGION_BLOCKS = "64"
 # powers of two 2..=32): the unit owning one entity / body / collider set.
 # `just chunk_blocks=2 …` overrides it, like the region dial above.
 VOXEL_CHUNK_BLOCKS = "16"
+# How a chop brings a tree down (`game::TREE_FELLING`, crates/game/src/trees.rs):
+# `instant` = the tree's blocks vanish and drop their items where they stood,
+# `physics` = the felled part topples as a voxel body. `just tree_felling=physics …`.
+VOXEL_TREE_FELLING = "instant"
 # Spawn island diameter in 64 m cells (`worldgen::islands::SPAWN_ISLAND_CELLS`,
 # 0 = its default); `just island=64 …`.
 VOXEL_ISLAND_CELLS = "0"

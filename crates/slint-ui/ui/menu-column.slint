@@ -6,15 +6,11 @@ export global MenuLayout {
     out property <length> margin: 0px;
 }
 
-// The top-right column: the game's menu buttons, and under them the context
-// box (Factorio-style) for what the player is doing right now — the active
-// designation tool and the selection. The box draws nothing when there is
+// The top-right column: the context box (Factorio-style) for what the
+// player is doing right now — the active designation tool and the selection. The box draws nothing when there is
 // neither. Embedded in `GameUi`; the client fills it
 // (renderer/slint_overlay.rs).
 export component MenuColumn {
-    callback open-settings();
-    callback open-encyclopedia();
-
     // The active tool's name; "" = no tool.
     in property <string> tool-name;
     in property <int> priority;
@@ -38,19 +34,6 @@ export component MenuColumn {
     column := VerticalLayout {
         spacing: 4px;
         alignment: start;
-
-        HorizontalLayout {
-            alignment: end;
-            spacing: 4px;
-            Button {
-                text: "Settings";
-                clicked => { root.open-settings(); }
-            }
-            Button {
-                text: "Encyclopedia";
-                clicked => { root.open-encyclopedia(); }
-            }
-        }
 
         // Following outlives the selection (Clear selection does not end it),
         // so Stop following stays reachable with nothing selected.

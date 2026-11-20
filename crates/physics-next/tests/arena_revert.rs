@@ -49,7 +49,11 @@ fn arena_lifo_revert_chain_is_exact() {
     a.revert_insert(z, s3.0, s3.1);
     a.revert_insert(y, s2.0, s2.1);
     a.revert_insert(x, s1.0, s1.1);
-    assert_eq!(before, bytes(&a), "LIFO chain over both insert paths must be exact");
+    assert_eq!(
+        before,
+        bytes(&a),
+        "LIFO chain over both insert paths must be exact"
+    );
 }
 
 // --- RigidBodySet --------------------------------------------------------
@@ -83,7 +87,9 @@ fn rigid_body_set_revert_insert_is_exact_on_both_paths() {
     remove_body(&mut w, a);
     let s1 = bytes(&w.bodies);
     let (head, len) = w.bodies.alloc_state();
-    let c = w.bodies.insert(RigidBodyBuilder::kinematic_position_based());
+    let c = w
+        .bodies
+        .insert(RigidBodyBuilder::kinematic_position_based());
     w.bodies.revert_insert(c, head, len);
     assert_eq!(s1, bytes(&w.bodies), "reuse-path revert must be exact");
 }
@@ -96,9 +102,14 @@ fn rigid_body_set_revert_insert_is_exact_on_both_paths() {
 fn rigid_body_tracked_write_reverts_exactly_both_tracking_cases() {
     let mut w = PhysicsWorld::default();
     let mut pipeline = PhysicsPipeline::new();
-    let h = w.bodies.insert(RigidBodyBuilder::kinematic_position_based());
+    let h = w
+        .bodies
+        .insert(RigidBodyBuilder::kinematic_position_based());
     w.step(&mut pipeline); // clears the modified list and flags
-    assert!(!w.bodies.is_marked_modified(h), "setup: the step leaves the body clean");
+    assert!(
+        !w.bodies.is_marked_modified(h),
+        "setup: the step leaves the body clean"
+    );
 
     for was_modified_case in [false, true] {
         let was_modified = w.bodies.is_marked_modified(h);
@@ -106,14 +117,21 @@ fn rigid_body_tracked_write_reverts_exactly_both_tracking_cases() {
         let before = bytes(&w.bodies);
         let pre = w.bodies.get(h).unwrap().clone();
 
-        w.bodies.get_mut(h).unwrap().set_next_kinematic_translation(Vector::new(1.0, 2.0, 3.0));
+        w.bodies
+            .get_mut(h)
+            .unwrap()
+            .set_next_kinematic_translation(Vector::new(1.0, 2.0, 3.0));
         assert!(w.bodies.is_marked_modified(h), "get_mut marks the body");
 
         w.bodies.restore_raw(h, pre);
         if !was_modified {
             w.bodies.pop_modified(h);
         }
-        assert_eq!(before, bytes(&w.bodies), "value + modified list must restore (was_modified={was_modified})");
+        assert_eq!(
+            before,
+            bytes(&w.bodies),
+            "value + modified list must restore (was_modified={was_modified})"
+        );
 
         // Second case: leave the body on the modified list.
         w.bodies.get_mut(h);
@@ -130,7 +148,10 @@ fn collider_tracked_write_reverts_exactly_both_tracking_cases() {
     let mut pipeline = PhysicsPipeline::new();
     let c = w.colliders.insert(ColliderBuilder::ball(1.0));
     w.step(&mut pipeline);
-    assert!(!w.colliders.is_marked_modified(c), "setup: the step leaves the collider clean");
+    assert!(
+        !w.colliders.is_marked_modified(c),
+        "setup: the step leaves the collider clean"
+    );
 
     for was_modified_case in [false, true] {
         let was_modified = w.colliders.is_marked_modified(c);
@@ -138,14 +159,24 @@ fn collider_tracked_write_reverts_exactly_both_tracking_cases() {
         let before = bytes(&w.colliders);
         let pre = w.colliders.get(c).unwrap().clone();
 
-        w.colliders.get_mut(c).unwrap().set_translation(Vector::new(4.0, 5.0, 6.0));
-        assert!(w.colliders.is_marked_modified(c), "get_mut marks the collider");
+        w.colliders
+            .get_mut(c)
+            .unwrap()
+            .set_translation(Vector::new(4.0, 5.0, 6.0));
+        assert!(
+            w.colliders.is_marked_modified(c),
+            "get_mut marks the collider"
+        );
 
         w.colliders.restore_raw(c, pre);
         if !was_modified {
             w.colliders.pop_modified(c);
         }
-        assert_eq!(before, bytes(&w.colliders), "value + modified list (was_modified={was_modified})");
+        assert_eq!(
+            before,
+            bytes(&w.colliders),
+            "value + modified list (was_modified={was_modified})"
+        );
 
         w.colliders.get_mut(c);
     }

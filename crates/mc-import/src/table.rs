@@ -14,7 +14,9 @@ pub const MAPPING_VERSION: u32 = 2;
 const BUILTIN: &str = include_str!("../data/materials.ron");
 
 /// The reasons a [`crate::Class::Dropped`] can carry (they are `&'static str`).
-const DROP_REASONS: &[&str] = &["liquid", "plant", "redstone", "fire", "web", "crystal", "egg", "portal"];
+const DROP_REASONS: &[&str] = &[
+    "liquid", "plant", "redstone", "fire", "web", "crystal", "egg", "portal",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarkerRule {
@@ -53,7 +55,8 @@ impl Table {
     pub fn builtin() -> &'static Table {
         static TABLE: OnceLock<Table> = OnceLock::new();
         TABLE.get_or_init(|| {
-            Table::from_ron(BUILTIN).unwrap_or_else(|e| panic!("data/materials.ron is malformed: {e}"))
+            Table::from_ron(BUILTIN)
+                .unwrap_or_else(|e| panic!("data/materials.ron is malformed: {e}"))
         })
     }
 

@@ -19,7 +19,10 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
-use game::{EntityId, InFlightRow, Ownership, RegionCoords, RegionSpawner, StoredRegion, SuccessionId, WorldCut, WorldManager};
+use game::{
+    EntityId, InFlightRow, Ownership, RegionCoords, RegionSpawner, StoredRegion, SuccessionId,
+    WorldCut, WorldManager,
+};
 use world_store::{Fence, HostRow, StoreError, StoreHandle, SuperRegion};
 
 /// The process exit status of a fenced host (another process took over its
@@ -108,7 +111,11 @@ pub struct WorldGeneration {
 
 impl WorldGeneration {
     pub fn new(mine: u64) -> Self {
-        WorldGeneration { mine, flag: Arc::default(), own: Arc::default() }
+        WorldGeneration {
+            mine,
+            flag: Arc::default(),
+            own: Arc::default(),
+        }
     }
 
     /// Why the flag is set, for the stop's log lines: this host's own stop for a rollback, or
@@ -117,7 +124,10 @@ impl WorldGeneration {
         if self.own.load(Ordering::SeqCst) {
             "this host traded state with a dead host that no succession accounts for (it stops for a rollback)".into()
         } else {
-            format!("another host restarted dirty (a world generation higher than {})", self.mine)
+            format!(
+                "another host restarted dirty (a world generation higher than {})",
+                self.mine
+            )
         }
     }
 
@@ -198,7 +208,11 @@ impl HostClaims {
     }
 
     /// Claims exactly `srs` as `owner`.
-    pub fn claim_srs(store: StoreHandle, owner: HostId, srs: Vec<SuperRegion>) -> Result<HostClaims, StoreError> {
+    pub fn claim_srs(
+        store: StoreHandle,
+        owner: HostId,
+        srs: Vec<SuperRegion>,
+    ) -> Result<HostClaims, StoreError> {
         let fence = store.claim_super_regions(owner, srs)?;
         Ok(HostClaims::with_fence(store, fence))
     }
@@ -206,7 +220,14 @@ impl HostClaims {
     /// Host `owner` holding nothing yet: what a host claiming on demand (`claim`) registers
     /// under — a boot told to wait must not have touched its predecessor's rows.
     pub fn none(store: StoreHandle, owner: HostId) -> HostClaims {
-        HostClaims::with_fence(store, Fence { owner, epochs: std::collections::BTreeMap::new(), all_hosts: false })
+        HostClaims::with_fence(
+            store,
+            Fence {
+                owner,
+                epochs: std::collections::BTreeMap::new(),
+                all_hosts: false,
+            },
+        )
     }
 
     /// Re-claims what the store says this host's ordinal holds (its previous boot's rows,
@@ -230,16 +251,23 @@ impl HostClaims {
             asked += 1;
             match self.reclaim_own_once(boot) {
                 Err(e) if e.is_lock_conflict() => {
-                    let live =
-                        self.store.hosts()?.iter().any(|r| r.id == owner && r.boot == boot && r.state == game::HOST_LIVE);
+                    let live = self
+                        .store
+                        .hosts()?
+                        .iter()
+                        .any(|r| r.id == owner && r.boot == boot && r.state == game::HOST_LIVE);
                     if !live {
-                        log::error!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}) to its own declaration: fenced");
+                        log::error!(
+                            "[server] re-claiming host {owner}'s rows lost a lock conflict ({e}) to its own declaration: fenced"
+                        );
                         return Err(StoreError::Fenced { sr: None });
                     }
                     if asked >= 2 {
                         return Err(e);
                     }
-                    log::warn!("[server] re-claiming host {owner}'s rows lost a lock conflict ({e}); its row is still live: once more");
+                    log::warn!(
+                        "[server] re-claiming host {owner}'s rows lost a lock conflict ({e}); its row is still live: once more"
+                    );
                 }
                 other => return other,
             }
@@ -269,7 +297,11 @@ impl HostClaims {
 
     /// Claims, as owner 0, the super-regions of every region within `radius`
     /// of `center` — for tests and tools that run regions without a map.
-    pub fn claim_around(store: StoreHandle, center: RegionCoords, radius: i32) -> Result<HostClaims, StoreError> {
+    pub fn claim_around(
+        store: StoreHandle,
+        center: RegionCoords,
+        radius: i32,
+    ) -> Result<HostClaims, StoreError> {
         let s = store.super_region_regions();
         let mut srs = std::collections::BTreeSet::new();
         for x in center.x - radius..=center.x + radius {
@@ -296,7 +328,10 @@ impl HostClaims {
     pub fn add(&self, more: Fence) {
         let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
         // Hard: another owner's rows in this fence would let this host write as that owner.
-        assert_eq!(more.owner, current.owner, "a fence grows only by its own owner's rows");
+        assert_eq!(
+            more.owner, current.owner,
+            "a fence grows only by its own owner's rows"
+        );
         let mut grown = (**current).clone();
         grown.epochs.extend(more.epochs);
         *current = Arc::new(grown);
@@ -310,7 +345,10 @@ impl HostClaims {
     /// `Fenced` and the host is fenced, as it must be.
     pub fn grow_to(&self, held: Fence) {
         let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(held.owner, current.owner, "a fence grows only by its own owner's rows");
+        assert_eq!(
+            held.owner, current.owner,
+            "a fence grows only by its own owner's rows"
+        );
         let mut grown = (**current).clone();
         for (sr, epoch) in held.epochs {
             let e = grown.epochs.entry(sr).or_insert(epoch);
@@ -339,7 +377,9 @@ impl HostClaims {
                     shrunk.epochs.remove(sr);
                 }
                 Some(held) => {
-                    log::info!("[server] super-region {sr:?} was released at epoch {epoch} and is this host's again at epoch {held}: it stays in the fence");
+                    log::info!(
+                        "[server] super-region {sr:?} was released at epoch {epoch} and is this host's again at epoch {held}: it stays in the fence"
+                    );
                 }
                 None => {}
             }
@@ -359,7 +399,10 @@ impl HostClaims {
     /// process's `all_hosts` is kept: it is how the process runs, not a stored row.
     pub fn replace(&self, mut fence: Fence) {
         let mut current = self.fence.write().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(fence.owner, current.owner, "a fence is replaced only by its own owner's");
+        assert_eq!(
+            fence.owner, current.owner,
+            "a fence is replaced only by its own owner's"
+        );
         fence.all_hosts = current.all_hosts;
         *current = Arc::new(fence);
     }
@@ -388,7 +431,9 @@ impl HostClaims {
     pub fn note_refusal_under(&self, fence: &Fence, error: &StoreError) -> bool {
         match error {
             StoreError::Fenced { sr: Some(sr) } if !fence.epochs.contains_key(sr) => {
-                log::error!("[server] a write touched super-region {sr:?}, which this host never claimed; refused (not a takeover)");
+                log::error!(
+                    "[server] a write touched super-region {sr:?}, which this host never claimed; refused (not a takeover)"
+                );
                 false
             }
             other => self.fenced.note(other),
@@ -406,7 +451,11 @@ impl HostClaims {
                 Err(e)
             }
             Ok(Some(mut region)) => {
-                let forgotten = self.forgotten.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let forgotten = self
+                    .forgotten
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 if !forgotten.is_empty() {
                     region.entities.retain(|b| !forgotten.contains(&b.id));
                 }
@@ -432,7 +481,11 @@ impl HostClaims {
 /// and NOT marked draining (`worldctl drain`: a draining host is assigned no land, Elastic 1).
 pub fn live_hosts(rows: &[HostRow], now_ms: u64) -> BTreeSet<HostId> {
     rows.iter()
-        .filter(|r| r.state == game::HOST_LIVE && !r.clean && now_ms.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS)
+        .filter(|r| {
+            r.state == game::HOST_LIVE
+                && !r.clean
+                && now_ms.saturating_sub(r.seen_ms) <= game::HOST_LEASE_MS
+        })
         .filter(|r| r.drain_in_ms.is_none())
         .map(|r| r.id)
         .collect()
@@ -440,7 +493,10 @@ pub fn live_hosts(rows: &[HostRow], now_ms: u64) -> BTreeSet<HostId> {
 
 /// The hosts whose `hosts` row carries a drain mark ([`game::WorldManager::set_draining`]).
 pub fn draining_hosts(rows: &[HostRow]) -> BTreeSet<HostId> {
-    rows.iter().filter(|r| r.drain_in_ms.is_some()).map(|r| r.id).collect()
+    rows.iter()
+        .filter(|r| r.drain_in_ms.is_some())
+        .map(|r| r.id)
+        .collect()
 }
 
 /// The directory read whole, blocking (a boot, before the main loop): every `super_regions`
@@ -451,7 +507,14 @@ pub fn draining_hosts(rows: &[HostRow]) -> BTreeSet<HostId> {
 pub fn read_directory(
     store: &StoreHandle,
     me: HostId,
-) -> Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>, BTreeSet<HostId>), StoreError> {
+) -> Result<
+    (
+        Vec<(SuperRegion, i64, u64)>,
+        BTreeSet<HostId>,
+        BTreeSet<HostId>,
+    ),
+    StoreError,
+> {
     let rows = store.owners()?;
     let hosts = store.hosts()?;
     let mut live = live_hosts(&hosts, store.db_now_ms()?);
@@ -480,25 +543,54 @@ struct DirectoryRead {
     /// Asked once the owners read answered.
     hosts: Option<Receiver<Result<world_store::HostsRead, StoreError>>>,
     now: Option<Receiver<Result<u64, StoreError>>>,
-    got: (Option<Vec<(SuperRegion, i64, u64)>>, Option<world_store::HostsRead>, Option<u64>),
+    got: (
+        Option<Vec<(SuperRegion, i64, u64)>>,
+        Option<world_store::HostsRead>,
+        Option<u64>,
+    ),
 }
 
 impl DirectoryRead {
     fn start(store: &StoreHandle) -> DirectoryRead {
-        DirectoryRead { owners: store.owners_later(), hosts: None, now: None, got: (None, None, None) }
+        DirectoryRead {
+            owners: store.owners_later(),
+            hosts: None,
+            now: None,
+            got: (None, None, None),
+        }
     }
 
     /// The read's rows, live hosts, `hosts` rows and `world.next_host_id` (read before them)
     /// once all three answered; an error as soon as one fails. Asks `store` for the `hosts`
     /// rows and the clock when the owners answered.
     #[allow(clippy::type_complexity)]
-    fn poll(&mut self, store: &StoreHandle) -> Option<Result<(Vec<(SuperRegion, i64, u64)>, BTreeSet<HostId>, Vec<HostRow>, u64), StoreError>> {
-        fn take<T>(rx: &Receiver<Result<T, StoreError>>, slot: &mut Option<T>) -> Result<(), StoreError> {
+    fn poll(
+        &mut self,
+        store: &StoreHandle,
+    ) -> Option<
+        Result<
+            (
+                Vec<(SuperRegion, i64, u64)>,
+                BTreeSet<HostId>,
+                Vec<HostRow>,
+                u64,
+            ),
+            StoreError,
+        >,
+    > {
+        fn take<T>(
+            rx: &Receiver<Result<T, StoreError>>,
+            slot: &mut Option<T>,
+        ) -> Result<(), StoreError> {
             if slot.is_none() {
                 match rx.try_recv() {
                     Ok(answer) => *slot = Some(answer?),
                     Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => return Err(StoreError::Backend("the world-store thread has stopped".into())),
+                    Err(TryRecvError::Disconnected) => {
+                        return Err(StoreError::Backend(
+                            "the world-store thread has stopped".into(),
+                        ));
+                    }
                 }
             }
             Ok(())
@@ -518,7 +610,12 @@ impl DirectoryRead {
             (rows @ Some(_), hosts @ Some(_), Some(now)) => {
                 let live = live_hosts(&hosts.as_ref().expect("matched").rows, *now);
                 let hosts = hosts.take().expect("matched");
-                Some(Ok((rows.take().expect("matched"), live, hosts.rows, hosts.next_host_id)))
+                Some(Ok((
+                    rows.take().expect("matched"),
+                    live,
+                    hosts.rows,
+                    hosts.next_host_id,
+                )))
             }
             _ => None,
         }
@@ -656,7 +753,15 @@ impl DirectoryKeeper {
     /// period from now (a boot reads the directory itself, [`read_directory`]).
     pub fn new(claims: HostClaims) -> DirectoryKeeper {
         let next_read = Instant::now() + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
-        DirectoryKeeper { claims, reading: None, read_wanted: false, next_read, last_started: None, warned: None, hosts_read: None }
+        DirectoryKeeper {
+            claims,
+            reading: None,
+            read_wanted: false,
+            next_read,
+            last_started: None,
+            warned: None,
+            hosts_read: None,
+        }
     }
 
     /// The `hosts` rows the latest directory read brought (each read once): what the peer links
@@ -667,7 +772,10 @@ impl DirectoryKeeper {
     }
 
     fn warn(&mut self, what: &str) {
-        if self.warned.is_none_or(|at| at.elapsed() >= Duration::from_millis(DIRECTORY_WARN_MS)) {
+        if self
+            .warned
+            .is_none_or(|at| at.elapsed() >= Duration::from_millis(DIRECTORY_WARN_MS))
+        {
             self.warned = Some(Instant::now());
             log::warn!("[server] {what}");
         }
@@ -676,7 +784,11 @@ impl DirectoryKeeper {
     /// `rows` (already this host's in the store) into the fence, then to the manager.
     fn fence_then_tell(&self, rows: Vec<(SuperRegion, u64)>, manager: &mut impl ClaimingManager) {
         let owner = self.claims.fence().owner;
-        self.claims.add(Fence { owner, epochs: rows.iter().copied().collect(), all_hosts: false });
+        self.claims.add(Fence {
+            owner,
+            epochs: rows.iter().copied().collect(),
+            all_hosts: false,
+        });
         manager.claimed(rows);
     }
 
@@ -697,29 +809,43 @@ impl DirectoryKeeper {
                         let fence = self.claims.fence();
                         let me = i64::try_from(fence.owner.0).unwrap_or(i64::MAX);
                         let open_run = hosts.iter().any(|r| r.succeeding);
-                        let expected: BTreeSet<SuperRegion> = manager.expected_committed().into_iter().collect();
+                        let expected: BTreeSet<SuperRegion> =
+                            manager.expected_committed().into_iter().collect();
                         let lost: Vec<(SuperRegion, u64)> = rows
                             .iter()
-                            .filter(|row| unfenced(&fence, me, row) && row.2 > manager.known_epoch(row.0).unwrap_or(0))
+                            .filter(|row| {
+                                unfenced(&fence, me, row)
+                                    && row.2 > manager.known_epoch(row.0).unwrap_or(0)
+                            })
                             .map(|(sr, _, epoch)| (*sr, *epoch))
                             .collect();
                         // Elastic 5: a committed move's land, once the read shows it as this host's
                         // (`COMMIT PREPARED` ran): fenced and taken even while a run is open.
-                        let (moved, lost): (Vec<_>, Vec<_>) = lost.into_iter().partition(|(sr, _)| expected.contains(sr));
+                        let (moved, lost): (Vec<_>, Vec<_>) =
+                            lost.into_iter().partition(|(sr, _)| expected.contains(sr));
                         if !moved.is_empty() && !self.claims.fenced().is_set() {
-                            log::info!("[server] the directory shows super-region(s) {moved:?} moved to this host: fenced and taken");
+                            log::info!(
+                                "[server] the directory shows super-region(s) {moved:?} moved to this host: fenced and taken"
+                            );
                             self.fence_then_tell(moved, manager);
                         }
                         if !lost.is_empty() && !open_run && !self.claims.fenced().is_set() {
-                            log::info!("[server] the directory shows super-region(s) {lost:?} assigned to this host: fenced and taken");
+                            log::info!(
+                                "[server] the directory shows super-region(s) {lost:?} assigned to this host: fenced and taken"
+                            );
                             self.fence_then_tell(lost, manager);
                         }
                         // What the store gives this host and its fence still lacks is withheld:
                         // the manager never treats an unfenced row as its own.
                         let fence = self.claims.fence();
-                        let (withheld, rows): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| unfenced(&fence, me, row));
+                        let (withheld, rows): (Vec<_>, Vec<_>) =
+                            rows.into_iter().partition(|row| unfenced(&fence, me, row));
                         if !withheld.is_empty() {
-                            let why = if open_run { "a succession is open: inherited land comes by its order" } else { "a read older than what this host knows" };
+                            let why = if open_run {
+                                "a succession is open: inherited land comes by its order"
+                            } else {
+                                "a read older than what this host knows"
+                            };
                             log::info!(
                                 "[server] the directory shows {} super-region(s) as this host's that its fence lacks ({why}): withheld from the read",
                                 withheld.len()
@@ -731,25 +857,45 @@ impl DirectoryKeeper {
                         // Every dead row is noted (`note_dead_rows`); then those no open
                         // succession names — gone for good (an ended landless host, Elastic 2a)
                         // — are forgotten, before the clean rows below, so none is noted as left.
-                        manager.note_dead_rows(hosts.iter().filter(|r| r.state != world_store::HOST_LIVE).map(|r| r.id).collect());
+                        manager.note_dead_rows(
+                            hosts
+                                .iter()
+                                .filter(|r| r.state != world_store::HOST_LIVE)
+                                .map(|r| r.id)
+                                .collect(),
+                        );
                         manager.forget_dead_hosts(
-                            hosts.iter().filter(|r| r.state != world_store::HOST_LIVE && !r.succeeding).map(|r| r.id).collect(),
+                            hosts
+                                .iter()
+                                .filter(|r| r.state != world_store::HOST_LIVE && !r.succeeding)
+                                .map(|r| r.id)
+                                .collect(),
                         );
                         // Rows that are gone (pruned: clean or dead, owning nothing, named by no
                         // open succession — Elastic 2b Task 10b): an id below the read's
                         // `next_host_id` absent from it is forgotten like a dead row, else a
                         // peer whose dead row was pruned before its forget succeeded is awaited
                         // for ever (the gate refuses every login).
-                        manager.forget_absent_hosts(hosts.iter().map(|r| r.id).collect(), next_host_id);
+                        manager.forget_absent_hosts(
+                            hosts.iter().map(|r| r.id).collect(),
+                            next_host_id,
+                        );
                         // Hosts that left in a committed leave cut: one this host missed (it
                         // registered while that cut ran, outside it; or its boot's read of the
                         // clean rows failed) is noted now — the manager skips the known ones.
-                        manager.note_clean_rows(hosts.iter().filter(|r| r.clean).map(|r| (r.id, r.boot)).collect());
+                        manager.note_clean_rows(
+                            hosts
+                                .iter()
+                                .filter(|r| r.clean)
+                                .map(|r| (r.id, r.boot))
+                                .collect(),
+                        );
                         self.hosts_read = Some(hosts);
                     }
                     Err(e) => {
                         self.warn(&format!("reading the ownership directory failed ({e}); read again in {DIRECTORY_READ_RETRY_MS} ms"));
-                        self.next_read = Instant::now() + Duration::from_millis(DIRECTORY_READ_RETRY_MS);
+                        self.next_read =
+                            Instant::now() + Duration::from_millis(DIRECTORY_READ_RETRY_MS);
                     }
                 }
             }
@@ -765,7 +911,9 @@ impl DirectoryKeeper {
         let now = Instant::now();
         // A wanted read waits out the spacing (the want is kept); a due one (the backstop, a
         // failed read's retry) does not.
-        let spaced = self.last_started.is_none_or(|at| now.duration_since(at) >= Duration::from_millis(DIRECTORY_READ_RETRY_MS));
+        let spaced = self.last_started.is_none_or(|at| {
+            now.duration_since(at) >= Duration::from_millis(DIRECTORY_READ_RETRY_MS)
+        });
         if self.reading.is_none() && ((self.read_wanted && spaced) || now >= self.next_read) {
             self.read_wanted = false;
             self.next_read = now + Duration::from_secs(world_store::TERRAIN_POLL_SECS);
@@ -777,7 +925,9 @@ impl DirectoryKeeper {
         }
         let assigned = manager.take_assigned();
         if !assigned.is_empty() {
-            log::debug!("[server] super-region(s) {assigned:?} assigned to this host: fenced, then taken");
+            log::debug!(
+                "[server] super-region(s) {assigned:?} assigned to this host: fenced, then taken"
+            );
             self.fence_then_tell(assigned, manager);
         }
     }
@@ -793,7 +943,12 @@ pub trait AdoptingManager {
     fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, HostId)>;
     fn adoption_drop_set(&self, id: SuccessionId) -> Vec<EntityId>;
     fn adoption_read_failed(&mut self, id: SuccessionId);
-    fn adopted_rows(&mut self, id: SuccessionId, rows: Vec<InFlightRow>, located: Vec<(EntityId, RegionCoords)>);
+    fn adopted_rows(
+        &mut self,
+        id: SuccessionId,
+        rows: Vec<InFlightRow>,
+        located: Vec<(EntityId, RegionCoords)>,
+    );
 }
 
 impl<S: RegionSpawner> AdoptingManager for WorldManager<S> {
@@ -806,7 +961,12 @@ impl<S: RegionSpawner> AdoptingManager for WorldManager<S> {
     fn adoption_read_failed(&mut self, id: SuccessionId) {
         WorldManager::adoption_read_failed(self, id)
     }
-    fn adopted_rows(&mut self, id: SuccessionId, rows: Vec<InFlightRow>, located: Vec<(EntityId, RegionCoords)>) {
+    fn adopted_rows(
+        &mut self,
+        id: SuccessionId,
+        rows: Vec<InFlightRow>,
+        located: Vec<(EntityId, RegionCoords)>,
+    ) {
         WorldManager::adopted_rows(self, id, rows, located)
     }
 }
@@ -829,7 +989,10 @@ enum AdoptionStep {
     Rows {
         rows: Receiver<Result<Vec<InFlightRow>, StoreError>>,
         located: Receiver<Result<Vec<(EntityId, RegionCoords)>, StoreError>>,
-        got: (Option<Vec<InFlightRow>>, Option<Vec<(EntityId, RegionCoords)>>),
+        got: (
+            Option<Vec<InFlightRow>>,
+            Option<Vec<(EntityId, RegionCoords)>>,
+        ),
     },
 }
 
@@ -855,7 +1018,12 @@ pub struct AdoptionReader {
 
 impl AdoptionReader {
     pub fn new(claims: HostClaims) -> AdoptionReader {
-        AdoptionReader { claims, read: None, no_read_before: None, warned: None }
+        AdoptionReader {
+            claims,
+            read: None,
+            no_read_before: None,
+            warned: None,
+        }
     }
 
     /// An adoption read is in flight.
@@ -864,7 +1032,10 @@ impl AdoptionReader {
     }
 
     fn warn(&mut self, what: &str) {
-        if self.warned.is_none_or(|at| at.elapsed() >= Duration::from_millis(DIRECTORY_WARN_MS)) {
+        if self
+            .warned
+            .is_none_or(|at| at.elapsed() >= Duration::from_millis(DIRECTORY_WARN_MS))
+        {
             self.warned = Some(Instant::now());
             log::warn!("[server] {what}");
         }
@@ -887,14 +1058,25 @@ impl AdoptionReader {
                 );
                 let step = AdoptionStep::Fence(self.claims.store().owned_by_later(owner));
                 let fence = self.claims.fence();
-                self.read = Some(AdoptionRead { id, predecessor, drop, started: Instant::now(), fence, step });
+                self.read = Some(AdoptionRead {
+                    id,
+                    predecessor,
+                    drop,
+                    started: Instant::now(),
+                    fence,
+                    step,
+                });
             }
         }
-        let Some(read) = self.read.as_mut() else { return };
+        let Some(read) = self.read.as_mut() else {
+            return;
+        };
         let outcome: Option<Result<(), StoreError>> = match &mut read.step {
             AdoptionStep::Fence(rx) => match rx.try_recv() {
                 Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+                Err(TryRecvError::Disconnected) => Some(Err(StoreError::Backend(
+                    "the world-store thread has stopped".into(),
+                ))),
                 Ok(Err(e)) => Some(Err(e)),
                 Ok(Ok(held)) => {
                     // The fence first: an inherited region loads (and a part is checked)
@@ -912,13 +1094,18 @@ impl AdoptionReader {
                 }
             },
             AdoptionStep::Rows { rows, located, got } => {
-                fn take<T>(rx: &Receiver<Result<T, StoreError>>, slot: &mut Option<T>) -> Result<(), StoreError> {
+                fn take<T>(
+                    rx: &Receiver<Result<T, StoreError>>,
+                    slot: &mut Option<T>,
+                ) -> Result<(), StoreError> {
                     if slot.is_none() {
                         match rx.try_recv() {
                             Ok(answer) => *slot = Some(answer?),
                             Err(TryRecvError::Empty) => {}
                             Err(TryRecvError::Disconnected) => {
-                                return Err(StoreError::Backend("the world-store thread has stopped".into()))
+                                return Err(StoreError::Backend(
+                                    "the world-store thread has stopped".into(),
+                                ));
                             }
                         }
                     }
@@ -935,7 +1122,11 @@ impl AdoptionReader {
         let read = self.read.take().expect("a read");
         match outcome {
             Ok(()) => {
-                let AdoptionStep::Rows { got: (Some(rows), Some(located)), .. } = read.step else {
+                let AdoptionStep::Rows {
+                    got: (Some(rows), Some(located)),
+                    ..
+                } = read.step
+                else {
                     unreachable!("an adoption read ends with both answers")
                 };
                 log::info!(
@@ -951,15 +1142,20 @@ impl AdoptionReader {
             Err(e @ StoreError::Fenced { .. }) => {
                 // Classified like every refusal, against the fence the reads were made under.
                 if self.claims.note_refusal_under(&read.fence, &e) {
-                    log::error!("[server] succession {}: the adoption read was refused ({e}); this host is fenced", read.id.0);
+                    log::error!(
+                        "[server] succession {}: the adoption read was refused ({e}); this host is fenced",
+                        read.id.0
+                    );
                 } else {
                     manager.adoption_read_failed(read.id);
-                    self.no_read_before = Some(Instant::now() + Duration::from_millis(ADOPTION_READ_RETRY_MS));
+                    self.no_read_before =
+                        Some(Instant::now() + Duration::from_millis(ADOPTION_READ_RETRY_MS));
                 }
             }
             Err(e) => {
                 manager.adoption_read_failed(read.id);
-                self.no_read_before = Some(Instant::now() + Duration::from_millis(ADOPTION_READ_RETRY_MS));
+                self.no_read_before =
+                    Some(Instant::now() + Duration::from_millis(ADOPTION_READ_RETRY_MS));
                 self.warn(&format!(
                     "succession {}: reading host {}'s land failed ({e}); asked again in {ADOPTION_READ_RETRY_MS} ms",
                     read.id.0, read.predecessor
@@ -977,11 +1173,10 @@ pub const SUPER_REGION_REGIONS_ENV: &str = "VOXEL_SUPER_REGION_REGIONS";
 pub fn super_region_regions_from(value: Option<&str>) -> Result<u32, String> {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         None => Ok(game::DEFAULT_SUPER_REGION_REGIONS),
-        Some(v) => v
-            .parse::<u32>()
-            .ok()
-            .filter(|s| *s >= 1)
-            .ok_or_else(|| format!("{SUPER_REGION_REGIONS_ENV}={v:?} is not a whole number >= 1")),
+        Some(v) => {
+            v.parse::<u32>().ok().filter(|s| *s >= 1).ok_or_else(|| {
+                format!("{SUPER_REGION_REGIONS_ENV}={v:?} is not a whole number >= 1")
+            })
+        }
     }
 }
-

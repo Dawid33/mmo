@@ -1,6 +1,6 @@
 //! Splitting a schematic of several spaced-out builds (a showroom) into one box per build.
 
-use crate::classify::{classify, Class};
+use crate::classify::{Class, classify};
 use crate::convert::sign_text;
 use crate::{BlockVolume, Table};
 use std::collections::VecDeque;
@@ -24,7 +24,11 @@ pub struct SplitOptions {
 
 impl Default for SplitOptions {
     fn default() -> Self {
-        SplitOptions { gap: 3, min_blocks: 30, ground: GroundMode::Auto }
+        SplitOptions {
+            gap: 3,
+            min_blocks: 30,
+            ground: GroundMode::Auto,
+        }
     }
 }
 
@@ -76,7 +80,10 @@ fn ground_layers(volume: &BlockVolume, sol: &[(bool, bool)], mode: GroundMode) -
             let mut g = 0;
             while g < sy {
                 let cells = &volume.blocks[g as usize * layer..(g as usize + 1) * layer];
-                let n = cells.iter().filter(|&&p| sol.get(p as usize).is_some_and(|s| s.1)).count() as u64;
+                let n = cells
+                    .iter()
+                    .filter(|&&p| sol.get(p as usize).is_some_and(|s| s.1))
+                    .count() as u64;
                 if total == 0 || n * 100 < GROUND_PERCENT * total {
                     break;
                 }
@@ -88,7 +95,14 @@ fn ground_layers(volume: &BlockVolume, sol: &[(bool, bool)], mode: GroundMode) -
 }
 
 /// `out[i]` = any occupied cell within `r` of `i` along one line of `n` cells, `stride` apart.
-fn dilate_lines(grid: &mut [bool], lines: usize, n: usize, line_stride: usize, stride: usize, r: usize) {
+fn dilate_lines(
+    grid: &mut [bool],
+    lines: usize,
+    n: usize,
+    line_stride: usize,
+    stride: usize,
+    r: usize,
+) {
     let mut prefix = vec![0u32; n + 1];
     for l in 0..lines {
         let base = l * line_stride;
@@ -107,7 +121,11 @@ pub fn split(volume: &BlockVolume, table: &Table, opts: &SplitOptions) -> Split 
     let (sxu, szu) = (sx as usize, sz as usize);
     let sol = solidity(volume, table);
     let g = ground_layers(volume, &sol, opts.ground);
-    let mut out = Split { ground_layers: g, builds: Vec::new(), dropped_small: 0 };
+    let mut out = Split {
+        ground_layers: g,
+        builds: Vec::new(),
+        dropped_small: 0,
+    };
     if sxu == 0 || szu == 0 || g >= sy {
         return out;
     }
@@ -160,7 +178,12 @@ pub fn split(volume: &BlockVolume, table: &Table, opts: &SplitOptions) -> Split 
     // Tight boxes from the undilated columns. Scanning z then x keeps the discovery order
     // irrelevant: builds are sorted by (min.z, min.x) afterwards.
     let mut builds: Vec<Build> = (0..next)
-        .map(|_| Build { min: [u32::MAX; 3], max: [0; 3], blocks: 0, label: None })
+        .map(|_| Build {
+            min: [u32::MAX; 3],
+            max: [0; 3],
+            blocks: 0,
+            label: None,
+        })
         .collect();
     for c in 0..cols {
         if cnt[c] == 0 {
@@ -169,7 +192,11 @@ pub fn split(volume: &BlockVolume, table: &Table, opts: &SplitOptions) -> Split 
         let b = &mut builds[label[c] as usize];
         let (x, z) = ((c % sxu) as u32, (c / sxu) as u32);
         b.min = [b.min[0].min(x), b.min[1].min(lo[c]), b.min[2].min(z)];
-        b.max = [b.max[0].max(x + 1), b.max[1].max(hi[c] + 1), b.max[2].max(z + 1)];
+        b.max = [
+            b.max[0].max(x + 1),
+            b.max[1].max(hi[c] + 1),
+            b.max[2].max(z + 1),
+        ];
         b.blocks += cnt[c] as u64;
     }
     let before = builds.len();
@@ -197,14 +224,22 @@ fn label_builds(volume: &BlockVolume, builds: &mut [Build]) {
         if e.id != "minecraft:sign" && e.id != "minecraft:hanging_sign" {
             continue;
         }
-        let Some(text) = sign_text(&e.nbt, volume.data_version) else { continue };
+        let Some(text) = sign_text(&e.nbt, volume.data_version) else {
+            continue;
+        };
         let text = text.trim().to_string();
-        if slug(&text).chars().filter(char::is_ascii_alphanumeric).count() < MIN_LABEL_CHARS {
+        if slug(&text)
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .count()
+            < MIN_LABEL_CHARS
+        {
             continue;
         }
         let (x, y, z) = (e.pos[0] as i64, e.pos[1], e.pos[2] as i64);
         let inside = builds.iter().any(|b| {
-            (b.min[0] as i64..b.max[0] as i64).contains(&x) && (b.min[2] as i64..b.max[2] as i64).contains(&z)
+            (b.min[0] as i64..b.max[0] as i64).contains(&x)
+                && (b.min[2] as i64..b.max[2] as i64).contains(&z)
         });
         if inside {
             continue;
@@ -220,7 +255,10 @@ fn label_builds(volume: &BlockVolume, builds: &mut [Build]) {
         }
         let Some((d, i)) = nearest else { continue };
         let key = (e.pos[2], e.pos[0], y);
-        if best[i].as_ref().map_or(true, |(bd, bk, _)| (d, key) < (*bd, *bk)) {
+        if best[i]
+            .as_ref()
+            .map_or(true, |(bd, bk, _)| (d, key) < (*bd, *bk))
+        {
             best[i] = Some((d, key, text));
         }
     }

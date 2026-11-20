@@ -28,8 +28,8 @@ use bevy::{
     ecs::{
         query::ROQueryItem,
         system::{
-            lifetimeless::{Read, SRes},
             SystemParamItem,
+            lifetimeless::{Read, SRes},
         },
     },
     pbr::{MeshPipelineViewLayoutKey, MeshViewBindGroup, ViewKeyCache},
@@ -45,12 +45,12 @@ use bevy::{
     },
 };
 
-use super::super::fortress_view::{cutaway_active, FortressViewUniform};
+use super::super::fortress_view::{FortressViewUniform, cutaway_active};
+use super::ExtractedChunkQuads;
 use super::arena::GpuQuadArena;
 use super::gpu::ActiveNearMode;
 use super::pipeline::{VoxelPullPipeline, VoxelPullPipelineKey};
 use super::prepare::GpuChunkQuads;
-use super::ExtractedChunkQuads;
 
 /// How much of the terrain in front of a dug space still draws, as an
 /// ordered-dither fraction of its pixels (0 = gone; "very slightly
@@ -99,7 +99,9 @@ pub fn xray_wanted(
     fortress: Option<&FortressViewUniform>,
     chunks: &InteriorChunks,
 ) -> bool {
-    settings.is_some_and(|s| s.enabled) && !fortress.is_some_and(cutaway_active) && !chunks.0.is_empty()
+    settings.is_some_and(|s| s.enabled)
+        && !fortress.is_some_and(cutaway_active)
+        && !chunks.0.is_empty()
 }
 
 /// A depth prepass writes the occluders' depth before the forward pass can
@@ -121,7 +123,8 @@ pub fn track_interior_chunks(
         }
     }
     // Removed bricks lose `ExtractedChunkQuads` (`extract_removed_chunk_quads`).
-    set.0.retain(|e| alive.get(*e).is_ok_and(|q| q.interior && q.cave_active));
+    set.0
+        .retain(|e| alive.get(*e).is_ok_and(|q| q.interior && q.cave_active));
 }
 
 /// One view's x-ray: its interior depth texture, the bind group the forward
@@ -142,11 +145,17 @@ pub struct XrayStandIn {
 }
 
 pub fn init_xray_stand_in(world: &mut World) {
-    let Some(pipeline) = world.get_resource::<VoxelPullPipeline>() else { return };
+    let Some(pipeline) = world.get_resource::<VoxelPullPipeline>() else {
+        return;
+    };
     let device = world.resource::<RenderDevice>();
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("voxel_pull_xray_stand_in"),
-        size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        size: Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
@@ -160,7 +169,10 @@ pub fn init_xray_stand_in(world: &mut World) {
         &pipeline.xray_layout,
         &BindGroupEntries::single(&view),
     );
-    world.insert_resource(XrayStandIn { bind_group, _texture: texture });
+    world.insert_resource(XrayStandIn {
+        bind_group,
+        _texture: texture,
+    });
 }
 
 /// A camera view `prepare_xray_views` decides for: whether it has the x-ray
@@ -201,7 +213,9 @@ pub fn prepare_xray_views(
         let Some(layout_key) = layout_key.filter(|k| wanted && view_allows_xray(*k)) else {
             if wanted && layout_key.is_some() && !*warned_prepass {
                 *warned_prepass = true;
-                warn!("[xray] the view runs a depth prepass (VOXEL_OCCLUSION=on?): no dug-space x-ray");
+                warn!(
+                    "[xray] the view runs a depth prepass (VOXEL_OCCLUSION=on?): no dug-space x-ray"
+                );
             }
             if had {
                 commands.entity(entity).remove::<ViewXray>();
@@ -213,7 +227,11 @@ pub fn prepare_xray_views(
             &device,
             TextureDescriptor {
                 label: Some("voxel_pull_xray_interior_depth"),
-                size: Extent3d { width: size.width, height: size.height, depth_or_array_layers: 1 },
+                size: Extent3d {
+                    width: size.width,
+                    height: size.height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
@@ -240,7 +258,11 @@ pub fn prepare_xray_views(
                 interior_pass: true,
             },
         );
-        commands.entity(entity).insert(ViewXray { depth: texture, bind_group, pipeline: interior_pipeline });
+        commands.entity(entity).insert(ViewXray {
+            depth: texture,
+            bind_group,
+            pipeline: interior_pipeline,
+        });
     }
 }
 
@@ -284,7 +306,10 @@ pub fn xray_interior_pass(
     mut ctx: RenderContext,
 ) {
     let (xray, view_bind_group, camera, resolution_override) = view.into_inner();
-    if world.get_resource::<ActiveNearMode>().is_none_or(|m| *m == ActiveNearMode::Disabled) {
+    if world
+        .get_resource::<ActiveNearMode>()
+        .is_none_or(|m| *m == ActiveNearMode::Disabled)
+    {
         return;
     }
     let (Some(arena), Some(chunks), Some(cache)) = (
@@ -294,9 +319,11 @@ pub fn xray_interior_pass(
     ) else {
         return;
     };
-    let (Some(bind_group), Some((quad_indices, _)), Some(pipeline)) =
-        (&arena.bind_group, &arena.quad_indices, cache.get_render_pipeline(xray.pipeline))
-    else {
+    let (Some(bind_group), Some((quad_indices, _)), Some(pipeline)) = (
+        &arena.bind_group,
+        &arena.quad_indices,
+        cache.get_render_pipeline(xray.pipeline),
+    ) else {
         return;
     };
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
@@ -305,14 +332,19 @@ pub fn xray_interior_pass(
         depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
             view: &xray.depth.default_view,
             // Reverse-Z: 0 is the far plane — "no interior here".
-            depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
+            depth_ops: Some(Operations {
+                load: LoadOp::Clear(0.0),
+                store: StoreOp::Store,
+            }),
             stencil_ops: None,
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    if let Some(viewport) = Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override) {
+    if let Some(viewport) =
+        Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
+    {
         pass.set_camera_viewport(&viewport);
     }
     pass.set_render_pipeline(pipeline);
@@ -320,11 +352,16 @@ pub fn xray_interior_pass(
     pass.set_bind_group(1, bind_group, &[]);
     pass.set_index_buffer(quad_indices.slice(..), IndexFormat::Uint32);
     for &entity in &chunks.0 {
-        let Some(gpu) = world.get::<GpuChunkQuads>(entity) else { continue };
+        let Some(gpu) = world.get::<GpuChunkQuads>(entity) else {
+            continue;
+        };
         let (first, quads) = gpu.range(false);
         if quads > 0 {
-            pass.draw_indexed(0..quads * 6, (first * 4) as i32, gpu.chunk_slot..gpu.chunk_slot + 1);
+            pass.draw_indexed(
+                0..quads * 6,
+                (first * 4) as i32,
+                gpu.chunk_slot..gpu.chunk_slot + 1,
+            );
         }
     }
 }
-

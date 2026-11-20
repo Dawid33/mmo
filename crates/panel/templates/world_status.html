@@ -1,0 +1,49 @@
+<h2>State</h2>
+<div class="card">
+  <p style="margin-top:0"><span class="pill {{ state_class }}">{{ state }}</span> <span class="num">{{ summary }}</span></p>
+  <div class="facts">
+    {% for (k, v) in facts %}<div class="fact"><div class="k">{{ k }}</div><div class="v">{{ v }}</div></div>{% endfor %}
+  </div>
+  <p class="muted" style="margin-bottom:0">Server image <span class="mono">{{ server_image }}</span></p>
+  {% if !problems.is_empty() %}<ul class="problems">{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>{% endif %}
+</div>
+
+{% if let Some(o) = op %}
+<h2>Last operation</h2>
+<div class="card">
+  <strong>{{ o.kind }}</strong> — {{ o.status() }}, begun {{ o.age() }} ago
+  {% if let Some(e) = o.error() %}<div class="notice bad">{{ e }}</div>{% endif %}
+  <pre class="log">{% for l in o.lines %}{{ l }}
+{% endfor %}</pre>
+</div>
+{% endif %}
+
+<h2>Pods</h2>
+<div class="scroll"><table>
+<tr><th>Pod</th><th>Component</th><th>Phase</th><th>Ready</th><th>Restarts</th><th>Age</th><th>/readyz</th><th>Loop age</th><th>Generation</th></tr>
+{% for p in pods %}
+<tr>
+  <td class="mono">{{ p.name }}</td><td>{{ p.component }}</td><td>{{ p.phase }}</td><td>{{ p.ready }}</td>
+  <td class="num">{{ p.restarts }}</td><td>{{ p.age }}</td><td class="mono">{{ p.readyz }}</td>
+  <td class="num">{{ p.loop_age }}</td><td class="num">{{ p.generation }}</td>
+</tr>
+{% endfor %}
+</table></div>
+
+<h2>Forge jobs</h2>
+{% if jobs.is_empty() %}<p class="muted">None (finished Jobs are kept 7 days).</p>{% else %}
+<div class="scroll"><table>
+<tr><th>Job</th><th>Arguments</th><th>Status</th><th>Age</th><th>Log</th></tr>
+{% for j in jobs %}
+<tr><td class="mono">{{ j.name }}</td><td class="mono">{{ j.args }}</td><td>{{ j.status }}</td><td>{{ j.age }}</td>
+<td><a href="/worlds/{{ namespace }}/jobs/{{ j.name }}/log" target="_blank" rel="noopener">log</a></td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+
+<h2>Release history</h2>
+{% if history.is_empty() %}<p class="muted">No release recorded (ConfigMap release-history: written by <span class="mono">just orion-world-update</span>).</p>{% else %}
+<div class="scroll"><table>
+{% for (k, v) in history %}<tr><td class="mono">{{ k }}</td><td class="mono">{{ v }}</td></tr>{% endfor %}
+</table></div>
+{% endif %}

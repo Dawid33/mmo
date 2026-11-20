@@ -33,7 +33,8 @@ pub struct ImpulseJoint {
         feature = "serde-serialize",
         serde(skip, default = "default_solver_body_ids")
     )]
-    #[state_hash(skip)] // mmo-fork: StateHash — stamped by the solver's selection each step (serde-skipped).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — stamped by the solver's selection each step (serde-skipped).
     pub(crate) solver_body_ids: [u32; 2],
     /// The solver graph color assigned to this joint.
     #[cfg_attr(feature = "serde-serialize", serde(default = "default_solver_color"))]

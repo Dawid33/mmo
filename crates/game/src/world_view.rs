@@ -14,7 +14,10 @@
 //! region's origin at `RegionCoords * REGION_SIZE`), as `f64` so any region
 //! of the `i32` grid keeps sub-voxel precision; blocks are
 //! [`WorldBlockPos`].
-use crate::{Block, Container, EntityId, EntityKey, EntityKind, ItemPile, Rollback, Tick, WorldBlockPos, HALO_BLOCKS, REGION_SIZE};
+use crate::{
+    Block, Container, EntityId, EntityKey, EntityKind, HALO_BLOCKS, ItemPile, REGION_SIZE,
+    Rollback, Tick, WorldBlockPos,
+};
 
 /// An axis-aligned box in world sim units, `min` inclusive, `max` exclusive.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,7 +29,10 @@ pub struct WorldAabb {
 impl WorldAabb {
     /// The box holding every position.
     pub fn everything() -> Self {
-        Self { min: [f64::NEG_INFINITY; 3], max: [f64::INFINITY; 3] }
+        Self {
+            min: [f64::NEG_INFINITY; 3],
+            max: [f64::INFINITY; 3],
+        }
     }
 
     pub fn contains(&self, p: [f64; 3]) -> bool {
@@ -84,7 +90,10 @@ impl EntityRef<'_> {
 
 impl std::fmt::Debug for EntityRef<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EntityRef").field("id", &self.id).field("mirror", &self.mirror).finish()
+        f.debug_struct("EntityRef")
+            .field("id", &self.id)
+            .field("mirror", &self.mirror)
+            .finish()
     }
 }
 
@@ -132,7 +141,11 @@ impl Rollback {
 /// The region's origin in world sim units.
 fn origin(data: &Rollback) -> [f64; 3] {
     let rc = *data.region;
-    [rc.x as f64 * REGION_SIZE as f64, 0.0, rc.z as f64 * REGION_SIZE as f64]
+    [
+        rc.x as f64 * REGION_SIZE as f64,
+        0.0,
+        rc.z as f64 * REGION_SIZE as f64,
+    ]
 }
 
 fn world_translation(data: &Rollback, key: EntityKey) -> Option<[f64; 3]> {
@@ -150,7 +163,12 @@ impl<'a> RegionView<'a> {
             None => (data.halo_entity(id)?.entity, true),
         };
         world_translation(data, key)?;
-        Some(EntityRef { id, key, mirror, data })
+        Some(EntityRef {
+            id,
+            key,
+            mirror,
+            data,
+        })
     }
 }
 
@@ -168,8 +186,13 @@ impl WorldView for RegionView<'_> {
     }
 
     fn entities_in(&self, aabb: WorldAabb) -> Vec<EntityRef<'_>> {
-        let ids: std::collections::BTreeSet<EntityId> =
-            self.data.id_index.keys().chain(self.data.halo_entities.keys()).copied().collect();
+        let ids: std::collections::BTreeSet<EntityId> = self
+            .data
+            .id_index
+            .keys()
+            .chain(self.data.halo_entities.keys())
+            .copied()
+            .collect();
         ids.into_iter()
             .filter_map(|id| self.get(id))
             .filter(|e| aabb.contains(e.world_translation()))
@@ -189,7 +212,10 @@ impl WorldView for RegionView<'_> {
     }
 
     fn raycast(&self, ray: WorldRay, max_blocks: f32) -> Option<Hit> {
-        debug_assert!(max_blocks <= HALO_BLOCKS as f32, "a {max_blocks}-block ray reads past the halo: send an intent");
+        debug_assert!(
+            max_blocks <= HALO_BLOCKS as f32,
+            "a {max_blocks}-block ray reads past the halo: send an intent"
+        );
         let o = origin(self.data);
         let local = rapier3d::math::Vector::new(
             (ray.origin[0] - o[0]) as f32,

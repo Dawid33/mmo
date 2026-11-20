@@ -17,16 +17,14 @@ use crate::utils::PoseOpt;
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(Clone)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, state_hash::StateHash)] // mmo-fork: StateHash
 struct SubDetector {
     manifold_id: usize,
     timestamp: bool,
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Clone, Default, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompositeShapeShapeContactManifoldsWorkspace {
     timestamp: bool,
     sub_detectors: HashMap<u32, SubDetector>,

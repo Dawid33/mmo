@@ -4,7 +4,7 @@
 //! Play forge that never leaves a half-written world file behind.
 
 #[cfg(not(target_arch = "wasm32"))]
-use super::{forge_with, ForgeParams, ForgeProgress, ForgeStage, Forged};
+use super::{ForgeParams, ForgeProgress, ForgeStage, Forged, forge_with};
 
 /// Preview cell sizes [`preview_cell_for`] picks from, finest first.
 pub const PREVIEW_CELL_CHOICES: [f64; 4] = [32.0, 64.0, 128.0, 256.0];
@@ -78,7 +78,11 @@ impl ForgeEstimate {
     /// "≈ 7 GB" / "≈ 300 MB".
     pub fn ram_text(&self) -> String {
         let gb = self.peak_ram_bytes / 1.0e9;
-        if gb >= 1.0 { format!("≈ {} GB", gb.ceil() as u64) } else { format!("≈ {} MB", (gb * 10.0).ceil() as u64 * 100) }
+        if gb >= 1.0 {
+            format!("≈ {} GB", gb.ceil() as u64)
+        } else {
+            format!("≈ {} MB", (gb * 10.0).ceil() as u64 * 100)
+        }
     }
 
     /// The whole line, e.g. "≈ 7 min, ≈ 8 GB RAM (est.)".
@@ -102,15 +106,35 @@ pub struct WorldSize {
 /// [`DEFAULT_WORLD_SIZE`] (Medium); `ForgeParams::default()` (server
 /// auto-forge, tests) stays 16 km / 32 m.
 pub const WORLD_SIZES: [WorldSize; 4] = [
-    WorldSize { name: "Tiny", width_m: 25_600.0, height_m: 12_800.0 },
-    WorldSize { name: "Small", width_m: 50_176.0, height_m: 25_088.0 },
-    WorldSize { name: "Medium", width_m: 100_352.0, height_m: 50_176.0 },
-    WorldSize { name: "Large", width_m: 200_704.0, height_m: 100_352.0 },
+    WorldSize {
+        name: "Tiny",
+        width_m: 25_600.0,
+        height_m: 12_800.0,
+    },
+    WorldSize {
+        name: "Small",
+        width_m: 50_176.0,
+        height_m: 25_088.0,
+    },
+    WorldSize {
+        name: "Medium",
+        width_m: 100_352.0,
+        height_m: 50_176.0,
+    },
+    WorldSize {
+        name: "Large",
+        width_m: 200_704.0,
+        height_m: 100_352.0,
+    },
 ];
 pub const DEFAULT_WORLD_SIZE: usize = 2;
 
 /// The developers' size (not in the menu): small enough to forge in seconds.
-pub const DEV_WORLD_SIZE: WorldSize = WorldSize { name: "Dev", width_m: 16_384.0, height_m: 8_192.0 };
+pub const DEV_WORLD_SIZE: WorldSize = WorldSize {
+    name: "Dev",
+    width_m: 16_384.0,
+    height_m: 8_192.0,
+};
 
 /// The narrowest world that may wrap east–west, metres: the client's NEAR window
 /// (the regions it subscribes, `client::wrap_frame`) must never hold one region
@@ -135,7 +159,11 @@ pub fn too_narrow_to_wrap(width_m: f64) -> Option<String> {
 
 /// The size called `name` (any case): one of [`WORLD_SIZES`] or `"dev"`.
 pub fn world_size_named(name: &str) -> Option<WorldSize> {
-    WORLD_SIZES.iter().chain([&DEV_WORLD_SIZE]).find(|s| s.name.eq_ignore_ascii_case(name)).copied()
+    WORLD_SIZES
+        .iter()
+        .chain([&DEV_WORLD_SIZE])
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+        .copied()
 }
 
 /// The forms a world size takes on a command line (`worldctl forge`, `forge_proto`).
@@ -144,15 +172,22 @@ pub const SIZE_FORMS: &str = "--size <tiny|small|medium|large|dev> or --width <m
 /// `--size`'s value: a size name ([`world_size_named`]). A bare number is
 /// refused — a world has two sides; give them with `--width` / `--height`.
 pub fn size_flag(value: &str) -> Result<WorldSize, String> {
-    world_size_named(value).ok_or_else(|| format!("--size {value}: not a size name; give {SIZE_FORMS}"))
+    world_size_named(value)
+        .ok_or_else(|| format!("--size {value}: not a size name; give {SIZE_FORMS}"))
 }
 
 /// The two sides given by `--width` / `--height` (both or neither) over `default`.
-pub fn sides_flags(width: Option<f64>, height: Option<f64>, default: (f64, f64)) -> Result<(f64, f64), String> {
+pub fn sides_flags(
+    width: Option<f64>,
+    height: Option<f64>,
+    default: (f64, f64),
+) -> Result<(f64, f64), String> {
     match (width, height) {
         (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Ok((w, h)),
         (None, None) => Ok(default),
-        _ => Err(format!("--width and --height are given together, both above 0; give {SIZE_FORMS}")),
+        _ => Err(format!(
+            "--width and --height are given together, both above 0; give {SIZE_FORMS}"
+        )),
     }
 }
 
@@ -163,7 +198,11 @@ pub fn km_text(width_m: f64, height_m: f64) -> String {
 
 /// The cells Play may forge at (cell, label), the default first. Which are
 /// offered depends on the size: [`offered_cells`].
-pub const WORLD_CELLS: [(f64, &str); 3] = [(16.0, "16 m"), (32.0, "32 m (coarse, fast)"), (8.0, "8 m (slow)")];
+pub const WORLD_CELLS: [(f64, &str); 3] = [
+    (16.0, "16 m"),
+    (32.0, "32 m (coarse, fast)"),
+    (8.0, "8 m (slow)"),
+];
 
 /// The Play forge runs inside the game client: no size / cell whose
 /// estimated peak memory is above this is offered or forged.
@@ -173,25 +212,39 @@ pub const MAX_PLAY_FORGE_RAM_BYTES: f64 = 12.0 * 1024.0 * 1024.0 * 1024.0;
 /// estimated within [`MAX_PLAY_FORGE_RAM_BYTES`].
 pub fn offered_cells(width_m: f64, height_m: f64) -> Vec<usize> {
     (0..WORLD_CELLS.len())
-        .filter(|&i| forge_estimate(width_m, height_m, WORLD_CELLS[i].0).peak_ram_bytes <= MAX_PLAY_FORGE_RAM_BYTES)
+        .filter(|&i| {
+            forge_estimate(width_m, height_m, WORLD_CELLS[i].0).peak_ram_bytes
+                <= MAX_PLAY_FORGE_RAM_BYTES
+        })
         .collect()
 }
 
 /// The most a Play forge may use: [`MAX_PLAY_FORGE_RAM_BYTES`], or half the
 /// machine's memory when that is smaller (`physical` unknown: the cap).
 pub fn play_ram_limit_bytes(physical: Option<f64>) -> f64 {
-    physical.map_or(MAX_PLAY_FORGE_RAM_BYTES, |m| (m / 2.0).min(MAX_PLAY_FORGE_RAM_BYTES))
+    physical.map_or(MAX_PLAY_FORGE_RAM_BYTES, |m| {
+        (m / 2.0).min(MAX_PLAY_FORGE_RAM_BYTES)
+    })
 }
 
 /// Play's backstop: `Err(status line)` when the forge's estimated peak
 /// memory is over [`play_ram_limit_bytes`].
-pub fn check_play_ram(width_m: f64, height_m: f64, cell_m: f64, physical: Option<f64>) -> Result<(), String> {
+pub fn check_play_ram(
+    width_m: f64,
+    height_m: f64,
+    cell_m: f64,
+    physical: Option<f64>,
+) -> Result<(), String> {
     let need = forge_estimate(width_m, height_m, cell_m).peak_ram_bytes;
     let limit = play_ram_limit_bytes(physical);
     if need <= limit {
         return Ok(());
     }
-    let why = if limit < MAX_PLAY_FORGE_RAM_BYTES { "half of this machine's memory" } else { "the forge's memory cap" };
+    let why = if limit < MAX_PLAY_FORGE_RAM_BYTES {
+        "half of this machine's memory"
+    } else {
+        "the forge's memory cap"
+    };
     Err(format!(
         "{} at {cell_m:.0} m needs ≈ {:.0} GB to forge (est.), over {why} ({:.0} GB): pick a coarser World cell or a smaller size.",
         km_text(width_m, height_m),
@@ -212,7 +265,10 @@ pub fn parse_meminfo_total(meminfo: &str) -> Option<f64> {
 pub fn physical_memory_bytes() -> Option<f64> {
     #[cfg(target_os = "linux")]
     {
-        std::fs::read_to_string("/proc/meminfo").ok().as_deref().and_then(parse_meminfo_total)
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .as_deref()
+            .and_then(parse_meminfo_total)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -256,7 +312,7 @@ pub fn forge_to_file(
     on_progress: &mut dyn FnMut(ForgeProgress),
 ) -> Result<Forged, ForgeFileError> {
     use std::ops::ControlFlow;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::Ordering;
 
     let cancelled = || cancel.load(Ordering::SeqCst);
@@ -270,7 +326,11 @@ pub fn forge_to_file(
             forge_with(p, &mut |pr| {
                 iters = pr.iters;
                 on_progress(pr);
-                if cancelled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+                if cancelled() {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
             })
         }))
         .map_err(|e| guarded("the forge failed", e))?
@@ -278,7 +338,11 @@ pub fn forge_to_file(
         if cancelled() {
             return Err(ForgeFileError::Cancelled);
         }
-        on_progress(ForgeProgress { stage: ForgeStage::Saving, iter: 0, iters });
+        on_progress(ForgeProgress {
+            stage: ForgeStage::Saving,
+            iter: 0,
+            iters,
+        });
         let bytes = catch_unwind(AssertUnwindSafe(|| forged.artifact(p).to_bytes()))
             .map_err(|e| guarded("the world could not be stored", e))?;
         if cancelled() {
@@ -300,4 +364,3 @@ pub fn forge_to_file(
     }
     result
 }
-

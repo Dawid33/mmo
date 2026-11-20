@@ -19,7 +19,20 @@
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "links": [],
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Telemetry for this world",
+      "tooltip": "Open traces, logs and profiles for the selected world",
+      "type": "link",
+      "url": "/d/telemetry/errantry-telemetry?orgId=1&var-world=$world"
+    }
+  ],
   "liveNow": false,
   "panels": [
     {
@@ -579,6 +592,37 @@
         "sort": 1,
         "hide": 0,
         "regex": "",
+        "options": []
+      },
+      {
+        "name": "world",
+        "label": "World id",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": {
+          "query": "label_values(mmo_registered{namespace=~\"$namespace\"}, namespace)",
+          "refId": "StandardVariableQuery"
+        },
+        "definition": "label_values(mmo_registered{namespace=~\"$namespace\"}, namespace)",
+        "current": {
+          "selected": false,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "hide": 2,
+        "regex": "/^world-(.*)$/",
         "options": []
       }
     ]

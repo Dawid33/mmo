@@ -54,7 +54,7 @@ fn assert_level_walk_across(w: &mut Walker, side: usize, n: usize, borders: usiz
     w.keys.right = false;
     w.ticks(2);
     w.keys.back = true;
-    w.ticks(1);
+    w.ticks(WARMUP);
     let start = w.body();
     let mut prev = start;
     for tick in 0..n {
@@ -63,13 +63,24 @@ fn assert_level_walk_across(w: &mut Walker, side: usize, n: usize, borders: usiz
         let at = format!("tick {tick}: {prev:?} -> {now:?}");
         assert!(now.grounded, "lost the ground at {at}");
         assert!((now.y - prev.y).abs() < LEVEL, "bobbed at {at}");
-        assert!((now.z - prev.z - STEP).abs() < LEVEL, "speed hitched at {at}");
+        assert!(
+            (now.z - prev.z - STEP).abs() < LEVEL,
+            "speed hitched at {at}"
+        );
         assert!((now.x - start.x).abs() < LEVEL, "drifted sideways at {at}");
         prev = now;
     }
     let crossed = chunk_row(prev.z) - chunk_row(start.z);
-    assert!(crossed >= borders as f32, "the walk must cross chunk borders: {start:?} -> {prev:?}");
+    assert!(
+        crossed >= borders as f32,
+        "the walk must cross chunk borders: {start:?} -> {prev:?}"
+    );
 }
+
+/// Ticks a walk accelerates (and a sidestep's momentum bleeds off) before it
+/// is measured: Minecraft's momentum closes on the walking speed by ×0.546 a
+/// tick, within [`LEVEL`] after 12.
+const WARMUP: usize = 20;
 
 /// Ticks of a walk long enough to also catch what only shows up now and then.
 const LONG: usize = 80;
@@ -78,7 +89,11 @@ const LONG: usize = 80;
 #[test]
 fn voxel_scale_floor_is_level_on_a_long_walk() {
     for side in [0, 4] {
-        assert_level_walk(&mut world(rows_for(LONG), |_, _| Chunk::flat_floor(8)), side, LONG);
+        assert_level_walk(
+            &mut world(rows_for(LONG), |_, _| Chunk::flat_floor(8)),
+            side,
+            LONG,
+        );
     }
 }
 
@@ -93,7 +108,11 @@ fn tunnel(clear_blocks: usize) -> Walker {
     let mut chunks = Vec::new();
     for (x, z) in chunks_over(spawn_x_band(), rows_for(25)) {
         for cy in 0..=top_layer {
-            let mut chunk = if cy == 0 { Chunk::flat_floor(floor as u32) } else { Chunk::default() };
+            let mut chunk = if cy == 0 {
+                Chunk::flat_floor(floor as u32)
+            } else {
+                Chunk::default()
+            };
             if z >= seam_row() {
                 for bx in 0..CHUNK_BLOCKS {
                     for by in 0..CHUNK_BLOCKS {
@@ -128,19 +147,27 @@ fn a_jump_under_a_low_ceiling_leaves_the_ground() {
     w.keys.back = false;
     w.ticks(2);
     let before = w.body();
-    assert!(before.z > seam_z() + 10.0 && before.grounded, "must stand in the tunnel: {before:?}");
+    assert!(
+        before.z > seam_z() + 10.0 && before.grounded,
+        "must stand in the tunnel: {before:?}"
+    );
     w.keys.jump_pressed = true;
     w.keys.jump_held = true;
     w.tick();
     w.keys.jump_held = false;
     let after = w.body();
-    assert!(after.y > before.y + 1.0 && !after.grounded, "the jump must rise to the ceiling: {before:?} -> {after:?}");
+    assert!(
+        after.y > before.y + 1.0 && !after.grounded,
+        "the jump must rise to the ceiling: {before:?} -> {after:?}"
+    );
 }
 
 /// One-voxel terraces, a step down per chunk along +z: the gentle slopes of
 /// generated terrain.
 fn terraces(z_units: std::ops::Range<f32>) -> Walker {
-    Walker::on(spawn_x_band(), z_units, |_, z| Chunk::flat_floor(28 - z as u32))
+    Walker::on(spawn_x_band(), z_units, |_, z| {
+        Chunk::flat_floor(28 - z as u32)
+    })
 }
 
 /// Gate: mmo-fork hunk rapier character_controller.rs:482 snap_to_ground no longer requires result down; observed hover past each terrace edge then drop (38cd3da5)
@@ -164,6 +191,8 @@ fn walking_down_terraces_stays_on_the_ground() {
         assert!(prev.y - now.y < 1.1, "fell more than a terrace at {at}");
         prev = now;
     }
-    assert!(prev.z > end_z, "must have walked down three terraces: {prev:?}");
+    assert!(
+        prev.z > end_z,
+        "must have walked down three terraces: {prev:?}"
+    );
 }
-

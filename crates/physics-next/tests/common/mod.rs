@@ -1,5 +1,5 @@
 //! A player walking through the fork the way the game drives one: the game's
-//! own movement code (`game::movement::{plan, sweep_character, settle}`, its
+//! own movement code (`game::movement::walk_body`, its
 //! constants, `game::collider_cells` for terrain) against a bare physics
 //! world, so the fork is pinned by exactly what the game runs. The port of
 //! `crates/game/tests/walking_smoothness.rs` drives it.
@@ -29,7 +29,9 @@ pub fn chunk_index_of(u: f32) -> i32 {
 pub fn chunks_over(x_units: Range<f32>, z_units: Range<f32>) -> Vec<(i32, i32)> {
     let span = |r: Range<f32>| chunk_index_of(r.start.max(0.0))..(r.end / CHUNK).ceil() as i32;
     let zs = span(z_units);
-    span(x_units).flat_map(|x| zs.clone().map(move |z| (x, z))).collect()
+    span(x_units)
+        .flat_map(|x| zs.clone().map(move |z| (x, z)))
+        .collect()
 }
 
 /// The first chunk row past the spawn's (row 5, z = 160, at 2-block chunks).
@@ -56,7 +58,9 @@ pub fn spawn_z_walk(ahead: f32) -> Range<f32> {
 /// chunk is one cuboid, anything else a `Voxels` per `collider_cells` grid.
 pub fn add_chunk(w: &mut PhysicsWorld, (x, y, z): (i32, i32, i32), chunk: &Chunk) {
     let origin = Vector::new(x as f32, y as f32, z as f32) * CHUNK;
-    let body = w.bodies.insert(RigidBodyBuilder::fixed().translation(origin));
+    let body = w
+        .bodies
+        .insert(RigidBodyBuilder::fixed().translation(origin));
     let cells = game::collider_cells(chunk);
     if cells.is_full_cube() {
         let half = 0.5 * CHUNK;
@@ -66,7 +70,11 @@ pub fn add_chunk(w: &mut PhysicsWorld, (x, y, z): (i32, i32, i32), chunk: &Chunk
     }
     for (size, keys) in cells.grids() {
         let keys: Vec<IVector> = keys.iter().map(|p| IVector::new(p.x, p.y, p.z)).collect();
-        w.colliders.insert_with_parent(ColliderBuilder::voxels(Vector::splat(size), &keys), body, &mut w.bodies);
+        w.colliders.insert_with_parent(
+            ColliderBuilder::voxels(Vector::splat(size), &keys),
+            body,
+            &mut w.bodies,
+        );
     }
 }
 
@@ -85,6 +93,8 @@ pub struct Walker {
     pub body: RigidBodyHandle,
     pub motion: Motion,
     pub keys: MoveKeys,
+    /// Heading, radians (0: `back` walks +z).
+    pub yaw: f32,
     tick: u64,
 }
 
@@ -103,24 +113,45 @@ impl Walker {
             top = top.max(coords.1 + 1);
             add_chunk(&mut w, coords, &chunk);
         }
-        let spawn = Vector::new(SPAWN[0], top as f32 * CHUNK + PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS, SPAWN[1]);
-        let body = w.bodies.insert(RigidBodyBuilder::kinematic_position_based().translation(spawn));
+        let spawn = Vector::new(
+            SPAWN[0],
+            top as f32 * CHUNK + PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS,
+            SPAWN[1],
+        );
+        let body = w
+            .bodies
+            .insert(RigidBodyBuilder::kinematic_position_based().translation(spawn));
         let capsule = ColliderBuilder::capsule_y(PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS);
         w.colliders.insert_with_parent(capsule, body, &mut w.bodies);
         let mut pipeline = PhysicsPipeline::new();
         w.step(&mut pipeline);
-        let mut walker = Walker { w, pipeline, body, motion: Motion::default(), keys: MoveKeys::default(), tick: 0 };
-        // The spawn clearance is a few ticks of fall.
-        walker.ticks(20);
-        assert!(walker.body().grounded, "player must settle on the floor: {:?}", walker.body());
+        let mut walker = Walker {
+            w,
+            pipeline,
+            body,
+            motion: Motion::default(),
+            keys: MoveKeys::default(),
+            yaw: 0.0,
+            tick: 0,
+        };
+        // The spawn clearance is a few ticks of fall (a chunk's 16 blocks land
+        // on tick 22 under Minecraft's gravity and drag).
+        walker.ticks(30);
+        assert!(
+            walker.body().grounded,
+            "player must settle on the floor: {:?}",
+            walker.body()
+        );
         walker
     }
 
     /// The chunks at y 0 overlapping the world-unit rectangle `x_units` x
     /// `z_units`, one each (`chunk(x, z)` gets its chunk coordinates).
     pub fn on(x_units: Range<f32>, z_units: Range<f32>, chunk: impl Fn(i32, i32) -> Chunk) -> Self {
-        let chunks: Vec<_> =
-            chunks_over(x_units, z_units).into_iter().map(|(x, z)| ((x, 0, z), chunk(x, z))).collect();
+        let chunks: Vec<_> = chunks_over(x_units, z_units)
+            .into_iter()
+            .map(|(x, z)| ((x, 0, z), chunk(x, z)))
+            .collect();
         Self::new(chunks)
     }
 
@@ -136,21 +167,22 @@ impl Walker {
         }
     }
 
-    /// One region tick of the player: plan, sweep, settle, step.
+    /// One region tick of the player: the game's `walk_body` (plan, sweep,
+    /// settle), then the step.
     pub fn tick(&mut self) {
-        let desired = movement::plan(&mut self.motion, &self.keys, 0.0, self.tick);
-        self.keys.jump_pressed = false;
         let w = &self.w;
-        let (corrected, grounded) = movement::sweep_character(
+        let corrected = movement::walk_body(
+            &mut self.motion,
+            &self.keys,
+            self.yaw,
+            self.tick,
             &w.broad_phase,
             &w.narrow_phase,
             &w.bodies,
             &w.colliders,
             self.body,
-            &self.motion,
-            desired,
         );
-        movement::settle(&mut self.motion, &desired, &corrected, grounded);
+        self.keys.jump_pressed = false;
         if corrected != Vector::ZERO {
             let t = self.w.bodies[self.body].translation();
             self.w.bodies[self.body].set_next_kinematic_translation(t + corrected);
@@ -167,7 +199,12 @@ impl Walker {
 
     pub fn body(&self) -> Body {
         let t = self.w.bodies[self.body].translation();
-        Body { x: t.x, y: t.y, z: t.z, grounded: self.motion.grounded }
+        Body {
+            x: t.x,
+            y: t.y,
+            z: t.z,
+            grounded: self.motion.grounded,
+        }
     }
 
     /// Puts the body at `pos`.

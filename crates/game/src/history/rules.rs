@@ -1,9 +1,9 @@
 //! Named tunables and integer rule math for world history.
 
+use super::History;
 use super::calendar::{CalendarTick, DAYS_PER_YEAR};
 use super::records::PersonId;
-use super::History;
-use super::rng::{seeded_roll, SALT_DEATH_AGE};
+use super::rng::{SALT_DEATH_AGE, seeded_roll};
 
 /// The year the bootstrapped history starts at.
 pub const HISTORY_START_YEAR: u64 = 250;
@@ -101,12 +101,17 @@ pub fn walk_ticks_per_region() -> u64 {
 /// `person`, their living spouse and their living children under `ADULT_AGE_YEARS`, all
 /// present at the person's site (a traveller has no household), in id order.
 pub fn household_of(h: &History, person: PersonId) -> Vec<PersonId> {
-    let Some(p) = h.people.get(&person).filter(|p| p.alive()) else { return Vec::new() };
-    let Some(site) = p.site.and_then(|s| h.sites.get(&s)) else { return Vec::new() };
+    let Some(p) = h.people.get(&person).filter(|p| p.alive()) else {
+        return Vec::new();
+    };
+    let Some(site) = p.site.and_then(|s| h.sites.get(&s)) else {
+        return Vec::new();
+    };
     if !site.members.contains(&person) {
         return Vec::new();
     }
-    let present = |id: &PersonId| site.members.contains(id) && h.people.get(id).is_some_and(|q| q.alive());
+    let present =
+        |id: &PersonId| site.members.contains(id) && h.people.get(id).is_some_and(|q| q.alive());
     let mut out = std::collections::BTreeSet::new();
     out.insert(person);
     let mut parents = vec![person];

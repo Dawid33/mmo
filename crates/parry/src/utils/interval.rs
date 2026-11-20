@@ -121,8 +121,7 @@ where
 }
 
 /// An interval implementing interval arithmetic.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Interval<T>(pub T, pub T);
 
 impl<T> Interval<T> {

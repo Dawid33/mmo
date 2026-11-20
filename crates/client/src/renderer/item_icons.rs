@@ -34,7 +34,9 @@ pub fn texture_path(registry: &BlockRegistry, item: ItemId) -> Option<String> {
             TextureSpec::All(p) => Some(p.to_string()),
             TextureSpec::Faces { side, .. } => Some(side.to_string()),
         },
-        None => extra_item_texture(item).strip_prefix("blocks/").map(str::to_string),
+        None => extra_item_texture(item)
+            .strip_prefix("blocks/")
+            .map(str::to_string),
     }
 }
 
@@ -52,11 +54,14 @@ pub fn icon(item: ItemId) -> Image {
             .and_then(|path| super::load_block_texture(&path))
             .map(|rgba| {
                 let (w, h) = rgba.dimensions();
-                Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h))
+                Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                    rgba.as_raw(),
+                    w,
+                    h,
+                ))
             })
             .unwrap_or_default();
         cache.images.insert(item, image.clone());
         image
     })
 }
-

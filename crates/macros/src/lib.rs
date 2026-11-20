@@ -278,7 +278,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
         if p.3.is_some() && p.2.as_deref() != Some("slotmap") {
-            panic!("#[emit(...)] is only supported on #[undo(slotmap)] fields (field `{}`)", p.0);
+            panic!(
+                "#[emit(...)] is only supported on #[undo(slotmap)] fields (field `{}`)",
+                p.0
+            );
         }
     }
 
@@ -301,8 +304,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                             all_fields.push(f.clone());
                             struct_info.push((f.ident.clone().unwrap(), f.ty.clone()));
                             let kind = undo_kind(f);
-                            f.attrs
-                                .retain(|a| !a.path().is_ident("undo") && !a.path().is_ident("emit"));
+                            f.attrs.retain(|a| {
+                                !a.path().is_ident("undo") && !a.path().is_ident("emit")
+                            });
                             let ty = &f.ty;
                             f.ty = match kind.as_deref() {
                                 Some("cell") => syn::Type::parse
@@ -318,7 +322,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                     let (k, v) = map_kv(ty);
                                     syn::Type::parse
                                         .parse2(quote! { UndoSlotMap<#k, #v> })
-                                        .expect("Failed to change type of field to UndoSlotMap<K, V>")
+                                        .expect(
+                                            "Failed to change type of field to UndoSlotMap<K, V>",
+                                        )
                                 }
                                 Some(other) => panic!("unknown undo kind `{}`", other),
                                 None => syn::Type::parse

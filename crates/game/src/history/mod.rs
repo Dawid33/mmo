@@ -1,25 +1,27 @@
 //! Deterministic, threadless world history: people, sites, civs and journeys on one calendar.
 
-mod chain;
-mod handover;
-mod play;
 pub mod bootstrap;
-pub mod stats;
-mod journey;
 pub mod calendar;
+mod chain;
 pub mod grid;
+mod handover;
+mod journey;
 pub mod legends;
 pub mod log;
 pub mod persist;
+mod play;
 pub mod records;
 pub mod rng;
 pub mod rules;
+pub mod stats;
 
 pub use calendar::*;
-pub use chain::{embark_allowed_in, AdventureRefusal, EmbarkRefusal};
-pub use handover::Directive;
+pub use chain::{AdventureRefusal, EmbarkRefusal, embark_allowed_in};
 pub use grid::*;
-pub use legends::{LegendLine, LegendsFilter, LegendsPage, LegendsQuery, LEGENDS_PAGE_DEFAULT, LEGENDS_PAGE_MAX};
+pub use handover::Directive;
+pub use legends::{
+    LEGENDS_PAGE_DEFAULT, LEGENDS_PAGE_MAX, LegendLine, LegendsFilter, LegendsPage, LegendsQuery,
+};
 pub use records::*;
 
 use serde::{Deserialize, Serialize};
@@ -34,7 +36,10 @@ pub(crate) enum Step {
     Death(PersonId),
     /// The end of leg `leg` (the walk out of `route[leg]`) of `journey`; stale, and
     /// ignored, once the journey is on another leg.
-    JourneyLeg { journey: JourneyId, leg: u32 },
+    JourneyLeg {
+        journey: JourneyId,
+        leg: u32,
+    },
 }
 
 /// The world's history: people, sites, civs and journeys advanced by a calendar-ordered queue.
@@ -120,7 +125,9 @@ impl History {
     }
 
     pub fn grid(&self) -> &SocietyGrid {
-        self.grid.as_ref().expect("History::set_grid was not called after load")
+        self.grid
+            .as_ref()
+            .expect("History::set_grid was not called after load")
     }
 
     pub fn now(&self) -> CalendarTick {
@@ -166,7 +173,8 @@ impl History {
         let entry = LogEntry { at: self.now, kind };
         if !regions.is_empty() {
             let line = entry.describe(self);
-            self.notices.extend(regions.into_iter().map(|r| (r, line.clone())));
+            self.notices
+                .extend(regions.into_iter().map(|r| (r, line.clone())));
         }
         self.log.push(entry);
     }
@@ -175,7 +183,15 @@ impl History {
         self.content_dirty = true;
         let id = CivId(self.next_ids[2]);
         self.next_ids[2] += 1;
-        self.civs.insert(id, Civ { id, race, name: civ_name(id), sites: Vec::new() });
+        self.civs.insert(
+            id,
+            Civ {
+                id,
+                race,
+                name: civ_name(id),
+                sites: Vec::new(),
+            },
+        );
         id
     }
 
@@ -185,8 +201,13 @@ impl History {
         self.content_dirty = true;
         let id = PersonId(self.next_ids[0]);
         self.next_ids[0] += 1;
-        self.people.insert(id, Person::newborn(id, sex, born, None, None, None, Location::Unplaced));
-        let at = born.plus_days(rules::death_age_days(self.seed, id, born)).max(self.now);
+        self.people.insert(
+            id,
+            Person::newborn(id, sex, born, None, None, None, Location::Unplaced),
+        );
+        let at = born
+            .plus_days(rules::death_age_days(self.seed, id, born))
+            .max(self.now);
         self.schedule(at, Step::Death(id));
         id
     }
@@ -200,9 +221,10 @@ impl History {
     ) -> SiteId {
         for f in founders {
             debug_assert!(
-                self.people
-                    .get(f)
-                    .is_none_or(|p| matches!(p.abstract_location(), Location::Unplaced | Location::Journey(_))),
+                self.people.get(f).is_none_or(|p| matches!(
+                    p.abstract_location(),
+                    Location::Unplaced | Location::Journey(_)
+                )),
                 "founder {f:?} is already placed: {:?}",
                 self.people.get(f).map(|p| p.abstract_location())
             );
@@ -236,7 +258,12 @@ impl History {
             }
             self.set_abstract_location(*f, Location::AtSite(id));
         }
-        self.log_event(LogKind::SiteFounded { site: id, civ, founders: founders.to_vec(), from });
+        self.log_event(LogKind::SiteFounded {
+            site: id,
+            civ,
+            founders: founders.to_vec(),
+            from,
+        });
         self.schedule(self.now.plus_days(DAYS_PER_MONTH), Step::SiteMonth(id));
         // Founded into a running region: bodies at once.
         self.embody_site(id);
@@ -290,14 +317,19 @@ impl History {
 
     /// Queued `SiteMonth` steps of `site`.
     pub fn pending_site_months(&self, site: SiteId) -> usize {
-        self.queue.values().filter(|s| matches!(s, Step::SiteMonth(x) if *x == site)).count()
+        self.queue
+            .values()
+            .filter(|s| matches!(s, Step::SiteMonth(x) if *x == site))
+            .count()
     }
 
     /// Queued `Death` steps of people who are already dead.
     pub fn pending_deaths_of_dead(&self) -> usize {
         self.queue
             .values()
-            .filter(|s| matches!(s, Step::Death(p) if self.people.get(p).is_some_and(|q| !q.alive())))
+            .filter(
+                |s| matches!(s, Step::Death(p) if self.people.get(p).is_some_and(|q| !q.alive())),
+            )
             .count()
     }
 
@@ -305,7 +337,13 @@ impl History {
     pub fn living_members(&self, site: SiteId) -> Vec<PersonId> {
         self.sites
             .get(&site)
-            .map(|s| s.members.iter().copied().filter(|p| self.people.get(p).is_some_and(Person::alive)).collect())
+            .map(|s| {
+                s.members
+                    .iter()
+                    .copied()
+                    .filter(|p| self.people.get(p).is_some_and(Person::alive))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }

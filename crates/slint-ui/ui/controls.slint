@@ -262,7 +262,11 @@ export component Tabs inherits Rectangle {
     out property <length> collapsed-height: root.row-height + Styles.tabbed-pane.content-frame.box.padding.top
         + Styles.tabbed-pane.content-frame.box.padding.bottom;
 
-    property <int> hovered: -1;
+    // The tab under the pointer at its last event in the tab row; it counts
+    // only while the pointer is still there (no event tells of its leaving
+    // onto the page below).
+    property <int> pointed: -1;
+    property <int> hovered: row.has-hover ? root.pointed : -1;
     property <length> tab-height: clamp(Styles.tab.button.font.line-height + Styles.tab.button.box.padding.top
         + Styles.tab.button.box.padding.bottom, Styles.tab.button.box.min-height, Styles.tab.button.box.max-height);
     out property <length> row-height: Styles.tabbed-pane.container.box.padding.top + tab-height
@@ -300,13 +304,13 @@ export component Tabs inherits Rectangle {
         @children
     }
     // Only the tab row takes the pointer; the page's children keep theirs.
-    TouchArea {
+    row := TouchArea {
         x: 0;
         y: 0;
         width: root.width;
         height: root.row-height;
         pointer-event(e) => {
-            root.hovered = root.index-at(self.mouse-x, self.mouse-y);
+            root.pointed = root.index-at(self.mouse-x, self.mouse-y);
         }
         clicked => {
             let i = root.index-at(self.mouse-x, self.mouse-y);

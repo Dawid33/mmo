@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Claim, ClientId, CutId, EntityBundle, GameEventKind, HaloEntityMsg, HaloUpdate, IntentMsg, PlayerId, PlayerRecord,
-    RegionCoords, Tick,
+    Claim, ClientId, CutId, EntityBundle, GameEventKind, HaloEntityMsg, HaloUpdate, IntentMsg,
+    PlayerId, PlayerRecord, RegionCoords, Tick,
 };
 
 /// Where a host can be reached: by its peers (`quic`) and by players (`webtransport`),
@@ -80,15 +80,30 @@ impl std::fmt::Debug for Nonce {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Reliable {
     /// An entity crossing into a region of the other host, applied at `stamp`.
-    Transfer { target: RegionCoords, stamp: Tick, bundle: Box<EntityBundle>, player: Option<PlayerHandoff> },
+    Transfer {
+        target: RegionCoords,
+        stamp: Tick,
+        bundle: Box<EntityBundle>,
+        player: Option<PlayerHandoff>,
+    },
     Intent(IntentMsg),
     /// A player without a body (parked, observing) moving to a region of the other host;
     /// `place` (Elastic 5): created at the target's landing, or restored at the record's pose
     /// (a player whose land moved under it).
-    PlayerMove { handoff: PlayerHandoff, record: Box<PlayerRecord>, target: RegionCoords, place: MovePlace },
+    PlayerMove {
+        handoff: PlayerHandoff,
+        record: Box<PlayerRecord>,
+        target: RegionCoords,
+        place: MovePlace,
+    },
     /// Admit `client` (of `player`) presenting `nonce` for `ttl_secs` from receipt (the
     /// receiving edge dates it by its own clock).
-    ObserverOrder { client: ClientId, player: PlayerId, nonce: Nonce, ttl_secs: u64 },
+    ObserverOrder {
+        client: ClientId,
+        player: PlayerId,
+        nonce: Nonce,
+        ttl_secs: u64,
+    },
     /// Spawn a login session's player; `origin` is the host the order entered at (the
     /// one the login service pushed it to), `hops` how often it was forwarded. `player` and
     /// `record_region` are what `origin` read from the store for the token.
@@ -102,34 +117,59 @@ pub enum Reliable {
     },
     /// The answer to a [`Reliable::SpawnOrder`], to its `origin`: `endpoint` is the host
     /// that took it (where the client connects), `None` when refused.
-    SpawnAck { player_token: String, session_epoch: u64, ok: bool, endpoint: Option<HostEndpoint> },
+    SpawnAck {
+        player_token: String,
+        session_epoch: u64,
+        ok: bool,
+        endpoint: Option<HostEndpoint>,
+    },
     /// The login service's kick, from the gate host it entered at: applied here, then answered
     /// with [`Reliable::KickAck`].
-    Kick { player_token: String, session_epoch: u64, reason: String },
-    KickAck { player_token: String, session_epoch: u64 },
+    Kick {
+        player_token: String,
+        session_epoch: u64,
+        reason: String,
+    },
+    KickAck {
+        player_token: String,
+        session_epoch: u64,
+    },
     /// A login session left the world on the sender. NO LONGER SENT (Elastic 1 Task 6: each
     /// host tells the login service up its own coordinator link, `HostMsg::Login`); kept
     /// because this enum is append-only on the wire.
-    SessionEnded { player_token: String, session_epoch: u64 },
+    SessionEnded {
+        player_token: String,
+        session_epoch: u64,
+    },
     /// The sender's in-band mark of a world save cut: what it sent before the mark
     /// belongs to the cut's receiver side, what follows to the next cut.
-    CutMark { cut: CutId },
+    CutMark {
+        cut: CutId,
+    },
     /// The sender parked `player` (of `client`), handed to it by the receiver, with no
     /// session of the client on the sender: a session the receiver still holds for the
     /// client (an observer) is ended.
-    PlayerParked { client: ClientId, player: PlayerId },
+    PlayerParked {
+        client: ClientId,
+        player: PlayerId,
+    },
     /// A state message (`Transfer`, `PlayerMove`, `Intent`) the SENDER already accounts
     /// for in its part of world cut `cut` (in a region snapshot of the sender, or written
     /// as its own row / player record): the receiver never counts it in that cut. Never
     /// nested.
-    InCut { cut: CutId, body: Box<Reliable> },
+    InCut {
+        cut: CutId,
+        body: Box<Reliable>,
+    },
     /// "These super-regions are mine at these epochs" (R4, `PgClaim`): sent to every peer
     /// when the sender claims (`WorldManager::claimed`) and, whole, on every hello. The
     /// receiver's directory takes each row unless it knows a newer epoch. Not a state
     /// message: a cut never accounts for it and it never travels as [`Reliable::InCut`] —
     /// the store's `super_regions` is the truth (every host reads it at boot and every
     /// `TERRAIN_POLL_SECS`); `Owns` only lets a peer learn a claim sooner.
-    Owns { rows: Vec<(crate::SuperRegion, u64)> },
+    Owns {
+        rows: Vec<(crate::SuperRegion, u64)>,
+    },
     /// A survivor's report to the heir of succession `id` (R4, `world_manager/succession.rs`):
     /// its peer journal against the predecessor since `base_cut` (every transfer and player
     /// move exchanged with it, acknowledged or not — the journal records at queue time) and,
@@ -152,7 +192,9 @@ pub enum Reliable {
     /// `super_regions` is the truth (a directory read repairs a lost one), and applying it
     /// twice or late is harmless (`Directory::set` ignores an older epoch). Never
     /// [`Reliable::InCut`], never journalled.
-    Released { rows: Vec<(crate::SuperRegion, u64)> },
+    Released {
+        rows: Vec<(crate::SuperRegion, u64)>,
+    },
 }
 
 impl Reliable {
@@ -167,7 +209,10 @@ impl Reliable {
     /// A message whose content a save cut must account for exactly once: a transfer
     /// (with or without a player), a player move, an intent or a reply.
     pub fn is_state(&self) -> bool {
-        matches!(self.inner(), Reliable::Transfer { .. } | Reliable::PlayerMove { .. } | Reliable::Intent(_))
+        matches!(
+            self.inner(),
+            Reliable::Transfer { .. } | Reliable::PlayerMove { .. } | Reliable::Intent(_)
+        )
     }
 
     /// A copy with every player token shown as `<secret>` (as [`Nonce`] is): what a log
@@ -185,7 +230,10 @@ impl Reliable {
             | Reliable::Kick { player_token, .. }
             | Reliable::KickAck { player_token, .. }
             | Reliable::SessionEnded { player_token, .. } => *player_token = SECRET.into(),
-            Reliable::Transfer { player: Some(h), .. } | Reliable::PlayerMove { handoff: h, .. } => {
+            Reliable::Transfer {
+                player: Some(h), ..
+            }
+            | Reliable::PlayerMove { handoff: h, .. } => {
                 if let Some((token, _)) = h.login.as_mut() {
                     *token = SECRET.into();
                 }
@@ -216,10 +264,25 @@ pub enum Volatile {
     /// The sender's region was lost (its thread died, its load failed): every mirror of
     /// it ends (`HaloSourceGone`).
     RegionDown(RegionCoords),
-    HaloRequest { from: RegionCoords, of: RegionCoords },
-    HaloUpdate { to: RegionCoords, update: HaloUpdate, stamp: Tick },
-    HaloEntity { to: RegionCoords, msg: HaloEntityMsg, stamp: Tick },
-    Input { client: ClientId, kind: GameEventKind, stamp: Tick },
+    HaloRequest {
+        from: RegionCoords,
+        of: RegionCoords,
+    },
+    HaloUpdate {
+        to: RegionCoords,
+        update: HaloUpdate,
+        stamp: Tick,
+    },
+    HaloEntity {
+        to: RegionCoords,
+        msg: HaloEntityMsg,
+        stamp: Tick,
+    },
+    Input {
+        client: ClientId,
+        kind: GameEventKind,
+        stamp: Tick,
+    },
     /// The sender's region parked (its final halo already sent): no longer running, but
     /// not lost — unlike [`Volatile::RegionDown`] (a lost region: its mirrors end).
     RegionParked(RegionCoords),
@@ -238,16 +301,26 @@ pub const PEER_FRAME_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// `PeerMsg::Reliable`, compressed as the wire compresses it), or `None` if it does not
 /// encode. Measured once per succession report, never per message.
 pub fn reliable_frame_bytes(body: &Reliable) -> Option<usize> {
-    crate::encode_packet(&PeerMsg::Reliable { seq: u64::MAX, body: body.clone() }).ok().map(|p| p.len())
+    crate::encode_packet(&PeerMsg::Reliable {
+        seq: u64::MAX,
+        body: body.clone(),
+    })
+    .ok()
+    .map(|p| p.len())
 }
 
 /// One message on a peer link.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum PeerMsg {
     Hello(PeerHello),
-    Reliable { seq: u64, body: Reliable },
+    Reliable {
+        seq: u64,
+        body: Reliable,
+    },
     /// Cumulative: every reliable message up to `through` arrived.
-    Ack { through: u64 },
+    Ack {
+        through: u64,
+    },
     Volatile(Volatile),
 }
 
@@ -255,7 +328,10 @@ impl PeerMsg {
     /// A copy with every player token shown as `<secret>` ([`Reliable::redacted`]).
     pub fn redacted(&self) -> PeerMsg {
         match self {
-            PeerMsg::Reliable { seq, body } => PeerMsg::Reliable { seq: *seq, body: body.redacted() },
+            PeerMsg::Reliable { seq, body } => PeerMsg::Reliable {
+                seq: *seq,
+                body: body.redacted(),
+            },
             other => other.clone(),
         }
     }

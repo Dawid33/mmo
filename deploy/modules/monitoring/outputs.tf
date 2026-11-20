@@ -1,5 +1,6 @@
 output "grafana_url" {
-  value = "https://${var.grafana_host}"
+  description = "https://<grafana_host> when public, else http://<grafana_host> over the operator VPN."
+  value       = local.grafana_url
 }
 
 output "grafana_admin_password" {

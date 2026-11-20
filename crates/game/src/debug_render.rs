@@ -5,8 +5,8 @@
 //! here may touch GameData, the rollback log, or the wire protocol. See
 //! docs/superpowers/specs/2026-07-08-collider-debug-render-design.md.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rapier3d::geometry::Aabb;
 use rapier3d::math::Vector;
@@ -78,13 +78,7 @@ impl DebugRenderBackend for LineCollector {
         }
     }
 
-    fn draw_line(
-        &mut self,
-        _object: DebugRenderObject,
-        a: Vector,
-        b: Vector,
-        color: DebugColor,
-    ) {
+    fn draw_line(&mut self, _object: DebugRenderObject, a: Vector, b: Vector, color: DebugColor) {
         self.lines.push(DebugLine {
             a: [a.x, a.y, a.z],
             b: [b.x, b.y, b.z],
@@ -130,4 +124,3 @@ impl ColliderDebug {
         backend.lines
     }
 }
-

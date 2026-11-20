@@ -3,7 +3,7 @@ mod merge_strategy;
 pub use merge_strategy::*;
 
 use crate::{
-    bounds::assert_in_bounds, OrientedBlockFace, QuadBuffer, UnorientedQuad, Voxel, VoxelVisibility,
+    OrientedBlockFace, QuadBuffer, UnorientedQuad, Voxel, VoxelVisibility, bounds::assert_in_bounds,
 };
 
 use crate::extent::Extent;
@@ -97,7 +97,6 @@ pub fn greedy_quads_with_merge_strategy<T, S, Merger>(
     Merger: MergeStrategy<Voxel = T>,
 {
     assert_in_bounds(voxels, voxels_shape, min, max);
-
 
     output.reset(voxels.len());
     let GreedyQuadsBuffer {
@@ -250,4 +249,3 @@ where
         VoxelVisibility::Opaque => false,
     }
 }
-

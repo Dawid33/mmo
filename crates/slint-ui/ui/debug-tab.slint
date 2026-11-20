@@ -1,4 +1,4 @@
-import { Button, Checkbox, LabelFace } from "@widgets";
+import { Button, Checkbox, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
 
 // One stats row: "FPS" · "60".
 export struct DevStat {
@@ -23,12 +23,12 @@ export struct DevTickRow {
     max: string,
 }
 
-// The fortress panel's Debug tab (fortress-panel.slint; only in `dev_ui`
-// builds, F3 opens it) — dev tooling, not player UI: stats on the left with
-// stand-ins for systems that don't exist yet under them, the debug toggles
-// in the middle, and each live region's tick times on the right
+// The debug pane's page (`DebugPane` below; only in `dev_ui` builds, F3
+// shows it) — dev tooling, not player UI: stats on the left with stand-ins
+// for systems that don't exist yet under them, the debug toggles in the
+// middle, and each live region's tick times on the right
 // (crates/client/src/renderer/dev_ui.rs fills it).
-export component DebugPage {
+component DebugPage {
     in property <[DevStat]> stats;
     in property <[DevToggle]> toggles;
     in property <[DevTickRow]> tick-rows;
@@ -107,7 +107,7 @@ export component DebugPage {
         }
 
         // One row per live predicted region: its forward-tick wall time
-        // over the last ticks (native builds; empty on wasm).
+        // over the last ticks.
         tick-table := VerticalLayout {
             alignment: start;
             HorizontalLayout {
@@ -129,6 +129,62 @@ export component DebugPage {
                 LabelFace { width: root.tick-value-width; text: row.max; }
             }
             if root.tick-rows.length == 0: LabelFace { text: "No live regions"; }
+        }
+    }
+}
+
+// The F3 debug pane, top left: `DebugPage` in a frame. Drawn last in `GameUi`
+// so it sits over every other in-game element; it takes the pointer only
+// where it draws and never the keyboard (the client does not free a grabbed
+// cursor for it).
+export component DebugPane {
+    in property <[DevStat]> stats;
+    in property <[DevToggle]> toggles;
+    in property <[DevTickRow]> tick-rows;
+    callback toggle(int, bool);
+    callback complete-orders();
+    callback drop-body();
+    // The tallest the pane may be (the window's height less margins); the
+    // page is clipped to it.
+    in property <length> height-limit: 100000px;
+
+    out property <length> toggles-x: page.toggles-x;
+    out property <length> toggles-y: page.toggles-y;
+    out property <length> toggle-row-height: page.toggle-row-height;
+    out property <length> complete-button-x: page.complete-button-x;
+    out property <length> complete-button-y: page.complete-button-y;
+    out property <length> drop-button-x: page.drop-button-x;
+    out property <length> drop-button-y: page.drop-button-y;
+    out property <length> ticks-x: page.ticks-x;
+
+    property <length> pad-right: Styles.frame.box.padding.right + GraphicalSets.inset(Styles.frame.graphics).right;
+    property <length> pad-bottom: Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
+
+    width: frame.content-x + page.preferred-width + root.pad-right;
+    height: min(frame.content-y + page.preferred-height + root.pad-bottom, root.height-limit);
+
+    frame := FrameFace {
+        width: 100%;
+        height: 100%;
+
+        Rectangle {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: max(0px, frame.width - frame.content-x - root.pad-right);
+            height: max(0px, frame.height - frame.content-y - root.pad-bottom);
+            clip: true;
+            page := DebugPage {
+                x: 0;
+                y: 0;
+                width: self.preferred-width;
+                height: self.preferred-height;
+                stats: root.stats;
+                toggles: root.toggles;
+                tick-rows: root.tick-rows;
+                toggle(i, on) => { root.toggle(i, on); }
+                complete-orders => { root.complete-orders(); }
+                drop-body => { root.drop-body(); }
+            }
         }
     }
 }

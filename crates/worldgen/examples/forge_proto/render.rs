@@ -2,7 +2,7 @@
 
 use image::{ImageBuffer, Luma};
 
-use worldgen::forge::render::{encode_png, render, PreviewLayer};
+use worldgen::forge::render::{PreviewLayer, encode_png, render};
 use worldgen::forge::{Forged, World};
 
 // Engine frame, for the 16-bit heightmap (same mapping as examples/world_map.rs:

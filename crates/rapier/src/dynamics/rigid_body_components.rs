@@ -305,8 +305,7 @@ bitflags::bitflags! {
 
 /// Mass and angular inertia added to a rigid-body on top of its attached colliders’ contributions.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, PartialEq, state_hash::StateHash)] // mmo-fork: StateHash
 pub enum RigidBodyAdditionalMassProps {
     /// Mass properties to be added as-is.
     MassProps(MassProperties),

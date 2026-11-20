@@ -14,8 +14,8 @@ pub struct HudStatus {
 
 /// Each live predicted region's recent tick times, from the game thread's
 /// `ClientUpdateEvent::RegionTickTimes` (every
-/// `game::perf::TICK_TIME_REPORT_INTERVAL`, native only). Shown by the F3
-/// Debug tab (`dev_ui`).
+/// `game::perf::TICK_TIME_REPORT_INTERVAL`). Shown by the F3 debug pane
+/// (`dev_ui`).
 #[derive(Resource, Default)]
 pub struct RegionTickTimes(pub Vec<(game::RegionId, game::perf::TickTimeStats)>);
 
@@ -27,4 +27,3 @@ pub struct RegionTickTimes(pub Vec<(game::RegionId, game::perf::TickTimeStats)>)
 pub fn crosshair_visible(grab: CursorGrabMode, orbit: bool, third_person: bool) -> bool {
     !orbit && !third_person && grab == CursorGrabMode::Locked
 }
-

@@ -6,7 +6,7 @@ output "vpn_domain" {
   value = var.vpn_domain
 }
 
-output "urls" {
-  description = "Each VPN-only name as an https URL (the Service serves TLS on 443)."
-  value       = { for name, _ in var.names : name => "https://${name}.${var.vpn_domain}" }
+output "hosts" {
+  description = "Each VPN-only name's host (https where the Service serves TLS on 443, e.g. keycloak; plain http for grafana)."
+  value       = { for name, _ in var.names : name => "${name}.${var.vpn_domain}" }
 }

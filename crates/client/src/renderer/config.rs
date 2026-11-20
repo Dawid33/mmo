@@ -109,7 +109,11 @@ impl TerrainRenderConfig {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let near = std::env::var("VOXEL_NEAR_RENDER").ok();
-            Self::resolve(near.as_deref(), false, TerrainRenderCapabilities::compiled())
+            Self::resolve(
+                near.as_deref(),
+                false,
+                TerrainRenderCapabilities::compiled(),
+            )
         }
     }
 }
@@ -168,4 +172,3 @@ pub fn configure_native_antialiasing(
         }
     }
 }
-

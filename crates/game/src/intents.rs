@@ -55,7 +55,16 @@ pub const MAX_INTENT_REPLY_HOPS: u8 = 4;
 /// What an intent is addressed to: an entity by its id, or a world position
 /// (the region holding it owns it).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize, state_hash::StateHash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
 )]
 pub enum Target {
     Entity(EntityId),
@@ -97,7 +106,16 @@ impl Target {
 /// (its reply goes there). Variants are added by the task that migrates a
 /// system onto them.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize, state_hash::StateHash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
 )]
 pub enum Intent {
     /// Break the target block to air through the ordinary break path
@@ -110,19 +128,34 @@ pub enum Intent {
     /// it occupied (a solid block, or a body in the way). `survival`: the
     /// sender took one `block` item for it, which a refusal gives back
     /// (`Rollback::refund_refused_places_safe`).
-    PlaceBlock { block: crate::BlockId, by: EntityId, survival: bool },
+    PlaceBlock {
+        block: crate::BlockId,
+        by: EntityId,
+        survival: bool,
+    },
     /// Put `stack` into the pile of the target cell `cell` (a
     /// `Target::Pile`), as `item_piles.rs`'s deposit does there: that cell
     /// first, then the owner's own cells around it. The new items carry the
     /// sender's `expire` / `pickup` ticks (world ticks). Granted when all fit;
     /// else `Refused(.., PileFull)` carrying the items that did NOT fit,
     /// which the sender gets back (`Rollback::settle_pile_replies_safe`).
-    DepositItems { cell: WorldBlockPos, stack: crate::ItemStack, expire: Tick, pickup: Tick, by: EntityId },
+    DepositItems {
+        cell: WorldBlockPos,
+        stack: crate::ItemStack,
+        expire: Tick,
+        pickup: Tick,
+        by: EntityId,
+    },
     /// Take up to `count` of `item` from the pile of the target cell `cell`.
     /// Granted with the count actually taken (into the sender's inventory
     /// only then); `Refused(.., NothingThere)` when there is none (or not
     /// yet pickable) — the loser of a race for the last item.
-    TakeFromPile { cell: WorldBlockPos, item: crate::ItemId, count: u32, by: EntityId },
+    TakeFromPile {
+        cell: WorldBlockPos,
+        item: crate::ItemId,
+        count: u32,
+        by: EntityId,
+    },
     /// Put `stack` into the chest of the target cell `cell` (a
     /// `Target::Container`): into `slot` only (empty, or the same item), or
     /// with `None` anywhere it fits (a shift click). The sender gave the
@@ -130,7 +163,12 @@ pub enum Intent {
     /// `Refused(.., ContainerFull)` carrying the rest (`NothingThere`, all
     /// of it, with no chest there), which goes back to the sender
     /// (`Rollback::settle_container_replies_safe`).
-    PutInContainer { cell: WorldBlockPos, stack: crate::ItemStack, slot: Option<u8>, by: EntityId },
+    PutInContainer {
+        cell: WorldBlockPos,
+        stack: crate::ItemStack,
+        slot: Option<u8>,
+        by: EntityId,
+    },
     /// Take up to `count` of `item` from slot `slot` of the chest of the
     /// target cell `cell`. Granted with the count actually taken — into the
     /// sender's cursor (`to_cursor`) or inventory only then;
@@ -149,7 +187,10 @@ pub enum Intent {
 /// Required by the rollback map; never a real intent.
 impl Default for Intent {
     fn default() -> Self {
-        Intent::BreakBlock { by: EntityId::default(), survival: false }
+        Intent::BreakBlock {
+            by: EntityId::default(),
+            survival: false,
+        }
     }
 }
 
@@ -158,14 +199,56 @@ impl Intent {
     pub fn canonical(self, map: Option<crate::MapExtent>) -> Self {
         let c = |p| crate::canonical_block(map, p);
         match self {
-            Intent::DepositItems { cell, stack, expire, pickup, by } => {
-                Intent::DepositItems { cell: c(cell), stack, expire, pickup, by }
-            }
-            Intent::TakeFromPile { cell, item, count, by } => Intent::TakeFromPile { cell: c(cell), item, count, by },
-            Intent::PutInContainer { cell, stack, slot, by } => Intent::PutInContainer { cell: c(cell), stack, slot, by },
-            Intent::TakeFromContainer { cell, slot, item, count, to_cursor, by } => {
-                Intent::TakeFromContainer { cell: c(cell), slot, item, count, to_cursor, by }
-            }
+            Intent::DepositItems {
+                cell,
+                stack,
+                expire,
+                pickup,
+                by,
+            } => Intent::DepositItems {
+                cell: c(cell),
+                stack,
+                expire,
+                pickup,
+                by,
+            },
+            Intent::TakeFromPile {
+                cell,
+                item,
+                count,
+                by,
+            } => Intent::TakeFromPile {
+                cell: c(cell),
+                item,
+                count,
+                by,
+            },
+            Intent::PutInContainer {
+                cell,
+                stack,
+                slot,
+                by,
+            } => Intent::PutInContainer {
+                cell: c(cell),
+                stack,
+                slot,
+                by,
+            },
+            Intent::TakeFromContainer {
+                cell,
+                slot,
+                item,
+                count,
+                to_cursor,
+                by,
+            } => Intent::TakeFromContainer {
+                cell: c(cell),
+                slot,
+                item,
+                count,
+                to_cursor,
+                by,
+            },
             other @ (Intent::BreakBlock { .. } | Intent::PlaceBlock { .. }) => other,
         }
     }
@@ -185,7 +268,16 @@ impl Intent {
 
 /// Why an owner (or the manager) refused an intent.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize, state_hash::StateHash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
 )]
 pub enum IntentRefusal {
     /// The owning region is not running (never woken by an intent).
@@ -208,7 +300,9 @@ pub enum IntentRefusal {
 
 /// An owner's answer, delivered to `Intent::by` one tick after the intent
 /// applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash,
+)]
 pub enum IntentReply {
     Granted(Intent),
     Refused(Intent, IntentRefusal),
@@ -230,15 +324,32 @@ impl IntentReply {
     pub fn carried_items(&self) -> Option<(Option<WorldBlockPos>, crate::ItemStack)> {
         match *self {
             IntentReply::Granted(
-                Intent::TakeFromPile { cell, item, count, .. } | Intent::TakeFromContainer { cell, item, count, .. },
+                Intent::TakeFromPile {
+                    cell, item, count, ..
+                }
+                | Intent::TakeFromContainer {
+                    cell, item, count, ..
+                },
             ) => Some((Some(cell), crate::ItemStack { item, count })),
             IntentReply::Refused(
-                Intent::DepositItems { cell, stack, .. } | Intent::PutInContainer { cell, stack, .. },
+                Intent::DepositItems { cell, stack, .. }
+                | Intent::PutInContainer { cell, stack, .. },
                 _,
             ) => Some((Some(cell), stack)),
-            IntentReply::Refused(Intent::PlaceBlock { block, survival: true, .. }, _) => {
-                Some((None, crate::ItemStack { item: crate::ItemId::block(block), count: 1 }))
-            }
+            IntentReply::Refused(
+                Intent::PlaceBlock {
+                    block,
+                    survival: true,
+                    ..
+                },
+                _,
+            ) => Some((
+                None,
+                crate::ItemStack {
+                    item: crate::ItemId::block(block),
+                    count: 1,
+                },
+            )),
             _ => None,
         }
     }
@@ -258,7 +369,17 @@ pub trait Effects {
 
 /// An intent on its way or queued at its owner: `from` is the region it was
 /// sent from (its reply's `hint`), `due` the tick that opens with it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub struct SentIntent {
     pub target: Target,
     pub intent: Intent,
@@ -269,7 +390,17 @@ pub struct SentIntent {
 /// A reply on its way or queued for delivery: `hint` is where its entity was
 /// last known to be (a client routes there; the server asks its directory
 /// first). `hops` counts the deliveries that found the entity gone.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub struct SentReply {
     pub reply: IntentReply,
     pub hint: RegionCoords,
@@ -321,7 +452,11 @@ impl Effects for RegionEffects<'_> {
 impl Rollback {
     /// The replies delivered to `id` at this tick's opening, in order.
     pub fn intent_inbox(&self, id: EntityId) -> Vec<IntentReply> {
-        self.data.intent_inbox.range((id, 0)..=(id, u32::MAX)).map(|(_, r)| *r).collect()
+        self.data
+            .intent_inbox
+            .range((id, 0)..=(id, u32::MAX))
+            .map(|(_, r)| *r)
+            .collect()
     }
 
     /// Intents queued here, in application order (tests, debugging).
@@ -337,11 +472,21 @@ impl Rollback {
     /// Send `intent` at `target`, due at the next tick: queued here when this
     /// region owns the target, else into `out`. Its positions leave canonical
     /// (a block past a wrapped seam is the map's other end).
-    pub(crate) fn send_intent_safe(&mut self, target: Target, intent: Intent, out: &mut Vec<IntentMsg>) {
+    pub(crate) fn send_intent_safe(
+        &mut self,
+        target: Target,
+        intent: Intent,
+        out: &mut Vec<IntentMsg>,
+    ) {
         let map = self.data.map();
         let (target, intent) = (target.canonical(map), intent.canonical(map));
         let from = *self.data.region;
-        let sent = SentIntent { target, intent, from, due: *self.data.tick + 1 };
+        let sent = SentIntent {
+            target,
+            intent,
+            from,
+            due: *self.data.tick + 1,
+        };
         let here = match target {
             Target::Entity(id) => self.data.id_index.contains_key(&id),
             _ => target.region() == Some(from),
@@ -355,13 +500,22 @@ impl Rollback {
 
     fn queue_intent_safe(&mut self, sent: SentIntent) {
         let (due, by) = (sent.due, sent.intent.by());
-        let seq = self.data.intents.range((due, by, 0)..=(due, by, u32::MAX)).next_back().map_or(0, |(k, _)| k.2 + 1);
+        let seq = self
+            .data
+            .intents
+            .range((due, by, 0)..=(due, by, u32::MAX))
+            .next_back()
+            .map_or(0, |(k, _)| k.2 + 1);
         self.data.intents.insert((due, by, seq), sent);
     }
 
     fn queue_reply_safe(&mut self, sent: SentReply) {
         let (due, to) = (sent.due, sent.reply.to());
-        let last = self.data.intent_replies.range((due, to, 0)..=(due, to, u32::MAX)).next_back();
+        let last = self
+            .data
+            .intent_replies
+            .range((due, to, 0)..=(due, to, u32::MAX))
+            .next_back();
         let seq = last.map_or(0, |(k, _)| k.2 + 1);
         self.data.intent_replies.insert((due, to, seq), sent);
     }
@@ -386,9 +540,17 @@ impl Rollback {
         for k in stale {
             self.data.intent_inbox.remove(&k);
         }
-        let due: Vec<_> = self.data.intent_replies.keys().copied().take_while(|k| k.0 <= now).collect();
+        let due: Vec<_> = self
+            .data
+            .intent_replies
+            .keys()
+            .copied()
+            .take_while(|k| k.0 <= now)
+            .collect();
         for k in due {
-            let Some(sent) = self.data.intent_replies.remove(&k) else { continue };
+            let Some(sent) = self.data.intent_replies.remove(&k) else {
+                continue;
+            };
             let to = sent.reply.to();
             if to == EntityId::of_region(*self.data.region) {
                 self.region_reply_safe(sent.reply);
@@ -397,24 +559,56 @@ impl Rollback {
             if !self.data.id_index.contains_key(&to) {
                 // Gone (parked, despawned, or arrived elsewhere): sent on for
                 // the manager's directory to find.
-                log::debug!("[intents] reply for {to:?} sent on from {:?}: it is not here", *self.data.region);
-                out.push(IntentMsg::Reply(SentReply { due: now + 1, hops: sent.hops.saturating_add(1), ..sent }));
+                log::debug!(
+                    "[intents] reply for {to:?} sent on from {:?}: it is not here",
+                    *self.data.region
+                );
+                out.push(IntentMsg::Reply(SentReply {
+                    due: now + 1,
+                    hops: sent.hops.saturating_add(1),
+                    ..sent
+                }));
                 continue;
             }
-            let seq = self.data.intent_inbox.range((to, 0)..=(to, u32::MAX)).next_back().map_or(0, |(k, _)| k.1 + 1);
+            let seq = self
+                .data
+                .intent_inbox
+                .range((to, 0)..=(to, u32::MAX))
+                .next_back()
+                .map_or(0, |(k, _)| k.1 + 1);
             self.data.intent_inbox.insert((to, seq), sent.reply);
         }
-        let due: Vec<_> = self.data.intents.keys().copied().take_while(|k| k.0 <= now).collect();
+        let due: Vec<_> = self
+            .data
+            .intents
+            .keys()
+            .copied()
+            .take_while(|k| k.0 <= now)
+            .collect();
         for k in due {
-            let Some(sent) = self.data.intents.remove(&k) else { continue };
+            let Some(sent) = self.data.intents.remove(&k) else {
+                continue;
+            };
             // One that belongs elsewhere (restored from a save that owed it)
             // goes on to its owner.
-            if sent.target.region().is_some_and(|rc| rc != *self.data.region) {
+            if sent
+                .target
+                .region()
+                .is_some_and(|rc| rc != *self.data.region)
+            {
                 out.push(IntentMsg::Intent(sent));
                 continue;
             }
             let reply = self.apply_intent_safe(sent.target, sent.intent);
-            self.send_reply_safe(SentReply { reply, hint: sent.from, due: now + 1, hops: 0 }, out);
+            self.send_reply_safe(
+                SentReply {
+                    reply,
+                    hint: sent.from,
+                    due: now + 1,
+                    hops: 0,
+                },
+                out,
+            );
         }
     }
 
@@ -431,11 +625,25 @@ impl Rollback {
 
     /// `id` departs to `target` this tick: the replies queued here for it go
     /// with it, addressed there, due unchanged.
-    pub(crate) fn forward_replies_safe(&mut self, id: EntityId, target: RegionCoords, out: &mut Vec<IntentMsg>) {
-        let keys: Vec<_> = self.data.intent_replies.keys().copied().filter(|k| k.1 == id).collect();
+    pub(crate) fn forward_replies_safe(
+        &mut self,
+        id: EntityId,
+        target: RegionCoords,
+        out: &mut Vec<IntentMsg>,
+    ) {
+        let keys: Vec<_> = self
+            .data
+            .intent_replies
+            .keys()
+            .copied()
+            .filter(|k| k.1 == id)
+            .collect();
         for k in keys {
             if let Some(sent) = self.data.intent_replies.remove(&k) {
-                out.push(IntentMsg::Reply(SentReply { hint: target, ..sent }));
+                out.push(IntentMsg::Reply(SentReply {
+                    hint: target,
+                    ..sent
+                }));
             }
         }
     }
@@ -446,9 +654,19 @@ impl Rollback {
         let now = *self.data.tick;
         let keys: Vec<_> = self.data.intents.keys().copied().collect();
         for k in keys {
-            let Some(sent) = self.data.intents.remove(&k) else { continue };
+            let Some(sent) = self.data.intents.remove(&k) else {
+                continue;
+            };
             let reply = IntentReply::Refused(sent.intent, IntentRefusal::OwnerNotRunning);
-            self.send_reply_safe(SentReply { reply, hint: sent.from, due: now + 1, hops: 0 }, out);
+            self.send_reply_safe(
+                SentReply {
+                    reply,
+                    hint: sent.from,
+                    due: now + 1,
+                    hops: 0,
+                },
+                out,
+            );
         }
     }
 
@@ -461,14 +679,23 @@ impl Rollback {
         let p = match (target, intent) {
             (Target::Pile(p), Intent::DepositItems { .. } | Intent::TakeFromPile { .. }) => {
                 if p.to_local().0 != *self.data.region {
-                    log::warn!("[intents] {intent:?} for {p:?} reached {:?}, not its owner", *self.data.region);
+                    log::warn!(
+                        "[intents] {intent:?} for {p:?} reached {:?}, not its owner",
+                        *self.data.region
+                    );
                     return refused(IntentRefusal::BadTarget);
                 }
                 return self.apply_pile_intent_safe(p, intent);
             }
-            (Target::Container(p), Intent::PutInContainer { .. } | Intent::TakeFromContainer { .. }) => {
+            (
+                Target::Container(p),
+                Intent::PutInContainer { .. } | Intent::TakeFromContainer { .. },
+            ) => {
                 if p.to_local().0 != *self.data.region {
-                    log::warn!("[intents] {intent:?} for {p:?} reached {:?}, not its owner", *self.data.region);
+                    log::warn!(
+                        "[intents] {intent:?} for {p:?} reached {:?}, not its owner",
+                        *self.data.region
+                    );
                     return refused(IntentRefusal::BadTarget);
                 }
                 return self.apply_container_intent_safe(p, intent);
@@ -478,18 +705,28 @@ impl Rollback {
         };
         let (rc, local) = p.to_local();
         if rc != *self.data.region {
-            log::warn!("[intents] {intent:?} for {p:?} reached {:?}, not its owner", *self.data.region);
+            log::warn!(
+                "[intents] {intent:?} for {p:?} reached {:?}, not its owner",
+                *self.data.region
+            );
             return refused(IntentRefusal::BadTarget);
         }
         let pos = [local.x, local.y, local.z];
-        let Some((coords, l)) = crate::edit::locate(pos) else { return refused(IntentRefusal::NothingThere) };
+        let Some((coords, l)) = crate::edit::locate(pos) else {
+            return refused(IntentRefusal::NothingThere);
+        };
         let current = self.current_block(coords, l);
-        let ground = self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z));
+        let ground = self
+            .data
+            .ground
+            .get(&crate::ColumnCoords::new(coords.x, coords.z));
         if current.is_some_and(|b| crate::edit::is_bedrock_at(ground, b)) {
             return refused(IntentRefusal::Bedrock);
         }
         let done = match intent {
-            Intent::BreakBlock { survival: false, .. } => self.set_block_in(pos, crate::Block::new(crate::BlockId::AIR)),
+            Intent::BreakBlock {
+                survival: false, ..
+            } => self.set_block_in(pos, crate::Block::new(crate::BlockId::AIR)),
             Intent::BreakBlock { survival: true, .. } => {
                 let tick = *self.data.tick;
                 match self.mineable(pos) {
@@ -507,7 +744,9 @@ impl Rollback {
             Intent::DepositItems { .. }
             | Intent::TakeFromPile { .. }
             | Intent::PutInContainer { .. }
-            | Intent::TakeFromContainer { .. } => unreachable!("pile and chest intents returned above"),
+            | Intent::TakeFromContainer { .. } => {
+                unreachable!("pile and chest intents returned above")
+            }
         };
         if done {
             IntentReply::Granted(intent)
@@ -517,8 +756,26 @@ impl Rollback {
     }
 
     /// `Order::DevBreakBlock`: `client`'s body sends `BreakBlock` at `p`.
-    pub(crate) fn dev_break_block_safe(&mut self, client: ClientId, p: WorldBlockPos, out: &mut Vec<IntentMsg>) {
-        let Some(by) = self.data.player_entites.get(&client).and_then(|&k| self.entity_id(k)) else { return };
-        RegionEffects { data: self, out }.send(Target::Block(p), Intent::BreakBlock { by, survival: false });
+    pub(crate) fn dev_break_block_safe(
+        &mut self,
+        client: ClientId,
+        p: WorldBlockPos,
+        out: &mut Vec<IntentMsg>,
+    ) {
+        let Some(by) = self
+            .data
+            .player_entites
+            .get(&client)
+            .and_then(|&k| self.entity_id(k))
+        else {
+            return;
+        };
+        RegionEffects { data: self, out }.send(
+            Target::Block(p),
+            Intent::BreakBlock {
+                by,
+                survival: false,
+            },
+        );
     }
 }

@@ -109,7 +109,11 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
             let row = WorldRow {
                 world_id: id.to_string(),
                 name,
-                status: if closed { WorldStatus::Closed } else { WorldStatus::Open },
+                status: if closed {
+                    WorldStatus::Closed
+                } else {
+                    WorldStatus::Open
+                },
                 quic,
                 webtransport: wt,
                 cert_hash,
@@ -122,9 +126,16 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
                 let store = open(&db_url()?).await?;
                 // `world add` replaces the row: a world that had a host link loses it unless
                 // `--link` is given again (joins stop pushing, its kicks wait) — said aloud.
-                let before = store.world(&row.world_id).await.map_err(|e| e.to_string())?;
+                let before = store
+                    .world(&row.world_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 store.put_world(&row).await.map_err(|e| e.to_string())?;
-                Ok::<_, String>(before.and_then(|w| w.host_link).filter(|_| row.host_link.is_none()))
+                Ok::<_, String>(
+                    before
+                        .and_then(|w| w.host_link)
+                        .filter(|_| row.host_link.is_none()),
+                )
             })?;
             if let Some(old) = cleared {
                 writeln!(
@@ -137,7 +148,13 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
             writeln!(out, "world {id} added").map_err(io)
         }
         ["world", "list"] => {
-            let worlds = block_on(async { open(&db_url()?).await?.worlds().await.map_err(|e| e.to_string()) })?;
+            let worlds = block_on(async {
+                open(&db_url()?)
+                    .await?
+                    .worlds()
+                    .await
+                    .map_err(|e| e.to_string())
+            })?;
             for w in worlds {
                 let status = match w.status {
                     WorldStatus::Open => "open",
@@ -159,14 +176,24 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
             Ok(())
         }
         ["world", "remove", id] => {
-            let removed = block_on(async { open(&db_url()?).await?.remove_world(id).await.map_err(|e| e.to_string()) })?;
+            let removed = block_on(async {
+                open(&db_url()?)
+                    .await?
+                    .remove_world(id)
+                    .await
+                    .map_err(|e| e.to_string())
+            })?;
             if !removed {
                 return Err(format!("no world {id:?}"));
             }
             writeln!(out, "world {id} removed").map_err(io)
         }
         ["world", cmd @ ("open" | "close"), id] => {
-            let status = if *cmd == "open" { WorldStatus::Open } else { WorldStatus::Closed };
+            let status = if *cmd == "open" {
+                WorldStatus::Open
+            } else {
+                WorldStatus::Closed
+            };
             block_on(async {
                 let store = open(&db_url()?).await?;
                 let mut w = store
@@ -189,7 +216,10 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
                 let store = open(&db_url()?).await?;
                 let err = |e: crate::LoginError| e.to_string();
                 let now = now_secs();
-                let id = store.ensure_verified_account(&email, now).await.map_err(err)?;
+                let id = store
+                    .ensure_verified_account(&email, now)
+                    .await
+                    .map_err(err)?;
                 crate::api::mint_refresh(&store, id, now).await.map_err(err)
             })?;
             writeln!(out, "{token}").map_err(io)
@@ -206,11 +236,19 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("no account {email:?}"))?;
                 store
-                    .revoke_account_with_kicks(acc.account_id, now_secs(), crate::api::KICK_ACCOUNT_REVOKED)
+                    .revoke_account_with_kicks(
+                        acc.account_id,
+                        now_secs(),
+                        crate::api::KICK_ACCOUNT_REVOKED,
+                    )
                     .await
                     .map_err(|e| e.to_string())
             })?;
-            writeln!(out, "{email}: refresh tokens revoked, {kicks} session(s) kicked").map_err(io)
+            writeln!(
+                out,
+                "{email}: refresh tokens revoked, {kicks} session(s) kicked"
+            )
+            .map_err(io)
         }
         ["serve"] => Err("`serve` is run by the binary itself".into()),
         _ => Err(USAGE.into()),
@@ -221,7 +259,10 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
 /// routes) and `--link-cert <sha256>` (the coordinator's pin) go together; each URL must be
 /// `https://host:port` (a bare `host:port` is refused) and the pin 64 hex digits (stored
 /// lowercase).
-fn host_link_args(link: Option<String>, cert: Option<String>) -> Result<(Option<String>, Option<String>), String> {
+fn host_link_args(
+    link: Option<String>,
+    cert: Option<String>,
+) -> Result<(Option<String>, Option<String>), String> {
     match (link, cert) {
         (None, None) => Ok((None, None)),
         (Some(link), Some(cert)) => {
@@ -237,7 +278,9 @@ fn host_link_args(link: Option<String>, cert: Option<String>) -> Result<(Option<
 }
 
 async fn open(url: &str) -> Result<LoginStore, String> {
-    LoginStore::open(url).await.map_err(|e| format!("login database {}: {e}", crate::config::redact_url(url)))
+    LoginStore::open(url)
+        .await
+        .map_err(|e| format!("login database {}: {e}", crate::config::redact_url(url)))
 }
 
 fn block_on<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
@@ -258,25 +301,37 @@ fn keygen(dir: &Path) -> Result<String, String> {
     builder.recursive(true);
     #[cfg(unix)]
     builder.mode(KEY_DIR_MODE);
-    builder.create(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    builder
+        .create(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
 
     let mut next = 1u32;
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
-        if path.extension().is_some_and(|e| e == auth::KEY_FILE_EXTENSION)
-            && let Some(n) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse::<u32>().ok())
+        if path
+            .extension()
+            .is_some_and(|e| e == auth::KEY_FILE_EXTENSION)
+            && let Some(n) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u32>().ok())
         {
             next = next.max(n + 1);
         }
     }
     let (key, pem) = auth::SigningKey::generate();
-    let path = dir.join(format!("{next:0width$}.{}", auth::KEY_FILE_EXTENSION, width = KEY_FILE_DIGITS));
+    let path = dir.join(format!(
+        "{next:0width$}.{}",
+        auth::KEY_FILE_EXTENSION,
+        width = KEY_FILE_DIGITS
+    ));
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     opts.mode(KEY_FILE_MODE);
-    let mut f = opts.open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut f = opts
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     f.write_all(pem.as_bytes()).map_err(|e| e.to_string())?;
     Ok(key.kid().to_string())
 }
-

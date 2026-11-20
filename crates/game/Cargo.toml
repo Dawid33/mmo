@@ -10,6 +10,7 @@ autotests = false
 slotmapd = { workspace = true }
 macros = { workspace = true }
 log = { workspace = true }
+tracing = { workspace = true }
 bincode = { workspace = true }
 lz4_flex = { workspace = true }
 crossbeam = { workspace = true }
@@ -18,7 +19,6 @@ ron = "0.12"
 borrow = { workspace = true }
 derive_more = { workspace = true }
 crc32fast = { workspace = true }
-grid = { workspace = true }
 block-mesh = { workspace = true }
 assert-json-diff = { workspace = true }
 serde_json = { workspace = true }
@@ -29,7 +29,6 @@ glamx = { workspace = true }
 # D3: the few game floats that need a total order use f32::total_cmp; libm
 # keeps the camera's trig identical on native and wasm32.
 libm = "0.2"
-oorandom = { workspace = true }
 # Sim-owned animation (`anim.rs`): rigs parsed without textures. A path dep,
 # not `workspace = true`, so default features (PNG decoding) stay off here.
 bbmodel = { path = "../bbmodel", default-features = false }

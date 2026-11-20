@@ -7,10 +7,10 @@ use std::collections::{BTreeMap, VecDeque};
 
 use bevy::prelude::*;
 
-use game::history::{CalendarTick, CivId, PersonId, SiteId};
 use game::history::{
-    AdventureRefusal, LegendLine, LegendsFilter, LegendsPage, LegendsQuery, LEGENDS_PAGE_DEFAULT,
+    AdventureRefusal, LEGENDS_PAGE_DEFAULT, LegendLine, LegendsFilter, LegendsPage, LegendsQuery,
 };
+use game::history::{CalendarTick, CivId, PersonId, SiteId};
 use game::{CivMarker, PersonInfo, SiteMarker};
 
 /// How long a notice stays on screen.
@@ -71,16 +71,25 @@ pub(crate) fn populated(s: &SiteMarker) -> bool {
 impl AdventureSelection {
     /// Civs with at least one populated site, in id order.
     pub fn civs(sites: &[SiteMarker], civs: &[CivMarker]) -> Vec<CivMarker> {
-        let mut out: Vec<CivMarker> =
-            civs.iter().filter(|c| sites.iter().any(|s| s.civ == c.civ && populated(s))).cloned().collect();
+        let mut out: Vec<CivMarker> = civs
+            .iter()
+            .filter(|c| sites.iter().any(|s| s.civ == c.civ && populated(s)))
+            .cloned()
+            .collect();
         out.sort_by_key(|c| c.civ);
         out
     }
 
     /// The picked civ's populated sites.
     pub fn sites(&self, sites: &[SiteMarker]) -> Vec<SiteMarker> {
-        let Some(civ) = self.civ else { return Vec::new() };
-        sites.iter().filter(|s| s.civ == civ && populated(s)).cloned().collect()
+        let Some(civ) = self.civ else {
+            return Vec::new();
+        };
+        sites
+            .iter()
+            .filter(|s| s.civ == civ && populated(s))
+            .cloned()
+            .collect()
     }
 
     pub fn pick_civ(&mut self, civ: CivId) {
@@ -118,7 +127,13 @@ pub struct LegendsState {
 
 impl Default for LegendsState {
     fn default() -> Self {
-        Self { filter: LegendsFilter::All, lines: Vec::new(), next: None, total: 0, pending: None }
+        Self {
+            filter: LegendsFilter::All,
+            lines: Vec::new(),
+            next: None,
+            total: 0,
+            pending: None,
+        }
     }
 }
 
@@ -129,7 +144,11 @@ impl LegendsState {
         self.lines.clear();
         self.next = None;
         self.total = 0;
-        let q = LegendsQuery { filter, before: None, limit: LEGENDS_PAGE_DEFAULT };
+        let q = LegendsQuery {
+            filter,
+            before: None,
+            limit: LEGENDS_PAGE_DEFAULT,
+        };
         self.pending = Some(q.clone());
         q
     }
@@ -140,7 +159,11 @@ impl LegendsState {
             return None;
         }
         let before = self.next?;
-        let q = LegendsQuery { filter: self.filter.clone(), before: Some(before), limit: LEGENDS_PAGE_DEFAULT };
+        let q = LegendsQuery {
+            filter: self.filter.clone(),
+            before: Some(before),
+            limit: LEGENDS_PAGE_DEFAULT,
+        };
         self.pending = Some(q.clone());
         Some(q)
     }
@@ -158,26 +181,38 @@ impl LegendsState {
     }
 }
 
+/// How long an adventure refusal stays on the status line.
+pub const REFUSAL_SHOW_SECS: f32 = 5.0;
+
 impl HistoryView {
     /// The adventure refusal still worth showing at `now`.
     pub fn visible_adventure_refusal(&self, now: f32) -> Option<AdventureRefusal> {
         self.adventure_refusal
-            .filter(|(_, at)| now - *at < super::world_map::REFUSAL_SHOW_SECS)
+            .filter(|(_, at)| now - *at < REFUSAL_SHOW_SECS)
             .map(|(why, _)| why)
     }
 
     /// Name of `civ`, from the server's civ list.
     pub fn civ_name(&self, civ: CivId) -> String {
-        self.civs.iter().find(|c| c.civ == civ).map_or_else(|| format!("civ {}", civ.0), |c| c.name.clone())
+        self.civs
+            .iter()
+            .find(|c| c.civ == civ)
+            .map_or_else(|| format!("civ {}", civ.0), |c| c.name.clone())
     }
 }
 
 /// The inspector's lines for one selected person: `info` once it arrived,
 /// otherwise a placeholder from the id. Empty parts are left out.
 pub fn person_lines(person: PersonId, info: Option<&PersonInfo>) -> Vec<String> {
-    let Some(info) = info else { return vec![format!("Dwarf {}", person.0)] };
+    let Some(info) = info else {
+        return vec![format!("Dwarf {}", person.0)];
+    };
     let mut lines = vec![info.name.clone()];
-    lines.push(if info.alive { format!("age {}", info.age_years) } else { format!("age {} (deceased)", info.age_years) });
+    lines.push(if info.alive {
+        format!("age {}", info.age_years)
+    } else {
+        format!("age {} (deceased)", info.age_years)
+    });
     if let Some(site) = &info.site {
         lines.push(site.clone());
     }
@@ -225,7 +260,10 @@ impl HistoryOut<'_> {
 /// Drop notices shown for `NOTICE_SHOW_SECS` or longer; whether any was dropped.
 fn prune_notices(notices: &mut VecDeque<(String, f32)>, now: f32) -> bool {
     let before = notices.len();
-    while notices.front().is_some_and(|(_, at)| now - at >= NOTICE_SHOW_SECS) {
+    while notices
+        .front()
+        .is_some_and(|(_, at)| now - at >= NOTICE_SHOW_SECS)
+    {
         notices.pop_front();
     }
     notices.len() != before
@@ -239,7 +277,10 @@ pub fn person_info_refresh_due(received: Option<f32>, now: f32) -> bool {
 impl HistoryView {
     /// The oldest notice younger than `NOTICE_SHOW_SECS` (a pure read; `apply_history_msgs` prunes).
     pub fn current_notice(&self, now: f32) -> Option<&str> {
-        self.notices.iter().find(|(_, at)| now - at < NOTICE_SHOW_SECS).map(|(t, _)| t.as_str())
+        self.notices
+            .iter()
+            .find(|(_, at)| now - at < NOTICE_SHOW_SECS)
+            .map(|(t, _)| t.as_str())
     }
 
     /// Whether `person` should be requested from the server now.
@@ -248,7 +289,11 @@ impl HistoryView {
     }
 }
 
-pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<HistoryView>, time: Res<Time>) {
+pub fn apply_history_msgs(
+    mut msgs: MessageReader<HistoryMsg>,
+    mut view: ResMut<HistoryView>,
+    time: Res<Time>,
+) {
     let now = time.elapsed_secs();
     // Only an actual expiry marks the resource changed.
     prune_notices(&mut view.bypass_change_detection().notices, now).then(|| view.set_changed());
@@ -277,4 +322,3 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
         }
     }
 }
-

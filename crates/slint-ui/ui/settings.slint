@@ -1,0 +1,208 @@
+import { Button, Checkbox, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+import { Slider, Tabs } from "controls.slint";
+
+// One slider row: the label, the slider and its value in `unit`.
+component DistanceRow {
+    in property <string> label;
+    in property <string> unit: " m";
+    in property <float> minimum;
+    in property <float> maximum;
+    in property <float> step;
+    // Two-way (controls.slint's binding rule).
+    in-out property <float> value;
+    callback edited(float);
+
+    property <length> label-width: 170px;
+    property <length> value-width: 80px;
+    preferred-height: 32px;
+    min-height: 32px;
+
+    LabelFace {
+        x: 0;
+        y: 0;
+        width: root.label-width - 8px;
+        height: root.height;
+        text: root.label;
+    }
+    Slider {
+        x: root.label-width;
+        y: (root.height - self.preferred-height) / 2;
+        width: root.width - root.label-width - root.value-width - 8px;
+        height: self.preferred-height;
+        minimum: root.minimum;
+        maximum: root.maximum;
+        step: root.step;
+        value <=> root.value;
+        edited(v) => { root.edited(v); }
+    }
+    LabelFace {
+        x: root.width - root.value-width;
+        y: 0;
+        width: root.value-width;
+        height: root.height;
+        text: round(root.value) + root.unit;
+    }
+}
+
+// The settings window, one for the main menu (frontend.slint) and the game
+// (game.slint: the menu column's Settings and the Esc menu's): window-sized
+// like the other modal screens, a frame with tabs and Close. The client
+// (graphics_settings.rs) sets the values and takes the edits; the sliders
+// are bound TWO-WAY (controls.slint's binding rule).
+export component SettingsWindow {
+    callback close();
+    in-out property <int> tab: 0;
+
+    // Graphics: how far anything is drawn (fog beyond it), and how far
+    // terrain keeps its full detail before the block-scale twins.
+    in-out property <float> view-distance;
+    in property <float> view-distance-min;
+    in property <float> view-distance-max;
+    in property <float> view-distance-step;
+    callback view-distance-edited(float);
+    in-out property <float> detail-distance;
+    in property <float> detail-distance-min;
+    in property <float> detail-distance-max;
+    in property <float> detail-distance-step;
+    callback detail-distance-edited(float);
+    // Present in step with the display's refresh (native only).
+    in-out property <bool> vsync;
+    callback vsync-edited(bool);
+    // The body view: vertical field of view (degrees), the walking bob and
+    // the sprint widening.
+    in-out property <float> fov;
+    in property <float> fov-min;
+    in property <float> fov-max;
+    in property <float> fov-step;
+    callback fov-edited(float);
+    in-out property <bool> view-bobbing;
+    callback view-bobbing-edited(bool);
+    in-out property <bool> sprint-fov;
+    callback sprint-fov-edited(bool);
+    // General: the interface scale, percent of the default. A stepped
+    // slider: the widgets are sharpest at 67 % and 133 % (a scale of 1 and 2). The client applies it once the mouse
+    // button is up (a scale that changed mid-drag would move the slider
+    // under the pointer).
+    in-out property <float> ui-scale;
+    in property <float> ui-scale-min;
+    in property <float> ui-scale-max;
+    in property <float> ui-scale-step;
+    callback ui-scale-edited(float);
+
+    // The Close button's centre (window logical pixels), for headless tests.
+    out property <length> close-x: close-button.absolute-position.x + close-button.width / 2;
+    out property <length> close-y: close-button.absolute-position.y + close-button.height / 2;
+
+    // The window catches the pointer, so nothing under the modal reacts.
+    TouchArea { }
+
+    window := FrameFace {
+        title: "Settings";
+        width: min(root.width - 32px, 560px);
+        height: min(root.height - 32px, 420px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        Tabs {
+            x: window.content-x;
+            y: window.content-y;
+            width: max(0px, window.content-right - window.content-x);
+            height: max(0px, close-button.y - 8px - window.content-y);
+            tabs: ["Graphics", "General"];
+            collapsible: false;
+            selected <=> root.tab;
+
+            // `visible` wrappers rather than `if`: the rows keep their values.
+            Rectangle {
+                visible: root.tab == 0;
+                VerticalLayout {
+                    width: parent.width;
+                    height: parent.height;
+                    alignment: start;
+                    spacing: 8px;
+                    padding: 8px;
+                    DistanceRow {
+                        label: "Render distance";
+                        minimum: root.view-distance-min;
+                        maximum: root.view-distance-max;
+                        step: root.view-distance-step;
+                        value <=> root.view-distance;
+                        edited(v) => { root.view-distance-edited(v); }
+                    }
+                    DistanceRow {
+                        label: "Full detail distance";
+                        minimum: root.detail-distance-min;
+                        maximum: root.detail-distance-max;
+                        step: root.detail-distance-step;
+                        value <=> root.detail-distance;
+                        edited(v) => { root.detail-distance-edited(v); }
+                    }
+                    LabelFace { text: "Past the render distance there is only fog."; }
+                    // Sized to its own content: stretched to the row, the
+                    // whole row would toggle it.
+                    HorizontalLayout {
+                        alignment: start;
+                        Checkbox {
+                            text: "Vertical sync";
+                            checked <=> root.vsync;
+                            toggled(on) => { root.vsync-edited(on); }
+                        }
+                    }
+                    DistanceRow {
+                        label: "Field of view";
+                        unit: "°";
+                        minimum: root.fov-min;
+                        maximum: root.fov-max;
+                        step: root.fov-step;
+                        value <=> root.fov;
+                        edited(v) => { root.fov-edited(v); }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 16px;
+                        Checkbox {
+                            text: "View bobbing";
+                            checked <=> root.view-bobbing;
+                            toggled(on) => { root.view-bobbing-edited(on); }
+                        }
+                        Checkbox {
+                            text: "Sprint FOV";
+                            checked <=> root.sprint-fov;
+                            toggled(on) => { root.sprint-fov-edited(on); }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                visible: root.tab == 1;
+                VerticalLayout {
+                    width: parent.width;
+                    height: parent.height;
+                    alignment: start;
+                    spacing: 8px;
+                    padding: 8px;
+                    DistanceRow {
+                        label: "Interface scale";
+                        unit: " %";
+                        minimum: root.ui-scale-min;
+                        maximum: root.ui-scale-max;
+                        step: root.ui-scale-step;
+                        value <=> root.ui-scale;
+                        edited(v) => { root.ui-scale-edited(v); }
+                    }
+                    LabelFace { text: "Sharpest at 67 % and 133 %. Applies when the slider is released."; }
+                }
+            }
+        }
+
+        close-button := Button {
+            x: window.content-right - self.width;
+            y: window.height - Styles.frame.box.padding.bottom - GraphicalSets.inset(Styles.frame.graphics).bottom
+                - self.height;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            text: "Close";
+            clicked => { root.close(); }
+        }
+    }
+}

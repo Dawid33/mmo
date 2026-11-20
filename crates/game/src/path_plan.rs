@@ -22,8 +22,9 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    find_path, find_path_toward, nearest_standable, standable, Goal, MapExtent, RegionCoords, Rollback, TilePos,
-    TileSource, TileSummary, WorldBlockPos, WorldMap, BLOCK_VOXELS, FLIP_HYSTERESIS, HALO_BLOCKS, REGION_BLOCKS,
+    BLOCK_VOXELS, FLIP_HYSTERESIS, Goal, HALO_BLOCKS, MapExtent, REGION_BLOCKS, RegionCoords,
+    Rollback, TilePos, TileSource, TileSummary, WorldBlockPos, WorldMap, find_path,
+    find_path_toward, nearest_standable, standable,
 };
 
 /// Largest share of a region's raster cells under sea or lake that a coarse
@@ -61,17 +62,34 @@ pub struct RouteMap {
 impl RouteMap {
     /// The extent with nothing to walk around.
     pub fn open(extent: MapExtent) -> Self {
-        RouteMap { extent, blocked: BTreeSet::new() }
+        RouteMap {
+            extent,
+            blocked: BTreeSet::new(),
+        }
     }
 
     /// The extent with `blocked` walked around (those on the map).
-    pub fn with_blocked(extent: MapExtent, blocked: impl IntoIterator<Item = RegionCoords>) -> Self {
-        RouteMap { extent, blocked: blocked.into_iter().filter(|rc| extent.contains(*rc)).collect() }
+    pub fn with_blocked(
+        extent: MapExtent,
+        blocked: impl IntoIterator<Item = RegionCoords>,
+    ) -> Self {
+        RouteMap {
+            extent,
+            blocked: blocked
+                .into_iter()
+                .filter(|rc| extent.contains(*rc))
+                .collect(),
+        }
     }
 
     /// From the world map's tile summaries.
     pub fn from_world_map(map: &WorldMap) -> Self {
-        let blocked = map.tiles.iter().enumerate().filter(|(_, t)| route_blocked(t)).map(|(i, _)| map.coords(i));
+        let blocked = map
+            .tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| route_blocked(t))
+            .map(|(i, _)| map.coords(i));
         Self::with_blocked(map.extent(), blocked)
     }
 
@@ -90,7 +108,8 @@ impl RouteMap {
 /// gets there (`FLIP_HYSTERESIS`), and the tile is still inside the halo.
 pub const PORTAL_DEPTH_BLOCKS: i32 = 2;
 const _: () = assert!(
-    (PORTAL_DEPTH_BLOCKS * BLOCK_VOXELS as i32) as f32 > FLIP_HYSTERESIS && PORTAL_DEPTH_BLOCKS < HALO_BLOCKS,
+    (PORTAL_DEPTH_BLOCKS * BLOCK_VOXELS as i32) as f32 > FLIP_HYSTERESIS
+        && PORTAL_DEPTH_BLOCKS < HALO_BLOCKS,
     "a stretch's end must be past the hand-off and inside the halo"
 );
 /// Farthest (blocks, per axis) the A* heuristic's target lies from the start:
@@ -135,18 +154,29 @@ impl PathPlan {
         // The goal's image nearest `here` (on a wrapped map the short way
         // round; else the goal itself): every frame computation below uses it.
         let near = nearest_image(&goal, goal_region, here, extent);
-        let src = OnMap { src, here, map: extent };
+        let src = OnMap {
+            src,
+            here,
+            map: extent,
+        };
         let n = REGION_BLOCKS as i32;
         let gl = near.local_column(here);
         // Canonical: a stretch past a wrapped seam is stored on the map's
         // other end (read back by the nearest image, `local_tile`).
-        let world =
-            |path: Vec<TilePos>| path.into_iter().map(|p| crate::world_block(extent, here, p)).collect::<Vec<_>>();
+        let world = |path: Vec<TilePos>| {
+            path.into_iter()
+                .map(|p| crate::world_block(extent, here, p))
+                .collect::<Vec<_>>()
+        };
         // The goal itself, when the tiles around this region reach it.
         if let Some(column) = gl.filter(|c| c.iter().all(|&v| (-n..2 * n).contains(&v))) {
             let to = nearest_standable(&src, column, goal.y);
             if let Some(path) = to.and_then(|to| find_path(&src, from, to, max_nodes)) {
-                return Some(PathPlan { path: world(path), reaches_goal: true, extent });
+                return Some(PathPlan {
+                    path: world(path),
+                    reaches_goal: true,
+                    extent,
+                });
             }
             if goal_region == here {
                 return None;
@@ -163,7 +193,8 @@ impl PathPlan {
         let mut steps = vec![(sx, sz)];
         if sx != 0 && sz != 0 {
             for side in [(sx, 0), (0, sz)] {
-                let rc = crate::canonical(extent, RegionCoords::new(here.x + side.0, here.z + side.1));
+                let rc =
+                    crate::canonical(extent, RegionCoords::new(here.x + side.0, here.z + side.1));
                 if map.is_none_or(|m| m.passable(rc)) {
                     steps.push(side);
                 }
@@ -171,8 +202,14 @@ impl PathPlan {
         }
         for step in steps {
             let accept = |p: TilePos| past_seam(p, step);
-            if let Some(path) = find_path_toward(&src, from, toward, accept, max_nodes).filter(|p| p.len() > 1) {
-                return Some(PathPlan { path: world(path), reaches_goal: false, extent });
+            if let Some(path) =
+                find_path_toward(&src, from, toward, accept, max_nodes).filter(|p| p.len() > 1)
+            {
+                return Some(PathPlan {
+                    path: world(path),
+                    reaches_goal: false,
+                    extent,
+                });
             }
         }
         None
@@ -180,7 +217,10 @@ impl PathPlan {
 
     /// The path in `here`'s block frame (the nearest image of each tile).
     pub fn local_path(&self, here: RegionCoords) -> Vec<TilePos> {
-        self.path.iter().map(|&p| crate::local_tile(p, here, self.extent)).collect()
+        self.path
+            .iter()
+            .map(|&p| crate::local_tile(p, here, self.extent))
+            .collect()
     }
 }
 
@@ -191,7 +231,8 @@ impl PathPlan {
 /// the same way. Canonical in, canonical out: across a wrapped seam the
 /// route goes the short way round.
 pub fn next_region(from: RegionCoords, to: RegionCoords, map: Option<&RouteMap>) -> RegionCoords {
-    map.and_then(|m| route_step(from, to, m)).unwrap_or_else(|| line_step(from, to, map.map(RouteMap::extent)))
+    map.and_then(|m| route_step(from, to, m))
+        .unwrap_or_else(|| line_step(from, to, map.map(RouteMap::extent)))
 }
 
 /// Cost of an orthogonal / diagonal step of the coarse route.
@@ -246,12 +287,25 @@ pub fn route_step(from: RegionCoords, to: RegionCoords, map: &RouteMap) -> Optio
             return None;
         }
         expanded += 1;
-        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+        for (dx, dz) in [
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+        ] {
             // Neighbours canonical (a wrapped map's east of its last column
             // is its first); off the map they stay plain, as `from` / `to` may.
             let step = |dx: i32, dz: i32| {
                 let (x, z) = (p.x.checked_add(dx)?, p.z.checked_add(dz)?);
-                Some(extent.neighbour(p, dx, dz).unwrap_or(RegionCoords::new(x, z)))
+                Some(
+                    extent
+                        .neighbour(p, dx, dz)
+                        .unwrap_or(RegionCoords::new(x, z)),
+                )
             };
             let Some(q) = step(dx, dz) else { continue };
             if !ok(q) {
@@ -285,7 +339,10 @@ pub fn line_step(from: RegionCoords, to: RegionCoords, map: Option<MapExtent>) -
             let (dx, dz) = m.delta(from, to);
             (i128::from(dx), i128::from(dz))
         }
-        _ => (i128::from(to.x) - i128::from(from.x), i128::from(to.z) - i128::from(from.z)),
+        _ => (
+            i128::from(to.x) - i128::from(from.x),
+            i128::from(to.z) - i128::from(from.z),
+        ),
     };
     if (lx, lz) == (0, 0) {
         return to;
@@ -301,8 +358,14 @@ pub fn line_step(from: RegionCoords, to: RegionCoords, map: Option<MapExtent>) -
         }
     }
     let off_line = |&(dx, dz): &(i128, i128)| ((lx * dz - lz * dx).abs(), dx, dz);
-    let (dx, dz) = steps.into_iter().min_by_key(off_line).expect("a step toward a different region");
-    crate::canonical(map, RegionCoords::new(from.x + dx as i32, from.z + dz as i32))
+    let (dx, dz) = steps
+        .into_iter()
+        .min_by_key(off_line)
+        .expect("a step toward a different region");
+    crate::canonical(
+        map,
+        RegionCoords::new(from.x + dx as i32, from.z + dz as i32),
+    )
 }
 
 /// Whether tile `p` (in `here`'s frame) lies in the region `step` (an
@@ -330,8 +393,15 @@ fn hint(from: TilePos, goal: &Goal, here: RegionCoords) -> TilePos {
     ];
     let far = d[0].abs().max(d[1].abs());
     let reach = i128::from(HINT_REACH_BLOCKS);
-    let d = if far > reach { d.map(|v| v * reach / far) } else { d };
-    let y = goal.y.unwrap_or(from[1]).clamp(from[1].saturating_sub(HINT_LEVEL_REACH), from[1].saturating_add(HINT_LEVEL_REACH));
+    let d = if far > reach {
+        d.map(|v| v * reach / far)
+    } else {
+        d
+    };
+    let y = goal.y.unwrap_or(from[1]).clamp(
+        from[1].saturating_sub(HINT_LEVEL_REACH),
+        from[1].saturating_add(HINT_LEVEL_REACH),
+    );
     [from[0] + d[0] as i32, y, from[2] + d[1] as i32]
 }
 
@@ -345,25 +415,47 @@ fn onto_map(goal: &Goal, map: Option<MapExtent>) -> Option<Goal> {
     }
     let n = REGION_BLOCKS as i64;
     let lo = [i64::from(m.origin.x) * n, i64::from(m.origin.z) * n];
-    let hi = [lo[0] + i64::from(m.width) * n - 1, lo[1] + i64::from(m.height) * n - 1];
+    let hi = [
+        lo[0] + i64::from(m.width) * n - 1,
+        lo[1] + i64::from(m.height) * n - 1,
+    ];
     let x = if m.wraps() {
-        m.canonical_block(WorldBlockPos { x: goal.column[0], y: 0, z: 0 }).x
+        m.canonical_block(WorldBlockPos {
+            x: goal.column[0],
+            y: 0,
+            z: 0,
+        })
+        .x
     } else {
         goal.column[0].clamp(lo[0], hi[0])
     };
-    Some(Goal { column: [x, goal.column[1].clamp(lo[1], hi[1])], ..*goal })
+    Some(Goal {
+        column: [x, goal.column[1].clamp(lo[1], hi[1])],
+        ..*goal
+    })
 }
 
 /// `goal` (in `goal_region`, canonical) moved by whole map widths to the
 /// image nearest `here` ([`crate::region_delta`]); `goal` itself on a map
 /// that does not wrap, or with none.
-fn nearest_image(goal: &Goal, goal_region: RegionCoords, here: RegionCoords, map: Option<MapExtent>) -> Goal {
+fn nearest_image(
+    goal: &Goal,
+    goal_region: RegionCoords,
+    here: RegionCoords,
+    map: Option<MapExtent>,
+) -> Goal {
     let (dx, _) = crate::region_delta(map, here, goal_region);
     let shift = i64::from(here.x) + i64::from(dx) - i64::from(goal_region.x);
     if shift == 0 {
         return *goal;
     }
-    Goal { column: [goal.column[0] + shift * REGION_BLOCKS as i64, goal.column[1]], ..*goal }
+    Goal {
+        column: [
+            goal.column[0] + shift * REGION_BLOCKS as i64,
+            goal.column[1],
+        ],
+        ..*goal
+    }
 }
 
 /// A [`TileSource`] with every tile in a region off `map` read as air
@@ -378,13 +470,18 @@ impl<S: TileSource> OnMap<'_, S> {
     fn on_map(&self, x: i32, z: i32) -> bool {
         let Some(m) = self.map else { return true };
         let n = REGION_BLOCKS as i32;
-        m.neighbour(self.here, x.div_euclid(n), z.div_euclid(n)).is_some()
+        m.neighbour(self.here, x.div_euclid(n), z.div_euclid(n))
+            .is_some()
     }
 }
 
 impl<S: TileSource> TileSource for OnMap<'_, S> {
     fn block(&self, p: TilePos) -> crate::BlockId {
-        if self.on_map(p[0], p[2]) { self.src.block(p) } else { crate::BlockId::AIR }
+        if self.on_map(p[0], p[2]) {
+            self.src.block(p)
+        } else {
+            crate::BlockId::AIR
+        }
     }
     fn is_bedrock(&self, p: TilePos) -> bool {
         self.on_map(p[0], p[2]) && self.src.is_bedrock(p)
@@ -393,19 +490,33 @@ impl<S: TileSource> TileSource for OnMap<'_, S> {
         self.on_map(p[0], p[2]) && self.src.is_constructed(p)
     }
     fn tree_id(&self, p: TilePos) -> u32 {
-        if self.on_map(p[0], p[2]) { self.src.tree_id(p) } else { 0 }
+        if self.on_map(p[0], p[2]) {
+            self.src.tree_id(p)
+        } else {
+            0
+        }
     }
     fn tree_limb(&self, p: TilePos) -> u8 {
-        if self.on_map(p[0], p[2]) { self.src.tree_limb(p) } else { 0 }
+        if self.on_map(p[0], p[2]) {
+            self.src.tree_limb(p)
+        } else {
+            0
+        }
     }
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
-        self.on_map(column[0], column[1]).then(|| self.src.column_band(column)).flatten()
+        self.on_map(column[0], column[1])
+            .then(|| self.src.column_band(column))
+            .flatten()
     }
     fn slope(&self, p: TilePos) -> Option<crate::SlopeShape> {
         self.on_map(p[0], p[2]).then(|| self.src.slope(p)).flatten()
     }
     fn water_units(&self, p: TilePos) -> u16 {
-        if self.on_map(p[0], p[2]) { self.src.water_units(p) } else { 0 }
+        if self.on_map(p[0], p[2]) {
+            self.src.water_units(p)
+        } else {
+            0
+        }
     }
 }
 
@@ -420,12 +531,25 @@ impl Rollback {
     /// seed answers a `HaloRequest`, `WorldManager::seed_halo`), and the walk
     /// re-plans at the end of its stretch or when stuck, giving up only then.
     /// Dropped otherwise. No walker: no change.
-    pub fn continue_walk_safe(&mut self, e: crate::EntityKey, here: RegionCoords, map: Option<&RouteMap>) {
-        let Some(old) = self.data.ecs.walker.try_get(e).clone() else { return };
+    pub fn continue_walk_safe(
+        &mut self,
+        e: crate::EntityKey,
+        here: RegionCoords,
+        map: Option<&RouteMap>,
+    ) {
+        let Some(old) = self.data.ecs.walker.try_get(e).clone() else {
+            return;
+        };
         let extent = map.map(RouteMap::extent);
-        let src = OnMap { src: &*self, here, map: extent };
+        let src = OnMap {
+            src: &*self,
+            here,
+            map: extent,
+        };
         let rest = old.path.get(old.next as usize..).unwrap_or_default();
-        let walkable = rest.iter().all(|&p| standable(&src, crate::local_tile(p, here, extent)));
+        let walkable = rest
+            .iter()
+            .all(|&p| standable(&src, crate::local_tile(p, here, extent)));
         if old.to_goal && !rest.is_empty() && walkable {
             return;
         }

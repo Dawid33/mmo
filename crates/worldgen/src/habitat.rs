@@ -8,9 +8,9 @@
 //! Only + - * /, floor and sqrt are used (the `noise.rs` determinism policy).
 
 use crate::forged::{ForgedWorld, QRasterId};
-use game::Biome;
 use crate::noise::OctaveNoise;
-use crate::pipeline::{TerrainPipeline, SEA_TOP_BLOCK};
+use crate::pipeline::{SEA_TOP_BLOCK, TerrainPipeline};
+use game::Biome;
 
 /// Procedural world: temperature at sea level (deg C).
 pub const BASE_TEMPERATURE_C: f32 = 14.0;
@@ -79,7 +79,13 @@ fn procedural_temperature_c(surface_block: i32) -> f32 {
     BASE_TEMPERATURE_C - LAPSE_C_PER_M * (surface_block - SEA_TOP_BLOCK) as f32
 }
 
-fn assemble(rain: f32, temperature_c: f32, slope: f32, salinity: f32, biome: Option<Biome>) -> Habitat {
+fn assemble(
+    rain: f32,
+    temperature_c: f32,
+    slope: f32,
+    salinity: f32,
+    biome: Option<Biome>,
+) -> Habitat {
     let flatness = (1.0 - slope / FLATNESS_SLOPE_LIMIT).clamp(0.0, 1.0);
     Habitat {
         biome,
@@ -94,7 +100,10 @@ fn assemble(rain: f32, temperature_c: f32, slope: f32, salinity: f32, biome: Opt
 
 fn gradient_magnitude(f: impl Fn(f64, f64) -> f64, x: f64, z: f64) -> f32 {
     let e = SLOPE_PROBE_M;
-    let (dx, dz) = ((f(x + e, z) - f(x - e, z)) / (2.0 * e), (f(x, z + e) - f(x, z - e)) / (2.0 * e));
+    let (dx, dz) = (
+        (f(x + e, z) - f(x - e, z)) / (2.0 * e),
+        (f(x, z + e) - f(x, z - e)) / (2.0 * e),
+    );
     (dx * dx + dz * dz).sqrt() as f32
 }
 
@@ -104,12 +113,22 @@ impl HabitatSource for ForgedWorld {
     /// is not used. The biome is the column's dithered one.
     fn habitat(&self, x_m: f64, z_m: f64, _surface_block: i32) -> Habitat {
         let (ax, az) = self.to_artifact_m(x_m, z_m);
-        let rain = (self.bilinear_q(QRasterId::PrecipMm, ax, az).max(0.0) as f32) / REFERENCE_PRECIP_MM;
+        let rain =
+            (self.bilinear_q(QRasterId::PrecipMm, ax, az).max(0.0) as f32) / REFERENCE_PRECIP_MM;
         let temperature_c = self.bilinear_q(QRasterId::TemperatureC, ax, az) as f32;
         let coast = self.bilinear_coast(ax, az) as f32;
         let slope = gradient_magnitude(|x, z| self.ground_engine_m(x, z), x_m, z_m);
-        let h = assemble(rain, temperature_c, slope, 1.0 - coast / SALT_REACH_M, Some(self.biome_at(x_m, z_m)));
-        Habitat { moisture: h.moisture.min(FORGED_MOISTURE_SATURATION), ..h }
+        let h = assemble(
+            rain,
+            temperature_c,
+            slope,
+            1.0 - coast / SALT_REACH_M,
+            Some(self.biome_at(x_m, z_m)),
+        );
+        Habitat {
+            moisture: h.moisture.min(FORGED_MOISTURE_SATURATION),
+            ..h
+        }
     }
 }
 
@@ -129,17 +148,28 @@ impl ProceduralHabitat {
         ProceduralHabitat {
             seed,
             pipeline: TerrainPipeline::new(seed),
-            rain_noise: OctaveNoise::new(seed ^ 0x4A17_0000, PROCEDURAL_RAIN_FIRST_OCTAVE, vec![1.0]),
+            rain_noise: OctaveNoise::new(
+                seed ^ 0x4A17_0000,
+                PROCEDURAL_RAIN_FIRST_OCTAVE,
+                vec![1.0],
+            ),
         }
     }
 }
 
 impl HabitatSource for ProceduralHabitat {
     fn habitat(&self, x_m: f64, z_m: f64, surface_block: i32) -> Habitat {
-        let rain = (1.0 + PROCEDURAL_RAIN_AMPLITUDE * self.rain_noise.sample2(x_m, z_m)).max(0.0) as f32;
+        let rain =
+            (1.0 + PROCEDURAL_RAIN_AMPLITUDE * self.rain_noise.sample2(x_m, z_m)).max(0.0) as f32;
         let slope = gradient_magnitude(|x, z| self.pipeline.column(x, z).surface_y(), x_m, z_m);
         let salinity = 1.0 - (surface_block - SEA_TOP_BLOCK) as f32 / PROCEDURAL_SALT_BLOCKS;
-        assemble(rain, procedural_temperature_c(surface_block), slope, salinity, None)
+        assemble(
+            rain,
+            procedural_temperature_c(surface_block),
+            slope,
+            salinity,
+            None,
+        )
     }
 }
 
@@ -148,7 +178,13 @@ impl HabitatSource for ProceduralHabitat {
 /// two-pass chamfer (axis step 1, diagonal sqrt 2 cells). A raster with no sea
 /// reports the raster's longer side everywhere. `wrap_x`: columns 0 and
 /// `nx - 1` are neighbours (a world that wraps east-west).
-pub fn coast_distance_m<T: Copy + Into<f64>>(height: &[T], nx: usize, nz: usize, cell_m: f64, wrap_x: bool) -> Vec<f32> {
+pub fn coast_distance_m<T: Copy + Into<f64>>(
+    height: &[T],
+    nx: usize,
+    nz: usize,
+    cell_m: f64,
+    wrap_x: bool,
+) -> Vec<f32> {
     coast_distance_by(nx, nz, cell_m, wrap_x, |i| height[i].into() <= 0.0)
 }
 
@@ -164,14 +200,26 @@ const CHAMFER_SETTLED_SHARE: f32 = 1e-5;
 
 /// [`coast_distance_m`] with the sea test as a closure over the raster index
 /// (`ForgedWorld` reads its quantised height without decoding a copy).
-pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, wrap_x: bool, is_sea: impl Fn(usize) -> bool) -> Vec<f32> {
+pub fn coast_distance_by(
+    nx: usize,
+    nz: usize,
+    cell_m: f64,
+    wrap_x: bool,
+    is_sea: impl Fn(usize) -> bool,
+) -> Vec<f32> {
     const DIAGONAL: f32 = 1.414_213_5;
     let far = (nx.max(nz) as f64 * cell_m) as f32;
     let (axis, diag) = (cell_m as f32, cell_m as f32 * DIAGONAL);
-    let mut d: Vec<f32> = (0..nx * nz).map(|i| if is_sea(i) { 0.0 } else { far }).collect();
+    let mut d: Vec<f32> = (0..nx * nz)
+        .map(|i| if is_sea(i) { 0.0 } else { far })
+        .collect();
     let relax = |d: &mut Vec<f32>, x: usize, z: usize, dx: isize, dz: isize, step: f32| {
         let (jx, jz) = (x as isize + dx, z as isize + dz);
-        let jx = if wrap_x { jx.rem_euclid(nx as isize) } else { jx };
+        let jx = if wrap_x {
+            jx.rem_euclid(nx as isize)
+        } else {
+            jx
+        };
         if jx >= 0 && jz >= 0 && (jx as usize) < nx && (jz as usize) < nz {
             let via = d[jz as usize * nx + jx as usize] + step;
             let i = z * nx + x;
@@ -219,7 +267,11 @@ pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, wrap_x: bool, is_sea
         if cfg!(debug_assertions) && !settled {
             let mut more = d.clone();
             pair(&mut more);
-            let moved = d.iter().zip(&more).map(|(a, b)| (a - b) / a.max(axis)).fold(0.0, f32::max);
+            let moved = d
+                .iter()
+                .zip(&more)
+                .map(|(a, b)| (a - b) / a.max(axis))
+                .fold(0.0, f32::max);
             assert!(
                 moved <= CHAMFER_SETTLED_SHARE,
                 "chamfer distance not settled after the capped pass pairs: one more lowers it by {moved} of itself"
@@ -228,4 +280,3 @@ pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, wrap_x: bool, is_sea
     }
     d
 }
-

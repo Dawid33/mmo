@@ -82,7 +82,11 @@ pub struct WriteShape {
 impl Transition {
     /// Its mailbox rows, drops and login answers, counted.
     pub fn shape(&self) -> WriteShape {
-        WriteShape { rows: self.outbox.len(), drops: self.outbox_drop.len(), logins: self.login_outbox.len() }
+        WriteShape {
+            rows: self.outbox.len(),
+            drops: self.outbox_drop.len(),
+            logins: self.login_outbox.len(),
+        }
     }
 }
 
@@ -133,10 +137,15 @@ pub(super) fn decode_core<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Histor
     match bytes.split_first() {
         None => Err(corrupt("empty".into())),
         Some((&COORDINATOR_STATE_VERSION, body)) => {
-            let raw = lz4_flex::decompress_size_prepended(body).map_err(|e| corrupt(e.to_string()))?;
+            let raw =
+                lz4_flex::decompress_size_prepended(body).map_err(|e| corrupt(e.to_string()))?;
             bincode::deserialize(&raw).map_err(|e| corrupt(e.to_string()))
         }
-        Some((&v, _)) if v < COORDINATOR_STATE_VERSION => Err(HistoryLoadError::OldVersion { found: u32::from(v) }),
-        Some((v, _)) => Err(corrupt(format!("format {v}; this build reads {COORDINATOR_STATE_VERSION}"))),
+        Some((&v, _)) if v < COORDINATOR_STATE_VERSION => Err(HistoryLoadError::OldVersion {
+            found: u32::from(v),
+        }),
+        Some((v, _)) => Err(corrupt(format!(
+            "format {v}; this build reads {COORDINATOR_STATE_VERSION}"
+        ))),
     }
 }

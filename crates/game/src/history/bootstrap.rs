@@ -4,7 +4,7 @@ use std::cmp::Reverse;
 
 use super::calendar::*;
 use super::records::*;
-use super::rng::{roll, SALT_AGE, SALT_PLACE, SALT_SEX};
+use super::rng::{SALT_AGE, SALT_PLACE, SALT_SEX, roll};
 use super::rules::HISTORY_START_YEAR;
 use super::{History, SocietyGrid};
 
@@ -20,7 +20,14 @@ pub struct BootstrapParams {
 
 impl Default for BootstrapParams {
     fn default() -> Self {
-        BootstrapParams { seed: 0, civs: 4, founders_per_civ: 30, years: 100, civ_min_spacing_regions: 10, max_attempts: 8 }
+        BootstrapParams {
+            seed: 0,
+            civs: 4,
+            founders_per_civ: 30,
+            years: 100,
+            civ_min_spacing_regions: 10,
+            max_attempts: 8,
+        }
     }
 }
 
@@ -36,7 +43,9 @@ impl std::fmt::Display for BootstrapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BootstrapError::NoHabitableLand => write!(f, "the map has no habitable land"),
-            BootstrapError::AllCivsDied { attempts } => write!(f, "every civ died out in all {attempts} attempts"),
+            BootstrapError::AllCivsDied { attempts } => {
+                write!(f, "every civ died out in all {attempts} attempts")
+            }
         }
     }
 }
@@ -51,7 +60,11 @@ fn place_civs(h: &History, p: &BootstrapParams) -> Vec<crate::RegionCoords> {
         .filter(|&rc| grid.capacity(rc) > 0)
         .map(|rc| {
             let subject = (u64::from(rc.z as u32) << 32) | u64::from(rc.x as u32);
-            (Reverse(grid.capacity(rc)), h.roll(h.now, subject, SALT_PLACE), rc)
+            (
+                Reverse(grid.capacity(rc)),
+                h.roll(h.now, subject, SALT_PLACE),
+                rc,
+            )
         })
         .collect();
     cands.sort_by_key(|&(c, r, _)| (c, r));
@@ -60,7 +73,10 @@ fn place_civs(h: &History, p: &BootstrapParams) -> Vec<crate::RegionCoords> {
         if placed.len() as u32 >= p.civs {
             break;
         }
-        if placed.iter().all(|&o| grid.distance(o, rc) >= i64::from(p.civ_min_spacing_regions)) {
+        if placed
+            .iter()
+            .all(|&o| grid.distance(o, rc) >= i64::from(p.civ_min_spacing_regions))
+        {
             placed.push(rc);
         }
     }
@@ -90,7 +106,10 @@ fn seed_civ(h: &mut History, civ: CivId, region: crate::RegionCoords, n: u32, st
     // (mother, father, the younger parent's age in days)
     let mut pairs = Vec::new();
     let mut idx = 0u32;
-    let (pmin, pspan) = (FOUNDER_PARENT_MIN_YEARS * DAYS_PER_YEAR, FOUNDER_PARENT_SPAN_YEARS * DAYS_PER_YEAR);
+    let (pmin, pspan) = (
+        FOUNDER_PARENT_MIN_YEARS * DAYS_PER_YEAR,
+        FOUNDER_PARENT_SPAN_YEARS * DAYS_PER_YEAR,
+    );
     for _ in 0..couples {
         let fa = age_days(h, idx, pmin, pspan);
         let ma = age_days(h, idx + 1, pmin, pspan);
@@ -106,10 +125,16 @@ fn seed_civ(h: &mut History, civ: CivId, region: crate::RegionCoords, n: u32, st
     let child_max = FOUNDER_CHILD_MAX_YEARS * DAYS_PER_YEAR;
     let gap = FOUNDER_PARENT_GAP_YEARS * DAYS_PER_YEAR;
     for k in 0..kids {
-        let sex = if h.roll(start, key(idx), SALT_SEX) & 1 == 0 { Sex::Female } else { Sex::Male };
+        let sex = if h.roll(start, key(idx), SALT_SEX) & 1 == 0 {
+            Sex::Female
+        } else {
+            Sex::Male
+        };
         let parents = (!pairs.is_empty()).then(|| pairs[k as usize % pairs.len()]);
         // At most the younger parent's age minus the gap: ages 0..=(parent - gap).
-        let span = parents.map_or(child_max, |(_, _, young)| child_max.min(young.saturating_sub(gap) + 1));
+        let span = parents.map_or(child_max, |(_, _, young)| {
+            child_max.min(young.saturating_sub(gap) + 1)
+        });
         let c = h.add_founder(sex, born(age_days(h, idx, 0, span)));
         idx += 1;
         if let Some((f, m, _)) = parents {
@@ -143,5 +168,7 @@ pub fn bootstrap(map: &crate::WorldMap, p: &BootstrapParams) -> Result<History, 
             return Ok(h);
         }
     }
-    Err(BootstrapError::AllCivsDied { attempts: p.max_attempts })
+    Err(BootstrapError::AllCivsDied {
+        attempts: p.max_attempts,
+    })
 }

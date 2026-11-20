@@ -1,4 +1,5 @@
-import { FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+import { GraphicalSetView, LabelFace, LayerView, Styles } from "@widgets";
+import { Tabs } from "controls.slint";
 
 // One item slot as the sim's projection gives it (`game::ui::SlotView`):
 // `icon` is empty (zero-sized) for an item with no texture of its own.
@@ -6,58 +7,132 @@ export struct ItemSlot {
     filled: bool,
     count: string,
     icon: image,
+    // What the tooltip says ("" = none).
+    name: string,
 }
 
 export global InventoryConfig {
-    out property <length> slot-size: 44px;
-    out property <length> slot-gap: 3px;
+    // Factorio's slot (`inventory_slot`, 40 px): the HUD hotbar's slots, and
+    // the least an inventory screen slot gets.
+    out property <length> slot-size: 40px;
+    // The inventory screen sizes its slots to the window: the tab page (the
+    // character panel's rows and the hotbar's) takes this share of the
+    // height (9 columns of the width, if that is the tighter), up to
+    // `slot-size-max` — twice Factorio's slot.
+    out property <float> screen-share: 0.85;
+    out property <length> slot-size-max: 80px;
+    // The character panel, in slots: its height, and the model frame's width.
+    out property <int> character-rows: 4;
+    out property <int> character-columns: 3;
+    // Behind the player's model (`character_preview.rs` clears to it).
+    out property <color> character-backdrop: #17120e;
+    // Factorio's slots touch inside a deep frame; ours stand a little apart
+    // straight on the frame they are set in, which shows between them
+    // (owner, 2026-11-19: no sunken floor under the slots).
+    out property <length> slot-gap: 2px;
+    // Between the chest, the main grid and the hotbar row.
+    out property <length> block-gap: 12px;
     out property <int> columns: 9;
 }
 
-// One slot square: a dark well, the item's icon (a tint when it has none),
-// its count bottom right, a bright border when `selected`.
+// Colours drawn here rather than from a sprite.
+export global SlotPalette {
+    // The selected hotbar slot's border (the HUD's sliding frame too).
+    out property <color> selected: rgb(255, 215, 90);
+}
+
+// One slot square, Factorio's `inventory_slot` button (the widgets' style;
+// development art, to be replaced by our own on the same proportions): its
+// default, hovered and clicked faces, a bright border when `selected` (the
+// style's own selected face is the blue filter slot);
+// the item's icon (a tint when it has none), its count bottom right in
+// `count_label`, a key hint top left when `hint` is set. Larger than the
+// style's 40 px, the face grows as a whole.
 export component SlotCell {
     in property <ItemSlot> slot;
     in property <bool> selected;
+    in property <string> hint;
     // `right` = the secondary button.
     callback pressed(bool);
+    // The pointer came over the slot (true) or left it.
+    callback hover(bool);
     // False for the stack drawn at the pointer, which presses pass through.
     in property <bool> interactive: true;
-    width: InventoryConfig.slot-size;
-    height: InventoryConfig.slot-size;
+    // False for that stack too: it is the item alone.
+    in property <bool> well: true;
+    // The square's edge; the icon's inset and the hint follow it.
+    in property <length> size: InventoryConfig.slot-size;
+    property <bool> hovered;
+    property <bool> held;
+    property <float> grow: root.size / InventoryConfig.slot-size;
+    width: root.size;
+    height: root.size;
 
-    Rectangle {
-        background: rgba(20, 14, 10, 0.85);
-        border-width: root.selected ? 3px : 1px;
-        border-color: root.selected ? rgb(255, 215, 90) : rgba(190, 150, 70, 0.6);
+    if root.well: GraphicalSetView {
+        width: 100%;
+        height: 100%;
+        set: root.held ? Styles.inventory-slot.clicked.graphics
+            : root.hovered ? Styles.inventory-slot.hovered.graphics
+            : Styles.inventory-slot.default.graphics;
     }
 
+    // Factorio's 32 px icon in the 40 px slot.
     if root.slot.filled && root.slot.icon.width > 0: Image {
-        x: 4px;
-        y: 4px;
-        width: parent.width - 8px;
-        height: parent.height - 8px;
+        x: round(4px * root.grow / 1px) * 1px;
+        y: self.x;
+        width: parent.width - 2 * self.x;
+        height: parent.height - 2 * self.x;
         source: root.slot.icon;
         image-fit: contain;
         image-rendering: pixelated;
     }
     if root.slot.filled && root.slot.icon.width <= 0: Rectangle {
-        x: 8px;
-        y: 8px;
-        width: parent.width - 16px;
-        height: parent.height - 16px;
+        x: round(8px * root.grow / 1px) * 1px;
+        y: self.x;
+        width: parent.width - 2 * self.x;
+        height: parent.height - 2 * self.x;
         background: rgb(102, 77, 51);
     }
-    if root.slot.filled: Text {
-        x: parent.width - self.width - 3px;
-        y: parent.height - self.height - 1px;
+    if root.slot.filled: LabelFace {
+        style: Styles.count-label;
+        // The style's font, grown with the slot.
+        font: {
+            family: Styles.count-label.font.family,
+            weight: Styles.count-label.font.weight,
+            size: round(Styles.count-label.font.size * root.grow / 1px) * 1px,
+            line-height: Styles.count-label.font.line-height * root.grow,
+            ascent: Styles.count-label.font.ascent * root.grow,
+            descent: Styles.count-label.font.descent * root.grow,
+            outline: Styles.count-label.font.outline,
+            outline-color: Styles.count-label.font.outline-color,
+        };
         text: root.slot.count;
-        color: white;
-        font-size: 12px;
+        width: self.preferred-width;
+        height: self.preferred-height;
+        x: parent.width - self.width - round(3px * root.grow / 1px) * 1px;
+        y: parent.height - self.height;
+    }
+    if root.hint != "": Text {
+        x: round(4px * root.grow / 1px) * 1px;
+        y: round(1px * root.grow / 1px) * 1px;
+        text: root.hint;
+        color: root.selected ? SlotPalette.selected : rgba(255, 255, 255, 0.8);
+        font-family: Styles.count-label.font.family;
+        font-size: round(10px * root.grow / 1px) * 1px;
         font-weight: 700;
     }
 
+    if root.selected: Rectangle {
+        border-width: round(2px * root.grow / 1px) * 1px;
+        border-color: SlotPalette.selected;
+    }
+
     if root.interactive: TouchArea {
+        changed has-hover => {
+            root.hovered = self.has-hover;
+            root.hover(self.has-hover);
+        }
+        changed pressed => { root.held = self.pressed; }
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 root.pressed(event.button == PointerEventButton.right);
@@ -66,63 +141,221 @@ export component SlotCell {
     }
 }
 
-// The inventory screen, window-sized and modal: the chest's 9 x 3 grid above
-// (when `container` has slots), the main 9 x 3 grid, the hotbar row, and the
-// stack on the cursor following `pointer-x/y`. A slot press reports
-// `(in-container, index, right)` with the index within its own inventory:
-// hotbar column c = c, main row r column c = 9 + r * 9 + c, chest row r
+// One line of the character panel: a stat and its value.
+export struct StatRow {
+    label: string,
+    value: string,
+}
+
+// The inventory screen, window-sized and modal, in tabs. The first tab is
+// "Inventory" — the character panel (the player's model in a deep frame,
+// drawn by the client's preview camera over `character-*`, and the stats
+// beside it) above the hotbar row, which is all a player carries without a
+// backpack — or, with a chest open, "Chest": the chest's 9 x 3 grid above
+// the hotbar row. The Journal tab is empty for now. The stack on the cursor
+// follows `pointer-x/y`. A slot press reports `(in-container, index, right)`
+// with the index within its own inventory: hotbar column c = c, chest row r
 // column c = r * 9 + c. Presses elsewhere are swallowed.
 export component InventoryScreen {
     in property <[ItemSlot]> hotbar-slots;
-    in property <[ItemSlot]> main-slots;
     in property <[ItemSlot]> container-slots;
     in property <ItemSlot> cursor-slot;
     in property <int> selected;
     in property <length> pointer-x;
     in property <length> pointer-y;
     callback slot-pressed(bool, int, bool);
+    // The open tab: 0 the slots, 1 the journal.
+    in-out property <int> tab: 0;
+    // The character panel's lines. FILLER until the sim has player stats:
+    // the client sets nothing yet.
+    in property <string> character-name: "Wanderer";
+    in property <[StatRow]> stats: [
+        { label: "Health", value: "100 / 100" },
+        { label: "Stamina", value: "100 / 100" },
+        { label: "Hunger", value: "Sated" },
+        { label: "Strength", value: "10" },
+        { label: "Agility", value: "10" },
+        { label: "Endurance", value: "10" },
+        { label: "Renown", value: "0" },
+        { label: "Carrying", value: "Hotbar only" },
+    ];
 
-    property <length> pitch: InventoryConfig.slot-size + InventoryConfig.slot-gap;
-    property <length> chest-height: root.container-slots.length > 0 ? 3 * root.pitch + 12px : 0px;
+    // The slot under the pointer, for its tooltip: a hotbar column, or 100 +
+    // a chest slot; -1 = none. A slot clears it only while it is still its own.
+    property <int> tip-key: -1;
+    property <string> tip-text: root.tip-key >= 100 ? root.container-slots[root.tip-key - 100].name
+        : root.tip-key >= 0 ? root.hotbar-slots[root.tip-key].name : "";
+    function tip(key: int, on: bool) {
+        if (on) {
+            root.tip-key = key;
+        } else if (root.tip-key == key) {
+            root.tip-key = -1;
+        }
+    }
+
+    property <bool> chest: root.container-slots.length > 0;
+    // The margin around the slot grids inside the tab page.
+    property <length> margin: 12px;
+    // What the window leaves the page's rows (the top block's and the
+    // hotbar's) and 9 columns of slots.
+    property <length> rows-room: root.height * InventoryConfig.screen-share - tabs.collapsed-height - 2 * root.margin
+        - InventoryConfig.block-gap;
+    property <length> columns-room: root.width * InventoryConfig.screen-share - 2 * root.margin
+        - 2 * Styles.tabbed-pane.content-frame.box.padding.left;
+    property <length> cell: clamp(floor(min(root.rows-room / (InventoryConfig.character-rows + 1), root.columns-room / 9) / 1px) * 1px
+        - InventoryConfig.slot-gap, InventoryConfig.slot-size, InventoryConfig.slot-size-max);
+    property <length> pitch: root.cell + InventoryConfig.slot-gap;
+    // The block above the hotbar: the chest's grid, or the character panel.
+    property <length> top-height: (root.chest ? 3 : InventoryConfig.character-rows) * root.pitch - InventoryConfig.slot-gap;
+    property <length> slots-width: 9 * root.pitch - InventoryConfig.slot-gap;
+    // The hotbar row, measured from the top block's top.
+    property <length> hotbar-offset: root.top-height + InventoryConfig.block-gap;
+    property <length> slots-height: root.hotbar-offset + root.cell;
     // Top-left of the first slot of each grid (window logical pixels), for
     // headless tests; columns are `slot-pitch` apart.
-    out property <length> grid-left: grid.absolute-position.x + grid.content-x;
-    out property <length> container-top: grid.absolute-position.y + grid.content-y;
-    out property <length> main-top: root.container-top + root.chest-height;
-    out property <length> hotbar-top: root.main-top + 3 * root.pitch + 8px;
+    out property <length> grid-left: slots.absolute-position.x;
+    out property <length> container-top: slots.absolute-position.y;
+    out property <length> hotbar-top: root.container-top + root.hotbar-offset;
     out property <length> slot-pitch: root.pitch;
-    out property <length> slot-size: InventoryConfig.slot-size;
+    out property <length> slot-size: root.cell;
+    // Where the client draws the player's model (UI pixels in the window):
+    // inside the character frame's inner shadow. Only while `character-shown`.
+    out property <bool> character-shown: root.tab == 0 && !root.chest;
+    property <length> view-inset: 4px;
+    out property <length> character-x: slots.absolute-position.x + root.view-inset;
+    out property <length> character-y: slots.absolute-position.y + root.view-inset;
+    out property <length> character-width: root.view-width - 2 * root.view-inset;
+    out property <length> character-height: root.top-height - 2 * root.view-inset;
+    property <length> view-width: InventoryConfig.character-columns * root.pitch - InventoryConfig.slot-gap;
 
     // Swallows presses outside the slots.
     TouchArea { }
 
-    grid := FrameFace {
-        title: root.container-slots.length > 0 ? "Chest" : "Inventory";
-        width: self.content-x + 9 * root.pitch + Styles.frame.box.padding.right
-            + GraphicalSets.inset(Styles.frame.graphics).right;
-        height: self.content-y + root.chest-height + 6 * root.pitch + 8px + Styles.frame.box.padding.bottom
-            + GraphicalSets.inset(Styles.frame.graphics).bottom;
-        x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2;
+    // On whole physical pixels: at a fractional interface scale a frame that
+    // starts between two pixels leaves a see-through seam under its tab row.
+    tabs := Tabs {
+        width: ceil((root.slots-width + 2 * root.margin + 2 * Styles.tabbed-pane.content-frame.box.padding.left) / 1phx) * 1phx;
+        height: ceil((self.collapsed-height + root.slots-height + 2 * root.margin) / 1phx) * 1phx;
+        x: round((root.width - self.width) / 2 / 1phx) * 1phx;
+        y: round((root.height - self.height) / 2 / 1phx) * 1phx;
+        tabs: [root.chest ? "Chest" : "Inventory", "Journal"];
+        collapsible: false;
+        selected <=> root.tab;
 
-        for slot[i] in root.container-slots: SlotCell {
-            x: grid.content-x + mod(i, 9) * root.pitch;
-            y: grid.content-y + floor(i / 9) * root.pitch;
-            slot: slot;
-            pressed(right) => { root.slot-pressed(true, i, right); }
+        // `visible` wrappers rather than `if`: the probes above read `slots`.
+        Rectangle {
+            visible: root.tab == 0;
+            slots := Rectangle {
+                x: root.margin;
+                y: root.margin;
+                width: root.slots-width;
+                height: root.slots-height;
+
+                // The character panel: the model's deep frame, the stats.
+                if !root.chest: Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: root.view-width;
+                    height: root.top-height;
+                    LayerView {
+                        width: 100%;
+                        height: 100%;
+                        layer: Styles.slot-button-deep-frame.graphics.base;
+                    }
+                    // What the model stands against (the preview camera
+                    // clears to the same colour).
+                    Rectangle { background: InventoryConfig.character-backdrop; }
+                    LayerView {
+                        width: 100%;
+                        height: 100%;
+                        layer: Styles.slot-button-deep-frame.graphics.shadow;
+                    }
+                }
+                if !root.chest: VerticalLayout {
+                    x: root.view-width + InventoryConfig.block-gap;
+                    y: 0px;
+                    width: root.slots-width - self.x;
+                    height: root.top-height;
+                    alignment: start;
+                    spacing: 2px;
+                    LabelFace {
+                        style: Styles.heading-2-label;
+                        text: root.character-name;
+                    }
+                    Rectangle { height: 6px; }
+                    for row in root.stats: Rectangle {
+                        height: name.preferred-height;
+                        name := LabelFace {
+                            x: 0px;
+                            width: parent.width * 0.5;
+                            height: self.preferred-height;
+                            style: Styles.semibold-label;
+                            text: row.label;
+                        }
+                        LabelFace {
+                            x: parent.width * 0.5;
+                            width: parent.width * 0.5;
+                            height: self.preferred-height;
+                            text: row.value;
+                        }
+                    }
+                }
+
+                for slot[i] in root.container-slots: SlotCell {
+                    x: mod(i, 9) * root.pitch;
+                    y: floor(i / 9) * root.pitch;
+                    slot: slot;
+                    size: root.cell;
+                    pressed(right) => { root.slot-pressed(true, i, right); }
+                    hover(on) => { root.tip(100 + i, on); }
+                }
+                for slot[i] in root.hotbar-slots: SlotCell {
+                    x: i * root.pitch;
+                    y: root.hotbar-offset;
+                    slot: slot;
+                    size: root.cell;
+                    selected: i == root.selected;
+                    hint: i + 1;
+                    pressed(right) => { root.slot-pressed(false, i, right); }
+                    hover(on) => { root.tip(i, on); }
+                }
+            }
         }
-        for slot[i] in root.main-slots: SlotCell {
-            x: grid.content-x + mod(i, 9) * root.pitch;
-            y: grid.content-y + root.chest-height + floor(i / 9) * root.pitch;
-            slot: slot;
-            pressed(right) => { root.slot-pressed(false, 9 + i, right); }
+        Rectangle {
+            visible: root.tab == 1;
+            LabelFace {
+                x: root.margin;
+                y: root.margin;
+                width: parent.width - 2 * root.margin;
+                height: self.preferred-height;
+                text: "Nothing here yet";
+            }
         }
-        for slot[i] in root.hotbar-slots: SlotCell {
-            x: grid.content-x + i * root.pitch;
-            y: grid.content-y + root.chest-height + 3 * root.pitch + 8px;
-            slot: slot;
-            selected: i == root.selected;
-            pressed(right) => { root.slot-pressed(false, i, right); }
+    }
+
+    // The hovered item's tooltip, beside the pointer and inside the window;
+    // not while a stack is held.
+    if root.tip-text != "" && !root.cursor-slot.filled && root.tab == 0: Rectangle {
+        width: tip-label.preferred-width + 16px;
+        height: tip-label.preferred-height + 8px;
+        x: clamp(root.pointer-x + 14px, 0px, max(0px, root.width - self.width));
+        y: clamp(root.pointer-y + 18px, 0px, max(0px, root.height - self.height));
+        GraphicalSetView {
+            width: 100%;
+            height: 100%;
+            set: Styles.tooltip-frame.graphics;
+        }
+        tip-label := LabelFace {
+            x: 8px;
+            y: 4px;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            // Light on the tooltip's dark frame, whatever the theme makes of
+            // the label styles (the tooltip heading style is dark text for a
+            // light title bar).
+            style: Styles.semibold-label;
+            color: #ece6da;
+            text: root.tip-text;
         }
     }
 
@@ -131,6 +364,8 @@ export component InventoryScreen {
         x: root.pointer-x - self.width / 2;
         y: root.pointer-y - self.height / 2;
         slot: root.cursor-slot;
+        size: root.cell;
         interactive: false;
+        well: false;
     }
 }

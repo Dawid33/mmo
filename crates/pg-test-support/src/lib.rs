@@ -25,7 +25,10 @@ impl PgTestDb {
     pub fn create(prefix: &str) -> Option<PgTestDb> {
         let prefix = prefix.to_string();
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(Self::create_async(&prefix))
         })
         .join()
@@ -35,12 +38,26 @@ impl PgTestDb {
     /// Async create. `None` when the env var is unset.
     pub async fn create_async(prefix: &str) -> Option<PgTestDb> {
         let admin_url = admin_url()?;
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let name = format!("{prefix}_{:x}_{nanos}", std::process::id());
-        let mut c = PgConnection::connect(&admin_url).await.expect("connect to MMO_TEST_DATABASE_URL");
-        sqlx::query(&format!("CREATE DATABASE {name}")).execute(&mut c).await.expect("create database");
-        let (base, _) = admin_url.rsplit_once('/').expect("a url with a database name");
-        Some(PgTestDb { url: format!("{base}/{name}"), admin_url, name })
+        let mut c = PgConnection::connect(&admin_url)
+            .await
+            .expect("connect to MMO_TEST_DATABASE_URL");
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut c)
+            .await
+            .expect("create database");
+        let (base, _) = admin_url
+            .rsplit_once('/')
+            .expect("a url with a database name");
+        Some(PgTestDb {
+            url: format!("{base}/{name}"),
+            admin_url,
+            name,
+        })
     }
 
     pub fn name(&self) -> &str {
@@ -54,7 +71,10 @@ impl Drop for PgTestDb {
         let name = self.name.clone();
         // A fresh thread: dropping inside an async test must not start a runtime on its thread.
         let done = std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => return eprintln!("pg-test-support: runtime for dropping {name}: {e}"),
             };
@@ -63,8 +83,9 @@ impl Drop for PgTestDb {
                     Ok(c) => c,
                     Err(e) => return eprintln!("pg-test-support: connect to drop {name}: {e}"),
                 };
-                if let Err(e) =
-                    sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")).execute(&mut c).await
+                if let Err(e) = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                    .execute(&mut c)
+                    .await
                 {
                     eprintln!("pg-test-support: dropping {name}: {e}");
                 }

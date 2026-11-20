@@ -138,8 +138,7 @@ impl From<JointAxis> for JointAxesMask {
 /// rotation, which doesn't count revolutions, so a wider range is indistinguishable from no
 /// limit at all and leaves the axis free.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, PartialEq, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct JointLimits<N> {
     /// Minimum allowed value (angle for revolute, distance for prismatic).
     pub min: N,
@@ -200,8 +199,7 @@ impl<N: SimdRealCopy> From<[N; 2]> for JointLimits<N> {
 /// prismatic_joint.set_motor_position(5.0, 100.0, 10.0);  // stiffness=100, damping=10
 /// ```
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[derive(Copy, Clone, Debug, PartialEq, state_hash::StateHash)] // mmo-fork: StateHash
 pub struct JointMotor {
     /// Target velocity (units/sec for prismatic, rad/sec for revolute).
     pub target_vel: Real,

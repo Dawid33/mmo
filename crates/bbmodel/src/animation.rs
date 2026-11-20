@@ -92,7 +92,11 @@ pub struct BonePose {
 
 impl Default for BonePose {
     fn default() -> Self {
-        Self { rotation: [0.0; 3], position: [0.0; 3], scale: [1.0; 3] }
+        Self {
+            rotation: [0.0; 3],
+            position: [0.0; 3],
+            scale: [1.0; 3],
+        }
     }
 }
 
@@ -104,13 +108,25 @@ pub fn blend(a: &[(usize, BonePose)], b: &[(usize, BonePose)], w: f32) -> Vec<(u
     let mut nodes: Vec<usize> = a.iter().chain(b).map(|(n, _)| *n).collect();
     nodes.sort_unstable();
     nodes.dedup();
-    let get = |set: &[(usize, BonePose)], n| set.iter().find(|(m, _)| *m == n).map(|(_, p)| *p).unwrap_or_default();
+    let get = |set: &[(usize, BonePose)], n| {
+        set.iter()
+            .find(|(m, _)| *m == n)
+            .map(|(_, p)| *p)
+            .unwrap_or_default()
+    };
     let lerp = |x: [f32; 3], y: [f32; 3]| [0, 1, 2].map(|i| x[i] + (y[i] - x[i]) * w);
     nodes
         .into_iter()
         .map(|n| {
             let (p, q) = (get(a, n), get(b, n));
-            (n, BonePose { rotation: lerp(p.rotation, q.rotation), position: lerp(p.position, q.position), scale: lerp(p.scale, q.scale) })
+            (
+                n,
+                BonePose {
+                    rotation: lerp(p.rotation, q.rotation),
+                    position: lerp(p.position, q.position),
+                    scale: lerp(p.scale, q.scale),
+                },
+            )
         })
         .collect()
 }
@@ -170,7 +186,11 @@ fn interpolate(keys: &[Keyframe], time: f32, cx: &Context) -> Option<[f32; 3]> {
     }
     let at = |k: &Keyframe| {
         // A key the playhead sits on or before arrives with its pre point.
-        let dp = if k.time > time || (k.time - time).abs() < EPSILON { 0 } else { k.data_points.len() - 1 };
+        let dp = if k.time > time || (k.time - time).abs() < EPSILON {
+            0
+        } else {
+            k.data_points.len() - 1
+        };
         [0, 1, 2].map(|a| k.calc(a, dp, cx))
     };
     let (b, a) = match (before, after) {
@@ -182,25 +202,31 @@ fn interpolate(keys: &[Keyframe], time: f32, cx: &Context) -> Option<[f32; 3]> {
         (None, Some(a)) => return Some(at(a)),
         (Some(b), Some(a)) => (b, a),
     };
-    let alpha = if a.time > b.time { (time - b.time) / (a.time - b.time) } else { 0.0 };
-    use Interpolation::*;
-    Some(if b.interpolation == Linear && matches!(a.interpolation, Linear | Step) {
-        // getLerp: leave `b` by its post point, reach `a` by its pre point.
-        let b_dp = if b.data_points.len() > 1 { 1 } else { 0 };
-        [0, 1, 2].map(|i| {
-            let x = b.calc(i, b_dp, cx);
-            x + (a.calc(i, 0, cx) - x) * alpha
-        })
-    } else if b.interpolation == CatmullRom || a.interpolation == CatmullRom {
-        let mut sorted: Vec<&Keyframe> = keys.iter().collect();
-        sorted.sort_by(|x, y| x.time.total_cmp(&y.time));
-        let i = sorted.iter().position(|k| std::ptr::eq(*k, b)).unwrap_or(0);
-        let before_plus = i.checked_sub(1).map(|j| sorted[j]);
-        let after_plus = sorted.get(i + 2).copied();
-        [0, 1, 2].map(|axis| catmull_rom(before_plus, b, a, after_plus, axis, alpha, cx))
+    let alpha = if a.time > b.time {
+        (time - b.time) / (a.time - b.time)
     } else {
-        [0, 1, 2].map(|axis| bezier(b, a, axis, alpha, cx))
-    })
+        0.0
+    };
+    use Interpolation::*;
+    Some(
+        if b.interpolation == Linear && matches!(a.interpolation, Linear | Step) {
+            // getLerp: leave `b` by its post point, reach `a` by its pre point.
+            let b_dp = if b.data_points.len() > 1 { 1 } else { 0 };
+            [0, 1, 2].map(|i| {
+                let x = b.calc(i, b_dp, cx);
+                x + (a.calc(i, 0, cx) - x) * alpha
+            })
+        } else if b.interpolation == CatmullRom || a.interpolation == CatmullRom {
+            let mut sorted: Vec<&Keyframe> = keys.iter().collect();
+            sorted.sort_by(|x, y| x.time.total_cmp(&y.time));
+            let i = sorted.iter().position(|k| std::ptr::eq(*k, b)).unwrap_or(0);
+            let before_plus = i.checked_sub(1).map(|j| sorted[j]);
+            let after_plus = sorted.get(i + 2).copied();
+            [0, 1, 2].map(|axis| catmull_rom(before_plus, b, a, after_plus, axis, alpha, cx))
+        } else {
+            [0, 1, 2].map(|axis| bezier(b, a, axis, alpha, cx))
+        },
+    )
 }
 
 /// `getCatmullromLerp`: three.js `SplineCurve` through the neighbouring keys,
@@ -264,9 +290,17 @@ fn bezier(b: &Keyframe, a: &Keyframe, axis: usize, alpha: f32, cx: &Context) -> 
     };
     let points: Vec<(f32, f32)> = (0..=200).map(|i| point(i as f32 / 200.0)).collect();
     let mut order: Vec<usize> = (0..points.len()).collect();
-    order.sort_by(|&x, &y| (points[x].0 - time).abs().total_cmp(&(points[y].0 - time).abs()));
+    order.sort_by(|&x, &y| {
+        (points[x].0 - time)
+            .abs()
+            .total_cmp(&(points[y].0 - time).abs())
+    });
     let (c, s) = (points[order[0]], points[order[1]]);
-    let f = if (s.0 - c.0).abs() > 0.0 { ((time - c.0) / (s.0 - c.0)).clamp(0.0, 1.0) } else { 0.0 };
+    let f = if (s.0 - c.0).abs() > 0.0 {
+        ((time - c.0) / (s.0 - c.0)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     c.1 + (s.1 - c.1) * f
 }
 
@@ -284,7 +318,11 @@ pub(crate) fn read(
     let old_axes = version_lt(format_version, (5, 0));
     let mut out = Vec::new();
     for anim in animations {
-        let name = anim.get("name").and_then(Value::as_str).unwrap_or("animation").to_string();
+        let name = anim
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("animation")
+            .to_string();
         let loop_mode = match anim.get("loop").and_then(Value::as_str) {
             Some("loop") => LoopMode::Loop,
             Some("hold") => LoopMode::Hold,
@@ -297,15 +335,29 @@ pub(crate) fn read(
             uuids.sort();
             for uuid in uuids {
                 let animator = &animators[uuid];
-                if animator.get("type").and_then(Value::as_str).is_some_and(|t| t != "bone") {
+                if animator
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t != "bone")
+                {
                     continue; // effects, null objects, cameras
                 }
                 let Some(&node) = bones.get(uuid.as_str()) else {
-                    warnings.push(format!("animation {name:?}: animator {uuid} has no bone, skipped"));
+                    warnings.push(format!(
+                        "animation {name:?}: animator {uuid} has no bone, skipped"
+                    ));
                     continue;
                 };
-                let mut track = BoneTrack { node, ..Default::default() };
-                for k in animator.get("keyframes").and_then(Value::as_array).into_iter().flatten() {
+                let mut track = BoneTrack {
+                    node,
+                    ..Default::default()
+                };
+                for k in animator
+                    .get("keyframes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
                     let channel = k.get("channel").and_then(Value::as_str).unwrap_or("");
                     let key = match keyframe(k, channel, old_axes) {
                         Ok(key) => key,
@@ -325,7 +377,12 @@ pub(crate) fn read(
                 tracks.push(track);
             }
         }
-        out.push(Animation { name, loop_mode, length, tracks });
+        out.push(Animation {
+            name,
+            loop_mode,
+            length,
+            tracks,
+        });
     }
     (out, warnings)
 }
@@ -338,15 +395,24 @@ fn keyframe(k: &Value, channel: &str, old_axes: bool) -> Result<Keyframe, String
         _ => Interpolation::Linear,
     };
     let mut data_points = Vec::new();
-    for dp in k.get("data_points").and_then(Value::as_array).into_iter().flatten() {
+    for dp in k
+        .get("data_points")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let mut xyz = [Expr::Num(0.0), Expr::Num(0.0), Expr::Num(0.0)];
         for (i, axis) in ["x", "y", "z"].iter().enumerate() {
             let mut e = match dp.get(*axis) {
                 Some(Value::Number(n)) => Expr::Num(n.as_f64().unwrap_or(0.0) as f32),
-                Some(Value::String(s)) => molang::parse(s).map_err(|e| format!("{channel} {axis}: {e}"))?,
+                Some(Value::String(s)) => {
+                    molang::parse(s).map_err(|e| format!("{channel} {axis}: {e}"))?
+                }
                 _ => Expr::Num(if channel == "scale" { 1.0 } else { 0.0 }),
             };
-            let flip = old_axes && ((i == 0 && (channel == "position" || channel == "rotation")) || (i == 1 && channel == "rotation"));
+            let flip = old_axes
+                && ((i == 0 && (channel == "position" || channel == "rotation"))
+                    || (i == 1 && channel == "rotation"));
             if flip {
                 e = match e {
                     Expr::Num(n) => Expr::Num(-n),

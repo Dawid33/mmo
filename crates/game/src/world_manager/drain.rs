@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 
 use super::{RegionSpawner, SessionKind, WorldManager};
-use crate::{ClientId, ServerPacket, Tick, HOST_HEARTBEAT_MS, TICK_RATE};
+use crate::{ClientId, HOST_HEARTBEAT_MS, ServerPacket, TICK_RATE, Tick};
 
 /// An earlier deadline within this many ticks of the one held is the heartbeat mark's ageing
 /// (one beat period's worth), not a shortened notice: kept as it is, nobody told again.
@@ -31,7 +31,10 @@ pub const DRAIN_RETELL_TOLERANCE_TICKS: Tick = HOST_HEARTBEAT_MS / TICK_RATE;
 /// Whole seconds from world tick `now_tick` to the drain deadline `at_tick` (`TICK_RATE` is a
 /// tick's period in ms), rounded up; 0 once it has passed.
 pub fn drain_remaining_secs(at_tick: u64, now_tick: u64) -> u64 {
-    at_tick.saturating_sub(now_tick).saturating_mul(TICK_RATE).div_ceil(1000)
+    at_tick
+        .saturating_sub(now_tick)
+        .saturating_mul(TICK_RATE)
+        .div_ceil(1000)
 }
 
 /// The drain of this host ([`WorldManager::drain_at`]).
@@ -56,7 +59,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                     "[server] this host is draining: it leaves the world at world tick {at_tick} (in {} s); its players are told",
                     drain_remaining_secs(at_tick, now)
                 );
-                self.drain = Some(Drain { at_tick, told: BTreeMap::new() });
+                self.drain = Some(Drain {
+                    at_tick,
+                    told: BTreeMap::new(),
+                });
             }
             Some(d) if at_tick.saturating_add(DRAIN_RETELL_TOLERANCE_TICKS) < d.at_tick => {
                 log::info!(
@@ -81,13 +87,19 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// coordinator has applied its latest `Attach` (a leave is asked of the coordinator; with
     /// the link down nothing parks — the host keeps simulating and its players keep the notice).
     pub fn drain_due(&self) -> bool {
-        self.drain.as_ref().is_some_and(|d| self.spawner.world_tick() >= d.at_tick) && self.world_attached()
+        self.drain
+            .as_ref()
+            .is_some_and(|d| self.spawner.world_tick() >= d.at_tick)
+            && self.world_attached()
     }
 
     /// Test support: the sessions told the drain, with the deadline each was told.
     #[doc(hidden)]
     pub fn drain_told(&self) -> Vec<(ClientId, Tick)> {
-        self.drain.as_ref().map(|d| d.told.iter().map(|(c, t)| (*c, *t)).collect()).unwrap_or_default()
+        self.drain
+            .as_ref()
+            .map(|d| d.told.iter().map(|(c, t)| (*c, *t)).collect())
+            .unwrap_or_default()
     }
 
     /// Every home session not told the current deadline is told it; told sessions that are no
@@ -95,13 +107,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub(super) fn tell_drain(&mut self) {
         let Some(d) = self.drain.as_mut() else { return };
         let sessions = &self.sessions;
-        d.told.retain(|c, _| sessions.get(c).is_some_and(|s| s.kind == SessionKind::Home));
+        d.told
+            .retain(|c, _| sessions.get(c).is_some_and(|s| s.kind == SessionKind::Home));
         for (&client, session) in sessions {
             if session.kind != SessionKind::Home || d.told.get(&client) == Some(&d.at_tick) {
                 continue;
             }
             d.told.insert(client, d.at_tick);
-            let _ = self.out.send((Some(client), ServerPacket::HostDraining { at_tick: d.at_tick }));
+            let _ = self.out.send((
+                Some(client),
+                ServerPacket::HostDraining { at_tick: d.at_tick },
+            ));
         }
     }
 

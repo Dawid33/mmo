@@ -4,7 +4,8 @@
 // these pixels. Sizes the client also uses are in `HudConfig`; the client
 // asserts they match its constants.
 import { GameTheme } from "theme.slint";
-import { InventoryConfig, ItemSlot, SlotCell } from "inventory.slint";
+import { FrameFace, GraphicalSets, GraphicalSetView, LabelFace, Styles } from "@widgets";
+import { InventoryConfig, ItemSlot, SlotCell, SlotPalette } from "inventory.slint";
 import { ChatConfig, ChatLines, ChatRow } from "chat.slint";
 
 export global HudConfig {
@@ -16,6 +17,8 @@ export global HudConfig {
     out property <length> minimap-outline: 2px;
     out property <length> mining-bar-width: 48px;
     out property <length> mining-bar-height: 6px;
+    // The hotbar's frame around its slots.
+    out property <length> hotbar-pad: 8px;
 }
 
 export component HudUi inherits Window {
@@ -34,6 +37,30 @@ export component HudUi inherits Window {
     in property <int> hotbar-selected;
     in property <float> mining-progress;
 
+    // The selection frame slides to the selected slot instead of jumping.
+    // `hotbar-frame` is its place in slots, UNWRAPPED: a step across either
+    // end of the strip (the wheel wraps the selection) keeps going in the
+    // same direction, so the frame leaves by one end and comes in at the
+    // other rather than running back across all the slots.
+    private property <int> hotbar-prev;
+    private property <int> hotbar-turns;
+    private property <float> hotbar-frame;
+    animate hotbar-frame {
+        duration: 140ms;
+        easing: ease-out;
+    }
+    // The frame's place within the strip, `0 ..< columns`.
+    private property <float> hotbar-frame-at: Math.mod(Math.mod(root.hotbar-frame, InventoryConfig.columns) + InventoryConfig.columns, InventoryConfig.columns);
+    changed hotbar-selected => {
+        if (root.hotbar-selected - root.hotbar-prev == InventoryConfig.columns - 1) {
+            root.hotbar-turns -= 1;
+        } else if (root.hotbar-prev - root.hotbar-selected == InventoryConfig.columns - 1) {
+            root.hotbar-turns += 1;
+        }
+        root.hotbar-prev = root.hotbar-selected;
+        root.hotbar-frame = root.hotbar-selected + root.hotbar-turns * InventoryConfig.columns;
+    }
+
     // Commander box selection, window logical pixels.
     in property <bool> band-visible;
     in property <length> band-x;
@@ -45,6 +72,17 @@ export component HudUi inherits Window {
     // draws its outline and the entity/footprint overlay over it.
     in property <bool> minimap-visible;
     in property <image> minimap-overlay;
+    // UI pixels per window logical pixel (the interface scale in effect).
+    // The minimap stays `HudConfig`'s size in WINDOW pixels at every scale:
+    // the client hit-tests it there (commander/minimap.rs `screen_rect`).
+    in property <float> ui-scale: 1;
+    private property <length> map-size: HudConfig.minimap-size / root.ui-scale;
+    private property <length> map-margin: HudConfig.minimap-margin / root.ui-scale;
+
+    // What the player looks at (`look_target.rs`): the pane's title ("" = no
+    // pane) and its lines.
+    in property <string> look-title;
+    in property <[string]> look-lines;
 
     // The chat's newest lines while its box is closed (the client drops each
     // after a few seconds), where the box opens.
@@ -68,9 +106,9 @@ export component HudUi inherits Window {
 
     if root.minimap-visible: Rectangle {
         // The outline, outside the map.
-        x: HudConfig.minimap-margin - HudConfig.minimap-outline;
-        y: root.height - HudConfig.minimap-margin - HudConfig.minimap-size - HudConfig.minimap-outline;
-        width: HudConfig.minimap-size + 2 * HudConfig.minimap-outline;
+        x: root.map-margin - HudConfig.minimap-outline;
+        y: root.height - root.map-margin - root.map-size - HudConfig.minimap-outline;
+        width: root.map-size + 2 * HudConfig.minimap-outline;
         height: self.width;
         // A border only: the map shows through the square inside it.
         border-width: HudConfig.minimap-outline;
@@ -79,8 +117,8 @@ export component HudUi inherits Window {
         Rectangle {
             x: HudConfig.minimap-outline;
             y: HudConfig.minimap-outline;
-            width: HudConfig.minimap-size;
-            height: HudConfig.minimap-size;
+            width: root.map-size;
+            height: root.map-size;
             // Transparent: the map shows through (the HUD is pass-through, so no pointer to keep).
             background: transparent;
 
@@ -124,18 +162,42 @@ export component HudUi inherits Window {
     }
 
     if root.hotbar.length > 0: Rectangle {
-        width: root.hotbar.length * (InventoryConfig.slot-size + InventoryConfig.slot-gap) + InventoryConfig.slot-gap;
-        height: InventoryConfig.slot-size + 2 * InventoryConfig.slot-gap;
+        width: root.hotbar.length * (InventoryConfig.slot-size + InventoryConfig.slot-gap) - InventoryConfig.slot-gap;
+        height: InventoryConfig.slot-size;
         x: (root.width - self.width) / 2;
-        y: root.height - self.height - 4px;
-        background: rgba(0, 0, 0, 0.4);
+        y: root.height - self.height - 4px - HudConfig.hotbar-pad;
+        // The frame the strip is set in: it shows around the slots and
+        // between them, as the inventory window does around its own.
+        GraphicalSetView {
+            x: -HudConfig.hotbar-pad;
+            y: -HudConfig.hotbar-pad;
+            width: parent.width + 2 * HudConfig.hotbar-pad;
+            height: parent.height + 2 * HudConfig.hotbar-pad;
+            set: Styles.frame.graphics;
+        }
 
+        // Each slot under the digit key that selects it.
         for slot[i] in root.hotbar: SlotCell {
-            x: InventoryConfig.slot-gap + i * (InventoryConfig.slot-size + InventoryConfig.slot-gap);
-            y: InventoryConfig.slot-gap;
+            x: i * (InventoryConfig.slot-size + InventoryConfig.slot-gap);
+            y: 0px;
             slot: slot;
-            selected: i == root.hotbar-selected;
+            hint: i + 1;
             interactive: false;
+        }
+
+        // The frame crossing an end is cut off at the strip's edge.
+        Rectangle {
+            clip: true;
+            // The frame, and its copy one strip to the left: while the frame
+            // hangs over the right end, the copy is the part coming in at the left.
+            for copy in 2: Rectangle {
+                x: (root.hotbar-frame-at - copy * InventoryConfig.columns) * (InventoryConfig.slot-size + InventoryConfig.slot-gap);
+                y: 0px;
+                width: InventoryConfig.slot-size;
+                height: InventoryConfig.slot-size;
+                border-width: 3px;
+                border-color: SlotPalette.selected;
+            }
         }
     }
 
@@ -152,6 +214,24 @@ export component HudUi inherits Window {
             x: 0px;
             width: parent.width * clamp(root.mining-progress, 0, 1);
             background: rgb(255, 215, 90);
+        }
+    }
+
+    // Bottom right: what is under the crosshair.
+    if root.look-title != "": look := FrameFace {
+        property <length> line-height: 22px;
+        title: root.look-title;
+        width: 260px;
+        height: self.content-y + root.look-lines.length * self.line-height + 4px + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: root.width - self.width - 12px;
+        y: root.height - self.height - 12px;
+        for line[i] in root.look-lines: LabelFace {
+            x: look.content-x;
+            y: look.content-y + i * look.line-height;
+            width: look.content-right - look.content-x;
+            height: look.line-height;
+            text: line;
         }
     }
 }

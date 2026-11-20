@@ -59,9 +59,10 @@ use crate::edit::BlockPos;
 use crate::intents::{Effects as _, RegionEffects};
 use crate::movement::{PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 use crate::{
-    block_props, BlockId, ClientId, EntityId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Intent,
-    IntentMsg, IntentRefusal, IntentReply, ItemId, ItemStack, RegionCoords, Rollback, Target, WorldBlockPos,
-    BLOCK_VOXELS, HALO_BLOCKS, MAX_STACK, REGION_BLOCKS,
+    BLOCK_VOXELS, BlockId, ClientId, EntityId, GameDataTransactionKind, GameDataUpdate,
+    GameDataUpdateKind, HALO_BLOCKS, Intent, IntentMsg, IntentRefusal, IntentReply, ItemId,
+    ItemStack, MAX_STACK, REGION_BLOCKS, RegionCoords, Rollback, Target, WorldBlockPos,
+    block_props,
 };
 
 /// Most stacks one pile (one cell) holds.
@@ -93,7 +94,9 @@ pub const PICKUP_REACH_V_BLOCKS: i32 = 1;
 pub const PILE_TAKE_RETRY_TICKS: u64 = 4;
 
 /// The items resting in one cell.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+#[derive(
+    Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, state_hash::StateHash,
+)]
 pub struct ItemPile {
     /// At most [`PILE_MAX_STACKS`], each `1..=MAX_STACK`.
     pub stacks: Vec<ItemStack>,
@@ -105,7 +108,9 @@ pub struct ItemPile {
 
 impl ItemPile {
     pub fn view(&self) -> PileView {
-        PileView { stacks: self.stacks.clone() }
+        PileView {
+            stacks: self.stacks.clone(),
+        }
     }
 
     /// Total items in the pile.
@@ -150,7 +155,11 @@ pub(crate) fn touch_cell(p: WorldBlockPos) {
 /// thread's pile outbox.
 fn send_pile_intent(r: &mut Rollback, cell: WorldBlockPos, intent: Intent) {
     let mut out = Vec::new();
-    RegionEffects { data: r, out: &mut out }.send(Target::Pile(cell), intent);
+    RegionEffects {
+        data: r,
+        out: &mut out,
+    }
+    .send(Target::Pile(cell), intent);
     PILE_INTENTS.with(|q| q.borrow_mut().extend(out));
 }
 
@@ -255,13 +264,24 @@ fn cells_near(c: WorldBlockPos, map: Option<crate::MapExtent>) -> Vec<WorldBlock
     for dx in -r..=r {
         for dy in -r..=r {
             for dz in -r..=r {
-                out.push(WorldBlockPos::new(c.x + dx as i64, c.y + dy, c.z + dz as i64));
+                out.push(WorldBlockPos::new(
+                    c.x + dx as i64,
+                    c.y + dy,
+                    c.z + dz as i64,
+                ));
             }
         }
     }
-    let cheb = |p: &WorldBlockPos| (p.x - c.x).abs().max((p.y - c.y).abs() as i64).max((p.z - c.z).abs());
+    let cheb = |p: &WorldBlockPos| {
+        (p.x - c.x)
+            .abs()
+            .max((p.y - c.y).abs() as i64)
+            .max((p.z - c.z).abs())
+    };
     out.sort_by_key(|p| (cheb(p), *p));
-    out.into_iter().map(|p| crate::canonical_block(map, p)).collect()
+    out.into_iter()
+        .map(|p| crate::canonical_block(map, p))
+        .collect()
 }
 
 /// Pile edits planned against the live maps before one batched write: the
@@ -293,7 +313,11 @@ impl<'a> PileOverlay<'a> {
     }
 
     fn base(&self, p: WorldBlockPos) -> Option<&'a ItemPile> {
-        if self.owns(p) { self.own.get(&p) } else { self.halo.get(&p) }
+        if self.owns(p) {
+            self.own.get(&p)
+        } else {
+            self.halo.get(&p)
+        }
     }
 
     fn get(&self, p: WorldBlockPos) -> Option<&ItemPile> {
@@ -347,7 +371,9 @@ impl Rollback {
     pub fn pile_support(&self, pos: WorldBlockPos) -> bool {
         self.pile_cell_seen(pos)
             && self.halo_block(pos).is_some_and(|b| {
-                b.id != BlockId::AIR && !crate::block_props().is_liquid(b.id) && block_props().is_solid(b.id)
+                b.id != BlockId::AIR
+                    && !crate::block_props().is_liquid(b.id)
+                    && block_props().is_solid(b.id)
             })
     }
 
@@ -355,7 +381,8 @@ impl Rollback {
     /// it was seeded with. A deposit's search uses only cells it sees.
     pub fn pile_cell_seen(&self, p: WorldBlockPos) -> bool {
         let p = self.data.canonical_block(p);
-        p.to_local().0 == *self.data.region || (self.halo_block(p).is_some() && self.halo_column_known(p))
+        p.to_local().0 == *self.data.region
+            || (self.halo_block(p).is_some() && self.halo_column_known(p))
     }
 
     /// Where a pile put at `from` comes to rest (Decision 2): up out of solid
@@ -370,7 +397,10 @@ impl Rollback {
             rose += 1;
         }
         let mut fell = 0;
-        while fell < MAX_PILE_FALL_BLOCKS && self.pile_cell_seen(up(p, -1)) && !self.pile_support(up(p, -1)) {
+        while fell < MAX_PILE_FALL_BLOCKS
+            && self.pile_cell_seen(up(p, -1))
+            && !self.pile_support(up(p, -1))
+        {
             p = up(p, -1);
             fell += 1;
         }
@@ -382,7 +412,11 @@ impl Rollback {
     /// neighbour's.
     pub fn pile_seen(&self, p: WorldBlockPos) -> Option<&ItemPile> {
         let p = self.data.canonical_block(p);
-        if p.to_local().0 == *self.data.region { self.data.item_piles.get(&p) } else { self.data.halo_piles.get(&p) }
+        if p.to_local().0 == *self.data.region {
+            self.data.item_piles.get(&p)
+        } else {
+            self.data.halo_piles.get(&p)
+        }
     }
 
     /// Drops `stack` at local cell `at` (Decision 1): settles, merges into
@@ -393,7 +427,13 @@ impl Rollback {
     /// back to). Returns how many items the caps destroyed here — overflow
     /// plus any evicted pile's items (0 normally); every one is counted
     /// (`record_destroyed`). Emits `SetItemPiles` both ways.
-    pub fn deposit_items_safe(&mut self, at: BlockPos, stack: ItemStack, tick: u64, pickup_delay: u64) -> u32 {
+    pub fn deposit_items_safe(
+        &mut self,
+        at: BlockPos,
+        stack: ItemStack,
+        tick: u64,
+        pickup_delay: u64,
+    ) -> u32 {
         self.deposit_items_from_safe(at, at, stack, tick, pickup_delay)
     }
 
@@ -432,18 +472,43 @@ impl Rollback {
         self.write_piles_safe(changes);
         for ((cell, item), count) in remote {
             let stack = ItemStack { item, count };
-            send_pile_intent(self, cell, Intent::DepositItems { cell, stack, expire, pickup, by });
+            send_pile_intent(
+                self,
+                cell,
+                Intent::DepositItems {
+                    cell,
+                    stack,
+                    expire,
+                    pickup,
+                    by,
+                },
+            );
         }
         self.send_landing(origin, self.settle_cell(at), vec![stack], tick);
-        record_destroyed(overflow, at, "deposit overflow") + record_destroyed(evicted, at, "pile cap eviction")
+        record_destroyed(overflow, at, "deposit overflow")
+            + record_destroyed(evicted, at, "pile cap eviction")
     }
 
     /// Tells the renderer items went from `from` to `to` (nothing if they
     /// did not move), in this region's frame. Render-only.
-    fn send_landing(&self, from: WorldBlockPos, to: WorldBlockPos, stacks: Vec<ItemStack>, tick: u64) {
+    fn send_landing(
+        &self,
+        from: WorldBlockPos,
+        to: WorldBlockPos,
+        stacks: Vec<ItemStack>,
+        tick: u64,
+    ) {
         if from != to && !stacks.is_empty() {
-            let flight = PileFlight { from: self.data.local_block(from), to: self.data.local_block(to), stacks, tick };
-            self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::ItemsLanded(vec![flight])));
+            let flight = PileFlight {
+                from: self.data.local_block(from),
+                to: self.data.local_block(to),
+                stacks,
+                tick,
+            };
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::ItemsLanded(vec![flight]),
+            ));
         }
     }
 
@@ -458,11 +523,21 @@ impl Rollback {
         let cell = self.data.world_block(cell);
         let by = EntityId::of_region(*self.data.region);
         let mut ov = PileOverlay::new(self);
-        let Some(pile) = ov.slot(cell).take() else { return 0 };
+        let Some(pile) = ov.slot(cell).take() else {
+            return 0;
+        };
         let stacks = pile.stacks.clone();
         let mut overflow = 0;
         for s in pile.stacks {
-            overflow += plan_deposit(self, &mut ov, cell, s, pile.expire_tick, pile.pickup_after_tick, true);
+            overflow += plan_deposit(
+                self,
+                &mut ov,
+                cell,
+                s,
+                pile.expire_tick,
+                pile.pickup_after_tick,
+                true,
+            );
         }
         let remote = std::mem::take(&mut ov.remote);
         let (changes, evicted) = self.capped(ov);
@@ -470,10 +545,21 @@ impl Rollback {
         for ((at, item), count) in remote {
             let stack = ItemStack { item, count };
             let (expire, pickup) = (pile.expire_tick, pile.pickup_after_tick);
-            send_pile_intent(self, at, Intent::DepositItems { cell: at, stack, expire, pickup, by });
+            send_pile_intent(
+                self,
+                at,
+                Intent::DepositItems {
+                    cell: at,
+                    stack,
+                    expire,
+                    pickup,
+                    by,
+                },
+            );
         }
         self.send_landing(cell, self.settle_cell(cell), stacks, tick);
-        record_destroyed(overflow, cell, "re-settle overflow") + record_destroyed(evicted, cell, "pile cap eviction")
+        record_destroyed(overflow, cell, "re-settle overflow")
+            + record_destroyed(evicted, cell, "pile cap eviction")
     }
 
     /// After block `pos` (local) was written: a pile pushed up out of it, or
@@ -485,8 +571,16 @@ impl Rollback {
         }
         let tick = *self.data.tick;
         let w = self.data.world_block(pos);
-        let cell = if self.pile_support(w) { pos } else { [pos[0], pos[1] + 1, pos[2]] };
-        if self.data.item_piles.contains_key(&self.data.world_block(cell)) {
+        let cell = if self.pile_support(w) {
+            pos
+        } else {
+            [pos[0], pos[1] + 1, pos[2]]
+        };
+        if self
+            .data
+            .item_piles
+            .contains_key(&self.data.world_block(cell))
+        {
             self.resettle_pile_safe(cell, tick)
         } else {
             0
@@ -500,7 +594,13 @@ impl Rollback {
     /// mirror) is asked for with one `TakeFromPile` per item, sent to its
     /// owner; the inventory changes when the grant comes back.
     pub fn tick_pickups_safe(&mut self, tick: u64) {
-        let expired: Vec<_> = self.data.pile_takes.iter().filter(|(_, t)| **t <= tick).map(|(k, _)| *k).collect();
+        let expired: Vec<_> = self
+            .data
+            .pile_takes
+            .iter()
+            .filter(|(_, t)| **t <= tick)
+            .map(|(k, _)| *k)
+            .collect();
         for k in expired {
             self.data.pile_takes.remove(&k);
         }
@@ -508,16 +608,31 @@ impl Rollback {
             return;
         }
         let bv = BLOCK_VOXELS as f32;
-        let (r, half) = (PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS);
+        let (r, half) = (
+            PLAYER_CAPSULE_RADIUS,
+            PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS,
+        );
         let (h, v) = (PICKUP_REACH_H_BLOCKS, PICKUP_REACH_V_BLOCKS);
-        let mut takers: Vec<(ClientId, crate::EntityKey, Option<EntityId>, BlockPos, BlockPos)> = Vec::new();
+        let mut takers: Vec<(
+            ClientId,
+            crate::EntityKey,
+            Option<EntityId>,
+            BlockPos,
+            BlockPos,
+        )> = Vec::new();
         for (id, c) in self.data.clients.iter() {
             if c.mode != crate::PlayMode::Adventure {
                 continue;
             }
-            let Some(&e) = self.data.player_entites.get(id) else { continue };
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let Some(&e) = self.data.player_entites.get(id) else {
+                continue;
+            };
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else {
+                continue;
+            };
+            let Some(body) = self.data.physics.bodies.get(handle) else {
+                continue;
+            };
             let t = body.translation();
             let cell = |x: f32| (x / bv).floor() as i32;
             let lo = [cell(t.x - r) - h, cell(t.y - half) - v, cell(t.z - r) - h];
@@ -565,20 +680,34 @@ impl Rollback {
                         let mut moved = false;
                         for &s in &pile.stacks {
                             let rest = inv.add(s);
-                            room.add(ItemStack { count: s.count - rest, ..s });
+                            room.add(ItemStack {
+                                count: s.count - rest,
+                                ..s
+                            });
                             moved |= rest < s.count;
                             if rest < s.count {
-                                taken.push(ItemStack { item: s.item, count: s.count - rest });
+                                taken.push(ItemStack {
+                                    item: s.item,
+                                    count: s.count - rest,
+                                });
                             }
                             if rest > 0 {
-                                left.push(ItemStack { item: s.item, count: rest });
+                                left.push(ItemStack {
+                                    item: s.item,
+                                    count: rest,
+                                });
                             }
                         }
                         if !moved {
                             continue;
                         }
                         took = true;
-                        picks.push(PickupView { cell: self.data.local_block(c), entity, stacks: taken, tick });
+                        picks.push(PickupView {
+                            cell: self.data.local_block(c),
+                            entity,
+                            stacks: taken,
+                            tick,
+                        });
                         let slot = ov.slot(c);
                         if left.is_empty() {
                             *slot = None;
@@ -600,11 +729,25 @@ impl Rollback {
         }
         self.write_piles_safe(changes);
         for (by, cell, item, count) in asks {
-            self.data.pile_takes.insert((by, cell), tick + PILE_TAKE_RETRY_TICKS);
-            send_pile_intent(self, cell, Intent::TakeFromPile { cell, item, count, by });
+            self.data
+                .pile_takes
+                .insert((by, cell), tick + PILE_TAKE_RETRY_TICKS);
+            send_pile_intent(
+                self,
+                cell,
+                Intent::TakeFromPile {
+                    cell,
+                    item,
+                    count,
+                    by,
+                },
+            );
         }
         if !picks.is_empty() {
-            self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::ItemsPickedUp(picks)));
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::ItemsPickedUp(picks),
+            ));
         }
     }
 
@@ -613,17 +756,29 @@ impl Rollback {
     /// there), then into the owner's own cells around it; what does not fit
     /// is refused back to the sender (`PileFull`, carrying the rest). A take
     /// takes what the pile has of the item, up to the count asked.
-    pub(crate) fn apply_pile_intent_safe(&mut self, cell: WorldBlockPos, intent: Intent) -> IntentReply {
+    pub(crate) fn apply_pile_intent_safe(
+        &mut self,
+        cell: WorldBlockPos,
+        intent: Intent,
+    ) -> IntentReply {
         let now = *self.data.tick;
         match intent {
-            Intent::DepositItems { stack, expire, pickup, .. } => {
+            Intent::DepositItems {
+                stack,
+                expire,
+                pickup,
+                ..
+            } => {
                 let mut ov = PileOverlay::new(self);
                 let mut left = stack;
                 if self.settle_cell(cell) == cell {
                     left.count = plan_into_cell(&mut ov, cell, stack, expire, pickup);
                 }
                 left.count = plan_deposit(self, &mut ov, cell, left, expire, pickup, false);
-                debug_assert!(ov.remote.is_empty(), "an owner's deposit stays in its own cells");
+                debug_assert!(
+                    ov.remote.is_empty(),
+                    "an owner's deposit stays in its own cells"
+                );
                 let (changes, evicted) = self.capped(ov);
                 self.write_piles_safe(changes);
                 record_destroyed(evicted, cell, "pile cap eviction");
@@ -631,17 +786,37 @@ impl Rollback {
                     IntentReply::Granted(intent)
                 } else {
                     let rest = match intent {
-                        Intent::DepositItems { cell, expire, pickup, by, .. } => {
-                            Intent::DepositItems { cell, stack: left, expire, pickup, by }
-                        }
+                        Intent::DepositItems {
+                            cell,
+                            expire,
+                            pickup,
+                            by,
+                            ..
+                        } => Intent::DepositItems {
+                            cell,
+                            stack: left,
+                            expire,
+                            pickup,
+                            by,
+                        },
                         other => other,
                     };
                     IntentReply::Refused(rest, IntentRefusal::PileFull)
                 }
             }
-            Intent::TakeFromPile { cell: c, item, count, by } => {
+            Intent::TakeFromPile {
+                cell: c,
+                item,
+                count,
+                by,
+            } => {
                 let refused = IntentReply::Refused(intent, IntentRefusal::NothingThere);
-                let Some(pile) = self.data.item_piles.get(&cell).filter(|p| p.pickup_after_tick <= now) else {
+                let Some(pile) = self
+                    .data
+                    .item_piles
+                    .get(&cell)
+                    .filter(|p| p.pickup_after_tick <= now)
+                else {
                     return refused;
                 };
                 let mut pile = pile.clone();
@@ -658,7 +833,12 @@ impl Rollback {
                 pile.stacks.retain(|s| s.count > 0);
                 let new = (!pile.stacks.is_empty()).then_some(pile);
                 self.write_piles_safe(vec![(cell, new)]);
-                IntentReply::Granted(Intent::TakeFromPile { cell: c, item, count: taken, by })
+                IntentReply::Granted(Intent::TakeFromPile {
+                    cell: c,
+                    item,
+                    count: taken,
+                    by,
+                })
             }
             other => IntentReply::Refused(other, IntentRefusal::BadTarget),
         }
@@ -668,33 +848,59 @@ impl Rollback {
     /// items into the inventory (what does not fit goes down at the feet),
     /// and a deposit a neighbour refused gives its rest back the same way.
     pub(crate) fn settle_pile_replies_safe(&mut self, client: ClientId) {
-        let Some(&key) = self.data.player_entites.get(&client) else { return };
-        let Some(by) = self.entity_id(key) else { return };
+        let Some(&key) = self.data.player_entites.get(&client) else {
+            return;
+        };
+        let Some(by) = self.entity_id(key) else {
+            return;
+        };
         let tick = *self.data.tick;
         let mut back = Vec::new();
         let mut picks = Vec::new();
         for reply in self.intent_inbox(by) {
             match reply {
-                IntentReply::Granted(Intent::TakeFromPile { cell, item, count, .. }) => {
+                IntentReply::Granted(Intent::TakeFromPile {
+                    cell, item, count, ..
+                }) => {
                     let stack = ItemStack { item, count };
-                    picks.push(PickupView { cell: self.data.local_block(cell), entity: key, stacks: vec![stack], tick });
+                    picks.push(PickupView {
+                        cell: self.data.local_block(cell),
+                        entity: key,
+                        stacks: vec![stack],
+                        tick,
+                    });
                     back.push(stack);
                 }
                 IntentReply::Refused(Intent::DepositItems { stack, .. }, why) => {
-                    log::debug!("[item_piles] deposit of {stack:?} refused ({why:?}): back to {by:?}");
+                    log::debug!(
+                        "[item_piles] deposit of {stack:?} refused ({why:?}): back to {by:?}"
+                    );
                     back.push(stack);
                 }
                 _ => {}
             }
         }
         for stack in back {
-            let left = self.data.clients.get_mut(&client).map_or(stack.count, |c| c.inventory.add(stack));
+            let left = self
+                .data
+                .clients
+                .get_mut(&client)
+                .map_or(stack.count, |c| c.inventory.add(stack));
             if left > 0 {
-                self.drop_at_feet_safe(client, ItemStack { count: left, ..stack });
+                self.drop_at_feet_safe(
+                    client,
+                    ItemStack {
+                        count: left,
+                        ..stack
+                    },
+                );
             }
         }
         if !picks.is_empty() {
-            self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::ItemsPickedUp(picks)));
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::ItemsPickedUp(picks),
+            ));
         }
     }
 
@@ -703,11 +909,27 @@ impl Rollback {
     /// in this region's own cell nearest its target — own cells only, so it
     /// never goes back out; what still does not fit is destroyed (counted).
     pub(crate) fn region_reply_safe(&mut self, reply: IntentReply) {
-        let IntentReply::Refused(Intent::DepositItems { cell, stack, expire, pickup, .. }, why) = reply else { return };
+        let IntentReply::Refused(
+            Intent::DepositItems {
+                cell,
+                stack,
+                expire,
+                pickup,
+                ..
+            },
+            why,
+        ) = reply
+        else {
+            return;
+        };
         let n = REGION_BLOCKS as i32;
         let local = self.data.local_block(cell);
-        let at = self.data.world_block([local[0].clamp(0, n - 1), local[1], local[2].clamp(0, n - 1)]);
-        log::debug!("[item_piles] region deposit of {stack:?} at {cell:?} refused ({why:?}): put down at {at:?}");
+        let at =
+            self.data
+                .world_block([local[0].clamp(0, n - 1), local[1], local[2].clamp(0, n - 1)]);
+        log::debug!(
+            "[item_piles] region deposit of {stack:?} at {cell:?} refused ({why:?}): put down at {at:?}"
+        );
         // The lifetimes are absolute ticks from when it was sent: a refusal
         // that waited in the manager's mailbox while this region was parked
         // arrives after its clock jumped (`jump_clock_to` shifts only the
@@ -768,7 +990,12 @@ impl Rollback {
         let rc = *self.data.region;
         let prior = changes
             .iter()
-            .map(|(p, _)| (self.data.local_block(*p), self.data.item_piles.get(p).map(ItemPile::view)))
+            .map(|(p, _)| {
+                (
+                    self.data.local_block(*p),
+                    self.data.item_piles.get(p).map(ItemPile::view),
+                )
+            })
             .collect();
         // LIFO: registered first, so the prior views are re-sent after the
         // maps are restored.
@@ -789,20 +1016,33 @@ impl Rollback {
                 self.data.item_piles.insert(p, new);
             }
         }
-        self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetItemPiles(views)));
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetItemPiles(views),
+        ));
     }
 
     /// The halo mirrors' write funnel (`halo.rs`): sets or clears each
     /// neighbour cell's mirror and tells the renderer both ways.
-    pub(crate) fn write_halo_piles_safe(&mut self, changes: Vec<(WorldBlockPos, Option<ItemPile>)>) {
-        let changes: Vec<_> =
-            changes.into_iter().filter(|(p, new)| self.data.halo_piles.get(p) != new.as_ref()).collect();
+    pub(crate) fn write_halo_piles_safe(
+        &mut self,
+        changes: Vec<(WorldBlockPos, Option<ItemPile>)>,
+    ) {
+        let changes: Vec<_> = changes
+            .into_iter()
+            .filter(|(p, new)| self.data.halo_piles.get(p) != new.as_ref())
+            .collect();
         if changes.is_empty() {
             return;
         }
         let prior = changes
             .iter()
-            .map(|(p, _)| (self.data.local_block(*p), self.data.halo_piles.get(p).map(ItemPile::view)))
+            .map(|(p, _)| {
+                (
+                    self.data.local_block(*p),
+                    self.data.halo_piles.get(p).map(ItemPile::view),
+                )
+            })
             .collect();
         self.data.emit_on_undo(GameDataUpdate::new(
             GameDataTransactionKind::Undo,
@@ -820,13 +1060,21 @@ impl Rollback {
                 }
             }
         }
-        self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetHaloPiles(views)));
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetHaloPiles(views),
+        ));
     }
 
     /// Drops every halo pile mirror of region `from` (its source is gone).
     pub(crate) fn drop_halo_piles_of_safe(&mut self, from: RegionCoords) {
-        let gone: Vec<_> =
-            self.data.halo_piles.keys().filter(|p| p.to_local().0 == from).map(|p| (*p, None)).collect();
+        let gone: Vec<_> = self
+            .data
+            .halo_piles
+            .keys()
+            .filter(|p| p.to_local().0 == from)
+            .map(|p| (*p, None))
+            .collect();
         self.write_halo_piles_safe(gone);
     }
 
@@ -849,9 +1097,19 @@ impl Rollback {
 /// Puts what fits of `stack` into the pile of `c` itself (a deposit
 /// intent's cell, at its owner): same-item stacks topped up, then new
 /// stacks while the pile has a free slot. Returns the count left over.
-fn plan_into_cell(ov: &mut PileOverlay<'_>, c: WorldBlockPos, mut stack: ItemStack, expire: u64, pickup: u64) -> u32 {
+fn plan_into_cell(
+    ov: &mut PileOverlay<'_>,
+    c: WorldBlockPos,
+    mut stack: ItemStack,
+    expire: u64,
+    pickup: u64,
+) -> u32 {
     let had = ov.get(c).cloned();
-    let pile = ov.slot(c).get_or_insert_with(|| ItemPile { stacks: Vec::new(), expire_tick: expire, pickup_after_tick: pickup });
+    let pile = ov.slot(c).get_or_insert_with(|| ItemPile {
+        stacks: Vec::new(),
+        expire_tick: expire,
+        pickup_after_tick: pickup,
+    });
     let before = stack.count;
     for s in pile.stacks.iter_mut().filter(|s| s.item == stack.item) {
         let n = (MAX_STACK - s.count).min(stack.count);
@@ -860,7 +1118,10 @@ fn plan_into_cell(ov: &mut PileOverlay<'_>, c: WorldBlockPos, mut stack: ItemSta
     }
     while stack.count > 0 && pile.stacks.len() < PILE_MAX_STACKS {
         let n = stack.count.min(MAX_STACK);
-        pile.stacks.push(ItemStack { item: stack.item, count: n });
+        pile.stacks.push(ItemStack {
+            item: stack.item,
+            count: n,
+        });
         stack.count -= n;
     }
     if stack.count == before {
@@ -892,7 +1153,8 @@ fn plan_deposit(
         return 0;
     }
     let rest = r.settle_cell(at);
-    let usable = |ov: &PileOverlay<'_>, c: WorldBlockPos| ov.owns(c) || (remote && r.pile_cell_seen(c));
+    let usable =
+        |ov: &PileOverlay<'_>, c: WorldBlockPos| ov.owns(c) || (remote && r.pile_cell_seen(c));
     if !usable(ov, rest) {
         if remote && !ov.owns(rest) {
             ov.added(rest, stack.item, stack.count);
@@ -913,7 +1175,11 @@ fn plan_deposit(
         if !usable(ov, c) {
             continue;
         }
-        let room = ov.get(c).is_some_and(|p| p.stacks.iter().any(|s| s.item == stack.item && s.count < MAX_STACK));
+        let room = ov.get(c).is_some_and(|p| {
+            p.stacks
+                .iter()
+                .any(|s| s.item == stack.item && s.count < MAX_STACK)
+        });
         if !room {
             continue;
         }
@@ -952,7 +1218,10 @@ fn plan_deposit(
         let mut added = 0;
         while stack.count > 0 && pile.stacks.len() < PILE_MAX_STACKS {
             let n = stack.count.min(MAX_STACK);
-            pile.stacks.push(ItemStack { item: stack.item, count: n });
+            pile.stacks.push(ItemStack {
+                item: stack.item,
+                count: n,
+            });
             stack.count -= n;
             added += n;
         }

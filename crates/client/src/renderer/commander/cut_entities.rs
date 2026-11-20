@@ -20,9 +20,9 @@
 //! never un-hide something another system hid.
 
 use bevy::prelude::*;
-use game::{EntityKind, RegionId, REGION_SIZE};
+use game::{EntityKind, REGION_SIZE, RegionId};
 
-use super::level::{camera_cut, WorkingLevel};
+use super::level::{WorkingLevel, camera_cut};
 use super::tiles::TileMirror;
 use crate::renderer::bridge::{SimEntity, SimKind};
 
@@ -37,7 +37,9 @@ pub struct CutHidden(pub Visibility);
 /// Body centre → feet, in world units.
 pub fn feet_offset(kind: EntityKind) -> f32 {
     match kind {
-        EntityKind::Player | EntityKind::Person { .. } => game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS,
+        EntityKind::Player | EntityKind::Person { .. } => {
+            game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS
+        }
         EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
         // Placeholder: the 1 m dev cube (bodies of other shapes come later).
         EntityKind::Body => game::BLOCK_VOXELS as f32 / 2.0,
@@ -54,8 +56,11 @@ pub fn home_rect(frame: &crate::wrap_frame::WrapFrame, home: RegionId) -> Rect {
 /// Whether an entity with world-space `feet` is hidden by the cut at `cut_y`
 /// (`None` = cut off) inside `home` (half-open on the far edges).
 pub fn hidden_by_cut(feet: Vec3, cut_y: Option<f32>, home: Option<Rect>) -> bool {
-    let (Some(cut), Some(home)) = (cut_y, home) else { return false };
-    let inside = (home.min.x..home.max.x).contains(&feet.x) && (home.min.y..home.max.y).contains(&feet.z);
+    let (Some(cut), Some(home)) = (cut_y, home) else {
+        return false;
+    };
+    let inside =
+        (home.min.x..home.max.x).contains(&feet.x) && (home.min.y..home.max.y).contains(&feet.z);
     inside && feet.y >= cut - FEET_EPSILON
 }
 
@@ -65,7 +70,14 @@ pub fn hide_cut_entities(
     level: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
     roots: Res<crate::renderer::bridge::RegionRoots>,
-    mut entities: Query<(Entity, &SimEntity, &SimKind, &Transform, &mut Visibility, Option<&mut CutHidden>)>,
+    mut entities: Query<(
+        Entity,
+        &SimEntity,
+        &SimKind,
+        &Transform,
+        &mut Visibility,
+        Option<&mut CutHidden>,
+    )>,
 ) {
     let cut = camera_cut(&level, &tiles);
     let frame = tiles.frame();
@@ -99,4 +111,3 @@ pub fn hide_cut_entities(
         }
     }
 }
-

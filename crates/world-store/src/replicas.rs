@@ -21,7 +21,7 @@
 //!
 //! SQLite (role `all`): the one replica registers; nothing beats, reads the rows or ends one.
 
-use game::coordinator::{ReplicaId, ReplicaRow, REPLICA_DEAD, REPLICA_LIVE};
+use game::coordinator::{REPLICA_DEAD, REPLICA_LIVE, ReplicaId, ReplicaRow};
 
 use crate::StoreError;
 
@@ -172,15 +172,32 @@ macro_rules! engine_replicas {
 /// A replica's beat (both engines; Postgres runs it on the beat connection): `seen_ms` moves for
 /// the caller's LIVE row only. No row returned: ended.
 pub(crate) fn beat_sql(now_ms: &str) -> String {
-    format!("UPDATE coordinator_replicas SET seen_ms = {now_ms} WHERE replica = $1 AND state = {REPLICA_LIVE} RETURNING replica")
+    format!(
+        "UPDATE coordinator_replicas SET seen_ms = {now_ms} WHERE replica = $1 AND state = {REPLICA_LIVE} RETURNING replica"
+    )
 }
 
 /// The end of replica `replica`'s row inside a transition ([`game::coordinator::StoreDecision::EndReplica`]):
 /// whether a live row was ended (`false`: none — gone, or ended already).
-pub(crate) async fn end_replica_in(tx: &mut sqlx::PgConnection, replica: ReplicaId) -> Result<bool, StoreError> {
-    let sql = format!("UPDATE coordinator_replicas SET state = {REPLICA_DEAD} WHERE replica = $1 AND state = {REPLICA_LIVE}");
-    Ok(sqlx::query(&sql).bind(i(replica.0)).execute(&mut *tx).await?.rows_affected() > 0)
+pub(crate) async fn end_replica_in(
+    tx: &mut sqlx::PgConnection,
+    replica: ReplicaId,
+) -> Result<bool, StoreError> {
+    let sql = format!(
+        "UPDATE coordinator_replicas SET state = {REPLICA_DEAD} WHERE replica = $1 AND state = {REPLICA_LIVE}"
+    );
+    Ok(sqlx::query(&sql)
+        .bind(i(replica.0))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        > 0)
 }
 
-engine_replicas!(sqlite, sqlx::Sqlite, false, "CAST(unixepoch('subsec') * 1000 AS INTEGER)");
+engine_replicas!(
+    sqlite,
+    sqlx::Sqlite,
+    false,
+    "CAST(unixepoch('subsec') * 1000 AS INTEGER)"
+);
 engine_replicas!(pg, sqlx::Postgres, true, crate::succession::PG_NOW_MS);

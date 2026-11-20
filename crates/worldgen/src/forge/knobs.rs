@@ -141,9 +141,14 @@ impl Knobs {
             .iter()
             .find(|s| s.key == key)
             .ok_or_else(|| format!("--set: no knob named {key} (see forge/knobs.rs)"))?;
-        let value: f64 = number.parse().map_err(|_| format!("--set {key}: not a number"))?;
+        let value: f64 = number
+            .parse()
+            .map_err(|_| format!("--set {key}: not a number"))?;
         if !(spec.min..=spec.max).contains(&value) {
-            return Err(format!("--set {key}={number}: outside the knob's range; give {} to {}", spec.min, spec.max));
+            return Err(format!(
+                "--set {key}={number}: outside the knob's range; give {} to {}",
+                spec.min, spec.max
+            ));
         }
         self.set(key, value);
         Ok(())

@@ -27,8 +27,11 @@ pub struct Report {
 impl Report {
     pub fn to_text(&self, name: &str) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "{name}: {} cells, {} blocks in {} boxes, {} shaped, {} carved, {} kept air",
-            self.cells, self.blocks, self.boxes, self.shaped, self.carved, self.kept_air);
+        let _ = writeln!(
+            out,
+            "{name}: {} cells, {} blocks in {} boxes, {} shaped, {} carved, {} kept air",
+            self.cells, self.blocks, self.boxes, self.shaped, self.carved, self.kept_air
+        );
         let section = |out: &mut String, title: &str, map: &BTreeMap<String, u64>| {
             if map.is_empty() {
                 return;
@@ -39,10 +42,18 @@ impl Report {
             }
         };
         if self.signs_unparsed > 0 {
-            let _ = writeln!(out, "sign lines unparsed (text lost): {}", self.signs_unparsed);
+            let _ = writeln!(
+                out,
+                "sign lines unparsed (text lost): {}",
+                self.signs_unparsed
+            );
         }
         section(&mut out, "markers", &self.markers);
-        section(&mut out, "unmapped (placed as the fallback block)", &self.unmapped);
+        section(
+            &mut out,
+            "unmapped (placed as the fallback block)",
+            &self.unmapped,
+        );
         section(&mut out, "dropped (became air)", &self.dropped);
         out
     }

@@ -33,7 +33,8 @@ fn world_with(body: RigidBodyBuilder) -> (PhysicsWorld, RigidBodyHandle) {
     let mut w = PhysicsWorld::default();
     let handle = w.bodies.insert(body);
     for collider in terrain_colliders() {
-        w.colliders.insert_with_parent(collider, handle, &mut w.bodies);
+        w.colliders
+            .insert_with_parent(collider, handle, &mut w.bodies);
     }
     (w, handle)
 }
@@ -41,14 +42,21 @@ fn world_with(body: RigidBodyBuilder) -> (PhysicsWorld, RigidBodyHandle) {
 /// What upstream would compute for the body: the sum of its colliders' mass
 /// properties.
 fn collider_mass(w: &PhysicsWorld, body: RigidBodyHandle) -> f32 {
-    w.bodies[body].colliders().iter().map(|&co| w.colliders[co].mass_properties().mass()).sum()
+    w.bodies[body]
+        .colliders()
+        .iter()
+        .map(|&co| w.colliders[co].mass_properties().mass())
+        .sum()
 }
 
 /// Gate: mmo-fork hunk rapier rigid_body_components.rs:451 fixed bodies skip collider mass properties (dd64debb)
 #[test]
 fn fixed_terrain_bodies_skip_collider_mass_properties() {
     let (mut w, body) = world_with(RigidBodyBuilder::fixed());
-    assert!(collider_mass(&w, body) > 0.0, "the colliders do have mass to skip");
+    assert!(
+        collider_mass(&w, body) > 0.0,
+        "the colliders do have mass to skip"
+    );
 
     // At attach (insert_with_parent) ...
     assert_eq!(
@@ -67,7 +75,11 @@ fn fixed_terrain_bodies_skip_collider_mass_properties() {
         );
     }
     let mprops = w.bodies[body].mass_properties();
-    assert_eq!(mprops.effective_inv_mass, Vector::ZERO, "fixed stays immovable");
+    assert_eq!(
+        mprops.effective_inv_mass,
+        Vector::ZERO,
+        "fixed stays immovable"
+    );
 }
 
 /// Gate: mmo-fork hunk rapier user_changes.rs:176 recompute on TYPE change (dd64debb)

@@ -266,35 +266,68 @@ fn resolve(reports: &BTreeMap<HostId, SuccessionReportIn>) -> Resolved {
             }
             continue;
         }
-        let JournalEvent::Sent(msg) = &reports[&from].entries[i].event else { continue };
+        let JournalEvent::Sent(msg) = &reports[&from].entries[i].event else {
+            continue;
+        };
         match (subject, msg.as_ref()) {
             // A body handing a player over: the player's subject decides.
-            (Subject::Entity(_), Reliable::Transfer { player: Some(_), .. }) => {}
-            (Subject::Entity(_), Reliable::Transfer { target, stamp, bundle, player: None }) => {
+            (
+                Subject::Entity(_),
+                Reliable::Transfer {
+                    player: Some(_), ..
+                },
+            ) => {}
+            (
+                Subject::Entity(_),
+                Reliable::Transfer {
+                    target,
+                    stamp,
+                    bundle,
+                    player: None,
+                },
+            ) => {
                 if matches!(bundle.kind, EntityKind::Person { .. }) {
                     out.people.push((*target, (**bundle).clone()));
                 } else {
                     out.bundles.push((*target, *stamp, (**bundle).clone()));
                 }
             }
-            (Subject::Player(_), Reliable::Transfer { target, bundle, player: Some(h), .. }) => {
-                match peers::handoff_record(*target, bundle, h) {
-                    Some(record) => players.push((stamp, from, h.clone(), record)),
-                    None => log::error!("[server] a journalled hand-off of player {} carries no player", h.player.0),
-                }
-            }
-            (Subject::Player(_), Reliable::PlayerMove { handoff, record, .. }) => {
+            (
+                Subject::Player(_),
+                Reliable::Transfer {
+                    target,
+                    bundle,
+                    player: Some(h),
+                    ..
+                },
+            ) => match peers::handoff_record(*target, bundle, h) {
+                Some(record) => players.push((stamp, from, h.clone(), record)),
+                None => log::error!(
+                    "[server] a journalled hand-off of player {} carries no player",
+                    h.player.0
+                ),
+            },
+            (
+                Subject::Player(_),
+                Reliable::PlayerMove {
+                    handoff, record, ..
+                },
+            ) => {
                 players.push((stamp, from, handoff.clone(), (**record).clone()));
             }
-            (subject, _) => log::error!("[server] a journal entry about {subject:?} that is not its message; skipped"),
+            (subject, _) => log::error!(
+                "[server] a journal entry about {subject:?} that is not its message; skipped"
+            ),
         }
     }
     out.bundles.sort_by_key(|(_, stamp, b)| (*stamp, b.id));
     players.sort_by_key(|(stamp, _, h, _)| (*stamp, h.player));
-    out.players = players.into_iter().map(|(_, from, h, r)| (from, h, r)).collect();
+    out.players = players
+        .into_iter()
+        .map(|(_, from, h, r)| (from, h, r))
+        .collect();
     out
 }
-
 
 // --- forgetting a host (Elastic 1 Task 4) ----------------------------------------------------
 
@@ -454,7 +487,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn forget_host(&mut self, host: HostId) -> Result<(), crate::ForgetRefused> {
         let me = self.ordinal();
         if host == me {
-            return Err(crate::ForgetRefused { peer: host, why: "it is this host".into() });
+            return Err(crate::ForgetRefused {
+                peer: host,
+                why: "it is this host".into(),
+            });
         }
         self.journal.forget(host)?;
         let mut dropped = 0usize;
@@ -474,12 +510,20 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         for key in acked {
             self.kicks_pending.remove(&key);
-            self.login_out.push(LoginOut::KickAck { player_token: key.0, session_epoch: key.1 });
+            self.login_out.push(LoginOut::KickAck {
+                player_token: key.0,
+                session_epoch: key.1,
+            });
         }
         // Rows the directory still gives it (land it released, a peer not told before it died
         // or left — `Reliable::Released` lost with it — or land a succession moves): read
         // again, so what is routed by them waits for, and asks, the land's real owner.
-        if self.ownership.0.directory().is_some_and(|d| !d.owned_by(host).is_empty()) {
+        if self
+            .ownership
+            .0
+            .directory()
+            .is_some_and(|d| !d.owned_by(host).is_empty())
+        {
             self.directory_wanted = true;
         }
         self.forget_fields(host, me);
@@ -505,8 +549,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             .collect();
         for h in gone {
             match self.forget_host(h) {
-                Ok(()) => log::info!("[server] host {h}'s row is dead and no open succession names it: forgotten"),
-                Err(e) => log::debug!("[server] host {h}'s row is dead, but it is not forgotten yet: {e}"),
+                Ok(()) => log::info!(
+                    "[server] host {h}'s row is dead and no open succession names it: forgotten"
+                ),
+                Err(e) => {
+                    log::debug!("[server] host {h}'s row is dead, but it is not forgotten yet: {e}")
+                }
             }
         }
     }
@@ -525,23 +573,37 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn forget_absent_hosts(&mut self, present: &BTreeSet<HostId>, next_host_id: u64) {
         let me = self.ordinal();
         // Every host this one keeps by id (a peer session, an endpoint, a boot).
-        let known: BTreeSet<HostId> =
-            self.peers.keys().chain(self.peer_endpoints.keys()).chain(self.peer_boots.keys()).copied().collect();
+        let known: BTreeSet<HostId> = self
+            .peers
+            .keys()
+            .chain(self.peer_endpoints.keys())
+            .chain(self.peer_boots.keys())
+            .copied()
+            .collect();
         let gone: Vec<HostId> = known
             .into_iter()
-            .filter(|h| *h != me && h.0 < next_host_id && !present.contains(h) && !self.forgotten_hosts.contains(h))
+            .filter(|h| {
+                *h != me
+                    && h.0 < next_host_id
+                    && !present.contains(h)
+                    && !self.forgotten_hosts.contains(h)
+            })
             .filter(|h| !self.named_by_a_run_here(*h))
             .collect();
         for h in gone {
             match self.forget_host(h) {
-                Ok(()) => log::info!("[server] host {h} has no `hosts` row any more (pruned) and no open succession names it: forgotten"),
+                Ok(()) => log::info!(
+                    "[server] host {h} has no `hosts` row any more (pruned) and no open succession names it: forgotten"
+                ),
                 Err(e) => {
                     // Final review G-I2: pruned, it was dead or clean-left and owns nothing. A clean
                     // leaver's traffic was saved by its leave cut (its forget succeeds), so what keeps
                     // it here is state traffic with a DEAD host no run here accounts for: seen dead,
                     // so the next cut stops this host for a rollback (`take_unaccounted_dead`) rather
                     // than refusing every part for ever.
-                    log::warn!("[server] host {h} has no `hosts` row any more (pruned), but it is not forgotten yet: {e}; noted dead");
+                    log::warn!(
+                        "[server] host {h} has no `hosts` row any more (pruned), but it is not forgotten yet: {e}; noted dead"
+                    );
                     self.dead_seen.insert(h);
                 }
             }
@@ -552,16 +614,23 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// survivor of a run ordered here, the predecessor of an adoption, or a survivor whose
     /// report this heir holds.
     fn named_by_a_run_here(&self, h: HostId) -> bool {
-        self.successions.values().any(|r| r.order.predecessor == h || r.order.heir == h || r.order.survivors.contains(&h))
-            || self.adoptions.values().any(|a| a.predecessor == h)
-            || self.succession_reports.values().any(|reports| reports.contains_key(&h))
+        self.successions.values().any(|r| {
+            r.order.predecessor == h || r.order.heir == h || r.order.survivors.contains(&h)
+        }) || self.adoptions.values().any(|a| a.predecessor == h)
+            || self
+                .succession_reports
+                .values()
+                .any(|reports| reports.contains_key(&h))
     }
 
     /// The `hosts` rows a directory read found dead (`dead`, every one of them): noted for the
     /// cut-time check of traffic nobody accounts for ([`Self::dead_seen`]'s rule, `world_cut.rs`).
     pub fn note_dead_rows(&mut self, dead: impl IntoIterator<Item = HostId>) {
         let me = self.ordinal();
-        self.dead_seen.extend(dead.into_iter().filter(|h| *h != me && !self.forgotten_hosts.contains(h)));
+        self.dead_seen.extend(
+            dead.into_iter()
+                .filter(|h| *h != me && !self.forgotten_hosts.contains(h)),
+        );
     }
 
     /// The dead host this host exchanged state with that no succession run here accounts for
@@ -597,7 +666,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         let me = self.ordinal();
         if let Some(run) = self.successions.get(&s.id) {
             if run.applied {
-                log::debug!("[server] succession {}: ordered again; applied already", s.id.0);
+                log::debug!(
+                    "[server] succession {}: ordered again; applied already",
+                    s.id.0
+                );
                 self.world_send(HostMsg::SuccessionApplied { id: s.id });
             }
             return;
@@ -612,7 +684,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         if !s.survivors.contains(&me) {
             if s.heir != me || !s.survivors.is_empty() {
-                log::warn!("[server] succession {}: this host is not among its survivors {:?}; ignored", s.id.0, s.survivors);
+                log::warn!(
+                    "[server] succession {}: this host is not among its survivors {:?}; ignored",
+                    s.id.0,
+                    s.survivors
+                );
                 return;
             }
             // The heir, no survivor: a succession opened while no host ran (`worldctl
@@ -660,21 +736,34 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.inheriting.insert(sr, id);
             }
         }
-        self.successions.insert(id, SurvivorRun { order: s, applied: false });
+        self.successions.insert(
+            id,
+            SurvivorRun {
+                order: s,
+                applied: false,
+            },
+        );
         self.try_apply_succession(id);
     }
 
     /// Every succession not applied yet whose base cut this host's journal counts from now
     /// is applied; the others log their wait (at most once per [`SUCCESSION_WAIT_LOG_MS`]).
     pub(super) fn retry_successions(&mut self) {
-        let waiting: Vec<SuccessionId> = self.successions.iter().filter(|(_, r)| !r.applied).map(|(id, _)| *id).collect();
+        let waiting: Vec<SuccessionId> = self
+            .successions
+            .iter()
+            .filter(|(_, r)| !r.applied)
+            .map(|(id, _)| *id)
+            .collect();
         for id in waiting {
             self.try_apply_succession(id);
         }
     }
 
     fn try_apply_succession(&mut self, id: SuccessionId) {
-        let Some(run) = self.successions.get(&id).filter(|r| !r.applied) else { return };
+        let Some(run) = self.successions.get(&id).filter(|r| !r.applied) else {
+            return;
+        };
         let base = self.journal.base();
         let order_base = run.order.base_cut;
         // Elastic 4 Decision 7: a survivor that never took part in the order's base cut K — it
@@ -704,7 +793,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             );
         } else if base != order_base {
             let now = self.clock_ms;
-            if self.succession_wait_logged_ms.is_none_or(|at| now.saturating_sub(at) >= SUCCESSION_WAIT_LOG_MS) {
+            if self
+                .succession_wait_logged_ms
+                .is_none_or(|at| now.saturating_sub(at) >= SUCCESSION_WAIT_LOG_MS)
+            {
                 self.succession_wait_logged_ms = Some(now);
                 log::warn!(
                     "[server] succession {}: this host's journal counts from cut {}, the succession from cut {}: waiting \
@@ -730,8 +822,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn apply_succession(&mut self, s: &Succession) {
         let (pred, heir, me) = (s.predecessor, s.heir, self.ordinal());
         self.returning_peers.remove(&pred);
-        let released = !self.left_peers.contains_key(&pred) && !self.leave_pairs.contains_key(&pred);
-        if s.kind == crate::SuccessionKind::Leave && released && self.peer_boots.get(&pred).is_some_and(|b| *b != s.predecessor_boot) {
+        let released =
+            !self.left_peers.contains_key(&pred) && !self.leave_pairs.contains_key(&pred);
+        if s.kind == crate::SuccessionKind::Leave
+            && released
+            && self
+                .peer_boots
+                .get(&pred)
+                .is_some_and(|b| *b != s.predecessor_boot)
+        {
             // The held session was released to a new boot of the leaver before this order
             // came — only on a host that booted after the leave (`apply_leave_overtaken`):
             // nothing of the departed boot is held here. Anywhere else the session stays held
@@ -800,7 +899,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 m @ Reliable::Intent(_) => owed.push(m),
                 // A journal entry already (`Sent`): the heir resolves it.
                 Reliable::Transfer { .. } | Reliable::PlayerMove { .. } => {}
-                Reliable::SpawnOrder { origin, player_token, session_epoch, .. } => {
+                Reliable::SpawnOrder {
+                    origin,
+                    player_token,
+                    session_epoch,
+                    ..
+                } => {
                     refused_spawns += 1;
                     self.spawn_answer(origin, player_token, session_epoch, false, None);
                 }
@@ -816,7 +920,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         for key in acked {
             self.kicks_pending.remove(&key);
-            self.login_out.push(LoginOut::KickAck { player_token: key.0, session_epoch: key.1 });
+            self.login_out.push(LoginOut::KickAck {
+                player_token: key.0,
+                session_epoch: key.1,
+            });
         }
         let carried: BTreeSet<PlayerId> = entries
             .iter()
@@ -833,21 +940,37 @@ impl<S: RegionSpawner> WorldManager<S> {
             entries.len(),
             owed.len()
         );
-        let report = SuccessionReportIn { base_cut: s.base_cut, entries, owed };
+        let report = SuccessionReportIn {
+            base_cut: s.base_cut,
+            entries,
+            owed,
+        };
         if heir == me {
             self.file_succession_report(me, s.id, report);
         } else {
             // A plain reliable message: no cut runs while the succession is unanswered, so it
             // is never wrapped (`world_cut_wrap` leaves a non-state message bare).
-            let SuccessionReportIn { base_cut, entries, owed } = report;
-            let msg = Reliable::SuccessionReport { id: s.id, base_cut, entries, owed };
+            let SuccessionReportIn {
+                base_cut,
+                entries,
+                owed,
+            } = report;
+            let msg = Reliable::SuccessionReport {
+                id: s.id,
+                base_cut,
+                entries,
+                owed,
+            };
             // A report the link cannot carry is never queued: the link would drop it at every
             // resend, stalling this peer session until the rollback. Not sent, the heir never
             // has every report, and the coordinator's deadline rolls the world back — the
             // failure is explicit, named here with its size.
             match crate::reliable_frame_bytes(&msg) {
                 Some(bytes) if bytes <= crate::PEER_FRAME_MAX_BYTES => {
-                    log::info!("[server] succession {}: the report to heir {heir} is {bytes} bytes on the link", s.id.0);
+                    log::info!(
+                        "[server] succession {}: the report to heir {heir} is {bytes} bytes on the link",
+                        s.id.0
+                    );
                     self.queue_to_peer(heir, msg);
                 }
                 bytes => log::error!(
@@ -876,7 +999,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             directory.note_dead(pred);
         } else if !s.moved.is_empty() {
-            log::error!("[server] succession {}: this host keeps no directory; {} moved rows not taken", s.id.0, s.moved.len());
+            log::error!(
+                "[server] succession {}: this host keeps no directory; {} moved rows not taken",
+                s.id.0,
+                s.moved.len()
+            );
         }
         self.peer_lost(pred);
         self.peer_unsynced(pred);
@@ -887,7 +1014,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.early_marks.remove(&pred);
         let mut departed_moved = 0usize;
         let mut departed_forgotten = 0usize;
-        let pointing: Vec<PlayerId> = self.departed.iter().filter(|(_, h)| **h == pred).map(|(p, _)| *p).collect();
+        let pointing: Vec<PlayerId> = self
+            .departed
+            .iter()
+            .filter(|(_, h)| **h == pred)
+            .map(|(p, _)| *p)
+            .collect();
         for p in pointing {
             // The heir itself places a carried player from the journal (Task 9): it points
             // nowhere then (a player is never "handed to" the host that holds it).
@@ -899,7 +1031,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 departed_forgotten += 1;
             }
         }
-        let handed: Vec<PlayerId> = self.handed.iter().filter(|(_, (to, _, _))| *to == pred).map(|(p, _)| *p).collect();
+        let handed: Vec<PlayerId> = self
+            .handed
+            .iter()
+            .filter(|(_, (to, _, _))| *to == pred)
+            .map(|(p, _)| *p)
+            .collect();
         for p in handed {
             if carried.contains(&p) && heir != me {
                 if let Some(entry) = self.handed.get_mut(&p) {
@@ -957,14 +1094,23 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.dead_boots.insert((pred, s.predecessor_boot));
         self.left_peers.remove(&pred);
         self.left_land.remove(&pred);
-        let report = SuccessionReportIn { base_cut: s.base_cut, entries: Vec::new(), owed: Vec::new() };
+        let report = SuccessionReportIn {
+            base_cut: s.base_cut,
+            entries: Vec::new(),
+            owed: Vec::new(),
+        };
         if heir == me {
             self.file_succession_report(me, s.id, report);
             for &(sr, _) in &s.moved {
                 self.inheriting.insert(sr, s.id);
             }
         } else {
-            let msg = Reliable::SuccessionReport { id: s.id, base_cut: s.base_cut, entries: Vec::new(), owed: Vec::new() };
+            let msg = Reliable::SuccessionReport {
+                id: s.id,
+                base_cut: s.base_cut,
+                entries: Vec::new(),
+                owed: Vec::new(),
+            };
             self.queue_to_peer(heir, msg);
         }
         if let Some(directory) = self.ownership.0.directory_mut() {
@@ -979,19 +1125,34 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// A survivor's report of succession `id` (`from`; this host is its heir): kept for the
     /// heir's resolution (Task 9).
-    fn file_succession_report(&mut self, from: HostId, id: SuccessionId, report: SuccessionReportIn) {
+    fn file_succession_report(
+        &mut self,
+        from: HostId,
+        id: SuccessionId,
+        report: SuccessionReportIn,
+    ) {
         if self.successions_done.contains(&id) {
-            log::warn!("[server] succession {}: host {from}'s report came after it was over; dropped", id.0);
+            log::warn!(
+                "[server] succession {}: host {from}'s report came after it was over; dropped",
+                id.0
+            );
             return;
         }
         if self.adoptions.contains_key(&id) {
             // The drop set was made from the reports as they were: never replaced.
-            log::warn!("[server] succession {}: host {from}'s report came after the resolution; dropped", id.0);
+            log::warn!(
+                "[server] succession {}: host {from}'s report came after the resolution; dropped",
+                id.0
+            );
             return;
         }
         if let Some(run) = self.successions.get(&id) {
             if run.order.heir != self.ordinal() {
-                log::error!("[server] succession {}: host {from}'s report came here; the heir is {}", id.0, run.order.heir);
+                log::error!(
+                    "[server] succession {}: host {from}'s report came here; the heir is {}",
+                    id.0,
+                    run.order.heir
+                );
             }
         }
         log::info!(
@@ -1000,7 +1161,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             report.entries.len(),
             report.owed.len()
         );
-        self.succession_reports.entry(id).or_default().insert(from, report);
+        self.succession_reports
+            .entry(id)
+            .or_default()
+            .insert(from, report);
         self.try_resolve_succession(id);
     }
 
@@ -1013,7 +1177,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         entries: Vec<JournalEntry>,
         owed: Vec<Reliable>,
     ) {
-        self.file_succession_report(from, id, SuccessionReportIn { base_cut, entries, owed });
+        self.file_succession_report(
+            from,
+            id,
+            SuccessionReportIn {
+                base_cut,
+                entries,
+                owed,
+            },
+        );
     }
 
     /// The coordinator's [`crate::CoordMsg::SuccessionDone`]: the run and its reports end; an
@@ -1021,15 +1193,30 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// spawner (the settle cut rewrote every stored region that held one of them).
     pub(super) fn succession_done(&mut self, id: SuccessionId, settled: bool) {
         let run = self.successions.remove(&id);
-        let predecessor = run.as_ref().map(|r| r.order.predecessor).or_else(|| self.adoptions.get(&id).map(|a| a.predecessor));
+        let predecessor = run
+            .as_ref()
+            .map(|r| r.order.predecessor)
+            .or_else(|| self.adoptions.get(&id).map(|a| a.predecessor));
         let reports = self.succession_reports.remove(&id);
         if run.is_some() || reports.is_some() {
-            log::info!("[server] succession {} {}", id.0, if settled { "settled" } else { "abandoned" });
+            log::info!(
+                "[server] succession {} {}",
+                id.0,
+                if settled { "settled" } else { "abandoned" }
+            );
         }
         if let Some(adoption) = self.adoptions.remove(&id) {
-            self.succession_pinned = self.adoptions.values().flat_map(|a| a.pinned.iter().copied()).collect();
-            let unpinned: Vec<RegionCoords> =
-                adoption.pinned.iter().copied().filter(|rc| !self.succession_pinned.contains(rc)).collect();
+            self.succession_pinned = self
+                .adoptions
+                .values()
+                .flat_map(|a| a.pinned.iter().copied())
+                .collect();
+            let unpinned: Vec<RegionCoords> = adoption
+                .pinned
+                .iter()
+                .copied()
+                .filter(|rc| !self.succession_pinned.contains(rc))
+                .collect();
             let now_ms = self.clock_ms;
             for rc in unpinned {
                 // Its keep-alive is the usual one from now on.
@@ -1050,9 +1237,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         if settled {
             self.retry_held_spawns();
             // Its settle cut committed: nothing of the predecessor is read any more.
-            if let Some(pred) = predecessor.filter(|p| !self.successions.values().any(|r| r.order.predecessor == *p)) {
+            if let Some(pred) = predecessor
+                .filter(|p| !self.successions.values().any(|r| r.order.predecessor == *p))
+            {
                 if let Err(e) = self.forget_host(pred) {
-                    log::warn!("[server] succession {} settled, but host {pred} is not forgotten: {e}", id.0);
+                    log::warn!(
+                        "[server] succession {} settled, but host {pred} is not forgotten: {e}",
+                        id.0
+                    );
                 }
             }
         }
@@ -1064,7 +1256,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.successions
             .iter()
             .filter(|(_, r)| r.applied)
-            .map(|(id, _)| (*id, self.adoptions.get(id).is_some_and(|a| a.state == AdoptionState::Adopted)))
+            .map(|(id, _)| {
+                (
+                    *id,
+                    self.adoptions
+                        .get(id)
+                        .is_some_and(|a| a.state == AdoptionState::Adopted),
+                )
+            })
             .collect()
     }
 
@@ -1076,17 +1275,24 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// adoption read is wanted ([`Self::take_adoption_wanted`]).
     fn try_resolve_succession(&mut self, id: SuccessionId) {
         let me = self.ordinal();
-        let Some(run) = self.successions.get(&id) else { return };
+        let Some(run) = self.successions.get(&id) else {
+            return;
+        };
         if run.order.heir != me || !run.applied || self.adoptions.contains_key(&id) {
             return;
         }
-        let Some(reports) = self.succession_reports.get(&id) else { return };
+        let Some(reports) = self.succession_reports.get(&id) else {
+            return;
+        };
         let survivors: BTreeSet<HostId> = run.order.survivors.iter().copied().collect();
         if !survivors.iter().all(|h| reports.contains_key(h)) {
             return;
         }
-        let other_base: Vec<HostId> =
-            reports.iter().filter(|(_, r)| r.base_cut != run.order.base_cut).map(|(h, _)| *h).collect();
+        let other_base: Vec<HostId> = reports
+            .iter()
+            .filter(|(_, r)| r.base_cut != run.order.base_cut)
+            .map(|(h, _)| *h)
+            .collect();
         if !other_base.is_empty() {
             // Never mixed with another cut's traffic: it waits (for ever: the deadline).
             log::error!(
@@ -1112,7 +1318,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             run.order.predecessor
         );
         let predecessor = run.order.predecessor;
-        self.adoptions.insert(id, Adoption { predecessor, drop, state: AdoptionState::Wanted, pinned: BTreeSet::new() });
+        self.adoptions.insert(
+            id,
+            Adoption {
+                predecessor,
+                drop,
+                state: AdoptionState::Wanted,
+                pinned: BTreeSet::new(),
+            },
+        );
     }
 
     /// The adoption the server reads the store for, if any: `(succession, predecessor)`.
@@ -1121,7 +1335,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// (`regions_of_entities`) — its fence already replaced by the claims it holds now — or
     /// [`Self::adoption_read_failed`].
     pub fn take_adoption_wanted(&mut self) -> Option<(SuccessionId, HostId)> {
-        let (id, a) = self.adoptions.iter_mut().find(|(_, a)| a.state == AdoptionState::Wanted)?;
+        let (id, a) = self
+            .adoptions
+            .iter_mut()
+            .find(|(_, a)| a.state == AdoptionState::Wanted)?;
         a.state = AdoptionState::Asked;
         Some((*id, a.predecessor))
     }
@@ -1130,14 +1347,24 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// (each lives elsewhere now, or is delivered from the journal) — none of them is taken
     /// from the predecessor's store.
     pub fn adoption_drop_set(&self, id: SuccessionId) -> Vec<crate::EntityId> {
-        self.adoptions.get(&id).map(|a| a.drop.iter().copied().collect()).unwrap_or_default()
+        self.adoptions
+            .get(&id)
+            .map(|a| a.drop.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// The server could not read what [`Self::take_adoption_wanted`] asked for: asked again.
     pub fn adoption_read_failed(&mut self, id: SuccessionId) {
-        if let Some(a) = self.adoptions.get_mut(&id).filter(|a| a.state == AdoptionState::Asked) {
+        if let Some(a) = self
+            .adoptions
+            .get_mut(&id)
+            .filter(|a| a.state == AdoptionState::Asked)
+        {
             // The server's reader warns (rate-limited); here only the state moves.
-            log::debug!("[server] succession {}: the adoption read failed; asked again", id.0);
+            log::debug!(
+                "[server] succession {}: the adoption read failed; asked again",
+                id.0
+            );
             a.state = AdoptionState::Wanted;
         }
     }
@@ -1145,14 +1372,31 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The store's answer to [`Self::take_adoption_wanted`] for succession `id`: the
     /// predecessor's in-flight `rows` of the base cut and where the store holds each entity
     /// of the drop set (`located`). Steps 1–5 of the module docs, in the order they give.
-    pub fn adopted_rows(&mut self, id: SuccessionId, mut rows: Vec<InFlightRow>, located: Vec<(crate::EntityId, RegionCoords)>) {
-        let Some(adoption) = self.adoptions.get(&id).filter(|a| a.state == AdoptionState::Asked) else {
-            log::warn!("[server] succession {}: adoption rows that were not asked for (or are answered); ignored", id.0);
+    pub fn adopted_rows(
+        &mut self,
+        id: SuccessionId,
+        mut rows: Vec<InFlightRow>,
+        located: Vec<(crate::EntityId, RegionCoords)>,
+    ) {
+        let span = tracing::info_span!("host.succession.adopt_rows", rows = rows.len());
+        let _entered = span.enter();
+        let Some(adoption) = self
+            .adoptions
+            .get(&id)
+            .filter(|a| a.state == AdoptionState::Asked)
+        else {
+            log::warn!(
+                "[server] succession {}: adoption rows that were not asked for (or are answered); ignored",
+                id.0
+            );
             return;
         };
         let (pred, drop) = (adoption.predecessor, adoption.drop.clone());
         let Some(order) = self.successions.get(&id).map(|r| r.order.clone()) else {
-            log::error!("[server] succession {}: adoption rows for a succession over here; ignored", id.0);
+            log::error!(
+                "[server] succession {}: adoption rows for a succession over here; ignored",
+                id.0
+            );
             return;
         };
         // The reports the drop set was made from (no report is filed after the resolution).
@@ -1169,7 +1413,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             );
         }
         if resolved.ties > 0 {
-            log::error!("[server] succession {}: {} subject(s) with two events at one stamp (a Received kept)", id.0, resolved.ties);
+            log::error!(
+                "[server] succession {}: {} subject(s) with two events at one stamp (a Received kept)",
+                id.0,
+                resolved.ties
+            );
         }
         // 2. Adopt rows: what a survivor holds or is delivered from a journal is not taken.
         let all_rows = rows.len();
@@ -1204,7 +1452,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             .flat_map(|r| r.owed.iter())
             .flat_map(crate::intents_in)
             .map(|m| peers::peer_intent_target(&m));
-        let pinned = self.load_pinned(located.iter().map(|(_, rc)| *rc).chain(owed_targets).collect());
+        let pinned = self.load_pinned(
+            located
+                .iter()
+                .map(|(_, rc)| *rc)
+                .chain(owed_targets)
+                .collect(),
+        );
         let owed = self.apply_owed(reports);
         self.succession_seam_events += resolved.entries as u64;
         log::info!(
@@ -1237,8 +1491,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         let mut reported = 0;
         for (target, bundle) in people {
             if let (EntityKind::Person { person }, true) = (bundle.kind, self.world.is_some()) {
-                self.note_moved(person, *target, Step::Absorbed { at: bundle_at(bundle) });
-                self.world_send(HostMsg::PersonCrossed { person, to: *target, delivered: false });
+                self.note_moved(
+                    person,
+                    *target,
+                    Step::Absorbed {
+                        at: bundle_at(bundle),
+                    },
+                );
+                self.world_send(HostMsg::PersonCrossed {
+                    person,
+                    to: *target,
+                    delivered: false,
+                });
                 reported += 1;
             }
         }
@@ -1246,8 +1510,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Step 3 for players: each parked here from its journalled record. How many.
-    fn park_players(&mut self, id: SuccessionId, players: &[(HostId, crate::PlayerHandoff, PlayerRecord)]) -> usize {
-        players.iter().cloned().filter(|(from, h, record)| self.park_from_journal(id, *from, h.clone(), record.clone())).count()
+    fn park_players(
+        &mut self,
+        id: SuccessionId,
+        players: &[(HostId, crate::PlayerHandoff, PlayerRecord)],
+    ) -> usize {
+        players
+            .iter()
+            .cloned()
+            .filter(|(from, h, record)| {
+                self.park_from_journal(id, *from, h.clone(), record.clone())
+            })
+            .count()
     }
 
     /// Step 3 for players another survivor holds (`held_by`: its `Received` entry is the
@@ -1278,7 +1552,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             if self.owns(target) {
                 self.accept_arrival(None, target, stamp, bundle, now_ms);
             } else {
-                let msg = Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None };
+                let msg = Reliable::Transfer {
+                    target,
+                    stamp,
+                    bundle: Box::new(bundle),
+                    player: None,
+                };
                 match self.foreign_host(target) {
                     Some(owner) => self.send_reliable(owner, msg, false),
                     None => self.wait_for_owner(target, msg, false, None),
@@ -1318,7 +1597,10 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// A region this host pinned for an adoption that `held` says a pending cut part does
     /// not hold, if any: such a part is never taken — "wait, never guess".
-    pub(super) fn pinned_missing(&self, held: impl Fn(&RegionCoords) -> bool) -> Option<RegionCoords> {
+    pub(super) fn pinned_missing(
+        &self,
+        held: impl Fn(&RegionCoords) -> bool,
+    ) -> Option<RegionCoords> {
         self.succession_pinned.iter().copied().find(|rc| !held(rc))
     }
 
@@ -1331,24 +1613,59 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// not journalled, like R3's), and the login service hears that the login session is
     /// over. `false` if this host holds the player already (a login placed it meanwhile: that
     /// copy is the newer truth).
-    fn park_from_journal(&mut self, id: SuccessionId, from: HostId, h: crate::PlayerHandoff, record: PlayerRecord) -> bool {
+    fn park_from_journal(
+        &mut self,
+        id: SuccessionId,
+        from: HostId,
+        h: crate::PlayerHandoff,
+        record: PlayerRecord,
+    ) -> bool {
         if self.holds_player(h.player) {
-            log::warn!("[server] succession {}: player {} is here already; the journal's copy is dropped", id.0, h.player.0);
+            log::warn!(
+                "[server] succession {}: player {} is here already; the journal's copy is dropped",
+                id.0,
+                h.player.0
+            );
             return false;
         }
         self.placed_by_handoff(h.player, h.hop);
         let hop = self.hop_here(h.player);
-        self.world_send(HostMsg::PlayerOffline { player: h.player, hop });
+        self.world_send(HostMsg::PlayerOffline {
+            player: h.player,
+            hop,
+        });
         self.parked_players.insert(h.player, record);
-        let here = self.sessions.get(&h.client).is_some_and(|s| s.player == Some(h.player));
+        let here = self
+            .sessions
+            .get(&h.client)
+            .is_some_and(|s| s.player == Some(h.player));
         if here {
-            log::info!("[server] succession {}: player {} (client {}) parked from the journal: its session here ends", id.0, h.player.0, h.client);
-            let _ = self.out.send((Some(h.client), ServerPacket::Refused(PLAYER_PARKED_ELSEWHERE.to_string())));
+            log::info!(
+                "[server] succession {}: player {} (client {}) parked from the journal: its session here ends",
+                id.0,
+                h.player.0,
+                h.client
+            );
+            let _ = self.out.send((
+                Some(h.client),
+                ServerPacket::Refused(PLAYER_PARKED_ELSEWHERE.to_string()),
+            ));
             self.client_disconnected(h.client, self.clock_ms);
         }
         if from != self.ordinal() {
-            log::info!("[server] succession {}: player {} (client {}) parked from host {from}'s journal: host {from} told", id.0, h.player.0, h.client);
-            self.queue_to_peer(from, Reliable::PlayerParked { client: h.client, player: h.player });
+            log::info!(
+                "[server] succession {}: player {} (client {}) parked from host {from}'s journal: host {from} told",
+                id.0,
+                h.player.0,
+                h.client
+            );
+            self.queue_to_peer(
+                from,
+                Reliable::PlayerParked {
+                    client: h.client,
+                    player: h.player,
+                },
+            );
         }
         self.login_parked_on_arrival(h.login);
         true
@@ -1360,20 +1677,32 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub(super) fn heir_not_adopted(&self) -> bool {
         let me = self.ordinal();
         self.successions.iter().any(|(id, r)| {
-            r.applied && r.order.heir == me && self.adoptions.get(id).is_none_or(|a| a.state != AdoptionState::Adopted)
+            r.applied
+                && r.order.heir == me
+                && self
+                    .adoptions
+                    .get(id)
+                    .is_none_or(|a| a.state != AdoptionState::Adopted)
         })
     }
 
     /// Every drop set of an adoption not over yet.
     fn adoption_drop_union(&self) -> BTreeSet<crate::EntityId> {
-        self.adoptions.values().flat_map(|a| a.drop.iter().copied()).collect()
+        self.adoptions
+            .values()
+            .flat_map(|a| a.drop.iter().copied())
+            .collect()
     }
 
     /// The predecessors this host adopted and whose successions are not settled: its cut
     /// parts carry them ([`crate::WorldCut::adopts`]).
     pub(super) fn adopting_predecessors(&self) -> Vec<HostId> {
-        let set: BTreeSet<HostId> =
-            self.adoptions.values().filter(|a| a.state == AdoptionState::Adopted).map(|a| a.predecessor).collect();
+        let set: BTreeSet<HostId> = self
+            .adoptions
+            .values()
+            .filter(|a| a.state == AdoptionState::Adopted)
+            .map(|a| a.predecessor)
+            .collect();
         set.into_iter().collect()
     }
 
@@ -1396,24 +1725,38 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A hello of host `from`'s boot `boot` was accepted: if that ordinal was succeeded as
     /// another boot, it is a new host now.
     pub(super) fn succession_hello(&mut self, from: HostId, boot: u64) {
-        if self.succeeded_peers.get(&from).is_some_and(|dead| *dead != boot) {
-            log::info!("[server] host {from} is back as a new boot ({boot:#x}) after its succession");
+        if self
+            .succeeded_peers
+            .get(&from)
+            .is_some_and(|dead| *dead != boot)
+        {
+            log::info!(
+                "[server] host {from} is back as a new boot ({boot:#x}) after its succession"
+            );
             self.succeeded_peers.remove(&from);
         }
     }
 
     /// The successions this host answers (or waits to): `(id, applied)`.
     pub fn successions(&self) -> Vec<(SuccessionId, bool)> {
-        self.successions.iter().map(|(id, r)| (*id, r.applied)).collect()
+        self.successions
+            .iter()
+            .map(|(id, r)| (*id, r.applied))
+            .collect()
     }
 
     /// The heir's: the survivors' reports of succession `id` it holds, by survivor.
-    pub fn succession_reports(&self, id: SuccessionId) -> Option<&BTreeMap<HostId, SuccessionReportIn>> {
+    pub fn succession_reports(
+        &self,
+        id: SuccessionId,
+    ) -> Option<&BTreeMap<HostId, SuccessionReportIn>> {
         self.succession_reports.get(&id)
     }
 
     /// Every report held (the heir's), by succession and survivor.
-    pub fn all_succession_reports(&self) -> &BTreeMap<SuccessionId, BTreeMap<HostId, SuccessionReportIn>> {
+    pub fn all_succession_reports(
+        &self,
+    ) -> &BTreeMap<SuccessionId, BTreeMap<HostId, SuccessionReportIn>> {
         &self.succession_reports
     }
 
@@ -1426,7 +1769,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.inheriting.retain(|_, s| *s != id);
         let lifted = before - self.inheriting.len();
         if lifted > 0 {
-            log::info!("[server] succession {}: {lifted} inherited super-region(s) adopted", id.0);
+            log::info!(
+                "[server] succession {}: {lifted} inherited super-region(s) adopted",
+                id.0
+            );
         }
         self.flush_unowned();
         self.retry_held_spawns();

@@ -76,14 +76,17 @@ pub struct RigidBodySet {
     pub(crate) bodies: Arena<RigidBody>,
     pub(crate) modified_bodies: ModifiedRigidBodies,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — a constant placeholder body, not state (serde-skipped).
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — a constant placeholder body, not state (serde-skipped).
     pub(crate) default_fixed: RigidBody,
     // mmo-fork: first-touch capture buffer, installed only for the duration of
     // a journaled step (`pipeline::step_journal`, upgrade plan Task 4.2).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    #[state_hash(skip)] // mmo-fork: StateHash — the journal's transient capture buffer, not state.
-    pub(crate) capture:
-        Option<alloc::boxed::Box<crate::pipeline::step_journal::Capture<RigidBodyHandle, RigidBody>>>,
+    #[state_hash(skip)]
+    // mmo-fork: StateHash — the journal's transient capture buffer, not state.
+    pub(crate) capture: Option<
+        alloc::boxed::Box<crate::pipeline::step_journal::Capture<RigidBodyHandle, RigidBody>>,
+    >,
 }
 
 impl RigidBodySet {
@@ -245,7 +248,10 @@ impl RigidBodySet {
     /// ```
     pub fn insert(&mut self, rb: impl Into<RigidBody>) -> RigidBodyHandle {
         // mmo-fork: the journal restores values, not slots.
-        debug_assert!(self.capture.is_none(), "body insert during a journaled step");
+        debug_assert!(
+            self.capture.is_none(),
+            "body insert during a journaled step"
+        );
         let mut rb = rb.into();
         // Make sure the internal links are reset, they may not be
         // if this rigid-body was obtained by cloning another one.
@@ -309,7 +315,10 @@ impl RigidBodySet {
         remove_attached_colliders: bool,
     ) -> Option<RigidBody> {
         // mmo-fork: the journal restores values, not slots.
-        debug_assert!(self.capture.is_none(), "body removal during a journaled step");
+        debug_assert!(
+            self.capture.is_none(),
+            "body removal during a journaled step"
+        );
         // Removing a soft-frame proxy removes its cluster: the particles only it covers, the
         // elements attached to them, and their colliders. Dissolved before the body removal so the
         // proxy (and its parenting of the cluster's colliders) is still intact meanwhile.

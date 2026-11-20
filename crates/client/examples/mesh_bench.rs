@@ -9,10 +9,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use client::renderer::bridge::VoxelData;
-use client::renderer::meshing::binary::{mesh_quads, CutoutTable};
+use client::renderer::meshing::binary::{CutoutTable, mesh_quads};
 use client::renderer::meshing::neighbors::{gather_padded_rle, zone_offsets};
 use client::renderer::meshing::visibility::face_connectivity;
-use game::{BlockId, Chunk, RegionCoords, REGION_CHUNKS};
+use game::{BlockId, Chunk, REGION_CHUNKS, RegionCoords};
 
 type Key = [i32; 3];
 
@@ -93,7 +93,11 @@ fn main() {
 
     let t = Instant::now();
     let chunks = window();
-    println!("worldgen: {} chunks in 3x3 regions, {:?}", chunks.len(), t.elapsed());
+    println!(
+        "worldgen: {} chunks in 3x3 regions, {:?}",
+        chunks.len(),
+        t.elapsed()
+    );
 
     let mut stage = Stage::default();
     let t = Instant::now();
@@ -114,7 +118,11 @@ fn main() {
         // The client meshes 32³ render bricks, not sim chunks.
         let n = game::BRICKS_PER_CHUNK_EDGE as i32;
         for (b, brick) in chunk.bricks() {
-            let bk = [key[0] * n + b[0] as i32, key[1] * n + b[1] as i32, key[2] * n + b[2] as i32];
+            let bk = [
+                key[0] * n + b[0] as i32,
+                key[1] * n + b[1] as i32,
+                key[2] * n + b[2] as i32,
+            ];
             grid.insert(bk, VoxelData::new(brick.voxels()));
         }
     }
@@ -143,21 +151,29 @@ fn main() {
         total_quads as f64 / n as f64
     );
     println!("per brick (us, 1 thread):");
-    println!("  derive+rle    {:7.1}   (snapshot-voxel task)", per(stage.derive));
+    println!(
+        "  derive+rle    {:7.1}   (snapshot-voxel task)",
+        per(stage.derive)
+    );
     println!("  gather_padded {:7.1}", per(stage.gather));
     println!("  mesh_quads    {:7.1}", per(stage.quads));
     println!("  connectivity  {:7.1}", per(stage.connectivity));
-    println!("  mesh task sum {:7.1}   (whole window {single:?})", per(single));
+    println!(
+        "  mesh task sum {:7.1}   (whole window {single:?})",
+        per(single)
+    );
 
     for &t_count in &threads {
         let t = Instant::now();
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|s| {
             for _ in 0..t_count {
-                s.spawn(|| loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(&k) = keys.get(i) else { break };
-                    std::hint::black_box(mesh_one(k, &grid, None));
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&k) = keys.get(i) else { break };
+                        std::hint::black_box(mesh_one(k, &grid, None));
+                    }
                 });
             }
         });

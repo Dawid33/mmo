@@ -7,9 +7,9 @@
 use crate::history::PersonId;
 use crate::movement::{self, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 use crate::{
-    PersonSpawn, SpawnAt,
-    current_tile, feet_of, nearest_standable, steer, ColliderSpec, EntityKey, EntityKind, GameDataTransactionKind,
-    GameDataUpdate, GameDataUpdateKind, Goal, Pose, RouteMap, RegionCoords, Rollback, REGION_BLOCKS,
+    ColliderSpec, EntityKey, EntityKind, GameDataTransactionKind, GameDataUpdate,
+    GameDataUpdateKind, Goal, PersonSpawn, Pose, REGION_BLOCKS, RegionCoords, Rollback, RouteMap,
+    SpawnAt, current_tile, feet_of, nearest_standable, steer,
 };
 use rapier3d::math::Vector;
 
@@ -24,16 +24,44 @@ pub const WANDER_RADIUS_BLOCKS: i32 = 8;
 /// budget ([`crate::MAX_PATH_NODES`]) an unreachable wander goal (past a cliff, on a ledge) cost a
 /// whole-neighbourhood search every wander of every resident.
 pub const WANDER_PATH_NODES: u32 = 2_048;
-/// A standing person re-runs the character controller every this many ticks (it is
-/// skipped while they stand grounded), so one whose ground was dug away falls.
+/// A standing person checks its footing every this many ticks (staggered by
+/// person, so a crowd never checks on one tick), and re-runs the character
+/// controller only when its tile is no longer standable: one whose ground was
+/// dug away falls.
 pub const IDLE_RESETTLE_TICKS: u64 = 20;
+/// A walking person follows its planned tiles directly ([`Rollback::follow_path_safe`],
+/// no collision sweep) unless a player body is within this many blocks (horizontally)
+/// of it or of its next tile; then it walks through the character controller, so it
+/// never walks into a player.
+pub const PATH_FOLLOW_PLAYER_CLEARANCE_BLOCKS: f32 = 2.0;
+/// ... and within this many blocks vertically.
+pub const PATH_FOLLOW_PLAYER_CLEARANCE_Y_BLOCKS: f32 = 3.0;
+/// Share of two people's capsule overlap a tick of [`Rollback::separation_pushes`]
+/// resolves (split between them): people may overlap a little and drift apart over a
+/// few ticks instead of colliding hard.
+pub const PERSON_SEPARATION_SHARE: f32 = 0.3;
+/// The most a person is pushed aside in one tick, metres (2 m/s at a 50 ms tick).
+pub const PERSON_SEPARATION_MAX_STEP_M: f32 = 0.1;
+/// A path-following person's feet move toward the next tile's level at up to this
+/// many times its horizontal step per tick (a step up or down eases over a few ticks).
+pub const PATH_FOLLOW_CLIMB_RATE: f32 = 2.0;
 
 const SALT_WANDER_WAIT: u64 = 0x9E47_0001;
 const SALT_WANDER_GOAL: u64 = 0x9E47_0002;
 
 /// When an idle person next picks somewhere to walk. Rollback component
 /// (`Ecs::wander`); the choice itself is a stateless roll on the tick.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, state_hash::StateHash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    state_hash::StateHash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct Wander {
     pub next_tick: u64,
     /// The world block column ([`crate::WorldBlockPos`]'s `[x, z]`) the
@@ -72,7 +100,10 @@ impl Rollback {
             GameDataUpdateKind::SetEntityKind(e, None),
         ));
         self.data.ecs.kind.set_safe(e, Some(kind));
-        self.data.ecs.motion.set_safe(e, Some(crate::Motion::default()));
+        self.data
+            .ecs
+            .motion
+            .set_safe(e, Some(crate::Motion::default()));
         self.attach_rig_safe(
             e,
             crate::anim::Animator::idle(crate::anim::RigId::Dwarf),
@@ -84,7 +115,9 @@ impl Rollback {
 
     /// Remove `person`'s body from this region. `false` if they had none.
     pub fn despawn_person_safe(&mut self, person: PersonId) -> bool {
-        let Some(&e) = self.data.person_entities.get(&person) else { return false };
+        let Some(&e) = self.data.person_entities.get(&person) else {
+            return false;
+        };
         self.data.person_entities.remove(&person);
         self.remove_entity_safe(e, None);
         true
@@ -92,7 +125,12 @@ impl Rollback {
 
     /// Applies a server-authored [`PersonSpawn`]: the body at the resolved
     /// column, then the optional walk. No change if they already have a body.
-    pub fn apply_person_spawn_safe(&mut self, spawn: PersonSpawn, here: RegionCoords, map: Option<&RouteMap>) {
+    pub fn apply_person_spawn_safe(
+        &mut self,
+        spawn: PersonSpawn,
+        here: RegionCoords,
+        map: Option<&RouteMap>,
+    ) {
         let n = REGION_BLOCKS as i32;
         let landing = [
             (crate::PLAYER_SPAWN_X as i32 / crate::BLOCK_VOXELS as i32).clamp(0, n - 1),
@@ -101,7 +139,10 @@ impl Rollback {
         let column = match spawn.at {
             SpawnAt::Column([x, z]) => [(x as i32).clamp(0, n - 1), (z as i32).clamp(0, n - 1)],
             SpawnAt::NearPerson(other) => self.near_person_column(other).unwrap_or(landing),
-            SpawnAt::Edge { from, along_per_mille } => {
+            SpawnAt::Edge {
+                from,
+                along_per_mille,
+            } => {
                 let along = (along_per_mille.min(1000) as i64 * (n as i64 - 1) / 1000) as i32;
                 let axis = |d: i32, along: i32| match d.signum() {
                     -1 => 0,
@@ -111,11 +152,15 @@ impl Rollback {
                 // The side `from` lies on (across a wrapped seam the short way).
                 let (dx, dz) = crate::region_delta(map.map(RouteMap::extent), here, from);
                 let c = [axis(dx, along), axis(dz, along)];
-                nearest_standable(self, c, None).map(|t| [t[0], t[2]]).unwrap_or(c)
+                nearest_standable(self, c, None)
+                    .map(|t| [t[0], t[2]])
+                    .unwrap_or(c)
             }
         };
         let xz = crate::block_column_xz([column[0] as u32, column[1] as u32]);
-        let Some(e) = self.spawn_person_safe(spawn.person, xz) else { return };
+        let Some(e) = self.spawn_person_safe(spawn.person, xz) else {
+            return;
+        };
         if let Some(goal) = spawn.walk_to {
             self.walk_entity_safe(e, goal, here, map);
         }
@@ -127,8 +172,9 @@ impl Rollback {
         let e = self.person_entity(other)?;
         let at = current_tile(self, self.body_feet(e)?)?;
         let n = REGION_BLOCKS as i32;
-        let mut offsets: Vec<(i32, i32)> =
-            (-2..=2).flat_map(|dx| (-2..=2).map(move |dz| (dx, dz))).collect();
+        let mut offsets: Vec<(i32, i32)> = (-2..=2)
+            .flat_map(|dx| (-2..=2).map(move |dz| (dx, dz)))
+            .collect();
         offsets.sort_by_key(|&(dx, dz)| (dx == 0 && dz == 0, dx * dx + dz * dz, dx, dz));
         offsets.into_iter().find_map(|(dx, dz)| {
             let c = [at[0] + dx, at[2] + dz];
@@ -170,7 +216,9 @@ impl Rollback {
         here: RegionCoords,
         map: Option<&RouteMap>,
     ) -> bool {
-        let Some(e) = self.person_entity(person) else { return false };
+        let Some(e) = self.person_entity(person) else {
+            return false;
+        };
         let n = REGION_BLOCKS as i32;
         if let Some(from) = self.body_feet(e).and_then(|feet| current_tile(self, feet)) {
             let across = |d: i32, own: i32| match d.signum() {
@@ -195,31 +243,110 @@ impl Rollback {
     /// same planner and character controller as a player's body.
     pub fn tick_people_safe(&mut self, here: RegionCoords, map: Option<&RouteMap>) {
         let tick = *self.data.tick;
-        let people: Vec<(PersonId, EntityKey)> =
-            self.data.person_entities.iter().map(|(&p, &e)| (p, e)).collect();
-        for (person, e) in people {
+        let people: Vec<(PersonId, EntityKey)> = self
+            .data
+            .person_entities
+            .iter()
+            .map(|(&p, &e)| (p, e))
+            .collect();
+        let pushes = self.separation_pushes(&people);
+        // People's sweeps pass through each other (separation keeps them apart).
+        let bodies: std::collections::BTreeSet<rapier3d::prelude::RigidBodyHandle> = people
+            .iter()
+            .filter_map(|&(_, e)| *self.data.ecs.rigidbody.try_get(e))
+            .collect();
+        for ((person, e), push) in people.into_iter().zip(pushes) {
             if self.data.ecs.walker.try_get(e).is_none() {
                 self.wander_person_safe(person, e, tick, here, map);
             }
-            self.steer_person_safe(e, tick);
+            self.steer_person_safe(person, e, tick, push, &bodies);
         }
     }
 
-    fn wander_person_safe(&mut self, person: PersonId, e: EntityKey, tick: u64, here: RegionCoords, map: Option<&RouteMap>) {
-        let wait = |t: u64| WANDER_MIN_TICKS + crate::slime::roll(t, person.0 as u64, SALT_WANDER_WAIT) % WANDER_RANGE_TICKS;
-        let Some(feet) = self.body_feet(e) else { return };
-        let Some(from) = current_tile(self, feet) else { return };
+    /// Soft separation between people: for each of `people` (in order), the
+    /// horizontal push (voxel units) away from every other person whose
+    /// capsule overlaps theirs, [`PERSON_SEPARATION_SHARE`] of the overlap,
+    /// capped at [`PERSON_SEPARATION_MAX_STEP_M`] a tick. Overlaps are allowed
+    /// and sort themselves out over a few ticks. All pushes come from the
+    /// positions at the start of the pass, so the order applied in changes
+    /// nothing.
+    fn separation_pushes(&self, people: &[(PersonId, EntityKey)]) -> Vec<Vector> {
+        let feet: Vec<Option<Vector>> = people.iter().map(|&(_, e)| self.body_feet(e)).collect();
+        let reach = 2.0 * PLAYER_CAPSULE_RADIUS;
+        let tall = 2.0 * (PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS);
+        let max_step = PERSON_SEPARATION_MAX_STEP_M * movement::UNITS_PER_METER;
+        let mut pushes = vec![Vector::ZERO; people.len()];
+        for i in 0..people.len() {
+            let Some(a) = feet[i] else { continue };
+            for j in i + 1..people.len() {
+                let Some(b) = feet[j] else { continue };
+                let (dx, dz) = (a.x - b.x, a.z - b.z);
+                let d2 = dx * dx + dz * dz;
+                if d2 >= reach * reach || (a.y - b.y).abs() >= tall {
+                    continue;
+                }
+                let d = libm::sqrtf(d2);
+                // Standing on the same spot: the lower id steps -x, the higher +x.
+                let (ux, uz) = if d > 1e-3 {
+                    (dx / d, dz / d)
+                } else {
+                    (-1.0, 0.0)
+                };
+                let push = Vector::new(ux, 0.0, uz) * ((reach - d) * PERSON_SEPARATION_SHARE * 0.5);
+                pushes[i] += push;
+                pushes[j] -= push;
+            }
+        }
+        for p in &mut pushes {
+            let len = libm::sqrtf(p.x * p.x + p.z * p.z);
+            if len > max_step {
+                *p *= max_step / len;
+            }
+        }
+        pushes
+    }
+
+    fn wander_person_safe(
+        &mut self,
+        person: PersonId,
+        e: EntityKey,
+        tick: u64,
+        here: RegionCoords,
+        map: Option<&RouteMap>,
+    ) {
+        let wait = |t: u64| {
+            WANDER_MIN_TICKS
+                + crate::slime::roll(t, person.0 as u64, SALT_WANDER_WAIT) % WANDER_RANGE_TICKS
+        };
+        let Some(feet) = self.body_feet(e) else {
+            return;
+        };
+        let Some(from) = current_tile(self, feet) else {
+            return;
+        };
         let home = match *self.data.ecs.wander.try_get(e) {
             Some(w) if tick < w.next_tick => return,
             Some(w) => w.home,
             None => {
                 let w = self.data.world_block(from);
                 let home = [w.x, w.z];
-                self.data.ecs.wander.set_safe(e, Some(Wander { next_tick: tick + wait(tick), home }));
+                self.data.ecs.wander.set_safe(
+                    e,
+                    Some(Wander {
+                        next_tick: tick + wait(tick),
+                        home,
+                    }),
+                );
                 return;
             }
         };
-        self.data.ecs.wander.set_safe(e, Some(Wander { next_tick: tick + wait(tick), home }));
+        self.data.ecs.wander.set_safe(
+            e,
+            Some(Wander {
+                next_tick: tick + wait(tick),
+                home,
+            }),
+        );
         let r = crate::slime::roll(tick, person.0 as u64, SALT_WANDER_GOAL);
         let span = 2 * WANDER_RADIUS_BLOCKS as u64 + 1;
         let dx = (r % span) as i64 - WANDER_RADIUS_BLOCKS as i64;
@@ -227,29 +354,67 @@ impl Rollback {
         // Anywhere around home, this side of a seam or the other: the walk
         // plans across seams (`PathPlan`), and finds the goal's standable
         // tile nearest the person's own level or gives up.
-        let goal = Goal { column: [home[0] + dx, home[1] + dz], y: Some(from[1]) };
+        let goal = Goal {
+            column: [home[0] + dx, home[1] + dz],
+            y: Some(from[1]),
+        };
         self.walk_entity_within_safe(e, goal, here, map, WANDER_PATH_NODES);
     }
 
-    fn steer_person_safe(&mut self, e: EntityKey, tick: u64) {
-        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return };
-        let Some(body) = self.data.physics.bodies.get(handle) else { return };
+    fn steer_person_safe(
+        &mut self,
+        person: PersonId,
+        e: EntityKey,
+        tick: u64,
+        push: Vector,
+        people: &std::collections::BTreeSet<rapier3d::prelude::RigidBodyHandle>,
+    ) {
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else {
+            return;
+        };
+        let Some(body) = self.data.physics.bodies.get(handle) else {
+            return;
+        };
         let t = body.translation();
         let rot0 = body.position().rotation;
         let motion0 = (*self.data.ecs.motion.try_get(e)).unwrap_or_default();
         let (keys, yaw) = match self.data.ecs.walker.try_get(e) {
-            Some(w) => steer(w, feet_of(t), motion0.grounded, *self.data.region, self.data.map()),
+            Some(w) => steer(
+                w,
+                feet_of(t),
+                motion0.grounded,
+                *self.data.region,
+                self.data.map(),
+            ),
             None => (MoveKeys::default(), 0.0),
         };
         let walking = self.data.ecs.walker.try_get(e).is_some();
         // A standing person on the ground makes no move at all, skipping the
-        // character controller on most ticks — but not every one, so a person
-        // whose ground was dug away falls.
-        if !walking && motion0.grounded && tick % IDLE_RESETTLE_TICKS != 0 {
+        // character controller — it checks its footing every
+        // IDLE_RESETTLE_TICKS (staggered by person), and only a person whose
+        // tile is no longer standable (its ground dug away) falls.
+        if !walking && motion0.grounded {
+            // Shoved aside by a person standing in it (`separation_pushes`).
+            if push != Vector::ZERO && self.can_shove(feet_of(t), push) {
+                self.data
+                    .physics
+                    .bodies
+                    .mutate_body_safe(handle, move |b| b.set_next_kinematic_translation(t + push));
+                return;
+            }
+            let due = (tick + person.0 as u64) % IDLE_RESETTLE_TICKS == 0;
+            if !due || crate::standable(self, crate::feet_tile(feet_of(t))) {
+                return;
+            }
+        }
+        if walking && self.follow_path_safe(e, handle, t, yaw, motion0, push) {
             return;
         }
         let mut motion = motion0;
-        let corrected = movement::walk_body(
+        let keep = |_: rapier3d::prelude::ColliderHandle, c: &rapier3d::prelude::Collider| {
+            c.parent().is_none_or(|b| !people.contains(&b))
+        };
+        let corrected = movement::walk_body_keeping(
             &mut motion,
             &keys,
             yaw,
@@ -259,6 +424,7 @@ impl Rollback {
             &self.data.physics.bodies,
             &self.data.physics.colliders,
             handle,
+            &keep,
         );
         if motion != motion0 {
             self.data.ecs.motion.set_safe(e, Some(motion));
@@ -275,5 +441,111 @@ impl Rollback {
                 }
             });
         }
+    }
+
+    /// Moves walking `e` one tick straight along its planned tiles at walk
+    /// speed, with no collision sweep: the plan already keeps it to standable
+    /// tiles, and the sweep is most of a walker's cost. Its feet ease to the
+    /// next tile's level (where the controller would hold them, a skin above
+    /// the floor). `false`, with no change, when the character controller must
+    /// walk it instead: a player body near it or its next tile (it must not
+    /// walk into a player), that tile no longer standable (dug, built over —
+    /// the controller collides, the walker stalls and re-plans), the body
+    /// airborne or in water.
+    fn follow_path_safe(
+        &mut self,
+        e: EntityKey,
+        handle: rapier3d::prelude::RigidBodyHandle,
+        t: Vector,
+        yaw: f32,
+        motion0: crate::Motion,
+        push: Vector,
+    ) -> bool {
+        if !motion0.grounded || motion0.flying || motion0.immersion != movement::Immersion::Dry {
+            return false;
+        }
+        let Some(wp) = self
+            .data
+            .ecs
+            .walker
+            .try_get(e)
+            .as_ref()
+            .and_then(|w| w.waypoint(w.next, *self.data.region, self.data.map()))
+        else {
+            return false;
+        };
+        if !crate::standable(self, wp) {
+            return false;
+        }
+        let bv = crate::BLOCK_VOXELS as f32;
+        let feet = feet_of(t);
+        let target = Vector::new(
+            (wp[0] as f32 + 0.5) * bv,
+            wp[1] as f32 * bv + movement::CHARACTER_SKIN,
+            (wp[2] as f32 + 0.5) * bv,
+        );
+        if self.player_near(&[feet, target]) {
+            return false;
+        }
+        let step = movement::WALK_SPEED * movement::UNITS_PER_METER * movement::TICK_DT;
+        let (dx, dz) = (target.x - feet.x, target.z - feet.z);
+        let d = libm::sqrtf(dx * dx + dz * dz);
+        let k = if d > step { step / d } else { 1.0 };
+        let climb = PATH_FOLLOW_CLIMB_RATE * step;
+        let mut moved = Vector::new(dx * k, (target.y - feet.y).clamp(-climb, climb), dz * k);
+        if push != Vector::ZERO && self.can_shove(feet + moved, push) {
+            moved += push;
+        }
+        let motion = crate::Motion {
+            vel_y: 0.0,
+            ..motion0
+        };
+        if motion != motion0 {
+            self.data.ecs.motion.set_safe(e, Some(motion));
+        }
+        let rot = crate::yaw_quat(yaw);
+        self.data.physics.bodies.mutate_body_safe(handle, move |b| {
+            b.set_next_kinematic_translation(t + moved);
+            b.set_next_kinematic_rotation(rot);
+        });
+        true
+    }
+
+    /// Whether feet at `feet` may be shoved by `push`: the capsule's centre and
+    /// its four horizontal extremes all land over standable tiles (never into a
+    /// wall or over a ledge), with no player near (a player is collided with,
+    /// never shoved into).
+    fn can_shove(&self, feet: Vector, push: Vector) -> bool {
+        let to = feet + push;
+        let r = PLAYER_CAPSULE_RADIUS;
+        [
+            Vector::ZERO,
+            Vector::X * r,
+            Vector::X * -r,
+            Vector::Z * r,
+            Vector::Z * -r,
+        ]
+        .iter()
+        .all(|o| crate::standable(self, crate::feet_tile(to + *o)))
+            && !self.player_near(&[to])
+    }
+
+    /// Whether any player body in this region is within
+    /// [`PATH_FOLLOW_PLAYER_CLEARANCE_BLOCKS`] (horizontally) and
+    /// [`PATH_FOLLOW_PLAYER_CLEARANCE_Y_BLOCKS`] (vertically) of any of `points`
+    /// (feet positions, voxel units).
+    fn player_near(&self, points: &[Vector]) -> bool {
+        let bv = crate::BLOCK_VOXELS as f32;
+        let r = PATH_FOLLOW_PLAYER_CLEARANCE_BLOCKS * bv;
+        let ry = PATH_FOLLOW_PLAYER_CLEARANCE_Y_BLOCKS * bv;
+        self.data.player_entites.values().any(|&p| {
+            let Some(pf) = self.body_feet(p) else {
+                return false;
+            };
+            points.iter().any(|q| {
+                let (dx, dz) = (pf.x - q.x, pf.z - q.z);
+                dx * dx + dz * dz <= r * r && (pf.y - q.y).abs() <= ry
+            })
+        })
     }
 }

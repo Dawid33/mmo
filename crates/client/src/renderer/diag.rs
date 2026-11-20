@@ -104,7 +104,8 @@ fn log_arena_geometry(
     }
     *last = Some(now);
     let sim_half = game::CHUNK_UNITS as f32 * 0.5 * 1.01;
-    let (mut near, mut near_q, mut fine_q, mut coarse, mut coarse_q, mut lod, mut lod_q) = (0u32, 0u64, 0u64, 0u32, 0u64, 0u32, 0u64);
+    let (mut near, mut near_q, mut fine_q, mut coarse, mut coarse_q, mut lod, mut lod_q) =
+        (0u32, 0u64, 0u64, 0u32, 0u64, 0u32, 0u64);
     let mut lod_by_size = std::collections::BTreeMap::<u32, (u32, u64)>::new();
     // LOD quads per face id (`Face::index()` order), then cutout.
     let mut lod_faces = [0u64; 7];
@@ -125,7 +126,9 @@ fn log_arena_geometry(
             _ => {
                 lod += 1;
                 lod_q += q;
-                let entry = lod_by_size.entry(m.half_extents[0] as u32 * 2 / game::BLOCK_VOXELS as u32).or_insert((0u32, 0u64));
+                let entry = lod_by_size
+                    .entry(m.half_extents[0] as u32 * 2 / game::BLOCK_VOXELS as u32)
+                    .or_insert((0u32, 0u64));
                 entry.0 += 1;
                 entry.1 += q;
                 let mut prev = 0u32;
@@ -138,7 +141,10 @@ fn log_arena_geometry(
         }
     }
     // LOD tiles by horizontal size (metres): where the far quads sit.
-    let by_size: Vec<String> = lod_by_size.iter().map(|(m, (n, q))| format!("{m}m:{n}/{q}")).collect();
+    let by_size: Vec<String> = lod_by_size
+        .iter()
+        .map(|(m, (n, q))| format!("{m}m:{n}/{q}"))
+        .collect();
     bevy::log::info!(
         "[arena] near_chunks={near} near_quads={near_q} (with_twin={fine_q}) coarse_twins={coarse} coarse_quads={coarse_q} lod_slots={lod} lod_quads={lod_q} lod_by_size(tiles/quads)=[{}] lod_faces={lod_faces:?}",
         by_size.join(" ")
@@ -149,17 +155,24 @@ fn log_arena_geometry(
 /// start — for unattended profiling runs whose output only flushes on a clean exit
 /// (the `trace_chrome` JSON), where a SIGTERM would truncate it. Native only.
 pub fn exit_after_from_env() -> Option<f32> {
-    std::env::var("VOXEL_EXIT_AFTER_SECS").ok()?.parse().ok().filter(|s: &f32| *s > 0.0)
+    std::env::var("VOXEL_EXIT_AFTER_SECS")
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|s: &f32| *s > 0.0)
 }
 
 /// Writes `AppExit::Success` once `secs` of real time have passed.
 pub fn exit_after_plugin(app: &mut App, secs: f32) {
     use bevy::prelude::*;
-    app.add_systems(Update, move |time: Res<Time<Real>>, mut exit: MessageWriter<AppExit>| {
-        if time.elapsed_secs() >= secs {
-            exit.write(AppExit::Success);
-        }
-    });
+    app.add_systems(
+        Update,
+        move |time: Res<Time<Real>>, mut exit: MessageWriter<AppExit>| {
+            if time.elapsed_secs() >= secs {
+                exit.write(AppExit::Success);
+            }
+        },
+    );
 }
 
 /// `VOXEL_SCREENSHOT=<secs>:<path>`: save the primary window to `<path>` (PNG)
@@ -174,11 +187,16 @@ pub fn screenshot_from_env() -> Option<(f32, String)> {
 /// Takes the [`screenshot_from_env`] capture.
 pub fn screenshot_plugin(app: &mut App, secs: f32, path: String) {
     use bevy::prelude::*;
-    use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-    app.add_systems(Update, move |time: Res<Time<Real>>, mut commands: Commands, mut taken: Local<bool>| {
-        if !*taken && time.elapsed_secs() >= secs {
-            *taken = true;
-            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.clone()));
-        }
-    });
+    use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+    app.add_systems(
+        Update,
+        move |time: Res<Time<Real>>, mut commands: Commands, mut taken: Local<bool>| {
+            if !*taken && time.elapsed_secs() >= secs {
+                *taken = true;
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(path.clone()));
+            }
+        },
+    );
 }

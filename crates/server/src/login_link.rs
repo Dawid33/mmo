@@ -70,17 +70,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use crossbeam::channel::{Receiver, Sender};
-use game::{PlayerToken, ServerEvent, LOGGED_IN_ELSEWHERE};
+use game::{LOGGED_IN_ELSEWHERE, PlayerToken, ServerEvent};
 use login_api::{HostToLogin, LoginPage, LoginToHost, SPAWN_PENDING_TTL_SECS};
 use tokio::sync::watch;
+use tracing::Instrument;
 
 use crate::coordinator_api::{AnswersQuery, Auth, MAILBOX_PAGE_MAX};
 
@@ -109,12 +110,16 @@ pub const REFUSE_NO_SPAWN_ORDER: &str = "no spawn order for this login — log i
 /// `VOXEL_SERVICE_TOKEN_FILE` set): a `jwt` host with one listens for the login service's
 /// push; without one it keeps R2a's admission (no link). A configured token that cannot be
 /// read is an error.
-pub fn service_token_if_configured(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<String>, String> {
+pub fn service_token_if_configured(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
     let set = |name: &str| lookup(name).is_some_and(|v| !v.trim().is_empty());
     if !set(svc_link::SERVICE_TOKEN_ENV) && !set(svc_link::SERVICE_TOKEN_FILE_ENV) {
         return Ok(None);
     }
-    svc_link::service_token_from_env().map(Some).map_err(|e| format!("the login link's service token: {e}"))
+    svc_link::service_token_from_env()
+        .map(Some)
+        .map_err(|e| format!("the login link's service token: {e}"))
 }
 
 /// Names the dev-only admission fallback of a `jwt` host without a service token.
@@ -148,7 +153,9 @@ pub fn jwt_admission(token_configured: bool, env: Option<&str>) -> Result<JwtAdm
             svc_link::SERVICE_TOKEN_FILE_ENV
         )),
         (false, Some(JWT_ADMISSION_NEWEST)) => Ok(JwtAdmission::Newest),
-        (false, Some(other)) => Err(format!("auth: {JWT_ADMISSION_ENV}={other:?} is not understood; the accepted value is {JWT_ADMISSION_NEWEST:?}")),
+        (false, Some(other)) => Err(format!(
+            "auth: {JWT_ADMISSION_ENV}={other:?} is not understood; the accepted value is {JWT_ADMISSION_NEWEST:?}"
+        )),
         (false, None) => Err(format!(
             "auth: jwt needs the login link — set VOXEL_SERVICE_TOKEN[_FILE] (a world registered with a host link), \
              or {JWT_ADMISSION_ENV}={JWT_ADMISSION_NEWEST} to admit tickets by newest epoch without spawn orders or kicks (dev only)"
@@ -163,12 +170,22 @@ pub fn bind_from(value: Option<&str>) -> Result<SocketAddr, String> {
 
 /// The pin file from an env value; unset or empty is [`DEFAULT_HOST_LINK_CERT_HASH_FILE`].
 pub fn cert_hash_file_from(value: Option<&str>) -> PathBuf {
-    PathBuf::from(value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_HOST_LINK_CERT_HASH_FILE))
+    PathBuf::from(
+        value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(DEFAULT_HOST_LINK_CERT_HASH_FILE),
+    )
 }
 
 fn addr_from(env: &str, value: Option<&str>, default: &str) -> Result<SocketAddr, String> {
-    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(default);
-    value.parse().map_err(|_| format!("{env}={value:?} is not an address (ip:port)"))
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(default);
+    value
+        .parse()
+        .map_err(|_| format!("{env}={value:?} is not an address (ip:port)"))
 }
 
 /// The world id this process's service links name (`VOXEL_WORLD_ID`, trimmed; unset: empty —
@@ -180,17 +197,48 @@ pub fn link_world_from(value: Option<&str>) -> String {
 /// The login service's message, as the coordinator relays it to the gate host.
 pub fn order_from(msg: LoginToHost) -> game::LoginOrder {
     match msg {
-        LoginToHost::SpawnPlayer { player_token, session_epoch } => game::LoginOrder::Spawn { player_token, session_epoch },
-        LoginToHost::Kick { player_token, session_epoch, reason } => game::LoginOrder::Kick { player_token, session_epoch, reason },
+        LoginToHost::SpawnPlayer {
+            player_token,
+            session_epoch,
+        } => game::LoginOrder::Spawn {
+            player_token,
+            session_epoch,
+        },
+        LoginToHost::Kick {
+            player_token,
+            session_epoch,
+            reason,
+        } => game::LoginOrder::Kick {
+            player_token,
+            session_epoch,
+            reason,
+        },
     }
 }
 
 /// A host's answer, as the coordinator forwards it to the login service.
 pub fn answer_from(out: game::LoginOut) -> HostToLogin {
     match out {
-        game::LoginOut::SpawnAck { player_token, session_epoch, ok, endpoint } => spawn_ack(player_token, session_epoch, ok, endpoint),
-        game::LoginOut::KickAck { player_token, session_epoch } => HostToLogin::KickAck { player_token, session_epoch },
-        game::LoginOut::SessionEnded { player_token, session_epoch } => HostToLogin::SessionEnded { player_token, session_epoch },
+        game::LoginOut::SpawnAck {
+            player_token,
+            session_epoch,
+            ok,
+            endpoint,
+        } => spawn_ack(player_token, session_epoch, ok, endpoint),
+        game::LoginOut::KickAck {
+            player_token,
+            session_epoch,
+        } => HostToLogin::KickAck {
+            player_token,
+            session_epoch,
+        },
+        game::LoginOut::SessionEnded {
+            player_token,
+            session_epoch,
+        } => HostToLogin::SessionEnded {
+            player_token,
+            session_epoch,
+        },
     }
 }
 
@@ -207,21 +255,39 @@ pub enum OrderOutcome {
     /// For the manager, on its event channel: a spawn to place ([`ServerEvent::SpawnOrder`]),
     /// or a kick applied here and to be relayed ([`ServerEvent::Kick`]; a revoked session's
     /// supersede went on the channel first).
-    Event(ServerEvent),
+    Event {
+        event: ServerEvent,
+        trace: Option<game::coordinator::TraceCarrier>,
+    },
     /// A spawn whose player could not be resolved: refused
     /// ([`game::WorldManager::login_order_refused`]).
-    Refused { player_token: String, session_epoch: u64 },
+    Refused {
+        player_token: String,
+        session_epoch: u64,
+        trace: Option<game::coordinator::TraceCarrier>,
+    },
     /// A kick not applied (a player store failure): unanswered, the login service resends it.
-    Unapplied,
+    Unapplied(Option<game::coordinator::TraceCarrier>),
 }
 
 /// One order in [`OrderResolver`]'s queue.
 enum Waiting {
     /// A spawn whose player is being read (`None`: a malformed token, refused).
-    Spawn { player_token: String, session_epoch: u64, read: Option<Resolving> },
+    Spawn {
+        player_token: String,
+        session_epoch: u64,
+        read: Option<Resolving>,
+        trace: Option<game::coordinator::TraceCarrier>,
+    },
     /// A kick: applied to the admission state when it reaches the front of the queue; a
     /// session it revoked then reads its player before its supersede goes out.
-    Kick { player_token: String, session_epoch: u64, reason: String, step: KickStep },
+    Kick {
+        player_token: String,
+        session_epoch: u64,
+        reason: String,
+        step: KickStep,
+        trace: Option<game::coordinator::TraceCarrier>,
+    },
 }
 
 /// Where a kick at the front of [`OrderResolver`]'s queue stands.
@@ -255,7 +321,10 @@ impl Default for OrderResolver {
 
 impl OrderResolver {
     pub fn new() -> OrderResolver {
-        OrderResolver { queue: std::collections::VecDeque::new(), dropped: 0 }
+        OrderResolver {
+            queue: std::collections::VecDeque::new(),
+            dropped: 0,
+        }
     }
 
     /// Orders waiting for their player's read (or behind one that is).
@@ -270,19 +339,35 @@ impl OrderResolver {
 
     /// `order` joins the queue — a spawn's player read asked of `players` at once — or, with
     /// [`LOGIN_ORDERS_IN_FLIGHT_MAX`] waiting, is dropped (`false`, counted).
-    pub fn push(&mut self, order: game::LoginOrder, players: &SharedPlayerStore) -> bool {
+    pub fn push(&mut self, incoming: game::TracedLoginOrder, players: &SharedPlayerStore) -> bool {
         if self.queue.len() >= LOGIN_ORDERS_IN_FLIGHT_MAX {
             self.dropped += 1;
             return false;
         }
-        self.queue.push_back(match order {
-            game::LoginOrder::Spawn { player_token, session_epoch } => {
+        self.queue.push_back(match incoming.order {
+            game::LoginOrder::Spawn {
+                player_token,
+                session_epoch,
+            } => {
                 let read = resolve_later(players, &player_token);
-                Waiting::Spawn { player_token, session_epoch, read }
+                Waiting::Spawn {
+                    player_token,
+                    session_epoch,
+                    read,
+                    trace: incoming.trace,
+                }
             }
-            game::LoginOrder::Kick { player_token, session_epoch, reason } => {
-                Waiting::Kick { player_token, session_epoch, reason, step: KickStep::Due }
-            }
+            game::LoginOrder::Kick {
+                player_token,
+                session_epoch,
+                reason,
+            } => Waiting::Kick {
+                player_token,
+                session_epoch,
+                reason,
+                step: KickStep::Due,
+                trace: incoming.trace,
+            },
         });
         true
     }
@@ -301,56 +386,99 @@ impl OrderResolver {
         let mut out = Vec::new();
         while let Some(front) = self.queue.front_mut() {
             let outcome = match front {
-                Waiting::Spawn { player_token, session_epoch, read } => match read.as_mut().map(Resolving::poll) {
-                    None => Some(OrderOutcome::Refused { player_token: std::mem::take(player_token), session_epoch: *session_epoch }),
-                    Some(None) => None,
-                    Some(Some(Ok((player, record)))) => Some(OrderOutcome::Event(ServerEvent::SpawnOrder {
-                        origin: me,
-                        hops: 0,
+                Waiting::Spawn {
+                    player_token,
+                    session_epoch,
+                    read,
+                    trace,
+                } => match read.as_mut().map(Resolving::poll) {
+                    None => Some(OrderOutcome::Refused {
                         player_token: std::mem::take(player_token),
                         session_epoch: *session_epoch,
-                        player,
-                        record_region: record.map(|r| r.region),
-                    })),
+                        trace: trace.take(),
+                    }),
+                    Some(None) => None,
+                    Some(Some(Ok((player, record)))) => Some(OrderOutcome::Event {
+                        event: ServerEvent::SpawnOrder {
+                            origin: me,
+                            hops: 0,
+                            player_token: std::mem::take(player_token),
+                            session_epoch: *session_epoch,
+                            player,
+                            record_region: record.map(|r| r.region),
+                        },
+                        trace: trace.take(),
+                    }),
                     Some(Some(Err(e))) => {
                         log::error!("[login-link] player store: {e}");
-                        Some(OrderOutcome::Refused { player_token: std::mem::take(player_token), session_epoch: *session_epoch })
+                        Some(OrderOutcome::Refused {
+                            player_token: std::mem::take(player_token),
+                            session_epoch: *session_epoch,
+                            trace: trace.take(),
+                        })
                     }
                 },
-                Waiting::Kick { player_token, session_epoch, reason, step } => {
+                Waiting::Kick {
+                    player_token,
+                    session_epoch,
+                    reason,
+                    step,
+                    trace,
+                } => {
                     let up_to = *session_epoch;
                     let kicked = |token: &mut String, reason: &mut String| {
-                        let (player_token, reason) = (std::mem::take(token), std::mem::take(reason));
-                        OrderOutcome::Event(ServerEvent::Kick { player_token, session_epoch: up_to, reason })
+                        let (player_token, reason) =
+                            (std::mem::take(token), std::mem::take(reason));
+                        ServerEvent::Kick {
+                            player_token,
+                            session_epoch: up_to,
+                            reason,
+                        }
                     };
                     if matches!(step, KickStep::Due) {
                         match orders.kick(player_token, up_to, reason) {
                             KickApplied::NoSession => {}
                             KickApplied::NewerKept => {
-                                log::info!("[login-link] kick up to epoch {up_to}: the live session is a newer login; kept")
+                                log::info!(
+                                    "[login-link] kick up to epoch {up_to}: the live session is a newer login; kept"
+                                )
                             }
                             KickApplied::Revoked => {
-                                *step = resolve_later(players, player_token).map_or(KickStep::Unreadable, KickStep::Reading)
+                                *step = resolve_later(players, player_token)
+                                    .map_or(KickStep::Unreadable, KickStep::Reading)
                             }
                         }
                     }
                     let unapplied = || {
-                        log::warn!("[login-link] kick up to epoch {up_to}: its session's player is unknown now; not acked");
-                        Some(OrderOutcome::Unapplied)
+                        log::warn!(
+                            "[login-link] kick up to epoch {up_to}: its session's player is unknown now; not acked"
+                        );
                     };
                     match step {
                         // Nothing revoked: applied as it stands.
-                        KickStep::Due => Some(kicked(player_token, reason)),
-                        KickStep::Unreadable => unapplied(),
+                        KickStep::Due => Some(OrderOutcome::Event {
+                            event: kicked(player_token, reason),
+                            trace: trace.take(),
+                        }),
+                        KickStep::Unreadable => {
+                            unapplied();
+                            Some(OrderOutcome::Unapplied(trace.take()))
+                        }
                         KickStep::Reading(read) => match read.poll() {
                             None => None,
                             Some(Ok((player, _))) => {
                                 park_revoked(orders, events, player_token, up_to, reason, player);
-                                Some(kicked(player_token, reason))
+                                Some(OrderOutcome::Event {
+                                    event: kicked(player_token, reason),
+                                    trace: trace.take(),
+                                })
                             }
                             Some(Err(e)) => {
                                 log::error!("[login-link] player store: {e}");
-                                unapplied()
+                                {
+                                    unapplied();
+                                    Some(OrderOutcome::Unapplied(trace.take()))
+                                }
                             }
                         },
                     }
@@ -422,13 +550,23 @@ impl OrderState {
     fn known(&self, token: &str, now: u64) -> Option<u64> {
         let pending = self.pending.by_token.get(token).map(|(epoch, _)| *epoch);
         let admitted = self.admitted.get(token).copied();
-        let used = self.used.get(token).filter(|(_, expires)| now < *expires).map(|(epoch, _)| *epoch);
-        let kicked = self.kicked.get(token).filter(|k| now < k.expires).map(|k| k.up_to);
+        let used = self
+            .used
+            .get(token)
+            .filter(|(_, expires)| now < *expires)
+            .map(|(epoch, _)| *epoch);
+        let kicked = self
+            .kicked
+            .get(token)
+            .filter(|k| now < k.expires)
+            .map(|k| k.up_to);
         pending.max(admitted).max(used).max(kicked)
     }
 
     fn prune(&mut self, now: u64) {
-        self.pending.by_token.retain(|_, (_, expires)| now < *expires);
+        self.pending
+            .by_token
+            .retain(|_, (_, expires)| now < *expires);
         self.used.retain(|_, (_, expires)| now < *expires);
         self.kicked.retain(|_, k| now < k.expires);
     }
@@ -458,7 +596,12 @@ impl LoginAnswers {
     fn new() -> LoginAnswers {
         let start = crate::roles::unix_ms_now().saturating_mul(1000);
         LoginAnswers {
-            inner: Mutex::new(AnswersInner { rows: VecDeque::new(), newest: start, dropped: 0, warned_at: None }),
+            inner: Mutex::new(AnswersInner {
+                rows: VecDeque::new(),
+                newest: start,
+                dropped: 0,
+                warned_at: None,
+            }),
             version: watch::channel(start).0,
         }
     }
@@ -469,7 +612,10 @@ impl LoginAnswers {
         if inner.rows.len() >= LOGIN_ANSWERS_HELD_MAX {
             inner.rows.pop_front();
             inner.dropped += 1;
-            if inner.warned_at.is_none_or(|at| at.elapsed() >= Duration::from_millis(LOGIN_ANSWERS_DROP_WARN_MS)) {
+            if inner
+                .warned_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_millis(LOGIN_ANSWERS_DROP_WARN_MS))
+            {
                 log::warn!(
                     "[login-link] {LOGIN_ANSWERS_HELD_MAX} answers wait for the login service: the oldest dropped ({} since start)",
                     inner.dropped
@@ -489,7 +635,13 @@ impl LoginAnswers {
     fn read(&self, after: u64, limit: usize) -> Vec<(u64, HostToLogin)> {
         let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let after = if after > inner.newest { 0 } else { after };
-        inner.rows.iter().filter(|(seq, _)| *seq > after).take(limit).cloned().collect()
+        inner
+            .rows
+            .iter()
+            .filter(|(seq, _)| *seq > after)
+            .take(limit)
+            .cloned()
+            .collect()
     }
 }
 
@@ -506,7 +658,12 @@ pub struct SpawnOrders {
 
 impl SpawnOrders {
     pub fn new(now: Clock) -> SpawnOrders {
-        SpawnOrders { state: Mutex::default(), now, login: OnceLock::new(), relay: OnceLock::new() }
+        SpawnOrders {
+            state: Mutex::default(),
+            now,
+            login: OnceLock::new(),
+            relay: OnceLock::new(),
+        }
     }
 
     /// Role `host` (any number of hosts): login sessions are announced with their login
@@ -526,14 +683,18 @@ impl SpawnOrders {
     fn tell_login(&self, msg: HostToLogin) {
         let Some(login) = self.login.get() else {
             // `HostToLogin`'s `Debug` hides the player token.
-            log::warn!("[login-link] {msg:?} for the login service, which this server does not serve: dropped");
+            log::warn!(
+                "[login-link] {msg:?} for the login service, which this server does not serve: dropped"
+            );
             return;
         };
         login.push(msg);
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, OrderState> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// A copy of the pending orders (tests, diagnostics).
@@ -561,7 +722,10 @@ impl SpawnOrders {
             Some(known) if epoch == known => SpawnOrder::Repeat,
             _ => {
                 let expires = now.saturating_add(SPAWN_PENDING_TTL_SECS);
-                state.pending.by_token.insert(token.to_string(), (epoch, expires));
+                state
+                    .pending
+                    .by_token
+                    .insert(token.to_string(), (epoch, expires));
                 on_new();
                 SpawnOrder::New
             }
@@ -577,10 +741,25 @@ impl SpawnOrders {
         let now = (self.now)();
         let mut state = self.state();
         state.prune(now);
-        let ceiling = state.kicked.get(token).map_or(up_to, |k| k.up_to.max(up_to));
+        let ceiling = state
+            .kicked
+            .get(token)
+            .map_or(up_to, |k| k.up_to.max(up_to));
         let expires = now.saturating_add(SPAWN_PENDING_TTL_SECS);
-        state.kicked.insert(token.to_string(), Kicked { up_to: ceiling, expires, reason: reason.to_string() });
-        if state.pending.by_token.get(token).is_some_and(|(epoch, _)| *epoch <= up_to) {
+        state.kicked.insert(
+            token.to_string(),
+            Kicked {
+                up_to: ceiling,
+                expires,
+                reason: reason.to_string(),
+            },
+        );
+        if state
+            .pending
+            .by_token
+            .get(token)
+            .is_some_and(|(epoch, _)| *epoch <= up_to)
+        {
             state.pending.by_token.remove(token);
         }
         match state.admitted.get(token) {
@@ -596,7 +775,11 @@ impl SpawnOrders {
     /// park the newer one).
     pub fn supersede_revoked(&self, token: &str, up_to: u64, park: impl FnOnce()) -> bool {
         let state = self.state();
-        if state.admitted.get(token).is_some_and(|epoch| *epoch <= up_to) {
+        if state
+            .admitted
+            .get(token)
+            .is_some_and(|epoch| *epoch <= up_to)
+        {
             park();
             true
         } else {
@@ -612,17 +795,29 @@ impl SpawnOrders {
     }
 
     fn revoked_in(state: &OrderState, token: &str, epoch: u64, now: u64) -> Option<String> {
-        if let Some(k) = state.kicked.get(token).filter(|k| now < k.expires && epoch <= k.up_to) {
+        if let Some(k) = state
+            .kicked
+            .get(token)
+            .filter(|k| now < k.expires && epoch <= k.up_to)
+        {
             return Some(k.reason.clone());
         }
-        state.known(token, now).filter(|known| *known > epoch).map(|_| LOGGED_IN_ELSEWHERE.to_string())
+        state
+            .known(token, now)
+            .filter(|known| *known > epoch)
+            .map(|_| LOGGED_IN_ELSEWHERE.to_string())
     }
 
     /// Announce the session admitted with (`token`, `epoch`): `connected` (its
     /// `ClientConnected`) is called under the lock unless the session was revoked (the reason
     /// is the refusal; nothing is announced). Under the lock, every order and kick is either
     /// seen here or sends its supersede after `connected`.
-    pub fn announce(&self, token: &str, epoch: u64, connected: impl FnOnce()) -> Result<(), String> {
+    pub fn announce(
+        &self,
+        token: &str,
+        epoch: u64,
+        connected: impl FnOnce(),
+    ) -> Result<(), String> {
         let now = (self.now)();
         let state = self.state();
         if let Some(why) = Self::revoked_in(&state, token, epoch, now) {
@@ -646,7 +841,9 @@ impl SpawnOrders {
                 Ok(())
             }
             Some((ordered, _)) if epoch < ordered => Err(REFUSE_SUPERSEDED),
-            _ if state.known(token, now).is_some_and(|known| epoch < known) => Err(REFUSE_SUPERSEDED),
+            _ if state.known(token, now).is_some_and(|known| epoch < known) => {
+                Err(REFUSE_SUPERSEDED)
+            }
             _ => Err(REFUSE_NO_SPAWN_ORDER),
         }
     }
@@ -659,7 +856,10 @@ impl SpawnOrders {
         self.forget(token, epoch);
         match self.relay.get() {
             Some(events) => {
-                let _ = events.send(ServerEvent::SessionEnded { player_token: token.to_string(), session_epoch: epoch });
+                let _ = events.send(ServerEvent::SessionEnded {
+                    player_token: token.to_string(),
+                    session_epoch: epoch,
+                });
             }
             None => self.tell_ended(token, epoch),
         }
@@ -682,14 +882,23 @@ impl SpawnOrders {
         if state.admitted.get(token) == Some(&epoch) {
             state.admitted.remove(token);
         }
-        let newest = state.used.get(token).map_or(epoch, |(used, _)| (*used).max(epoch));
-        state.used.insert(token.to_string(), (newest, now.saturating_add(SPAWN_PENDING_TTL_SECS)));
+        let newest = state
+            .used
+            .get(token)
+            .map_or(epoch, |(used, _)| (*used).max(epoch));
+        state.used.insert(
+            token.to_string(),
+            (newest, now.saturating_add(SPAWN_PENDING_TTL_SECS)),
+        );
     }
 
     /// `SessionEnded` to the login service (not served: nothing).
     fn tell_ended(&self, token: &str, epoch: u64) {
         if self.login.get().is_some() {
-            self.tell_login(HostToLogin::SessionEnded { player_token: token.to_string(), session_epoch: epoch });
+            self.tell_login(HostToLogin::SessionEnded {
+                player_token: token.to_string(),
+                session_epoch: epoch,
+            });
         }
     }
 }
@@ -720,8 +929,13 @@ impl LoginLink {
 /// What the login routes share.
 struct RouteState {
     auth: Auth,
-    orders: Sender<LoginToHost>,
+    orders: Sender<QueuedOrder>,
     answers: Arc<LoginAnswers>,
+}
+
+struct QueuedOrder {
+    message: LoginToHost,
+    trace: Option<observability::TraceCarrier>,
 }
 
 /// Serve the login routes on `bind` (port 0 picks one) to callers presenting the service `token`
@@ -739,27 +953,43 @@ pub fn start(
     events: Sender<ServerEvent>,
 ) -> io::Result<LoginLink> {
     if orders.relays() {
-        return Err(io::Error::other("relaying spawn orders (role host) take the coordinator's orders, not the login service's"));
+        return Err(io::Error::other(
+            "relaying spawn orders (role host) take the coordinator's orders, not the login service's",
+        ));
     }
     if token.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the service token is empty"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the service token is empty",
+        ));
     }
-    if let Some(dir) = cert_hash_file.parent().filter(|d| !d.as_os_str().is_empty()) {
+    if let Some(dir) = cert_hash_file
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(dir)?;
     }
     let answers = Arc::new(LoginAnswers::new());
     if orders.login.set(answers.clone()).is_err() {
-        return Err(io::Error::other("these spawn orders already serve the login service"));
+        return Err(io::Error::other(
+            "these spawn orders already serve the login service",
+        ));
     }
     let (tls, pin) = svc_link::pinned_server_config(&cert_hash_file, &[b"h2"])?;
     let listener = std::net::TcpListener::bind(bind)?;
     let addr = listener.local_addr()?;
     let (orders_tx, orders_rx) = crossbeam::channel::unbounded();
-    let state = Arc::new(RouteState { auth: Auth { token, world }, orders: orders_tx, answers: answers.clone() });
+    let state = Arc::new(RouteState {
+        auth: Auth { token, world },
+        orders: orders_tx,
+        answers: answers.clone(),
+    });
     let router = Router::new()
         .route(login_api::PATH_COORD_LOGIN_ORDERS, post(take_order))
         .route(login_api::PATH_COORD_LOGIN_ANSWERS, get(read_answers))
-        .layer(axum::extract::DefaultBodyLimit::max(crate::coordinator_api::API_BODY_MAX_BYTES))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::coordinator_api::API_BODY_MAX_BYTES,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
         .with_state(state);
     std::thread::Builder::new()
@@ -767,22 +997,75 @@ pub fn start(
         .spawn(move || serve(orders_rx, answers, orders, players, events))?;
     let stop = crate::coordinator_api::serve_tls("login-link-api", listener, tls, router)?;
     log::info!("[login-link] serving the login service on https://{addr} (pin {pin})");
-    Ok(LoginLink { addr, pin, _stop: stop })
+    Ok(LoginLink {
+        addr,
+        pin,
+        _stop: stop,
+    })
 }
 
 async fn auth_layer(State(s): State<Arc<RouteState>>, req: Request, next: Next) -> Response {
-    if let Err(refused) = crate::coordinator_api::check_auth(&s.auth, req.headers()) {
-        return refused;
+    let route = if req.uri().path() == login_api::PATH_COORD_LOGIN_ORDERS {
+        "login_orders"
+    } else if req.uri().path() == login_api::PATH_COORD_LOGIN_ANSWERS {
+        "login_answers"
+    } else {
+        "other"
+    };
+    let headers: Vec<_> = req
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)))
+        .collect();
+    let parent = observability::extract_context(headers);
+    let span = tracing::info_span!(
+        "coordinator.http.request",
+        route,
+        "http.response.status_code" = tracing::field::Empty
+    );
+    observability::set_parent(&span, parent);
+    async {
+        let response =
+            if let Err(refused) = crate::coordinator_api::check_auth(&s.auth, req.headers()) {
+                refused
+            } else {
+                next.run(req).await
+            };
+        tracing::Span::current().record("http.response.status_code", response.status().as_u16());
+        response
     }
-    next.run(req).await
+    .instrument(span)
+    .await
 }
 
 /// `POST` an order: 202 once queued for the orders' thread (its answer comes as a queued answer).
-async fn take_order(State(s): State<Arc<RouteState>>, body: Bytes) -> Response {
+async fn take_order(
+    State(s): State<Arc<RouteState>>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
     let Ok(msg) = game::decode_packet::<LoginToHost>(&body) else {
         return crate::coordinator_api::text(StatusCode::BAD_REQUEST, "order");
     };
-    if s.orders.send(msg).is_err() {
+    let operation_id = headers
+        .get("x-mmo-operation-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            value.len() == 32
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(observability::operation_id);
+    let trace = observability::current_carrier(operation_id);
+    if s.orders
+        .send(QueuedOrder {
+            message: msg,
+            trace,
+        })
+        .is_err()
+    {
         return crate::coordinator_api::text(StatusCode::SERVICE_UNAVAILABLE, "not_ready");
     }
     StatusCode::ACCEPTED.into_response()
@@ -801,21 +1084,50 @@ async fn read_answers(State(s): State<Arc<RouteState>>, Query(q): Query<AnswersQ
 
 /// The orders' thread: each order applied in arrival order, its answer queued.
 fn serve(
-    orders_rx: Receiver<LoginToHost>,
+    orders_rx: Receiver<QueuedOrder>,
     answers: Arc<LoginAnswers>,
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
 ) {
-    for msg in orders_rx.iter() {
-        match msg {
-            LoginToHost::SpawnPlayer { player_token, session_epoch } => {
+    for queued in orders_rx.iter() {
+        let span = queued
+            .trace
+            .as_ref()
+            .map_or_else(tracing::Span::none, |trace| {
+                let span = tracing::info_span!(
+                    "host.login.resolve",
+                    "mmo.operation_id" = %trace.operation_id
+                );
+                observability::set_parent(&span, trace.context());
+                span
+            });
+        let _entered = span.enter();
+        match queued.message {
+            LoginToHost::SpawnPlayer {
+                player_token,
+                session_epoch,
+            } => {
                 let ok = spawn(&orders, &players, &events, &player_token, session_epoch);
                 answers.push(spawn_ack(player_token, session_epoch, ok, None));
             }
-            LoginToHost::Kick { player_token, session_epoch, reason } => {
-                if kick(&orders, &players, &events, &player_token, session_epoch, reason) {
-                    answers.push(HostToLogin::KickAck { player_token, session_epoch });
+            LoginToHost::Kick {
+                player_token,
+                session_epoch,
+                reason,
+            } => {
+                if kick(
+                    &orders,
+                    &players,
+                    &events,
+                    &player_token,
+                    session_epoch,
+                    reason,
+                ) {
+                    answers.push(HostToLogin::KickAck {
+                        player_token,
+                        session_epoch,
+                    });
                 }
             }
         }
@@ -825,23 +1137,41 @@ fn serve(
 
 /// The acknowledgement of a spawn order; `endpoint`: the host that took it (`None`: the
 /// world row's addresses).
-fn spawn_ack(player_token: String, session_epoch: u64, ok: bool, endpoint: Option<game::HostEndpoint>) -> HostToLogin {
+fn spawn_ack(
+    player_token: String,
+    session_epoch: u64,
+    ok: bool,
+    endpoint: Option<game::HostEndpoint>,
+) -> HostToLogin {
     let (quic, webtransport, cert_hash) = match endpoint {
         Some(e) => (e.quic, e.webtransport, e.cert_hash),
         None => (None, None, None),
     };
-    HostToLogin::SpawnAck { player_token, session_epoch, ok, quic, webtransport, cert_hash }
+    HostToLogin::SpawnAck {
+        player_token,
+        session_epoch,
+        ok,
+        quic,
+        webtransport,
+        cert_hash,
+    }
 }
 
 /// The player of a login token and its stored record, through the player store (created
 /// if new). `None` (logged) for a malformed token or a store failure.
-fn resolve(players: &SharedPlayerStore, token: &str) -> Option<(game::PlayerId, Option<game::PlayerRecord>)> {
+fn resolve(
+    players: &SharedPlayerStore,
+    token: &str,
+) -> Option<(game::PlayerId, Option<game::PlayerRecord>)> {
     let token = PlayerToken(token.to_string());
     if !token.is_valid() {
         log::warn!("[login-link] a malformed player token");
         return None;
     }
-    let resolved = players.lock().unwrap_or_else(|p| p.into_inner()).resolve(&PlayerKey::Online(token));
+    let resolved = players
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .resolve(&PlayerKey::Online(token));
     match resolved {
         Ok(found) => Some(found),
         Err(e) => {
@@ -859,7 +1189,12 @@ fn resolve_later(players: &SharedPlayerStore, token: &str) -> Option<Resolving> 
         log::warn!("[login-link] a malformed player token");
         return None;
     }
-    Some(players.lock().unwrap_or_else(|p| p.into_inner()).resolve_later(&PlayerKey::Online(token)))
+    Some(
+        players
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .resolve_later(&PlayerKey::Online(token)),
+    )
 }
 
 /// The player of a login token ([`resolve`]).
@@ -875,25 +1210,42 @@ fn spawn(
     token: &str,
     epoch: u64,
 ) -> bool {
-    let Some(player) = player_of(players, token) else { return false };
+    let Some(player) = player_of(players, token) else {
+        return false;
+    };
     order_player(orders, events, token, epoch, player)
 }
 
 /// A spawn order of `player` (resolved) recorded: whether it is acked ok.
-fn order_player(orders: &SpawnOrders, events: &Sender<ServerEvent>, token: &str, epoch: u64, player: game::PlayerId) -> bool {
+fn order_player(
+    orders: &SpawnOrders,
+    events: &Sender<ServerEvent>,
+    token: &str,
+    epoch: u64,
+    player: game::PlayerId,
+) -> bool {
     // Any session of the player parks now, before the new ticket is handed out (and, sent
     // under the orders' lock, before any session can be announced after the order).
     let supersede = || {
-        let _ = events.send(ServerEvent::Supersede { player, reason: LOGGED_IN_ELSEWHERE.to_string() });
+        let _ = events.send(ServerEvent::Supersede {
+            player,
+            reason: LOGGED_IN_ELSEWHERE.to_string(),
+        });
     };
     match orders.order_then(token, epoch, supersede) {
         SpawnOrder::New => {
-            log::info!("[login-link] spawn order for player {} (epoch {epoch})", player.0);
+            log::info!(
+                "[login-link] spawn order for player {} (epoch {epoch})",
+                player.0
+            );
             true
         }
         SpawnOrder::Repeat => true,
         SpawnOrder::Stale => {
-            log::info!("[login-link] stale spawn order for player {} (epoch {epoch}): refused", player.0);
+            log::info!(
+                "[login-link] stale spawn order for player {} (epoch {epoch}): refused",
+                player.0
+            );
             false
         }
     }
@@ -915,12 +1267,16 @@ fn kick(
     match orders.kick(token, up_to, &reason) {
         KickApplied::NoSession => true,
         KickApplied::NewerKept => {
-            log::info!("[login-link] kick up to epoch {up_to}: the live session is a newer login; kept");
+            log::info!(
+                "[login-link] kick up to epoch {up_to}: the live session is a newer login; kept"
+            );
             true
         }
         KickApplied::Revoked => {
             let Some(player) = player_of(players, token) else {
-                log::warn!("[login-link] kick up to epoch {up_to}: its session's player is unknown now; not acked");
+                log::warn!(
+                    "[login-link] kick up to epoch {up_to}: its session's player is unknown now; not acked"
+                );
                 return false;
             };
             park_revoked(orders, events, token, up_to, &reason, player);
@@ -931,12 +1287,25 @@ fn kick(
 
 /// A kick revoked `player`'s session (`token`, up to `up_to`): its supersede goes on `events`,
 /// unless a newer login took the session over meanwhile ([`SpawnOrders::supersede_revoked`]).
-fn park_revoked(orders: &SpawnOrders, events: &Sender<ServerEvent>, token: &str, up_to: u64, reason: &str, player: game::PlayerId) {
+fn park_revoked(
+    orders: &SpawnOrders,
+    events: &Sender<ServerEvent>,
+    token: &str,
+    up_to: u64,
+    reason: &str,
+    player: game::PlayerId,
+) {
     let parked = orders.supersede_revoked(token, up_to, || {
-        let _ = events.send(ServerEvent::Supersede { player, reason: reason.to_string() });
+        let _ = events.send(ServerEvent::Supersede {
+            player,
+            reason: reason.to_string(),
+        });
     });
     if parked {
-        log::info!("[login-link] kick of player {} (up to epoch {up_to}): {reason}", player.0);
+        log::info!(
+            "[login-link] kick of player {} (up to epoch {up_to}): {reason}",
+            player.0
+        );
     }
 }
 
@@ -951,16 +1320,27 @@ pub struct LoginRelay {
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
     resolver: OrderResolver,
+    traces: std::collections::BTreeMap<(String, u64), game::coordinator::TraceCarrier>,
 }
 
 impl LoginRelay {
     /// The relay over `orders` (from now on they relay: [`SpawnOrders::relay_through`]);
     /// supersedes and edge-ended sessions go to the manager on `events`.
-    pub fn new(orders: Arc<SpawnOrders>, players: SharedPlayerStore, events: Sender<ServerEvent>) -> LoginRelay {
+    pub fn new(
+        orders: Arc<SpawnOrders>,
+        players: SharedPlayerStore,
+        events: Sender<ServerEvent>,
+    ) -> LoginRelay {
         if !orders.relay_through(events.clone()) {
             log::warn!("[login-link] these spawn orders relay already");
         }
-        LoginRelay { orders, players, events, resolver: OrderResolver::new() }
+        LoginRelay {
+            orders,
+            players,
+            events,
+            resolver: OrderResolver::new(),
+            traces: BTreeMap::new(),
+        }
     }
 
     /// Orders waiting for their player's store read, and orders dropped at the bound since
@@ -986,22 +1366,100 @@ impl LoginRelay {
                  (the login service answers 503 at its timeout; the client retries)"
             );
         }
-        for outcome in self.resolver.poll(&self.orders, &self.players, &self.events, me) {
+        for outcome in self
+            .resolver
+            .poll(&self.orders, &self.players, &self.events, me)
+        {
             match outcome {
-                OrderOutcome::Event(ev) => {
-                    let _ = self.events.send(ev);
+                OrderOutcome::Event { event, trace } => {
+                    if let Some(trace) = trace {
+                        let key = match &event {
+                            ServerEvent::SpawnOrder {
+                                player_token,
+                                session_epoch,
+                                ..
+                            }
+                            | ServerEvent::Kick {
+                                player_token,
+                                session_epoch,
+                                ..
+                            } => Some((player_token.clone(), *session_epoch)),
+                            _ => None,
+                        };
+                        trace_span("host.login.resolve", &trace).in_scope(|| {
+                            if let Some(key) = key {
+                                if self.traces.len() >= LOGIN_ORDERS_IN_FLIGHT_MAX {
+                                    if let Some(oldest) = self.traces.keys().next().cloned() {
+                                        self.traces.remove(&oldest);
+                                    }
+                                }
+                                self.traces.insert(key, trace);
+                            }
+                        });
+                    }
+                    let _ = self.events.send(event);
                 }
-                OrderOutcome::Refused { player_token, session_epoch } => manager.login_order_refused(player_token, session_epoch),
+                OrderOutcome::Refused {
+                    player_token,
+                    session_epoch,
+                    trace,
+                } => {
+                    if let Some(trace) = trace {
+                        trace_span("host.login.refused", &trace).in_scope(|| {});
+                    }
+                    manager.login_order_refused(player_token, session_epoch);
+                }
                 // Logged without the token; unanswered, the login service resends it.
-                OrderOutcome::Unapplied => {}
+                OrderOutcome::Unapplied(trace) => {
+                    if let Some(trace) = trace {
+                        trace_span("host.login.unapplied", &trace).in_scope(|| {});
+                    }
+                }
             }
         }
         for order in manager.take_spawn_here() {
-            let ok = order_player(&self.orders, &self.events, &order.player_token, order.session_epoch, order.player);
+            let trace = self
+                .traces
+                .remove(&(order.player_token.clone(), order.session_epoch));
+            let span = trace.as_ref().map_or_else(tracing::Span::none, |trace| {
+                trace_span("host.login.place", trace)
+            });
+            let ok = span.in_scope(|| {
+                order_player(
+                    &self.orders,
+                    &self.events,
+                    &order.player_token,
+                    order.session_epoch,
+                    order.player,
+                )
+            });
             manager.spawn_answered(order, ok);
         }
+
+        fn trace_span(
+            name: &'static str,
+            trace: &game::coordinator::TraceCarrier,
+        ) -> tracing::Span {
+            let Some(trace) = observability::TraceCarrier::new(
+                trace.traceparent.clone(),
+                trace.tracestate.clone(),
+                trace.operation_id.clone(),
+            ) else {
+                return tracing::Span::none();
+            };
+            let span = tracing::info_span!("host.login", operation = name, "mmo.operation_id" = %trace.operation_id);
+            observability::set_parent(&span, trace.context());
+            span
+        }
         for k in manager.take_kicks_in() {
-            let applied = kick(&self.orders, &self.players, &self.events, &k.player_token, k.session_epoch, k.reason.clone());
+            let applied = kick(
+                &self.orders,
+                &self.players,
+                &self.events,
+                &k.player_token,
+                k.session_epoch,
+                k.reason.clone(),
+            );
             // A revoking kick resolves its player with a synchronous store read (`player_of`),
             // which may wait up to the pool's acquire timeout (30 s) while the database is away;
             // two in one pass would pass `/livez`'s stall limit and restart a host for a database
@@ -1012,4 +1470,3 @@ impl LoginRelay {
         manager.send_login_out();
     }
 }
-

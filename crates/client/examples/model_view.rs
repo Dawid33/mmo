@@ -12,8 +12,10 @@
 //! In the window, N plays the next animation, Space pauses, R restarts.
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use client::renderer::model::{BbAnimationPlayer, BbModel, BbModelAsset, BbModelPlugin, BbModelSpawned};
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use client::renderer::model::{
+    BbAnimationPlayer, BbModel, BbModelAsset, BbModelPlugin, BbModelSpawned,
+};
 
 #[derive(Resource)]
 struct Args {
@@ -47,18 +49,32 @@ fn main() {
     App::new()
         .add_plugins(
             DefaultPlugins
-                .set(AssetPlugin { file_path: "../..".into(), ..default() })
+                .set(AssetPlugin {
+                    file_path: "../..".into(),
+                    ..default()
+                })
                 .set(WindowPlugin {
-                    primary_window: Some(Window { title: format!("model_view: {path}"), ..default() }),
+                    primary_window: Some(Window {
+                        title: format!("model_view: {path}"),
+                        ..default()
+                    }),
                     ..default()
                 })
                 .set(client::renderer::render_plugin()),
         )
         .add_plugins(BbModelPlugin)
         .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
-        .insert_resource(Args { path, shot, anim, time })
+        .insert_resource(Args {
+            path,
+            shot,
+            anim,
+            time,
+        })
         .add_systems(Startup, setup)
-        .add_systems(Update, (reload_on_save, frame_camera, turn, shoot, animation_keys))
+        .add_systems(
+            Update,
+            (reload_on_save, frame_camera, turn, shoot, animation_keys),
+        )
         .run();
 }
 
@@ -80,7 +96,9 @@ fn reload_on_save(
         return;
     }
     *since = 0.0;
-    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(&args.path);
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(&args.path);
     let modified = std::fs::metadata(file).and_then(|m| m.modified()).ok();
     if seen.is_some() && modified != *seen {
         assets.reload(args.path.clone());
@@ -99,13 +117,23 @@ fn setup(
     commands.spawn((BbModel(model), Turntable, BbAnimationPlayer::default()));
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(256.0, 256.0))),
-        MeshMaterial3d(materials.add(StandardMaterial { base_color: Color::srgb(0.45, 0.45, 0.42), ..default() })),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.45, 0.45, 0.42),
+            ..default()
+        })),
     ));
     commands.spawn((
-        DirectionalLight { illuminance: 8_000.0, shadow_maps_enabled: true, ..default() },
+        DirectionalLight {
+            illuminance: 8_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
         Transform::default().looking_at(Vec3::new(-0.4, -1.0, -0.6), Vec3::Y),
     ));
-    commands.insert_resource(GlobalAmbientLight { brightness: 500.0, ..default() });
+    commands.insert_resource(GlobalAmbientLight {
+        brightness: 500.0,
+        ..default()
+    });
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(40.0, 30.0, 40.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -121,8 +149,12 @@ fn frame_camera(
     mut camera: Query<&mut Transform, With<Camera3d>>,
 ) {
     for (model, mut player) in &mut loaded {
-        let Some(asset) = models.get(&model.0) else { continue };
-        let (lo, hi) = asset.bounds.unwrap_or((Vec3::splat(-8.0), Vec3::splat(8.0)));
+        let Some(asset) = models.get(&model.0) else {
+            continue;
+        };
+        let (lo, hi) = asset
+            .bounds
+            .unwrap_or((Vec3::splat(-8.0), Vec3::splat(8.0)));
         let centre = (lo + hi) / 2.0;
         let radius = (hi - lo).length().max(4.0);
         info!(
@@ -142,8 +174,10 @@ fn frame_camera(
             }
         }
         for mut t in &mut camera {
-            *t = Transform::from_translation(centre + Vec3::new(1.0, 0.7, 1.0).normalize() * radius * 1.3)
-                .looking_at(centre, Vec3::Y);
+            *t = Transform::from_translation(
+                centre + Vec3::new(1.0, 0.7, 1.0).normalize() * radius * 1.3,
+            )
+            .looking_at(centre, Vec3::Y);
         }
     }
 }
@@ -165,7 +199,9 @@ fn shoot(
     mut after_load: Local<u32>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let Some(path) = args.shot.as_ref() else { return };
+    let Some(path) = args.shot.as_ref() else {
+        return;
+    };
     if loaded.is_empty() {
         *waited += 1;
         if *waited > 1200 {
@@ -177,7 +213,9 @@ fn shoot(
     // Let textures upload and shadows settle, then shoot once and exit.
     *after_load += 1;
     if *after_load == 30 {
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.clone()));
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path.clone()));
     }
     if *after_load == 60 {
         exit.write(AppExit::Success);
@@ -190,7 +228,9 @@ fn animation_keys(
     mut players: Query<(&BbModel, &mut BbAnimationPlayer)>,
 ) {
     for (model, mut player) in &mut players {
-        let Some(asset) = models.get(&model.0) else { continue };
+        let Some(asset) = models.get(&model.0) else {
+            continue;
+        };
         if keys.just_pressed(KeyCode::Space) {
             player.paused = !player.paused;
         }

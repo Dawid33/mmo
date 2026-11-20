@@ -46,8 +46,15 @@ variable "object_store_key" {
 # --- Grafana -----------------------------------------------------------------
 
 variable "grafana_host" {
-  type    = string
-  default = "grafana.errantry.renownandruin.com"
+  description = "Grafana's hostname. Default: a VPN-only name (the vpn-names root maps it to Grafana's Service; docs/superpowers/plans/2026-11-15-orion-vpn.md), served over plain HTTP inside the WireGuard tunnel. With grafana_public, a public name behind Traefik with a Let's Encrypt certificate."
+  type        = string
+  default     = "grafana.vpn.errantry.renownandruin.com"
+}
+
+variable "grafana_public" {
+  description = "Expose Grafana on the internet: a Traefik Ingress with TLS (cluster_issuer) and, with manage_dns_record, a public A record grafana_host -> node_ip. Off: no Ingress, no record — only the operator VPN reaches it (http://<grafana_host>)."
+  type        = bool
+  default     = false
 }
 
 variable "grafana_oidc" {
@@ -89,7 +96,7 @@ variable "ingress_class" {
 }
 
 variable "manage_dns_record" {
-  description = "Create the Route53 A record grafana_host -> node_ip here (the zone is dns_zone)."
+  description = "With grafana_public: create the Route53 A record grafana_host -> node_ip here (the zone is dns_zone)."
   type        = bool
   default     = true
 }

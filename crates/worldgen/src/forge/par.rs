@@ -18,7 +18,12 @@ pub const TREE_GROUP_CELLS: usize = 4096;
 /// Calls `f(first_row, rows, sink)` on `data` split into runs of
 /// `ROWS_PER_TASK` rows of `row_len`, in parallel natively. Whatever the
 /// calls push to their `sink` replaces `out`, in row order.
-pub fn for_rows<T: Send>(data: &mut [T], row_len: usize, out: &mut Vec<u32>, f: impl Fn(usize, &mut [T], &mut Vec<u32>) + Sync + Send) {
+pub fn for_rows<T: Send>(
+    data: &mut [T],
+    row_len: usize,
+    out: &mut Vec<u32>,
+    f: impl Fn(usize, &mut [T], &mut Vec<u32>) + Sync + Send,
+) {
     let chunk = row_len * ROWS_PER_TASK;
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -72,7 +77,12 @@ pub fn for_rows3<A: Send, B: Send, C: Send>(
     #[cfg(target_arch = "wasm32")]
     {
         out.clear();
-        for (k, ((ra, rb), rc)) in a.chunks_mut(chunk).zip(b.chunks_mut(chunk)).zip(c.chunks_mut(chunk)).enumerate() {
+        for (k, ((ra, rb), rc)) in a
+            .chunks_mut(chunk)
+            .zip(b.chunks_mut(chunk))
+            .zip(c.chunks_mut(chunk))
+            .enumerate()
+        {
             f(k * ROWS_PER_TASK, ra, rb, rc, out);
         }
     }
@@ -141,7 +151,11 @@ unsafe impl<T: Send> Send for Disjoint<'_, T> {}
 
 impl<'a, T: Copy> Disjoint<'a, T> {
     pub fn new(slice: &'a mut [T]) -> Self {
-        Disjoint { ptr: slice.as_mut_ptr(), len: slice.len(), _slice: std::marker::PhantomData }
+        Disjoint {
+            ptr: slice.as_mut_ptr(),
+            len: slice.len(),
+            _slice: std::marker::PhantomData,
+        }
     }
 
     /// # Safety

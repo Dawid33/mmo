@@ -52,7 +52,11 @@ pub fn redact_url(url: &str) -> String {
         return url.to_string();
     }
     match url.parse::<sqlx::postgres::PgConnectOptions>() {
-        Ok(o) => format!("postgres://{}/{}", o.get_host(), o.get_database().unwrap_or("?")),
+        Ok(o) => format!(
+            "postgres://{}/{}",
+            o.get_host(),
+            o.get_database().unwrap_or("?")
+        ),
         Err(_) => "postgres://<unparsable URL>".into(),
     }
 }
@@ -72,4 +76,3 @@ impl fmt::Debug for StoreUrl {
         }
     }
 }
-

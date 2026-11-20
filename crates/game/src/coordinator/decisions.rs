@@ -49,7 +49,10 @@ pub struct CallStamp {
 impl CallStamp {
     /// A mark handed out by `replica`, its transition not taken yet.
     pub fn pending(replica: ReplicaId) -> CallStamp {
-        CallStamp { replica, version: PENDING_VERSION }
+        CallStamp {
+            replica,
+            version: PENDING_VERSION,
+        }
     }
 
     pub fn is_pending(&self) -> bool {
@@ -168,14 +171,49 @@ pub enum HostRemoved {
 /// and the core still committed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecisionAnswer {
-    Cut { stamp: CallStamp, cut: CutId, committed: Result<bool, String> },
-    Begin { cut: CutId, bound: Result<HostId, String> },
-    Declared { stamp: CallStamp, outcome: Result<Declared, String> },
-    Ended { stamp: CallStamp, end: EndLandless, outcome: Result<LandlessEnd, String> },
-    RolledBack { stamp: CallStamp, outcome: Result<u64, String> },
-    ReplicaEnded { replica: ReplicaId },
-    Assigned { stamp: CallStamp, assign: AssignLand, outcome: Result<Assigned, String> },
-    HostAdded { stamp: CallStamp, add: AddHost, outcome: Result<HostAdded, String> },
-    HostDrained { stamp: CallStamp, drain: DrainHost, outcome: Result<HostDrained, String> },
-    HostRemoved { stamp: CallStamp, remove: RemoveHost, outcome: Result<HostRemoved, String> },
+    Cut {
+        stamp: CallStamp,
+        cut: CutId,
+        committed: Result<bool, String>,
+    },
+    Begin {
+        cut: CutId,
+        bound: Result<HostId, String>,
+    },
+    Declared {
+        stamp: CallStamp,
+        outcome: Result<Declared, String>,
+    },
+    Ended {
+        stamp: CallStamp,
+        end: EndLandless,
+        outcome: Result<LandlessEnd, String>,
+    },
+    RolledBack {
+        stamp: CallStamp,
+        outcome: Result<u64, String>,
+    },
+    ReplicaEnded {
+        replica: ReplicaId,
+    },
+    Assigned {
+        stamp: CallStamp,
+        assign: AssignLand,
+        outcome: Result<Assigned, String>,
+    },
+    HostAdded {
+        stamp: CallStamp,
+        add: AddHost,
+        outcome: Result<HostAdded, String>,
+    },
+    HostDrained {
+        stamp: CallStamp,
+        drain: DrainHost,
+        outcome: Result<HostDrained, String>,
+    },
+    HostRemoved {
+        stamp: CallStamp,
+        remove: RemoveHost,
+        outcome: Result<HostRemoved, String>,
+    },
 }

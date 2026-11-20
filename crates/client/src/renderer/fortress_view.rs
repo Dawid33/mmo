@@ -42,6 +42,7 @@ use std::collections::BTreeMap;
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::{
+    Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
     render_resource::{
@@ -50,9 +51,10 @@ use bevy::render::{
     },
     renderer::RenderQueue,
     texture::GpuImage,
-    Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
 };
-use game::{Designation, DesignationKind, Invalid, RegionId, TileBox, TilePos, REGION_BLOCKS, REGION_SIZE};
+use game::{
+    Designation, DesignationKind, Invalid, REGION_BLOCKS, REGION_SIZE, RegionId, TileBox, TilePos,
+};
 
 use super::commander::level::{self, WorkingLevel};
 use super::commander::tiles::TileMirror;
@@ -138,7 +140,12 @@ pub struct OverlayGrid {
 impl Default for OverlayGrid {
     fn default() -> Self {
         let dims = overlay_dims();
-        Self { base_level: 0, dims, bytes: vec![0; dims.element_product() as usize], dirty: None }
+        Self {
+            base_level: 0,
+            dims,
+            bytes: vec![0; dims.element_product() as usize],
+            dirty: None,
+        }
     }
 }
 
@@ -146,8 +153,13 @@ impl OverlayGrid {
     /// Byte index of tile `p` with layer 0 at `base`, `None` outside the grid.
     fn index_at(dims: UVec3, base: i32, p: TilePos) -> Option<usize> {
         let at = [p[0], p[2], p[1] - base];
-        let inside = at.iter().zip(dims.to_array()).all(|(&c, d)| c >= 0 && (c as u32) < d);
-        inside.then(|| (at[0] as u32 + at[1] as u32 * dims.x + at[2] as u32 * dims.x * dims.y) as usize)
+        let inside = at
+            .iter()
+            .zip(dims.to_array())
+            .all(|(&c, d)| c >= 0 && (c as u32) < d);
+        inside.then(|| {
+            (at[0] as u32 + at[1] as u32 * dims.x + at[2] as u32 * dims.x * dims.y) as usize
+        })
     }
 
     /// Byte index of tile `p`, `None` outside the grid.
@@ -177,14 +189,27 @@ impl OverlayGrid {
         // a build, which has no face tint) keeps each tile's designation.
         let drag_kind = preview
             .kind
-            .filter(|k| matches!(k, DesignationKind::Dig | DesignationKind::Deconstruct | DesignationKind::Chop))
-            .map(|kind| Designation { kind, op: game::OpId::default(), priority: game::DEFAULT_PRIORITY });
+            .filter(|k| {
+                matches!(
+                    k,
+                    DesignationKind::Dig | DesignationKind::Deconstruct | DesignationKind::Chop
+                )
+            })
+            .map(|kind| Designation {
+                kind,
+                op: game::OpId::default(),
+                priority: game::DEFAULT_PRIORITY,
+            });
         for (p, result) in &preview.cells {
             if let Some(i) = Self::index_at(self.dims, base_level, *p) {
                 next[i] = overlay_byte(drag_kind.as_ref().or(designations.get(p)), Some(*result));
             }
         }
-        let dirty = if full { Some((UVec3::ZERO, self.dims)) } else { diff_box(&self.bytes, &next, self.dims) };
+        let dirty = if full {
+            Some((UVec3::ZERO, self.dims))
+        } else {
+            diff_box(&self.bytes, &next, self.dims)
+        };
         self.base_level = base_level;
         self.bytes = next;
         self.dirty = union_box(self.dirty, dirty);
@@ -202,7 +227,13 @@ fn diff_box(old: &[u8], new: &[u8], dims: UVec3) -> Option<(UVec3, UVec3)> {
         let first = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(0) as u32;
         let last = a.iter().zip(b).rposition(|(x, y)| x != y).unwrap_or(0) as u32;
         let (z, layer) = (row as u32 % dims.y, row as u32 / dims.y);
-        found = union_box(found, Some((UVec3::new(first, z, layer), UVec3::new(last + 1, z + 1, layer + 1))));
+        found = union_box(
+            found,
+            Some((
+                UVec3::new(first, z, layer),
+                UVec3::new(last + 1, z + 1, layer + 1),
+            )),
+        );
     }
     found
 }
@@ -248,14 +279,20 @@ pub fn update_overlay_grid(
     if grid.dirty.is_some() {
         grid.dirty = None;
     }
-    let (Some(region), Some(level)) = (tiles.region(), working.level) else { return };
+    let (Some(region), Some(level)) = (tiles.region(), working.level) else {
+        return;
+    };
     let base = overlay_base_level(level);
     let full = built.region != Some(region) || built.base_level != Some(base);
     if !full && built.version == tiles.version() && !preview.is_changed() {
         return;
     }
     grid.rebuild(base, tiles.designations(), &preview, full);
-    *built = OverlayBuilt { region: Some(region), base_level: Some(base), version: tiles.version() };
+    *built = OverlayBuilt {
+        region: Some(region),
+        base_level: Some(base),
+        version: tiles.version(),
+    };
 }
 
 /// The overlay texture: an R8Uint `W × D × OVERLAY_LEVELS` 3D image, render
@@ -269,7 +306,11 @@ impl FromWorld for OverlayTexture {
     fn from_world(world: &mut World) -> Self {
         let dims = overlay_dims();
         let mut image = Image::new(
-            Extent3d { width: dims.x, height: dims.y, depth_or_array_layers: dims.z },
+            Extent3d {
+                width: dims.x,
+                height: dims.y,
+                depth_or_array_layers: dims.z,
+            },
             TextureDimension::D3,
             vec![0; dims.element_product() as usize],
             TextureFormat::R8Uint,
@@ -309,14 +350,22 @@ fn upload_overlay(
     images: Res<RenderAssets<GpuImage>>,
     queue: Res<RenderQueue>,
 ) {
-    let Some((lo, hi)) = upload.pending else { return };
-    let Some(gpu) = texture.and_then(|t| images.get(&t.0)) else { return };
+    let Some((lo, hi)) = upload.pending else {
+        return;
+    };
+    let Some(gpu) = texture.and_then(|t| images.get(&t.0)) else {
+        return;
+    };
     let dims = upload.dims;
     queue.write_texture(
         TexelCopyTextureInfo {
             texture: &gpu.texture,
             mip_level: 0,
-            origin: Origin3d { x: lo.x, y: lo.y, z: lo.z },
+            origin: Origin3d {
+                x: lo.x,
+                y: lo.y,
+                z: lo.z,
+            },
             aspect: TextureAspect::All,
         },
         &upload.bytes,
@@ -325,7 +374,11 @@ fn upload_overlay(
             bytes_per_row: Some(dims.x),
             rows_per_image: Some(dims.y),
         },
-        Extent3d { width: hi.x - lo.x, height: hi.y - lo.y, depth_or_array_layers: hi.z - lo.z },
+        Extent3d {
+            width: hi.x - lo.x,
+            height: hi.y - lo.y,
+            depth_or_array_layers: hi.z - lo.z,
+        },
     );
     upload.pending = None;
 }
@@ -343,11 +396,16 @@ impl Plugin for FortressOverlayPlugin {
             .add_session_reset::<DragPreview>()
             .init_resource::<OverlayTexture>()
             .add_plugins(ExtractResourcePlugin::<OverlayTexture>::default());
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
         render_app
             .init_resource::<OverlayUpload>()
             .add_systems(ExtractSchedule, extract_overlay)
-            .add_systems(Render, upload_overlay.in_set(RenderSystems::PrepareResources));
+            .add_systems(
+                Render,
+                upload_overlay.in_set(RenderSystems::PrepareResources),
+            );
     }
 }
 
@@ -386,7 +444,11 @@ pub fn cutaway_active(u: &FortressViewUniform) -> bool {
 /// no home. The overlay is on whenever the home and the level are known,
 /// cut on or off, its layers ending at the working level. The home is drawn
 /// at its copy in `frame`.
-pub fn build_uniform(working: &WorkingLevel, home: Option<RegionId>, frame: &crate::wrap_frame::WrapFrame) -> FortressViewUniform {
+pub fn build_uniform(
+    working: &WorkingLevel,
+    home: Option<RegionId>,
+    frame: &crate::wrap_frame::WrapFrame,
+) -> FortressViewUniform {
     let mut u = FortressViewUniform::default();
     let Some(region) = home else { return u };
     u.origin = Vec3::from_array(frame.offset(region)).extend(0.0);
@@ -415,4 +477,3 @@ pub fn update_fortress_view(
         *uniform = next;
     }
 }
-

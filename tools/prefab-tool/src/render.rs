@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::BufWriter;
 use std::path::Path;
 
-use game::prefab::{Cell, ResolvedPrefab, ResolvedShape, PREFAB_BUCKET_BLOCKS};
+use game::prefab::{Cell, PREFAB_BUCKET_BLOCKS, ResolvedPrefab, ResolvedShape};
 use game::registry::{BlockId, BlockRegistry, TextureSpec};
 
 pub const GAP: u32 = 4;
@@ -111,7 +111,11 @@ pub fn render(p: &ResolvedPrefab, colours: &BlockColours, scale: u32) -> Image {
     let [sx, sy, sz] = p.size;
     let width = (2 * sx + sz) * scale + 2 * GAP;
     let height = sz.max(sy) * scale;
-    let mut img = Image { width, height, rgb: BACKGROUND.repeat((width * height) as usize) };
+    let mut img = Image {
+        width,
+        height,
+        rgb: BACKGROUND.repeat((width * height) as usize),
+    };
 
     draw_plan(&mut img, p, colours, scale);
     let south = elevation(p, colours, Side::South);
@@ -132,15 +136,27 @@ fn draw_plan(img: &mut Image, p: &ResolvedPrefab, colours: &BlockColours, scale:
         }
     }
     for (x, z) in tops {
-        let Some((y, id)) = p.column_top(x, z) else { continue };
-        let shade = if hi > lo { LOW_SHADE + (1.0 - LOW_SHADE) * (y - lo) as f32 / (hi - lo) as f32 } else { 1.0 };
+        let Some((y, id)) = p.column_top(x, z) else {
+            continue;
+        };
+        let shade = if hi > lo {
+            LOW_SHADE + (1.0 - LOW_SHADE) * (y - lo) as f32 / (hi - lo) as f32
+        } else {
+            1.0
+        };
         let c = colours.of(id).map(|v| (v as f32 * shade).round() as u8);
         img.fill(x as u32 * scale, z as u32 * scale, scale, scale, c);
     }
     for m in &p.markers {
         if (0..sx).contains(&m.at[0]) && (0..sz).contains(&m.at[2]) {
             // One pixel at the centre of the block's square.
-            img.fill(m.at[0] as u32 * scale + scale / 2, m.at[2] as u32 * scale + scale / 2, 1, 1, MARKER);
+            img.fill(
+                m.at[0] as u32 * scale + scale / 2,
+                m.at[2] as u32 * scale + scale / 2,
+                1,
+                1,
+                MARKER,
+            );
         }
     }
 }
@@ -171,7 +187,9 @@ fn elevation(p: &ResolvedPrefab, colours: &BlockColours, side: Side) -> Vec<Opti
         };
         let mut found: Vec<(usize, i32, [u8; 3])> = Vec::new();
         p.for_each_cell(min, max, &mut |at, cell| {
-            let Some(id) = cell_material(cell) else { return };
+            let Some(id) = cell_material(cell) else {
+                return;
+            };
             let (col, d) = match side {
                 Side::South => (at[0], at[2]),
                 Side::East => (sz - 1 - at[2], at[0]),

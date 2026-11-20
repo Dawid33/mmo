@@ -12,8 +12,8 @@
 
 use std::collections::BTreeSet;
 
-use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
 use super::cursor::CursorPolicy;
@@ -84,4 +84,3 @@ pub fn mute_keys_while_typing(
         keys.clear_just_released(key);
     }
 }
-

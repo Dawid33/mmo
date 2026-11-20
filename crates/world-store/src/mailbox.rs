@@ -30,12 +30,19 @@ use crate::StoreError;
 pub type MailboxHead = (HostId, u64, u64, u64);
 
 /// What SQLite answers for every mailbox call.
-pub(crate) const MAILBOX_UNSUPPORTED: &str = "the host mailbox and the login answers need Postgres (the coordinator's HTTP API)";
+pub(crate) const MAILBOX_UNSUPPORTED: &str =
+    "the host mailbox and the login answers need Postgres (the coordinator's HTTP API)";
 
 /// Host `host`'s rows at or below `after` deleted, then at most `limit` of its rows after `after`
 /// (in `seq` order) of its boot `boot` — `(seq, msg)`. Rows of another boot are not returned (a
 /// row for an older boot is left for the next `Attach`'s drop, or deleted with the cursor).
-pub(crate) async fn mailbox_read_pg(pool: &PgPool, host: HostId, boot: u64, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+pub(crate) async fn mailbox_read_pg(
+    pool: &PgPool,
+    host: HostId,
+    boot: u64,
+    after: u64,
+    limit: u32,
+) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
     // ONE statement: the delete (a data-modifying CTE) and the read share its snapshot; they
     // touch disjoint rows (`seq <= after` vs `seq > after`).
     let rows = sqlx::query(
@@ -48,7 +55,9 @@ pub(crate) async fn mailbox_read_pg(pool: &PgPool, host: HostId, boot: u64, afte
     .bind(i64::from(limit))
     .fetch_all(pool)
     .await?;
-    rows.into_iter().map(|r| Ok((r.try_get::<i64, _>(0)? as u64, r.try_get(1)?))).collect()
+    rows.into_iter()
+        .map(|r| Ok((r.try_get::<i64, _>(0)? as u64, r.try_get(1)?)))
+        .collect()
 }
 
 /// One row per host with unread rows: `(host, boot, at_ms, rows)` — the boot and `at_ms` of its
@@ -76,7 +85,11 @@ pub(crate) async fn mailbox_oldest_pg(pool: &PgPool) -> Result<Vec<MailboxHead>,
 /// database while the login service ran: its sequence started again) or the table is empty
 /// (everything pruned): the answers are read from the start. A cursor of THIS table is never past
 /// its newest row while one is kept — the prune deletes the oldest first.
-pub(crate) async fn login_answers_read_pg(pool: &PgPool, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+pub(crate) async fn login_answers_read_pg(
+    pool: &PgPool,
+    after: u64,
+    limit: u32,
+) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
     let rows = sqlx::query(
         "SELECT seq, msg FROM login_outbox \
          WHERE seq > (CASE WHEN $1 > COALESCE((SELECT MAX(seq) FROM login_outbox), 0) THEN 0 ELSE $1 END) \
@@ -86,5 +99,7 @@ pub(crate) async fn login_answers_read_pg(pool: &PgPool, after: u64, limit: u32)
     .bind(i64::from(limit))
     .fetch_all(pool)
     .await?;
-    rows.into_iter().map(|r| Ok((r.try_get::<i64, _>(0)? as u64, r.try_get(1)?))).collect()
+    rows.into_iter()
+        .map(|r| Ok((r.try_get::<i64, _>(0)? as u64, r.try_get(1)?)))
+        .collect()
 }

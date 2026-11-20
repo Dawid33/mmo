@@ -17,8 +17,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::AsyncComputeTaskPool;
-use bevy::tasks::{block_on, futures_lite::future, Task};
-use game::map_tile::{sample_flags, MapTile, MapTileKey, MAP_TILE_SAMPLES};
+use bevy::tasks::{Task, block_on, futures_lite::future};
+use game::map_tile::{MAP_TILE_SAMPLES, MapTile, MapTileKey, sample_flags};
 
 use crate::session::SessionResetExt;
 
@@ -79,7 +79,12 @@ impl MapWorld {
         let mut h = crc32fast::Hasher::new();
         h.update(entry_dir.to_string_lossy().as_bytes());
         h.update(&std::fs::read(entry_dir.join("world.json")).unwrap_or_default());
-        MapWorld { id: u64::from(h.finalize()), how: MapWorldSource::Local { store: store.to_path_buf() } }
+        MapWorld {
+            id: u64::from(h.finalize()),
+            how: MapWorldSource::Local {
+                store: store.to_path_buf(),
+            },
+        }
     }
 
     /// The world `world` (its id, or the server's address) served at `base` (`{base}/v1/map/tiles/…`).
@@ -87,7 +92,12 @@ impl MapWorld {
         let mut h = crc32fast::Hasher::new();
         h.update(world.as_bytes());
         h.update(base.as_bytes());
-        MapWorld { id: u64::from(h.finalize()), how: MapWorldSource::Http { base: base.trim_end_matches('/').to_string() } }
+        MapWorld {
+            id: u64::from(h.finalize()),
+            how: MapWorldSource::Http {
+                base: base.trim_end_matches('/').to_string(),
+            },
+        }
     }
 }
 
@@ -179,24 +189,37 @@ impl MapTiles {
 
     /// A loaded tile's samples.
     pub fn tile(&self, key: MapTileKey) -> Option<&MapTile> {
-        self.active.then(|| self.entries.get(&key).map(|e| &e.tile)).flatten()
+        self.active
+            .then(|| self.entries.get(&key).map(|e| &e.tile))
+            .flatten()
     }
 
     /// Paint `key`'s loaded tile in place with `f` (which says whether it changed anything): its textures
     /// are rewritten and it is marked painted — kept until a served tile with a NEWER etag replaces it
     /// (spec 5.3). `false` when the tile is not loaded (or nothing changed).
-    pub fn paint(&mut self, key: MapTileKey, images: &mut Assets<Image>, f: impl FnOnce(&mut MapTile) -> bool) -> bool {
+    pub fn paint(
+        &mut self,
+        key: MapTileKey,
+        images: &mut Assets<Image>,
+        f: impl FnOnce(&mut MapTile) -> bool,
+    ) -> bool {
         if !self.active {
             return false;
         }
-        let Some(e) = self.entries.get_mut(&key) else { return false };
+        let Some(e) = self.entries.get_mut(&key) else {
+            return false;
+        };
         if !f(&mut e.tile) {
             return false;
         }
         e.painted = true;
         e.real = true;
         let (h, b, w) = planes(&e.tile);
-        for (handle, data) in [(&e.gpu.height, h), (&e.gpu.block, b), (&e.gpu.water_flags, w)] {
+        for (handle, data) in [
+            (&e.gpu.height, h),
+            (&e.gpu.block, b),
+            (&e.gpu.water_flags, w),
+        ] {
             if let Some(mut image) = images.get_mut(handle) {
                 image.data = Some(data);
             }
@@ -226,7 +249,11 @@ impl MapTiles {
 
     /// Everything of the previous world goes.
     fn clear(&mut self) {
-        *self = MapTiles { active: self.active, logged_at: self.logged_at, ..MapTiles::default() };
+        *self = MapTiles {
+            active: self.active,
+            logged_at: self.logged_at,
+            ..MapTiles::default()
+        };
     }
 
     fn insert(&mut self, key: MapTileKey, entry: Entry) {
@@ -242,7 +269,8 @@ impl MapTiles {
         if self.bytes <= MAP_TILE_CACHE_BYTES {
             return;
         }
-        let mut by_age: Vec<(u64, MapTileKey)> = self.entries.iter().map(|(k, e)| (e.used, *k)).collect();
+        let mut by_age: Vec<(u64, MapTileKey)> =
+            self.entries.iter().map(|(k, e)| (e.used, *k)).collect();
         by_age.sort();
         for (_, key) in by_age {
             if self.bytes <= MAP_TILE_CACHE_BYTES {
@@ -280,7 +308,12 @@ fn pause_map_tiles(world: &mut World) {
 
 /// A session's [`MapWorld`]: resume the same world, clear for another, and open its source.
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-fn follow_map_world(world: Option<Res<MapWorld>>, mut tiles: ResMut<MapTiles>, images: ResMut<Assets<Image>>, time: Res<Time>) {
+fn follow_map_world(
+    world: Option<Res<MapWorld>>,
+    mut tiles: ResMut<MapTiles>,
+    images: ResMut<Assets<Image>>,
+    time: Res<Time>,
+) {
     let Some(world) = world else { return };
     if tiles.world != Some(world.id) {
         let mut images = images;
@@ -292,7 +325,10 @@ fn follow_map_world(world: Option<Res<MapWorld>>, mut tiles: ResMut<MapTiles>, i
         let n = tiles.entries.len();
         tiles.clear();
         tiles.world = Some(world.id);
-        info!("[map] world {:016x}: tile cache cleared ({n} tiles of the previous world)", world.id);
+        info!(
+            "[map] world {:016x}: tile cache cleared ({n} tiles of the previous world)",
+            world.id
+        );
     }
     tiles.active = true;
     match &world.how {
@@ -303,7 +339,9 @@ fn follow_map_world(world: Option<Res<MapWorld>>, mut tiles: ResMut<MapTiles>, i
                 return;
             }
             if let Some(task) = tiles.opening.as_mut() {
-                let Some(opened) = block_on(future::poll_once(task)) else { return };
+                let Some(opened) = block_on(future::poll_once(task)) else {
+                    return;
+                };
                 tiles.opening = None;
                 match opened {
                     Ok(source) => {
@@ -321,7 +359,8 @@ fn follow_map_world(world: Option<Res<MapWorld>>, mut tiles: ResMut<MapTiles>, i
             }
             if now >= tiles.open_retry_at {
                 let store = store.clone();
-                tiles.opening = Some(AsyncComputeTaskPool::get().spawn(async move { open_local(&store) }));
+                tiles.opening =
+                    Some(AsyncComputeTaskPool::get().spawn(async move { open_local(&store) }));
             }
         }
         MapWorldSource::Http { base } => {
@@ -342,12 +381,29 @@ fn open_local(store: &std::path::Path) -> Result<Arc<map_tiles::TileSource>, Str
     if !store.exists() {
         return Err("no store file yet".into());
     }
-    let dials = Dials { region_blocks: game::REGION_BLOCKS as u32, chunk_blocks: game::CHUNK_BLOCKS as u32 };
-    let handle = StoreHandle::open(&StoreUrl::Sqlite(store.to_path_buf()), dials, OpenMode::ReadOnly).map_err(|e| e.to_string())?;
-    let (world, _map) = world_store::load_forged(&handle).map_err(|e| e.to_string())?.ok_or("the store holds no forged world")?;
+    let dials = Dials {
+        region_blocks: game::REGION_BLOCKS as u32,
+        chunk_blocks: game::CHUNK_BLOCKS as u32,
+    };
+    let handle = StoreHandle::open(
+        &StoreUrl::Sqlite(store.to_path_buf()),
+        dials,
+        OpenMode::ReadOnly,
+    )
+    .map_err(|e| e.to_string())?;
+    let (world, _map) = world_store::load_forged(&handle)
+        .map_err(|e| e.to_string())?
+        .ok_or("the store holds no forged world")?;
     let registry = crate::blocks::load_registry();
-    let mats = worldgen::material::Materials::from_names(|name| registry.id_of(name).unwrap_or(game::BlockId::AIR));
-    Ok(Arc::new(map_tiles::TileSource::forged(handle, Arc::new(world), mats, map_tiles::TileSourceConfig::CLIENT)))
+    let mats = worldgen::material::Materials::from_names(|name| {
+        registry.id_of(name).unwrap_or(game::BlockId::AIR)
+    });
+    Ok(Arc::new(map_tiles::TileSource::forged(
+        handle,
+        Arc::new(world),
+        mats,
+        map_tiles::TileSourceConfig::CLIENT,
+    )))
 }
 
 /// The three textures of `tile`.
@@ -355,7 +411,11 @@ fn upload(images: &mut Assets<Image>, tile: &MapTile) -> GpuTile {
     let n = MAP_TILE_SAMPLES;
     let image = |data: Vec<u8>, format: TextureFormat| {
         let mut image = Image::new(
-            Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+            Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: 1,
+            },
             TextureDimension::D2,
             data,
             format,
@@ -375,9 +435,18 @@ fn upload(images: &mut Assets<Image>, tile: &MapTile) -> GpuTile {
 /// A tile's texture bytes: height (i16), block (u16), water and flags (u8 pairs).
 fn planes(tile: &MapTile) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     (
-        tile.samples.iter().flat_map(|s| s.height.to_le_bytes()).collect(),
-        tile.samples.iter().flat_map(|s| s.block.0.to_le_bytes()).collect(),
-        tile.samples.iter().flat_map(|s| [s.water, s.flags]).collect(),
+        tile.samples
+            .iter()
+            .flat_map(|s| s.height.to_le_bytes())
+            .collect(),
+        tile.samples
+            .iter()
+            .flat_map(|s| s.block.0.to_le_bytes())
+            .collect(),
+        tile.samples
+            .iter()
+            .flat_map(|s| [s.water, s.flags])
+            .collect(),
     )
 }
 
@@ -415,20 +484,36 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
                     images.remove(&old.gpu.block);
                     images.remove(&old.gpu.water_flags);
                 }
-                let real = tile.samples.iter().any(|s| s.flags & sample_flags::REAL != 0);
+                let real = tile
+                    .samples
+                    .iter()
+                    .any(|s| s.flags & sample_flags::REAL != 0);
                 if key.level <= super::paint::MAP_PAINT_MAX_LEVEL {
                     tiles.replaced.push(key);
                 }
                 tiles.stamp += 1;
                 let used = tiles.stamp;
-                tiles.insert(key, Entry { tile, gpu, etag, fetched_at: now, real, painted: false, used });
+                tiles.insert(
+                    key,
+                    Entry {
+                        tile,
+                        gpu,
+                        etag,
+                        fetched_at: now,
+                        real,
+                        painted: false,
+                        used,
+                    },
+                );
             }
             Answer::Failed(e) => {
                 tiles.failures += 1;
                 if tiles.failures.is_power_of_two() {
                     warn!("[map] tile {key:?}: {e} ({} failures)", tiles.failures);
                 }
-                tiles.retry_at.insert(key, now + MAP_RETRY_MS as f64 / 1000.0);
+                tiles
+                    .retry_at
+                    .insert(key, now + MAP_RETRY_MS as f64 / 1000.0);
             }
         }
     }

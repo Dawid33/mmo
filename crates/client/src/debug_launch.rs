@@ -43,18 +43,20 @@ use std::path::{Path, PathBuf};
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use game::history::SiteId;
 use game::SiteMarker;
+use game::history::SiteId;
 use worldgen::forge::ForgeParams;
 use worldgen::{forged, world_store};
 
-use crate::frontend::generator::{progress_text, ForgeEvent, ForgeJob};
+use crate::frontend::generator::{ForgeEvent, ForgeJob, progress_text};
 use crate::instance::ClientRequest;
 use crate::login::flow::{LoginIntent, LoginSession, RejoinEnd};
-use crate::renderer::commander::CommanderCamera;
-use crate::renderer::history_view::{populated, HistoryView};
 use crate::renderer::ClientRequests;
-use crate::session::{AppState, InPlay, LastSessionError, PendingWorld, PreparingWorld, SessionEnded, StartingStatus};
+use crate::renderer::commander::CommanderCamera;
+use crate::renderer::history_view::{HistoryView, populated};
+use crate::session::{
+    AppState, InPlay, LastSessionError, PendingWorld, PreparingWorld, SessionEnded, StartingStatus,
+};
 
 /// `worlds/<this>/`: the `world` preset's world.
 pub const DEBUG_WORLD_SLUG: &str = "debug-world";
@@ -67,7 +69,9 @@ pub const DEBUG_WORLD_NAME: &str = "Debug: world";
 fn debug_world_override() -> Option<String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::env::var("VOXEL_DEBUG_WORLD").ok().filter(|v| !v.is_empty())
+        std::env::var("VOXEL_DEBUG_WORLD")
+            .ok()
+            .filter(|v| !v.is_empty())
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -135,7 +139,10 @@ impl DebugScenario {
 /// A missing one is an error naming it (the variable, never a token).
 pub fn online_login_from(login_url: Option<&str>, kept: Option<&str>) -> Result<(), String> {
     if login_url.is_none() {
-        return Err(format!("`debug online` needs {} set (the login service)\n\n{USAGE}", crate::login::api::LOGIN_URL_ENV));
+        return Err(format!(
+            "`debug online` needs {} set (the login service)\n\n{USAGE}",
+            crate::login::api::LOGIN_URL_ENV
+        ));
     }
     if kept.is_none() {
         return Err(format!(
@@ -164,25 +171,35 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
             let mut flags = flags.iter();
             while let Some(flag) = flags.next() {
                 let mut value = || {
-                    flags.next().copied().ok_or_else(|| format!("`{flag}` needs a value\n\n{USAGE}"))
+                    flags
+                        .next()
+                        .copied()
+                        .ok_or_else(|| format!("`{flag}` needs a value\n\n{USAGE}"))
                 };
                 match *flag {
                     "--reset" => reset = true,
                     "--port" => {
                         let v = value()?;
-                        port = Some(v.parse::<u16>().map_err(|e| format!("bad --port `{v}`: {e}\n\n{USAGE}"))?);
+                        port = Some(
+                            v.parse::<u16>()
+                                .map_err(|e| format!("bad --port `{v}`: {e}\n\n{USAGE}"))?,
+                        );
                     }
                     "--join" => {
                         let v = value()?;
                         let addr = std::net::ToSocketAddrs::to_socket_addrs(v)
                             .ok()
                             .and_then(|mut a| a.next())
-                            .ok_or_else(|| format!("bad --join `{v}`: want HOST:PORT\n\n{USAGE}"))?;
+                            .ok_or_else(|| {
+                                format!("bad --join `{v}`: want HOST:PORT\n\n{USAGE}")
+                            })?;
                         join = Some(addr);
                     }
                     "--site" => {
                         let v = value()?;
-                        let n = v.parse::<u32>().map_err(|e| format!("bad --site `{v}`: {e}\n\n{USAGE}"))?;
+                        let n = v
+                            .parse::<u32>()
+                            .map_err(|e| format!("bad --site `{v}`: {e}\n\n{USAGE}"))?;
                         if site.replace(SiteId(n)).is_some() {
                             return Err(format!("--site: only once\n\n{USAGE}"));
                         }
@@ -195,7 +212,9 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                     "--prefab" => {
                         let v = value()?;
                         if v.trim().is_empty() || v.starts_with('-') {
-                            return Err(format!("bad --prefab `{v}`: want NAME[:DX,DZ[:TURN]]\n\n{USAGE}"));
+                            return Err(format!(
+                                "bad --prefab `{v}`: want NAME[:DX,DZ[:TURN]]\n\n{USAGE}"
+                            ));
                         }
                         prefab = Some(match prefab.take() {
                             Some(p) => format!("{p};{v}"),
@@ -204,8 +223,13 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                     }
                     "--town" => {
                         let v = value()?;
-                        if v.trim().is_empty() || v.starts_with('-') || town.replace(v.to_string()).is_some() {
-                            return Err(format!("bad --town `{v}`: want STYLE[:ARMS[:LEN]], once\n\n{USAGE}"));
+                        if v.trim().is_empty()
+                            || v.starts_with('-')
+                            || town.replace(v.to_string()).is_some()
+                        {
+                            return Err(format!(
+                                "bad --town `{v}`: want STYLE[:ARMS[:LEN]], once\n\n{USAGE}"
+                            ));
                         }
                     }
                     "--world" => {
@@ -215,11 +239,17 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                         }
                         world = Some(v.to_string());
                     }
-                    other => return Err(format!("unknown flag `{other}` for `debug {preset}`\n\n{USAGE}")),
+                    other => {
+                        return Err(format!(
+                            "unknown flag `{other}` for `debug {preset}`\n\n{USAGE}"
+                        ));
+                    }
                 }
             }
             if join.is_some() && (reset || port.is_some()) {
-                return Err(format!("--join plays on another client's world: not with --reset or --port\n\n{USAGE}"));
+                return Err(format!(
+                    "--join plays on another client's world: not with --reset or --port\n\n{USAGE}"
+                ));
             }
             match *preset {
                 "world"
@@ -227,7 +257,14 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                         && !(join.is_some() && (prefab.is_some() || town.is_some()))
                         && !(prefab.is_some() && town.is_some()) =>
                 {
-                    Ok(Some(DebugScenario::World { reset, port, join, site, prefab, town }))
+                    Ok(Some(DebugScenario::World {
+                        reset,
+                        port,
+                        join,
+                        site,
+                        prefab,
+                        town,
+                    }))
                 }
                 "online"
                     if !reset
@@ -237,9 +274,13 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                         && prefab.is_none()
                         && town.is_none() =>
                 {
-                    Ok(Some(DebugScenario::Online { world: world.unwrap_or_else(|| DEFAULT_ONLINE_WORLD.into()) }))
+                    Ok(Some(DebugScenario::Online {
+                        world: world.unwrap_or_else(|| DEFAULT_ONLINE_WORLD.into()),
+                    }))
                 }
-                "world" | "online" => Err(format!("flags not valid for `debug {preset}`\n\n{USAGE}")),
+                "world" | "online" => {
+                    Err(format!("flags not valid for `debug {preset}`\n\n{USAGE}"))
+                }
                 other => Err(format!("unknown debug preset `{other}`\n\n{USAGE}")),
             }
         }
@@ -250,7 +291,11 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
 /// The first site the Adventure tab would offer — a populated site of the
 /// lowest civ, in the order the server lists them.
 pub fn choose_adventure_site(sites: &[SiteMarker]) -> Option<SiteId> {
-    sites.iter().filter(|s| populated(s)).min_by_key(|s| s.civ).map(|s| s.site)
+    sites
+        .iter()
+        .filter(|s| populated(s))
+        .min_by_key(|s| s.civ)
+        .map(|s| s.site)
 }
 
 /// What the automatic start does next, from what the server has sent.
@@ -334,7 +379,10 @@ impl DebugLaunchPlugin {
     /// is missing (like a bad command line, before any window opens).
     pub fn from_env(scenario: DebugScenario) -> Result<Self, String> {
         if matches!(scenario, DebugScenario::Online { .. }) {
-            online_login_from(crate::login::login_url().as_deref(), crate::login::store::load_refresh().as_deref())?;
+            online_login_from(
+                crate::login::login_url().as_deref(),
+                crate::login::store::load_refresh().as_deref(),
+            )?;
         }
         Ok(Self { scenario })
     }
@@ -342,16 +390,40 @@ impl DebugLaunchPlugin {
 
 impl Plugin for DebugLaunchPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(DebugLaunch { scenario: self.scenario.clone(), phase: Phase::Boot })
-            .add_systems(Update, (boot, drive_online_login, poll_forge, auto_start).chain());
+        app.insert_resource(DebugLaunch {
+            scenario: self.scenario.clone(),
+            phase: Phase::Boot,
+        })
+        .add_systems(
+            Update,
+            (boot, drive_online_login, poll_forge, auto_start).chain(),
+        );
         // An online session ends on the world list instead of the menu (or,
         // its login revoked during a rejoin, on the sign-in screen).
         for home in [AppState::MainMenu, AppState::Worlds, AppState::Login] {
-            app.add_systems(OnTransition { exited: AppState::Starting, entered: home }, (exit_when_lost, abandon).chain())
-                .add_systems(OnTransition { exited: AppState::InWorld, entered: home }, (exit_when_lost, abandon).chain());
+            app.add_systems(
+                OnTransition {
+                    exited: AppState::Starting,
+                    entered: home,
+                },
+                (exit_when_lost, abandon).chain(),
+            )
+            .add_systems(
+                OnTransition {
+                    exited: AppState::InWorld,
+                    entered: home,
+                },
+                (exit_when_lost, abandon).chain(),
+            );
         }
         // A rejoin (`login::flow`): the new session starts again.
-        app.add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::Starting }, restart_after_rejoin);
+        app.add_systems(
+            OnTransition {
+                exited: AppState::InWorld,
+                entered: AppState::Starting,
+            },
+            restart_after_rejoin,
+        );
     }
 }
 
@@ -360,7 +432,11 @@ fn worlds_root() -> PathBuf {
 }
 
 /// The session ended before the scenario settled: it does not come back.
-fn abandon(mut launch: ResMut<DebugLaunch>, mut commands: Commands, forge: Option<Res<DebugForge>>) {
+fn abandon(
+    mut launch: ResMut<DebugLaunch>,
+    mut commands: Commands,
+    forge: Option<Res<DebugForge>>,
+) {
     if let Some(forge) = forge {
         forge.0.cancel();
         commands.remove_resource::<DebugForge>();
@@ -379,7 +455,9 @@ fn exit_when_lost(
     last: Res<LastSessionError>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if !matches!(launch.scenario, DebugScenario::Online { .. }) || matches!(launch.phase, Phase::Boot | Phase::Online(_)) {
+    if !matches!(launch.scenario, DebugScenario::Online { .. })
+        || matches!(launch.phase, Phase::Boot | Phase::Online(_))
+    {
         return;
     }
     let Some(login) = login else { return };
@@ -398,7 +476,9 @@ fn exit_when_lost(
 /// `online`: the lost session rejoins (`login::flow`); its new session
 /// starts again (a restored player is already adventuring).
 fn restart_after_rejoin(mut launch: ResMut<DebugLaunch>) {
-    if matches!(launch.scenario, DebugScenario::Online { .. }) && matches!(launch.phase, Phase::Starting(_) | Phase::Done) {
+    if matches!(launch.scenario, DebugScenario::Online { .. })
+        && matches!(launch.phase, Phase::Starting(_) | Phase::Done)
+    {
         info!("[debug] the session rejoins; starting again once it is in");
         launch.phase = Phase::Starting(Sent::Nothing);
     }
@@ -416,7 +496,14 @@ fn boot(
         return;
     }
     let (reset, port, join, prefab, town) = match &launch.scenario {
-        DebugScenario::World { reset, port, join, prefab, town, .. } => (*reset, *port, *join, prefab.clone(), town.clone()),
+        DebugScenario::World {
+            reset,
+            port,
+            join,
+            prefab,
+            town,
+            ..
+        } => (*reset, *port, *join, prefab.clone(), town.clone()),
         DebugScenario::Online { world } => {
             // The Play online flow from its login screen: `drive_online_login` presses its buttons.
             info!("[debug] logging in to join the login service's world {world}");
@@ -476,13 +563,21 @@ fn boot(
     if reset && dir.exists() {
         info!("[debug] --reset: deleting {}", dir.display());
         if let Err(e) = std::fs::remove_dir_all(&dir) {
-            return fail(format!("could not delete {}: {e}", dir.display()), &mut launch, &mut error);
+            return fail(
+                format!("could not delete {}: {e}", dir.display()),
+                &mut launch,
+                &mut error,
+            );
         }
     }
     if dir.exists() {
         let entry = world_store::list(&root).into_iter().find(|e| e.dir == dir);
         let Some(entry) = entry else {
-            return fail(format!("{} is not a world", dir.display()), &mut launch, &mut error);
+            return fail(
+                format!("{} is not a world", dir.display()),
+                &mut launch,
+                &mut error,
+            );
         };
         if let Err(why) = entry.loadable {
             return fail(
@@ -502,7 +597,11 @@ fn boot(
         });
     } else {
         info!("[debug] forging the debug world into {}", dir.display());
-        commands.insert_resource(DebugForge(ForgeJob::start(root, ForgeParams::default(), DEBUG_WORLD_NAME.into())));
+        commands.insert_resource(DebugForge(ForgeJob::start(
+            root,
+            ForgeParams::default(),
+            DEBUG_WORLD_NAME.into(),
+        )));
         commands.insert_resource(PreparingWorld);
         status.0 = "Forging the debug world\u{2026}".into();
         launch.phase = Phase::Forging;
@@ -516,7 +615,12 @@ fn boot(
 /// What `online`'s login step does next: `None` = wait, `Some(Ok)` = logged in (on the world
 /// list), `Some(Err)` = give up. A kept token the service refuses is dropped silently by the
 /// flow, so "back on the login screen, idle, not logged in" with no error line is a refusal.
-fn online_login_verdict(state: AppState, busy: bool, logged_in: bool, error: &str) -> Option<Result<(), String>> {
+fn online_login_verdict(
+    state: AppState,
+    busy: bool,
+    logged_in: bool,
+    error: &str,
+) -> Option<Result<(), String>> {
     if busy {
         return None;
     }
@@ -545,8 +649,12 @@ fn drive_online_login(
     mut intents: MessageWriter<LoginIntent>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let Phase::Online(step) = launch.phase else { return };
-    let DebugScenario::Online { world } = &launch.scenario else { return };
+    let Phase::Online(step) = launch.phase else {
+        return;
+    };
+    let DebugScenario::Online { world } = &launch.scenario else {
+        return;
+    };
     let mut fail = |why: &str, launch: &mut DebugLaunch| {
         // The screens' line (a `LoginFailure`): never a secret.
         error!("[debug] online: {why}");
@@ -618,7 +726,9 @@ fn poll_forge(
     }
     for event in forge.0.events.try_iter() {
         match forge.0.settle(event) {
-            ForgeEvent::Progress(p) => status.0 = format!("Forging the debug world: {}", progress_text(p).1),
+            ForgeEvent::Progress(p) => {
+                status.0 = format!("Forging the debug world: {}", progress_text(p).1)
+            }
             ForgeEvent::Done(world) => {
                 info!("[debug] forged {}", world.entry_dir.display());
                 commands.remove_resource::<DebugForge>();
@@ -655,7 +765,9 @@ fn auto_start(
     requests: Option<Res<ClientRequests>>,
     cam: Option<ResMut<CommanderCamera>>,
 ) {
-    let Phase::Starting(sent) = launch.phase else { return };
+    let Phase::Starting(sent) = launch.phase else {
+        return;
+    };
     if *state.get() != AppState::InWorld {
         return;
     }
@@ -681,7 +793,9 @@ fn auto_start(
     // A restored player (the server kept its adventure across the disconnect /
     // restart) is told so on connect, as the answer a start would have had:
     // wait for that to be applied, never start again.
-    if sent == Sent::Nothing && (history.adventuring.is_some() || history.adventure_result.is_some()) {
+    if sent == Sent::Nothing
+        && (history.adventuring.is_some() || history.adventure_result.is_some())
+    {
         return;
     }
     let Some(requests) = requests else { return };
@@ -692,7 +806,10 @@ fn auto_start(
         }
         return;
     }
-    let site = match (wanted, adventure_start(&history.sites, history.sites_received)) {
+    let site = match (
+        wanted,
+        adventure_start(&history.sites, history.sites_received),
+    ) {
         (Some(site), _) => site,
         (None, Start::Wait) => return,
         (None, Start::PlayHere) => {
@@ -706,7 +823,11 @@ fn auto_start(
         }
         (None, Start::Adventure(site)) => site,
     };
-    if requests.0.send(ClientRequest::StartAdventure(site)).is_err() {
+    if requests
+        .0
+        .send(ClientRequest::StartAdventure(site))
+        .is_err()
+    {
         warn!("[debug] adventure request not sent: no game thread");
         launch.phase = Phase::Done;
         return;
@@ -718,4 +839,3 @@ fn auto_start(
     history.adventure_pending = true;
     launch.phase = Phase::Starting(Sent::Adventure);
 }
-

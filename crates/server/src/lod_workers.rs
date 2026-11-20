@@ -2,8 +2,8 @@
 //! `LodBuildJob`s so a cache-miss (worst case a full region generation)
 //! never stalls the manager thread's event routing.
 
-use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
-use game::{build_lod_job, LodBuildJob, LodBuilder, LodResult, NoStoredTerrain, StoredTerrain};
+use crossbeam::channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use game::{LodBuildJob, LodBuilder, LodResult, NoStoredTerrain, StoredTerrain, build_lod_job};
 
 /// Floor on the default worker count (and the old fixed value).
 pub const LOD_BUILD_THREADS: usize = 2;
@@ -113,7 +113,8 @@ impl ThreadLodBuilder {
         threads: usize,
     ) -> Self {
         let reads_stored = stored.is_some();
-        let stored: std::sync::Arc<dyn StoredTerrain> = stored.unwrap_or_else(|| std::sync::Arc::new(NoStoredTerrain));
+        let stored: std::sync::Arc<dyn StoredTerrain> =
+            stored.unwrap_or_else(|| std::sync::Arc::new(NoStoredTerrain));
         let (jobs, job_recv) = unbounded::<Queued>();
         let retry = spawn_retry_thread(jobs.clone());
         for i in 0..threads {
@@ -131,18 +132,31 @@ impl ThreadLodBuilder {
                     // kind (never from chunks): water plan Task 8.
                     let water =
                         move |key: &game::lod::LodKey| worldgen::coarse_water(key, seed, materials);
-                    let generate =
-                        move |rc: game::RegionCoords| gen_cache.generate_cached(rc, seed, materials);
-                    worker_loop(&recv, &retry, Backoff::default(), &prefetch_job, &mut |job| {
-                        let started = std::time::Instant::now();
-                        let result = build_lod_job(job, &coarse, &water, &generate, stored.as_ref());
-                        crate::perf::EDGE.record_lod_build(started.elapsed());
-                        result
-                    }, &out);
+                    let generate = move |rc: game::RegionCoords| {
+                        gen_cache.generate_cached(rc, seed, materials)
+                    };
+                    worker_loop(
+                        &recv,
+                        &retry,
+                        Backoff::default(),
+                        &prefetch_job,
+                        &mut |job| {
+                            let started = std::time::Instant::now();
+                            let result =
+                                build_lod_job(job, &coarse, &water, &generate, stored.as_ref());
+                            crate::perf::EDGE.record_lod_build(started.elapsed());
+                            result
+                        },
+                        &out,
+                    );
                 })
                 .expect("spawn lod worker");
         }
-        Self { jobs, retry, reads_stored }
+        Self {
+            jobs,
+            retry,
+            reads_stored,
+        }
     }
 }
 
@@ -173,11 +187,20 @@ fn worker_loop(
                 let delay = backoff.delay(attempt);
                 let key = job_key(&job);
                 if attempt == 0 {
-                    log::warn!("[server] LOD {key:?}: its forged world tiles do not load ({e}); retrying in {delay:?}, then backing off to {:?}", backoff.max);
+                    log::warn!(
+                        "[server] LOD {key:?}: its forged world tiles do not load ({e}); retrying in {delay:?}, then backing off to {:?}",
+                        backoff.max
+                    );
                 } else {
-                    log::debug!("[server] LOD {key:?}: attempt {} failed ({e}); retrying in {delay:?}", attempt + 1);
+                    log::debug!(
+                        "[server] LOD {key:?}: attempt {} failed ({e}); retrying in {delay:?}",
+                        attempt + 1
+                    );
                 }
-                let queued = Queued { job, attempt: attempt.saturating_add(1) };
+                let queued = Queued {
+                    job,
+                    attempt: attempt.saturating_add(1),
+                };
                 let _ = retry.send(Delayed::Job(std::time::Instant::now() + delay, queued));
                 continue;
             }
@@ -195,7 +218,8 @@ fn spawn_retry_thread(jobs: Sender<Queued>) -> Sender<Delayed> {
     std::thread::Builder::new()
         .name("lod-retry".into())
         .spawn(move || {
-            let mut waiting: std::collections::BTreeMap<(std::time::Instant, u64), Queued> = Default::default();
+            let mut waiting: std::collections::BTreeMap<(std::time::Instant, u64), Queued> =
+                Default::default();
             let mut seq = 0u64;
             loop {
                 let next = match waiting.first_key_value() {
@@ -254,7 +278,9 @@ fn prefetch_job_with(
         LodBuildJob::Pristine { region, .. } | LodBuildJob::Stored { region, .. } => Some(*region),
         LodBuildJob::Region { .. } | LodBuildJob::Tile { .. } => None,
     };
-    std::iter::once(lod(&job_key(job))).chain(generates.map(region)).collect()
+    std::iter::once(lod(&job_key(job)))
+        .chain(generates.map(region))
+        .collect()
 }
 
 impl LodBuilder for ThreadLodBuilder {
@@ -274,4 +300,3 @@ impl LodBuilder for ThreadLodBuilder {
         self.reads_stored
     }
 }
-

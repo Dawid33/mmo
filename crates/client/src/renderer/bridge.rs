@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+use super::history_view::HistoryMsg;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, Task};
+use bevy::tasks::{Task, block_on, futures_lite::future};
 use crossbeam::channel::Receiver;
 use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
 use game::{EntityKey, Voxel};
-use super::history_view::HistoryMsg;
 
-use super::convert::{iso_to_transform, perspective_to_projection};
 use super::commander::tiles::TileMirrorMsg;
+use super::convert::{iso_to_transform, perspective_to_projection};
 use super::hud::HudStatus;
 use super::lod_rings;
 use super::{ClientUpdates, LocalPlayer};
@@ -34,14 +34,22 @@ pub struct RegionRoots(pub BTreeMap<RegionId, Entity>, BodyRoots);
 /// region's tree was placed at ([`RegionRoots::alias`]) and the trees the
 /// frame has moved away from ([`RegionRoots::drawn`]).
 #[derive(Default)]
-pub struct BodyRoots(BTreeMap<RegionId, Entity>, BTreeMap<RegionId, RegionId>, std::collections::BTreeSet<RegionId>);
+pub struct BodyRoots(
+    BTreeMap<RegionId, Entity>,
+    BTreeMap<RegionId, RegionId>,
+    std::collections::BTreeSet<RegionId>,
+);
 
 impl RegionRoots {
     /// The parent of `region`'s non-terrain entities: its bodies root, or
     /// the region root itself for a root mapped without one (tests that
     /// insert into `.0` directly).
     pub fn bodies(&self, region: RegionId) -> Option<Entity> {
-        self.1 .0.get(&region).or_else(|| self.0.get(&region)).copied()
+        self.1
+            .0
+            .get(&region)
+            .or_else(|| self.0.get(&region))
+            .copied()
     }
 
     /// The copy of `region` (canonical) in the `WrapFrame` its tree was
@@ -50,7 +58,9 @@ impl RegionRoots {
     /// never moves (`crate::wrap_frame`'s module docs); `region` itself for
     /// one mapped without it (tests that insert into `.0`); `None` unmapped.
     pub fn alias(&self, region: RegionId) -> Option<RegionId> {
-        self.0.contains_key(&region).then(|| self.1 .1.get(&region).copied().unwrap_or(region))
+        self.0
+            .contains_key(&region)
+            .then(|| self.1.1.get(&region).copied().unwrap_or(region))
     }
 
     /// Whether `region` is mapped and drawn where the current `WrapFrame`
@@ -59,7 +69,7 @@ impl RegionRoots {
     /// replaced, and what places things by the current frame treats it as
     /// not loaded.
     pub fn drawn(&self, region: RegionId) -> bool {
-        self.0.contains_key(&region) && !self.1 .2.contains(&region)
+        self.0.contains_key(&region) && !self.1.2.contains(&region)
     }
 
     /// The frame is `frame` now: hide every tree placed at another copy than
@@ -67,35 +77,39 @@ impl RegionRoots {
     /// Trees are never moved (see [`RegionRoots::alias`]).
     fn follow_frame(&mut self, frame: &crate::wrap_frame::WrapFrame, commands: &mut Commands) {
         for (&region, &root) in &self.0 {
-            let placed = self.1 .1.get(&region).copied().unwrap_or(region);
+            let placed = self.1.1.get(&region).copied().unwrap_or(region);
             let stale = placed != frame.alias(region);
-            if stale == self.1 .2.contains(&region) {
+            if stale == self.1.2.contains(&region) {
                 continue;
             }
-            let vis = if stale { Visibility::Hidden } else { Visibility::Inherited };
-            for e in std::iter::once(root).chain(self.1 .0.get(&region).copied()) {
+            let vis = if stale {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+            for e in std::iter::once(root).chain(self.1.0.get(&region).copied()) {
                 commands.entity(e).insert(vis);
             }
             if stale {
-                self.1 .2.insert(region);
+                self.1.2.insert(region);
             } else {
-                self.1 .2.remove(&region);
+                self.1.2.remove(&region);
             }
         }
     }
 
     fn insert(&mut self, region: RegionId, root: Entity, bodies: Entity, alias: RegionId) {
         self.0.insert(region, root);
-        self.1 .0.insert(region, bodies);
-        self.1 .1.insert(region, alias);
-        self.1 .2.remove(&region);
+        self.1.0.insert(region, bodies);
+        self.1.1.insert(region, alias);
+        self.1.2.remove(&region);
     }
 
     /// Unmaps `region`: its root and the alias it was placed at.
     fn remove(&mut self, region: &RegionId) -> Option<(Entity, RegionId)> {
-        self.1 .0.remove(region);
-        self.1 .2.remove(region);
-        let alias = self.1 .1.remove(region).unwrap_or(*region);
+        self.1.0.remove(region);
+        self.1.2.remove(region);
+        let alias = self.1.1.remove(region).unwrap_or(*region);
         self.0.remove(region).map(|root| (root, alias))
     }
 }
@@ -113,11 +127,20 @@ pub struct RegionBodies(Vec<Entity>);
 
 /// The region root and bodies root of a newly received region, both at the
 /// offset of its copy in `frame` (they never move: [`RegionRoots::alias`]).
-fn spawn_region_roots(commands: &mut Commands, id: RegionId, frame: &crate::wrap_frame::WrapFrame) -> (Entity, Entity) {
+fn spawn_region_roots(
+    commands: &mut Commands,
+    id: RegionId,
+    frame: &crate::wrap_frame::WrapFrame,
+) -> (Entity, Entity) {
     let offset = frame.offset(id);
     let at = Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2]));
     let root = commands
-        .spawn((at, Visibility::default(), Name::new(format!("region {:?}", id)), SessionScoped))
+        .spawn((
+            at,
+            Visibility::default(),
+            Name::new(format!("region {:?}", id)),
+            SessionScoped,
+        ))
         .id();
     // Scoped too, though it goes with its region root: nothing of a
     // session may outlive it, whatever the relationship does.
@@ -155,7 +178,9 @@ pub fn despawn_retired_regions(
     mut retired: ResMut<RetiredRegionRoots>,
     children: Query<&Children>,
 ) {
-    let Some(&(_, root)) = retired.0.front() else { return };
+    let Some(&(_, root)) = retired.0.front() else {
+        return;
+    };
     let budget = REGION_ENTITY_DESPAWNS_PER_FRAME << (retired.0.len() - 1).min(4);
     match children.get(root) {
         // From the END of the list, last first: a despawned child is taken
@@ -319,7 +344,8 @@ impl VoxelData {
             }
         }
         // Decoded once per chiselled block of the brick.
-        let mut materials: std::collections::BTreeMap<[usize; 3], Vec<game::BlockId>> = Default::default();
+        let mut materials: std::collections::BTreeMap<[usize; 3], Vec<game::BlockId>> =
+            Default::default();
         for bz in 0..BRICK_BLOCKS {
             for by in 0..BRICK_BLOCKS {
                 for bx in 0..BRICK_BLOCKS {
@@ -367,15 +393,17 @@ impl VoxelData {
     /// Every voxel is air or liquid (`cutout`'s liquids): nothing the chunk
     /// mesher draws.
     pub fn is_all_empty(&self, cutout: &super::meshing::binary::CutoutTable) -> bool {
-        self.0.iter().all(|&(_, id)| id == game::BlockId::AIR || cutout.is_liquid(id))
+        self.0
+            .iter()
+            .all(|&(_, id)| id == game::BlockId::AIR || cutout.is_liquid(id))
     }
 
     /// Every voxel hides what is behind it: no air, no liquid and no cutout
     /// block (`cutout`) anywhere in the chunk.
     pub fn is_opaque_throughout(&self, cutout: &super::meshing::binary::CutoutTable) -> bool {
-        self.0
-            .iter()
-            .all(|&(_, id)| id != game::BlockId::AIR && !cutout.is_liquid(id) && !cutout.is_cutout(id))
+        self.0.iter().all(|&(_, id)| {
+            id != game::BlockId::AIR && !cutout.is_liquid(id) && !cutout.is_cutout(id)
+        })
     }
 
     /// The cached boundary-zone hashes, if `with_boundary_zones` ran.
@@ -408,7 +436,10 @@ impl VoxelData {
         let mut run_end = run_len as usize;
         let mut previous = None;
         for index in indices {
-            debug_assert!(previous.is_none_or(|p| index >= p), "RLE indices must be sorted");
+            debug_assert!(
+                previous.is_none_or(|p| index >= p),
+                "RLE indices must be sorted"
+            );
             debug_assert!(index < game::BRICK_VOXEL_COUNT, "voxel index out of bounds");
             previous = Some(index);
             while index >= run_end {
@@ -469,7 +500,11 @@ pub const SNAPSHOT_VOXEL_TASK_BRICKS: usize = 64;
 /// of bricks, at least one chunk.
 pub const SNAPSHOT_VOXEL_TASK_CHUNKS: usize = {
     let per_chunk = game::BRICKS_PER_CHUNK_EDGE.pow(3);
-    if SNAPSHOT_VOXEL_TASK_BRICKS > per_chunk { SNAPSHOT_VOXEL_TASK_BRICKS / per_chunk } else { 1 }
+    if SNAPSHOT_VOXEL_TASK_BRICKS > per_chunk {
+        SNAPSHOT_VOXEL_TASK_BRICKS / per_chunk
+    } else {
+        1
+    }
 };
 
 /// Floor on derived snapshot bricks spawned per frame (the live count follows
@@ -543,17 +578,29 @@ pub enum DeriveSource {
 impl DeriveBricksJob {
     /// Snapshot chunks at `items`, the snapshot shared (threads).
     pub fn shared(data: Arc<GameData>, items: Vec<game::ChunkCoords>) -> Self {
-        Self { shared: Some(data), items, source: DeriveSource::Part(Default::default()) }
+        Self {
+            shared: Some(data),
+            items,
+            source: DeriveSource::Part(Default::default()),
+        }
     }
 
     /// Snapshot chunks at `items` with just the part of the snapshot they read.
     pub fn part(part: super::bricks::SnapshotPart, items: Vec<game::ChunkCoords>) -> Self {
-        Self { shared: None, items, source: DeriveSource::Part(part) }
+        Self {
+            shared: None,
+            items,
+            source: DeriveSource::Part(part),
+        }
     }
 
     /// Chunks that came on their own.
     pub fn owned(chunks: Vec<game::Chunk>) -> Self {
-        Self { shared: None, items: Vec::new(), source: DeriveSource::Owned(chunks) }
+        Self {
+            shared: None,
+            items: Vec::new(),
+            source: DeriveSource::Owned(chunks),
+        }
     }
 }
 
@@ -562,9 +609,15 @@ impl super::compute::ComputeJob for DeriveBricksJob {
     const KIND: super::compute::JobKind = super::compute::JobKind::DeriveBricks;
 
     fn run(self) -> Self::Output {
-        use super::bricks::{derive_chunk_bricks, derive_chunk_bricks_across, snapshot_across, DerivedBricks};
+        use super::bricks::{
+            DerivedBricks, derive_chunk_bricks, derive_chunk_bricks_across, snapshot_across,
+        };
         let zones = |mut derived: DerivedBricks| {
-            derived.spawn = derived.spawn.into_iter().map(|(l, v)| (l, v.with_boundary_zones())).collect();
+            derived.spawn = derived
+                .spawn
+                .into_iter()
+                .map(|(l, v)| (l, v.with_boundary_zones()))
+                .collect();
             derived
         };
         let cutout = super::meshing::binary::CutoutTable::installed();
@@ -575,7 +628,10 @@ impl super::compute::ComputeJob for DeriveBricksJob {
                 .map(|coords| {
                     let key = data.chunk_index.get(&game::chunk_index_key(coords))?;
                     let chunk = data.ecs.chunk.try_get(*key).as_ref()?;
-                    Some(zones(derive_chunk_bricks_across(chunk, snapshot_across(&data, coords, &cutout))))
+                    Some(zones(derive_chunk_bricks_across(
+                        chunk,
+                        snapshot_across(&data, coords, &cutout),
+                    )))
                 })
                 .collect();
         }
@@ -585,13 +641,20 @@ impl super::compute::ComputeJob for DeriveBricksJob {
                 .into_iter()
                 .map(|coords| {
                     let chunk = part.chunks.get(&coords)?.as_ref()?;
-                    Some(zones(derive_chunk_bricks_across(chunk, part.across(coords, &cutout))))
+                    Some(zones(derive_chunk_bricks_across(
+                        chunk,
+                        part.across(coords, &cutout),
+                    )))
                 })
                 .collect(),
-            DeriveSource::Owned(chunks) => {
-                chunks.iter().map(|chunk| Some(zones(derive_chunk_bricks(chunk)))).collect()
-            }
-            DeriveSource::Mirrors(items) => items.iter().map(|item| Some(zones(item.derive()))).collect(),
+            DeriveSource::Owned(chunks) => chunks
+                .iter()
+                .map(|chunk| Some(zones(derive_chunk_bricks(chunk))))
+                .collect(),
+            DeriveSource::Mirrors(items) => items
+                .iter()
+                .map(|item| Some(zones(item.derive())))
+                .collect(),
         }
     }
 }
@@ -665,7 +728,10 @@ pub fn detail_reach(
     if detail.distance <= 0.0 {
         return Some((Vec3::ZERO, 0.0));
     }
-    Some((detail.eye, detail.distance + DETAIL_REACH_MARGIN_CHUNKS * game::CHUNK_UNITS as f32))
+    Some((
+        detail.eye,
+        detail.distance + DETAIL_REACH_MARGIN_CHUNKS * game::CHUNK_UNITS as f32,
+    ))
 }
 
 /// Whether the sim chunk centred at `centre` is within `reach` of `eye`:
@@ -686,7 +752,10 @@ fn nearest_batch(centers: impl Iterator<Item = Vec3>, camera: Option<Vec3>) -> O
         return centers.next().map(|(index, _)| index);
     };
     centers
-        .min_by(|(_, a), (_, b)| a.distance_squared(camera).total_cmp(&b.distance_squared(camera)))
+        .min_by(|(_, a), (_, b)| {
+            a.distance_squared(camera)
+                .total_cmp(&b.distance_squared(camera))
+        })
         .map(|(index, _)| index)
 }
 
@@ -703,7 +772,13 @@ pub fn apply_snapshot_voxels(
     cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     roots: Res<RegionRoots>,
     mut queue: ResMut<SnapshotVoxelQueue>,
-    deferred: Query<(Entity, &GlobalTransform, &ChildOf), (With<super::bricks::FineDeferred>, Without<PendingSnapshotVoxels>)>,
+    deferred: Query<
+        (Entity, &GlobalTransform, &ChildOf),
+        (
+            With<super::bricks::FineDeferred>,
+            Without<PendingSnapshotVoxels>,
+        ),
+    >,
     detail: Option<Res<super::voxel_pull::NearDetail>>,
     render_config: Option<Res<super::config::TerrainRenderConfig>>,
 ) {
@@ -714,16 +789,20 @@ pub fn apply_snapshot_voxels(
         // chunk at 16-block chunks; a larger one goes by its centroid).
         if !queue.batches.is_empty() {
             for batch in std::mem::take(&mut queue.batches) {
-                if matches!(batch.chunks, BatchChunks::Mirrors(_)) || within_reach(batch.center, reach) {
+                if matches!(batch.chunks, BatchChunks::Mirrors(_))
+                    || within_reach(batch.center, reach)
+                {
                     queue.batches.push_back(batch);
                     continue;
                 }
                 match batch.chunks {
-                    BatchChunks::Snapshot(data, items) => queue.deferred.extend(
-                        items
-                            .into_iter()
-                            .filter_map(|(e, key, _)| Some((e, data.ecs.chunk.try_get(key).as_ref()?.clone()))),
-                    ),
+                    BatchChunks::Snapshot(data, items) => {
+                        queue
+                            .deferred
+                            .extend(items.into_iter().filter_map(|(e, key, _)| {
+                                Some((e, data.ecs.chunk.try_get(key).as_ref()?.clone()))
+                            }))
+                    }
                     BatchChunks::Owned(items) => queue.deferred.extend(items),
                     BatchChunks::Mirrors(_) => unreachable!("kept above"),
                 }
@@ -732,7 +811,9 @@ pub fn apply_snapshot_voxels(
         materialise_near(&mut commands, &deferred, &roots, reach);
     }
     for _ in 0..DEFERRED_LANDS_PER_FRAME {
-        let Some((entity, chunk)) = queue.deferred.pop_front() else { break };
+        let Some((entity, chunk)) = queue.deferred.pop_front() else {
+            break;
+        };
         if pending.contains(entity) {
             commands.queue(move |world: &mut World| {
                 if world.get::<PendingSnapshotVoxels>(entity).is_some() {
@@ -754,7 +835,9 @@ pub fn apply_snapshot_voxels(
     // Retire batches of regions that were removed or replaced since (their
     // entities are gone; holding the `Arc` would keep ~40 MiB alive each).
     if roots.is_changed() {
-        queue.batches.retain(|batch| roots.0.get(&batch.region) == Some(&batch.root));
+        queue
+            .batches
+            .retain(|batch| roots.0.get(&batch.region) == Some(&batch.root));
     }
     // Hand out compute-pool slots, nearest batch to the camera first.
     let camera = cameras
@@ -762,7 +845,8 @@ pub fn apply_snapshot_voxels(
         .find(|(_, camera)| camera.is_active)
         .map(|(transform, _)| transform.translation());
     while outstanding < MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS {
-        let Some(index) = nearest_batch(queue.batches.iter().map(|batch| batch.center), camera) else {
+        let Some(index) = nearest_batch(queue.batches.iter().map(|batch| batch.center), camera)
+        else {
             break;
         };
         let Some(PendingVoxelBatch { root, chunks, .. }) = queue.batches.remove(index) else {
@@ -774,45 +858,67 @@ pub fn apply_snapshot_voxels(
                 // Off the page (a wasm worker) the job carries just what it
                 // reads; on a thread it shares the snapshot.
                 let job = if super::compute::serializes() {
-                    DeriveBricksJob::part(super::bricks::SnapshotPart::gather(&data, coords.iter().copied()), coords)
+                    DeriveBricksJob::part(
+                        super::bricks::SnapshotPart::gather(&data, coords.iter().copied()),
+                        coords,
+                    )
                 } else {
                     DeriveBricksJob::shared(data.clone(), coords)
                 };
-                super::compute::spawn(job, move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
-                    items
-                        .into_iter()
-                        .zip(derived)
-                        .filter_map(|((entity, key, _), derived)| {
-                            let chunk = data.ecs.chunk.try_get(key).as_ref()?;
-                            Some((entity, chunk.clone(), derived?))
-                        })
-                        .collect()
-                })
+                super::compute::spawn(
+                    job,
+                    move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
+                        items
+                            .into_iter()
+                            .zip(derived)
+                            .filter_map(|((entity, key, _), derived)| {
+                                let chunk = data.ecs.chunk.try_get(key).as_ref()?;
+                                Some((entity, chunk.clone(), derived?))
+                            })
+                            .collect()
+                    },
+                )
             }
             BatchChunks::Mirrors(items) => {
-                let sources: Vec<(Entity, game::Chunk)> = items.iter().map(|(e, item)| (*e, item.chunk.clone())).collect();
+                let sources: Vec<(Entity, game::Chunk)> = items
+                    .iter()
+                    .map(|(e, item)| (*e, item.chunk.clone()))
+                    .collect();
                 let job = DeriveBricksJob {
                     shared: None,
                     items: Vec::new(),
-                    source: DeriveSource::Mirrors(items.into_iter().map(|(_, item)| item).collect()),
+                    source: DeriveSource::Mirrors(
+                        items.into_iter().map(|(_, item)| item).collect(),
+                    ),
                 };
-                super::compute::spawn(job, move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
-                    sources
-                        .into_iter()
-                        .zip(derived)
-                        .filter_map(|((entity, chunk), derived)| Some((entity, chunk, derived?)))
-                        .collect()
-                })
+                super::compute::spawn(
+                    job,
+                    move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
+                        sources
+                            .into_iter()
+                            .zip(derived)
+                            .filter_map(|((entity, chunk), derived)| {
+                                Some((entity, chunk, derived?))
+                            })
+                            .collect()
+                    },
+                )
             }
             BatchChunks::Owned(items) => {
-                let job = DeriveBricksJob::owned(items.iter().map(|(_, chunk)| chunk.clone()).collect());
-                super::compute::spawn(job, move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
-                    items
-                        .into_iter()
-                        .zip(derived)
-                        .filter_map(|((entity, chunk), derived)| Some((entity, chunk, derived?)))
-                        .collect()
-                })
+                let job =
+                    DeriveBricksJob::owned(items.iter().map(|(_, chunk)| chunk.clone()).collect());
+                super::compute::spawn(
+                    job,
+                    move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
+                        items
+                            .into_iter()
+                            .zip(derived)
+                            .filter_map(|((entity, chunk), derived)| {
+                                Some((entity, chunk, derived?))
+                            })
+                            .collect()
+                    },
+                )
             }
         };
         // Child of the region root: removing the region cancels the task.
@@ -872,7 +978,13 @@ pub fn apply_snapshot_voxels(
 /// of its mirror happen together in one command (`bricks::materialise_chunk`).
 fn materialise_near(
     commands: &mut Commands,
-    deferred: &Query<(Entity, &GlobalTransform, &ChildOf), (With<super::bricks::FineDeferred>, Without<PendingSnapshotVoxels>)>,
+    deferred: &Query<
+        (Entity, &GlobalTransform, &ChildOf),
+        (
+            With<super::bricks::FineDeferred>,
+            Without<PendingSnapshotVoxels>,
+        ),
+    >,
     roots: &RegionRoots,
     reach: (Vec3, f32),
 ) {
@@ -881,7 +993,8 @@ fn materialise_near(
         .iter()
         .filter_map(|(e, tf, parent)| {
             let centre = tf.translation() + half;
-            within_reach(centre, reach).then(|| (centre.distance_squared(reach.0), e, centre, parent.parent()))
+            within_reach(centre, reach)
+                .then(|| (centre.distance_squared(reach.0), e, centre, parent.parent()))
         })
         .collect();
     if near.len() > MATERIALISE_PER_FRAME {
@@ -889,9 +1002,13 @@ fn materialise_near(
         near.truncate(MATERIALISE_PER_FRAME);
     }
     for (_, entity, center, root) in near {
-        let Some((&region, _)) = roots.0.iter().find(|(_, r)| **r == root) else { continue };
+        let Some((&region, _)) = roots.0.iter().find(|(_, r)| **r == root) else {
+            continue;
+        };
         commands.queue(move |world: &mut World| {
-            let Some(item) = super::bricks::materialise_chunk(world, entity) else { return };
+            let Some(item) = super::bricks::materialise_chunk(world, entity) else {
+                return;
+            };
             if let Some(mut queue) = world.get_resource_mut::<SnapshotVoxelQueue>() {
                 queue.batches.push_back(PendingVoxelBatch {
                     region,
@@ -929,11 +1046,12 @@ pub fn drain_client_updates(
     mut roots: ResMut<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
     // Paired to stay within Bevy's 16 system parameters.
-    (mut hud_status, mut tick_times, mut drain, mut region_hosts, mut wrap_frame): (
+    (mut hud_status, mut tick_times, mut drain, mut region_hosts, mut block_damage, mut wrap_frame): (
         ResMut<HudStatus>,
         Option<ResMut<super::hud::RegionTickTimes>>,
         Option<ResMut<super::drain_notice::DrainNotice>>,
         Option<ResMut<RegionHosts>>,
+        Option<ResMut<super::block_damage::BlockDamage>>,
         Option<ResMut<crate::wrap_frame::WrapFrame>>,
     ),
     mut ui_updates: ResMut<crate::renderer::slint_overlay::UiUpdates>,
@@ -953,7 +1071,9 @@ pub fn drain_client_updates(
     // (2026-09-23 `fly-probe` trace). Later events wait, in order.
     let mut spawned_region = false;
     while !spawned_region {
-        let Ok(event) = updates.0.try_recv() else { break };
+        let Ok(event) = updates.0.try_recv() else {
+            break;
+        };
         stall.add_work(1);
         match event {
             ClientUpdateEvent::NewRegion(id, data, receiver) => {
@@ -979,23 +1099,44 @@ pub fn drain_client_updates(
                 // The snapshot's item piles and halo pile mirrors (canonical
                 // cells, to the region's block frame by the nearest image),
                 // ahead of the region's own updates.
-                let local = |m: &std::collections::BTreeMap<game::WorldBlockPos, game::ItemPile>| -> Vec<_> {
-                    m.iter().map(|(p, pile)| (game::local_block(frame.extent, id, *p), Some(pile.view()))).collect()
+                let local = |m: &std::collections::BTreeMap<
+                    game::WorldBlockPos,
+                    game::ItemPile,
+                >|
+                 -> Vec<_> {
+                    m.iter()
+                        .map(|(p, pile)| {
+                            (game::local_block(frame.extent, id, *p), Some(pile.view()))
+                        })
+                        .collect()
                 };
                 let (piles, mirrors) = (local(data.item_piles()), local(data.halo_piles()));
                 // The water pass's recipe (its tiles mesh once the chunks land).
                 let water_ground = Arc::new(data.ground_recipes().clone());
                 commands.queue(move |world: &mut World| {
-                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::water::WaterMsg>>() {
-                        msgs.write(super::water::WaterMsg::Region { region: id, ground: water_ground });
+                    if let Some(mut msgs) =
+                        world.get_resource_mut::<Messages<super::water::WaterMsg>>()
+                    {
+                        msgs.write(super::water::WaterMsg::Region {
+                            region: id,
+                            ground: water_ground,
+                        });
                     }
-                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
+                    if let Some(mut msgs) =
+                        world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>()
+                    {
                         msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
                         if !piles.is_empty() {
-                            msgs.write(super::item_piles::ItemPileMsg::Set { region: id, changes: piles });
+                            msgs.write(super::item_piles::ItemPileMsg::Set {
+                                region: id,
+                                changes: piles,
+                            });
                         }
                         if !mirrors.is_empty() {
-                            msgs.write(super::item_piles::ItemPileMsg::SetMirrors { region: id, changes: mirrors });
+                            msgs.write(super::item_piles::ItemPileMsg::SetMirrors {
+                                region: id,
+                                changes: mirrors,
+                            });
                         }
                     }
                 });
@@ -1034,7 +1175,11 @@ pub fn drain_client_updates(
                     id.z,
                     game::perf::ms(spawn.elapsed()),
                     data.ecs.entities.len(),
-                    data.ecs.chunk.iter().filter(|(_, chunk)| chunk.is_some()).count(),
+                    data.ecs
+                        .chunk
+                        .iter()
+                        .filter(|(_, chunk)| chunk.is_some())
+                        .count(),
                     roots.0.len()
                 );
                 info!("bridge: region {:?} loaded", id);
@@ -1044,21 +1189,29 @@ pub fn drain_client_updates(
                 // Unmapped now, despawned over the next frames.
                 if let Some((root, alias)) = unmap_region(&mut regions, &mut roots, &mut map, id) {
                     retired_roots.0.push_back((id, root));
-                    commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, alias));
+                    commands.queue(move |world: &mut World| {
+                        super::bricks::prune_region_skipped(world, alias)
+                    });
                 }
                 debug_lines.0.remove(&id);
                 commands.queue(move |world: &mut World| {
-                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::water::WaterMsg>>() {
+                    if let Some(mut msgs) =
+                        world.get_resource_mut::<Messages<super::water::WaterMsg>>()
+                    {
                         msgs.write(super::water::WaterMsg::RemoveRegion { region: id });
                     }
-                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
+                    if let Some(mut msgs) =
+                        world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>()
+                    {
                         msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
                     }
                 });
                 info!("bridge: region {:?} removed", id);
             }
             ClientUpdateEvent::LodData(key, payload, water) => {
-                lod_rings.pending.push(lod_rings::LodEventMsg::Data(key, payload, water));
+                lod_rings
+                    .pending
+                    .push(lod_rings::LodEventMsg::Data(key, payload, water));
             }
             ClientUpdateEvent::RemoveLod { key, near_takeover } => {
                 lod_rings
@@ -1070,10 +1223,16 @@ pub fn drain_client_updates(
                 // connect, crash): the session flow takes us back to the menu.
                 error!("bridge: game session ended: {:?}", e);
                 if let Some(ended) = session_ended.as_mut() {
-                    ended.write(crate::session::SessionEnded { reason: Some(session_end_reason(&e)) });
+                    ended.write(crate::session::SessionEnded {
+                        reason: Some(session_end_reason(&e)),
+                    });
                 }
             }
-            ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
+            ClientUpdateEvent::HudStatus {
+                home_region,
+                viewer_region,
+                connection,
+            } => {
                 hud_status.home_region = Some(home_region);
                 hud_status.viewer_region = Some(viewer_region);
                 hud_status.connection = connection;
@@ -1089,11 +1248,6 @@ pub fn drain_client_updates(
                     msgs.write(super::world_map::WorldMapMsg::Map(world_map));
                 }
             }
-            ClientUpdateEvent::PlayRefused(rc, why) => {
-                if let Some(msgs) = history_out.world_map.as_mut() {
-                    msgs.write(super::world_map::WorldMapMsg::Refused(rc, why));
-                }
-            }
             ClientUpdateEvent::Sites(v) => history_out.write(HistoryMsg::Sites(v)),
             ClientUpdateEvent::Calendar(c) => history_out.write(HistoryMsg::Calendar(c)),
             ClientUpdateEvent::RegionTickTimes(stats) => {
@@ -1102,6 +1256,20 @@ pub fn drain_client_updates(
                 }
             }
             ClientUpdateEvent::Notice(n) => history_out.write(HistoryMsg::Notice(n)),
+            ClientUpdateEvent::BlockDamage(region, blocks) => {
+                if let Some(damage) = block_damage.as_mut() {
+                    if damage.region != Some(region) {
+                        damage.shake.clear();
+                    }
+                    damage.region = Some(region);
+                    damage.blocks = blocks;
+                }
+            }
+            ClientUpdateEvent::TreeShake(region, sets) => {
+                if let Some(damage) = block_damage.as_mut().filter(|d| d.region == Some(region)) {
+                    damage.shake = sets;
+                }
+            }
             ClientUpdateEvent::HostDraining { remaining_secs } => {
                 if let Some(drain) = drain.as_mut() {
                     drain.remaining_secs = remaining_secs;
@@ -1133,7 +1301,9 @@ pub fn drain_client_updates(
             ClientUpdateEvent::PersonInfo(p) => history_out.write(HistoryMsg::PersonInfo(p)),
             ClientUpdateEvent::Civs(c) => history_out.write(HistoryMsg::Civs(c)),
             ClientUpdateEvent::Legends(p) => history_out.write(HistoryMsg::Legends(p)),
-            ClientUpdateEvent::AdventureResult(r) => history_out.write(HistoryMsg::AdventureResult(r)),
+            ClientUpdateEvent::AdventureResult(r) => {
+                history_out.write(HistoryMsg::AdventureResult(r))
+            }
         }
     }
 }
@@ -1189,7 +1359,15 @@ fn spawn_region_snapshot(
     let mirrors: BTreeMap<EntityKey, HaloMirror> = data
         .halo_entities
         .iter()
-        .map(|(id, h)| (h.entity, HaloMirror { id: *id, source: h.source_region }))
+        .map(|(id, h)| {
+            (
+                h.entity,
+                HaloMirror {
+                    id: *id,
+                    source: h.source_region,
+                },
+            )
+        })
         .collect();
     for (key, _) in data.ecs.entities.iter() {
         // Terrain under the static region root, everything else under the
@@ -1242,7 +1420,10 @@ fn spawn_region_snapshot(
             e.insert(*mirror);
         }
         if let Some(body) = data.ecs.voxel_body.try_get(key) {
-            e.insert((super::voxel_bodies::PendingVoxelBody(Arc::new(body.model.clone())), super::voxel_bodies::VoxelBodyModel));
+            e.insert((
+                super::voxel_bodies::PendingVoxelBody(Arc::new(body.model.clone())),
+                super::voxel_bodies::VoxelBodyModel,
+            ));
         }
         map.0.insert((region, key), e.id());
     }
@@ -1253,7 +1434,8 @@ fn spawn_region_snapshot(
     // compute pool a few at a time, nearest to the camera first.
     let offset = Vec3::from_array(origin);
     for batch in chunk_entities.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
-        let center = batch.iter().map(|(_, _, position)| *position).sum::<Vec3>() / batch.len() as f32;
+        let center =
+            batch.iter().map(|(_, _, position)| *position).sum::<Vec3>() / batch.len() as f32;
         voxel_queue.batches.push_back(PendingVoxelBatch {
             region,
             root,
@@ -1264,7 +1446,8 @@ fn spawn_region_snapshot(
                 batch
                     .iter()
                     .map(|(entity, key, position)| {
-                        let t = game::rapier3d::math::Vector::new(position.x, position.y, position.z);
+                        let t =
+                            game::rapier3d::math::Vector::new(position.x, position.y, position.z);
                         (*entity, *key, game::chunk_coords_from_translation(t))
                     })
                     .collect(),
@@ -1289,6 +1472,7 @@ pub fn drain_region_updates(
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
     mut pile_msgs: Option<ResMut<Messages<super::item_piles::ItemPileMsg>>>,
+    mut felled_msgs: Option<ResMut<Messages<super::block_damage::TreeFelledMsg>>>,
 ) {
     let commander = commander(camera_mode.as_deref());
     // Local cameras inserted by Commands this drain, not yet queryable: a
@@ -1296,8 +1480,13 @@ pub fn drain_region_updates(
     // smoothing) rather than overwrite it with a body target.
     let mut new_cameras: Vec<Entity> = Vec::new();
     for (&region, receiver) in regions.0.iter() {
-        let root = *roots.0.get(&region).expect("RegionRoots co-populated with Regions");
-        let bodies = roots.bodies(region).expect("RegionRoots co-populated with Regions");
+        let root = *roots
+            .0
+            .get(&region)
+            .expect("RegionRoots co-populated with Regions");
+        let bodies = roots
+            .bodies(region)
+            .expect("RegionRoots co-populated with Regions");
         // Cell terrain loaded this drain: voxels are derived off-thread in the
         // snapshot queue's batches (nearest first, budgeted per frame).
         let mut new_terrain: Vec<(Entity, game::Chunk, Vec3)> = Vec::new();
@@ -1327,7 +1516,9 @@ pub fn drain_region_updates(
                             .insert_if_new(super::bricks::ChunkBricks::default());
                         existing
                     } else {
-                        let e = commands.spawn((bundle, super::bricks::ChunkBricks::default())).id();
+                        let e = commands
+                            .spawn((bundle, super::bricks::ChunkBricks::default()))
+                            .id();
                         map.0.insert((region, key), e);
                         e
                     };
@@ -1348,7 +1539,9 @@ pub fn drain_region_updates(
                 GameDataUpdateKind::RemoveEntity(key) => {
                     if let Some(e) = map.0.remove(&(region, key)) {
                         // A terrain chunk's bricks are siblings, not children.
-                        commands.queue(move |world: &mut World| super::bricks::despawn_sim_entity(world, e));
+                        commands.queue(move |world: &mut World| {
+                            super::bricks::despawn_sim_entity(world, e)
+                        });
                     } else {
                         warn!("bridge: RemoveEntity for unmapped {:?}", key);
                     }
@@ -1371,7 +1564,11 @@ pub fn drain_region_updates(
                         if terrain_chunk {
                             let goal = target.goal();
                             let rot = target.rot;
-                            transform.set_if_neq(Transform { translation: goal, rotation: rot, ..*transform });
+                            transform.set_if_neq(Transform {
+                                translation: goal,
+                                rotation: rot,
+                                ..*transform
+                            });
                         }
                     } else {
                         // Entity spawned via Commands earlier this same drain —
@@ -1384,14 +1581,19 @@ pub fn drain_region_updates(
                         } else {
                             SimTarget::body(tf.translation, tf.rotation)
                         };
-                        let start = Transform { translation: target.goal(), ..tf };
+                        let start = Transform {
+                            translation: target.goal(),
+                            ..tf
+                        };
                         commands.entity(e).insert((start, target));
                     }
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, Some(voxels)) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
                         // Newer than any snapshot voxels still in flight.
-                        commands.queue(move |world: &mut World| super::bricks::write_legacy_voxels(world, e, voxels));
+                        commands.queue(move |world: &mut World| {
+                            super::bricks::write_legacy_voxels(world, e, voxels)
+                        });
                     } else {
                         warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
@@ -1435,7 +1637,10 @@ pub fn drain_region_updates(
                         ));
                     } else if local_player.0 == Some(client_id) {
                         let target = SimTarget::camera(tf.translation, tf.rotation);
-                        let tf = Transform { translation: target.goal(), ..tf };
+                        let tf = Transform {
+                            translation: target.goal(),
+                            ..tf
+                        };
                         new_cameras.push(e);
                         commands.entity(e).insert((
                             Camera3d::default(),
@@ -1447,7 +1652,9 @@ pub fn drain_region_updates(
                     } else {
                         // Another player's camera: track its pose so the
                         // entity follows the sim, but never render from it.
-                        commands.entity(e).insert((tf, SimTarget::body(tf.translation, tf.rotation)));
+                        commands
+                            .entity(e)
+                            .insert((tf, SimTarget::body(tf.translation, tf.rotation)));
                     }
                 }
                 GameDataUpdateKind::RemoveCameraComponent(key) => {
@@ -1459,7 +1666,9 @@ pub fn drain_region_updates(
                 }
                 GameDataUpdateKind::UpdateCameraViewProj(key, proj) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
-                        commands.entity(e).insert(Projection::Perspective(perspective_to_projection(&proj)));
+                        commands
+                            .entity(e)
+                            .insert(Projection::Perspective(perspective_to_projection(&proj)));
                     } else {
                         warn!("bridge: UpdateCameraViewProj for unmapped {:?}", key);
                     }
@@ -1474,7 +1683,9 @@ pub fn drain_region_updates(
                         target.pos = tf.translation;
                         target.rot = tf.rotation;
                     } else {
-                        commands.entity(e).insert(SimTarget::camera(tf.translation, tf.rotation));
+                        commands
+                            .entity(e)
+                            .insert(SimTarget::camera(tf.translation, tf.rotation));
                     }
                 }
                 GameDataUpdateKind::SetEntityKind(key, kind) => {
@@ -1483,8 +1694,12 @@ pub fn drain_region_updates(
                         continue;
                     };
                     match kind {
-                        Some(k) => { commands.entity(e).insert(SimKind(k)); }
-                        None => { commands.entity(e).remove::<SimKind>(); }
+                        Some(k) => {
+                            commands.entity(e).insert(SimKind(k));
+                        }
+                        None => {
+                            commands.entity(e).remove::<SimKind>();
+                        }
                     }
                 }
                 GameDataUpdateKind::SetHaloSource(key, src) => {
@@ -1493,7 +1708,9 @@ pub fn drain_region_updates(
                         continue;
                     };
                     match src {
-                        Some((source, id)) => { commands.entity(e).insert(HaloMirror { id, source }); }
+                        Some((source, id)) => {
+                            commands.entity(e).insert(HaloMirror { id, source });
+                        }
                         None => {
                             commands.entity(e).remove::<HaloMirror>();
                             // Upgraded in place: an owned body draws.
@@ -1514,8 +1731,12 @@ pub fn drain_region_updates(
                     }
                 }
                 // The terrain halo, for walk planning past the region's edge.
-                kind @ (GameDataUpdateKind::SetHaloTerrain(_) | GameDataUpdateKind::SetHaloGround(_)) => {
-                    if let Some(msg) = tile_msgs.as_mut().and_then(|_| TileMirrorMsg::from_update(region, &kind)) {
+                kind @ (GameDataUpdateKind::SetHaloTerrain(_)
+                | GameDataUpdateKind::SetHaloGround(_)) => {
+                    if let Some(msg) = tile_msgs
+                        .as_mut()
+                        .and_then(|_| TileMirrorMsg::from_update(region, &kind))
+                    {
                         tile_msgs.as_mut().unwrap().write(msg);
                     }
                 }
@@ -1541,6 +1762,12 @@ pub fn drain_region_updates(
                         msgs.write(super::item_piles::ItemPileMsg::Landed { region, flights });
                     }
                 }
+                // Render-only: the felled tree's pieces go top to bottom (`block_damage`).
+                GameDataUpdateKind::TreeFelled(felled) => {
+                    if let Some(msgs) = felled_msgs.as_mut() {
+                        msgs.write(super::block_damage::TreeFelledMsg { region, felled });
+                    }
+                }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {
@@ -1559,8 +1786,12 @@ pub fn drain_region_updates(
                         continue;
                     };
                     match animator {
-                        Some(a) => { commands.entity(e).insert(super::rigs::SimAnimator(a)); }
-                        None => { commands.entity(e).remove::<super::rigs::SimAnimator>(); }
+                        Some(a) => {
+                            commands.entity(e).insert(super::rigs::SimAnimator(a));
+                        }
+                        None => {
+                            commands.entity(e).remove::<super::rigs::SimAnimator>();
+                        }
                     }
                 }
                 // Detached terrain (`game::voxel_body`): its model is meshed
@@ -1579,7 +1810,12 @@ pub fn drain_region_updates(
                         commands.entity(e).insert(bundle);
                     } else {
                         let e = commands
-                            .spawn((SimEntity { region, key }, Visibility::default(), ChildOf(bodies), bundle))
+                            .spawn((
+                                SimEntity { region, key },
+                                Visibility::default(),
+                                ChildOf(bodies),
+                                bundle,
+                            ))
                             .id();
                         map.0.insert((region, key), e);
                     }
@@ -1597,7 +1833,10 @@ pub fn drain_region_updates(
                     root,
                     center: offset + center + Vec3::splat(game::CHUNK_UNITS as f32 / 2.0),
                     chunks: BatchChunks::Owned(
-                        batch.iter().map(|(e, chunk, _)| (*e, chunk.clone())).collect(),
+                        batch
+                            .iter()
+                            .map(|(e, chunk, _)| (*e, chunk.clone()))
+                            .collect(),
                     ),
                 });
             }
@@ -1624,7 +1863,11 @@ pub fn dedupe_halo_entities(
     }
     for (m, host, mut vis) in mirrors.iter_mut() {
         let shown = drawn.get(&m.id) == Some(&host.region);
-        let want = if shown { Visibility::Inherited } else { Visibility::Hidden };
+        let want = if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         if *vis != want {
             *vis = want;
         }
@@ -1680,7 +1923,9 @@ pub fn enforce_single_active_camera(
             home_keeper = Some(e);
         }
     }
-    let Some(keeper) = home_keeper.or(fallback) else { return };
+    let Some(keeper) = home_keeper.or(fallback) else {
+        return;
+    };
 
     for (e, _se, mut cam, has_marker) in cams.iter_mut() {
         let active = e == keeper;
@@ -1704,8 +1949,6 @@ mod tests {
     use super::*;
     use crate::renderer::{ClientUpdates, GameEvents, LocalPlayer};
     use game::{ClientUpdateEvent, RegionCoords, Rollback};
-    
-    
 
     fn app_shell() -> (App, crossbeam::channel::Sender<ClientUpdateEvent>) {
         let (client_send, client_recv) = crossbeam::channel::unbounded();
@@ -1769,8 +2012,12 @@ mod tests {
         let (_sa, ra) = crossbeam::channel::unbounded();
         let (_sb, rbr) = crossbeam::channel::unbounded();
         client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
-        client.send(ClientUpdateEvent::NewRegion(region_a, data_a, ra)).unwrap();
-        client.send(ClientUpdateEvent::NewRegion(region_b, data_b, rbr)).unwrap();
+        client
+            .send(ClientUpdateEvent::NewRegion(region_a, data_a, ra))
+            .unwrap();
+        client
+            .send(ClientUpdateEvent::NewRegion(region_b, data_b, rbr))
+            .unwrap();
         client
             .send(ClientUpdateEvent::HudStatus {
                 home_region: region_a,
@@ -1796,13 +2043,16 @@ mod tests {
             "non-home-region camera must be inactive"
         );
         assert!(
-            app.world().entity(ea).contains::<crate::renderer::UiCamera>(),
+            app.world()
+                .entity(ea)
+                .contains::<crate::renderer::UiCamera>(),
             "home-region camera must be the default UI camera"
         );
         assert!(
-            !app.world().entity(eb).contains::<crate::renderer::UiCamera>(),
+            !app.world()
+                .entity(eb)
+                .contains::<crate::renderer::UiCamera>(),
             "non-home-region camera must not keep the default UI camera marker"
         );
     }
 }
-

@@ -46,8 +46,7 @@ pub const JWKS_REFETCH_MIN_SECS: u64 = 30;
 pub const JWKS_FETCH_TIMEOUT_SECS: u64 = 5;
 
 /// The refusal a `local` host gives a login ticket.
-pub const REFUSE_JWT_ON_LOCAL_HOST: &str =
-    "this server does not use login (single-player / dev)";
+pub const REFUSE_JWT_ON_LOCAL_HOST: &str = "this server does not use login (single-player / dev)";
 /// The refusal a `jwt` host gives a player name.
 pub const REFUSE_LOCAL_ON_JWT_HOST: &str = "this server requires login";
 /// The refusal of an observer ticket ([`Credential::Observer`]) this host has no valid
@@ -121,7 +120,10 @@ impl AuthMode {
         };
         match lookup(AUTH_ENV).as_deref().map(str::trim) {
             None | Some("") | Some("local") | Some("token") => Ok(AuthMode::Local),
-            Some("jwt") => Ok(AuthMode::Jwt { world: required(WORLD_ID_ENV)?, login_url: required(LOGIN_URL_ENV)? }),
+            Some("jwt") => Ok(AuthMode::Jwt {
+                world: required(WORLD_ID_ENV)?,
+                login_url: required(LOGIN_URL_ENV)?,
+            }),
             Some(other) => Err(format!("{AUTH_ENV}={other:?}: expected `local` or `jwt`")),
         }
     }
@@ -163,7 +165,11 @@ impl JwksCache {
 
     /// Keys from the login service at `login_url` (`GET {login_url}{PATH_JWKS}`).
     pub fn from_login(login_url: &str) -> JwksCache {
-        let url = format!("{}{}", login_url.trim_end_matches('/'), login_api::PATH_JWKS);
+        let url = format!(
+            "{}{}",
+            login_url.trim_end_matches('/'),
+            login_api::PATH_JWKS
+        );
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(JWKS_FETCH_TIMEOUT_SECS))
             .build()
@@ -172,9 +178,18 @@ impl JwksCache {
             let client = client.clone();
             let url = url.clone();
             Box::pin(async move {
-                let response = client.get(&url).send().await.map_err(|e| format!("GET {url}: {e}"))?;
-                let response = response.error_for_status().map_err(|e| format!("GET {url}: {e}"))?;
-                response.json::<Jwks>().await.map_err(|e| format!("GET {url}: bad JWKS: {e}"))
+                let response = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET {url}: {e}"))?;
+                let response = response
+                    .error_for_status()
+                    .map_err(|e| format!("GET {url}: {e}"))?;
+                response
+                    .json::<Jwks>()
+                    .await
+                    .map_err(|e| format!("GET {url}: bad JWKS: {e}"))
             })
         }))
     }
@@ -210,7 +225,11 @@ impl JwksCache {
     /// A verifier that knows `kid`: the published one, else (at most every
     /// [`JWKS_REFETCH_MIN_SECS`]) a refetched one. A failed fetch keeps the
     /// published keys.
-    pub async fn verifier_for(&self, kid: &str, now_secs: u64) -> Result<Arc<Verifier>, VerifyError> {
+    pub async fn verifier_for(
+        &self,
+        kid: &str,
+        now_secs: u64,
+    ) -> Result<Arc<Verifier>, VerifyError> {
         let current = self.current();
         if current.knows(kid) {
             return Ok(current);
@@ -221,7 +240,8 @@ impl JwksCache {
         if current.knows(kid) {
             return Ok(current);
         }
-        let due = last_attempt.is_none_or(|at| now_secs >= at.saturating_add(JWKS_REFETCH_MIN_SECS));
+        let due =
+            last_attempt.is_none_or(|at| now_secs >= at.saturating_add(JWKS_REFETCH_MIN_SECS));
         if due {
             *last_attempt = Some(now_secs);
             self.refresh().await;
@@ -237,7 +257,10 @@ impl JwksCache {
 
     /// The published verifier, whatever keys it knows. Never waits on a fetch.
     pub fn current(&self) -> Arc<Verifier> {
-        self.published.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+        self.published
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Fetch and, on success, publish the keys. Whether it succeeded.
@@ -247,7 +270,10 @@ impl JwksCache {
             Ok(jwks) => {
                 log::info!("[auth] JWKS fetched: {} key(s)", jwks.keys.len());
                 let verifier = Arc::new(Verifier::from_jwks(&jwks));
-                *self.published.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = verifier;
+                *self
+                    .published
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = verifier;
                 true
             }
             Err(e) => {
@@ -279,11 +305,16 @@ pub struct ObserverOrders {
 impl ObserverOrders {
     /// No orders yet; `now` is this edge's clock (expiry is checked against it).
     pub fn new(now: Clock) -> ObserverOrders {
-        ObserverOrders { now, orders: Mutex::default() }
+        ObserverOrders {
+            now,
+            orders: Mutex::default(),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<ClientId, Vec<ObserverOrder>>> {
-        self.orders.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.orders
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Admit `nonce` for `client`'s `player` until `expires_unix_secs`.
@@ -298,15 +329,27 @@ impl ObserverOrders {
             return;
         }
         let list = orders.entry(client).or_default();
-        list.push(ObserverOrder { player, nonce, expires_unix_secs });
+        list.push(ObserverOrder {
+            player,
+            nonce,
+            expires_unix_secs,
+        });
         if list.len() > OBSERVER_ORDERS_PER_CLIENT {
-            let first = list.iter().enumerate().min_by_key(|(_, o)| o.expires_unix_secs).map(|(i, _)| i);
+            let first = list
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, o)| o.expires_unix_secs)
+                .map(|(i, _)| i);
             list.remove(first.expect("not empty"));
         }
         while orders.values().map(Vec::len).sum::<usize>() > OBSERVER_ORDERS_MAX {
             let first = orders
                 .iter()
-                .flat_map(|(c, list)| list.iter().enumerate().map(move |(i, o)| (o.expires_unix_secs, *c, i)))
+                .flat_map(|(c, list)| {
+                    list.iter()
+                        .enumerate()
+                        .map(move |(i, o)| (o.expires_unix_secs, *c, i))
+                })
                 .min()
                 .expect("not empty");
             let list = orders.get_mut(&first.1).expect("listed");
@@ -337,7 +380,12 @@ impl ObserverOrders {
     /// The player of `client`'s order for `nonce`, if one is valid at `now_secs`. The nonce
     /// is compared in constant time with every order of the client; an unknown client, a
     /// wrong nonce and an expired order give the same refusal.
-    pub fn admit(&self, client: ClientId, nonce: u64, now_secs: u64) -> Result<PlayerId, &'static str> {
+    pub fn admit(
+        &self,
+        client: ClientId,
+        nonce: u64,
+        now_secs: u64,
+    ) -> Result<PlayerId, &'static str> {
         let orders = self.lock();
         let mut found = None;
         for order in orders.get(&client).map(Vec::as_slice).unwrap_or_default() {
@@ -375,7 +423,10 @@ pub const MAX_KID_SHOWN_CHARS: usize = 64;
 fn shown(error: VerifyError) -> VerifyError {
     match error {
         VerifyError::UnknownKid(kid) if kid.chars().count() > MAX_KID_SHOWN_CHARS => {
-            VerifyError::UnknownKid(format!("{}…", kid.chars().take(MAX_KID_SHOWN_CHARS).collect::<String>()))
+            VerifyError::UnknownKid(format!(
+                "{}…",
+                kid.chars().take(MAX_KID_SHOWN_CHARS).collect::<String>()
+            ))
         }
         other => other,
     }
@@ -521,12 +572,18 @@ impl Authenticator {
     pub async fn admit(&self, credential: Credential) -> Result<Admitted, String> {
         match (&self.mode, credential) {
             (AuthMode::Local, Credential::Local(name)) => match PlayerName::parse(&name.0) {
-                Ok(name) => Ok(Admitted { who: AdmittedAs::Player(PlayerKey::Local(name)), ticket: None, session_epoch: None }),
+                Ok(name) => Ok(Admitted {
+                    who: AdmittedAs::Player(PlayerKey::Local(name)),
+                    ticket: None,
+                    session_epoch: None,
+                }),
                 Err(why) => Err(format!("invalid player name: {why}")),
             },
             (AuthMode::Local, Credential::Jwt(_)) => Err(REFUSE_JWT_ON_LOCAL_HOST.into()),
             (AuthMode::Jwt { .. }, Credential::Local(_)) => Err(REFUSE_LOCAL_ON_JWT_HOST.into()),
-            (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => self.check_jwt(world, &jwt).await,
+            (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => {
+                self.check_jwt(world, &jwt).await
+            }
             // Another host's redirect: whatever this host's mode, only that host's order admits it.
             (_, Credential::Observer { client, nonce }) => {
                 let admitted = match &self.observers {
@@ -536,8 +593,15 @@ impl Authenticator {
                 };
                 match admitted {
                     Ok(player) => {
-                        log::info!("[auth] client {client} admitted as an observer (player {})", player.0);
-                        Ok(Admitted { who: AdmittedAs::Observer { client, player }, ticket: None, session_epoch: None })
+                        log::info!(
+                            "[auth] client {client} admitted as an observer (player {})",
+                            player.0
+                        );
+                        Ok(Admitted {
+                            who: AdmittedAs::Observer { client, player },
+                            ticket: None,
+                            session_epoch: None,
+                        })
                     }
                     Err(why) => {
                         log::info!("[auth] observer ticket of client {client} refused");
@@ -577,7 +641,9 @@ impl Authenticator {
     /// reason, or a newer login of the player), if it may not.
     pub fn revoked(&self, ticket: &SessionTicket) -> Option<String> {
         match &self.admission {
-            Admission::SpawnOrders(orders) => orders.revoked(&ticket.player_token, ticket.session_epoch),
+            Admission::SpawnOrders(orders) => {
+                orders.revoked(&ticket.player_token, ticket.session_epoch)
+            }
             Admission::Newest(_) => None,
         }
     }
@@ -586,9 +652,15 @@ impl Authenticator {
     /// a spawn-order ticket under the orders' lock
     /// ([`SpawnOrders::announce`]) — unless the ticket was revoked meanwhile
     /// (the refusal is returned; nothing is announced).
-    pub fn announce(&self, ticket: Option<&SessionTicket>, connected: impl FnOnce()) -> Result<(), String> {
+    pub fn announce(
+        &self,
+        ticket: Option<&SessionTicket>,
+        connected: impl FnOnce(),
+    ) -> Result<(), String> {
         match (&self.admission, ticket) {
-            (Admission::SpawnOrders(orders), Some(t)) => orders.announce(&t.player_token, t.session_epoch, connected),
+            (Admission::SpawnOrders(orders), Some(t)) => {
+                orders.announce(&t.player_token, t.session_epoch, connected)
+            }
             _ => {
                 connected();
                 Ok(())
@@ -612,15 +684,25 @@ impl Authenticator {
         .map_err(|e| shown(e).to_string())?;
         let token = PlayerToken(claims.player_token.clone());
         if !token.is_valid() {
-            log::warn!("[auth] ticket of account {} carries a malformed player token", claims.sub);
+            log::warn!(
+                "[auth] ticket of account {} carries a malformed player token",
+                claims.sub
+            );
             return Err("login ticket carries an invalid player token".into());
         }
         let epochs = match &self.admission {
             Admission::SpawnOrders(orders) => {
                 return match orders.admit(&claims.player_token, claims.session_epoch) {
                     Ok(()) => {
-                        log::info!("[auth] account {} admitted by its spawn order (epoch {})", claims.sub, claims.session_epoch);
-                        let ticket = SessionTicket { player_token: claims.player_token, session_epoch: claims.session_epoch };
+                        log::info!(
+                            "[auth] account {} admitted by its spawn order (epoch {})",
+                            claims.sub,
+                            claims.session_epoch
+                        );
+                        let ticket = SessionTicket {
+                            player_token: claims.player_token,
+                            session_epoch: claims.session_epoch,
+                        };
                         Ok(Admitted {
                             who: AdmittedAs::Player(PlayerKey::Online(token)),
                             ticket: Some(ticket),
@@ -628,7 +710,11 @@ impl Authenticator {
                         })
                     }
                     Err(why) => {
-                        log::info!("[auth] account {} ticket epoch {} refused: {why}", claims.sub, claims.session_epoch);
+                        log::info!(
+                            "[auth] account {} ticket epoch {} refused: {why}",
+                            claims.sub,
+                            claims.session_epoch
+                        );
                         Err(why.into())
                     }
                 };
@@ -637,8 +723,12 @@ impl Authenticator {
         };
         // Checked and recorded under one lock: of two racing tickets the
         // older can never be admitted after the newer.
-        let mut epochs = epochs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let newest = epochs.entry(claims.player_token).or_insert(claims.session_epoch);
+        let mut epochs = epochs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let newest = epochs
+            .entry(claims.player_token)
+            .or_insert(claims.session_epoch);
         if claims.session_epoch < *newest {
             log::info!(
                 "[auth] account {} ticket epoch {} refused: epoch {} already admitted",
@@ -649,7 +739,15 @@ impl Authenticator {
             return Err(REFUSE_SUPERSEDED.into());
         }
         *newest = claims.session_epoch;
-        log::info!("[auth] account {} admitted (epoch {})", claims.sub, claims.session_epoch);
-        Ok(Admitted { who: AdmittedAs::Player(PlayerKey::Online(token)), ticket: None, session_epoch: Some(claims.session_epoch) })
+        log::info!(
+            "[auth] account {} admitted (epoch {})",
+            claims.sub,
+            claims.session_epoch
+        );
+        Ok(Admitted {
+            who: AdmittedAs::Player(PlayerKey::Online(token)),
+            ticket: None,
+            session_epoch: Some(claims.session_epoch),
+        })
     }
 }

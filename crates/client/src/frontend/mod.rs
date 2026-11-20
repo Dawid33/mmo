@@ -6,7 +6,7 @@
 //! starting 3 — also `InWorld` until the world map arrives — login 5, the
 //! online world list 6, whose flow is `login::flow`); the layer draws
 //! only while [`frontend_ui_shown`]: the frontend owns the screen and the
-//! arrival map (the game UI's world map, before the first Play) is not up.
+//! arrival map (the game UI's world map, while not in play) is not up.
 //! The generator lives in [`generator`], the world list in [`load_world`] and
 //! the menu's map backdrop in [`menu_background`] (native only); the starting screen's lines come from [`starting_lines`].
 //! Once in play, the same layer draws the [`loading`] screen (screen 4) over
@@ -14,9 +14,9 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod generator;
-pub mod loading;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod load_world;
+pub mod loading;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod menu_background;
 
@@ -27,11 +27,15 @@ use bevy::app::AppExit;
 use bevy::prelude::*;
 use slint_ui::FrontendUi;
 
-use crate::renderer::slint_overlay::{render_slint_layer, SlintLayer, SlintLayerPlugin, FRONTEND_LAYER_ORDER};
-use crate::session::SessionResetExt;
 use crate::login::flow::{LoginIntent, LoginSession};
+use crate::renderer::slint_overlay::{
+    FRONTEND_LAYER_ORDER, SlintLayer, SlintLayerPlugin, render_slint_layer,
+};
 use crate::renderer::world_map::WorldMapState;
-use crate::session::{frontend_ui_shown, AppState, InPlay, LastSessionError, StartingLog, StartingStatus};
+use crate::session::SessionResetExt;
+use crate::session::{
+    AppState, InPlay, LastSessionError, StartingLog, StartingStatus, frontend_ui_shown,
+};
 
 /// What a frontend button asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,9 +73,11 @@ struct FrontendActions(Rc<RefCell<Vec<FrontendAction>>>);
 /// The address the last Join server named (the Slint callback's argument).
 struct JoinAddress(Rc<RefCell<String>>);
 
-/// Whether the menu is the browser's: only Join server (the browser cannot
-/// make or keep worlds, it only joins a server).
+/// Whether the menu is the browser's (the browser cannot make or keep worlds).
 pub const JOIN_ONLY: bool = cfg!(target_arch = "wasm32");
+/// Direct server addresses are a local-development escape hatch. Release
+/// browser builds use the login-backed Play online flow instead.
+pub const DEBUG_DIRECT_JOIN: bool = cfg!(all(target_arch = "wasm32", debug_assertions));
 
 /// Whether any saved world exists, refreshed on entering the main menu.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,7 +165,9 @@ pub struct FrontendPlugin;
 impl Plugin for FrontendPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(
-            SlintLayerPlugin::new(FrontendUi::new).order(FRONTEND_LAYER_ORDER).with_init(connect_frontend),
+            SlintLayerPlugin::new(FrontendUi::new)
+                .order(FRONTEND_LAYER_ORDER)
+                .with_init(connect_frontend),
         )
         .init_resource::<CanLoad>()
         .init_resource::<LastSessionError>()
@@ -170,19 +178,33 @@ impl Plugin for FrontendPlugin {
         // none of it is session-reset.
         .add_message::<LoginIntent>()
         .add_systems(Startup, crate::login::flow::setup_login)
-        .add_systems(OnEnter(AppState::Worlds), crate::login::flow::refresh_worlds)
+        .add_systems(
+            OnEnter(AppState::Worlds),
+            crate::login::flow::refresh_worlds,
+        )
         .add_systems(
             Update,
-            (apply_frontend_actions, crate::login::flow::start_login, crate::login::flow::poll_login).chain(),
+            (
+                apply_frontend_actions,
+                crate::login::flow::start_login,
+                crate::login::flow::poll_login,
+            )
+                .chain(),
         )
         // After every Update system that starts play or re-arms the camera, so the
         // loading screen is drawn on the very frame the world camera takes over.
         .add_systems(
             PostUpdate,
-            (loading::update_loading_cover, push_frontend_state).chain().before(render_slint_layer::<FrontendUi>),
+            (loading::update_loading_cover, push_frontend_state)
+                .chain()
+                .before(render_slint_layer::<FrontendUi>),
         );
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_plugins((generator::GeneratorPlugin, load_world::LoadWorldPlugin, menu_background::MenuBackgroundPlugin));
+        app.add_plugins((
+            generator::GeneratorPlugin,
+            load_world::LoadWorldPlugin,
+            menu_background::MenuBackgroundPlugin,
+        ));
     }
 }
 
@@ -208,7 +230,11 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
     ui.on_logout(push(FrontendAction::Logout));
     {
         let queue = actions.clone();
-        ui.on_world_join(move |id| queue.borrow_mut().push(FrontendAction::JoinWorld(id.to_string())));
+        ui.on_world_join(move |id| {
+            queue
+                .borrow_mut()
+                .push(FrontendAction::JoinWorld(id.to_string()))
+        });
     }
     ui.on_login_sign_in(push(FrontendAction::SignIn));
     ui.on_login_cancel(push(FrontendAction::CancelSignIn));
@@ -232,13 +258,19 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
                 return;
             }
             if let Some(window) = web_sys::window() {
-                if window.open_with_url_and_target(url.as_str(), "_blank").is_err() {
+                if window
+                    .open_with_url_and_target(url.as_str(), "_blank")
+                    .is_err()
+                {
                     bevy::log::warn!("[login] the browser refused to open the sign-in tab");
                 }
             }
         });
     }
+    // The Settings window over the main menu (graphics_settings.rs).
+    crate::graphics_settings::connect_settings!(ui, world);
     ui.set_join_only(JOIN_ONLY);
+    ui.set_debug_direct_join(DEBUG_DIRECT_JOIN);
     #[cfg(target_arch = "wasm32")]
     ui.set_server_address(initial_server_address().into());
     world.insert_non_send(JoinAddress(address));
@@ -263,9 +295,19 @@ fn refresh_can_load() {}
 #[cfg(target_arch = "wasm32")]
 fn initial_server_address() -> String {
     let location = web_sys::window().map(|w| w.location());
-    let protocol = location.as_ref().and_then(|l| l.protocol().ok()).unwrap_or_default();
-    let hostname = location.as_ref().and_then(|l| l.hostname().ok()).unwrap_or_default();
-    crate::web_endpoint::default_server_address(crate::web_endpoint::BUILT_FOR_SERVER, &protocol, &hostname)
+    let protocol = location
+        .as_ref()
+        .and_then(|l| l.protocol().ok())
+        .unwrap_or_default();
+    let hostname = location
+        .as_ref()
+        .and_then(|l| l.hostname().ok())
+        .unwrap_or_default();
+    crate::web_endpoint::default_server_address(
+        crate::web_endpoint::BUILT_FOR_SERVER,
+        &protocol,
+        &hostname,
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
@@ -291,17 +333,24 @@ fn apply_frontend_actions(
     for action in queued {
         // Back from the starting screen: its error has been read there, the
         // main menu need not repeat it.
-        if action == FrontendAction::Back && matches!(state.get(), AppState::Starting | AppState::InWorld) {
+        if action == FrontendAction::Back
+            && matches!(state.get(), AppState::Starting | AppState::InWorld)
+        {
             error.0 = None;
             log.0.clear();
         }
         // Back off the login screens abandons the login calls in flight (a
         // hung one must not leave Play online busy).
-        if action == FrontendAction::Back && matches!(state.get(), AppState::Login | AppState::Worlds) {
+        if action == FrontendAction::Back
+            && matches!(state.get(), AppState::Login | AppState::Worlds)
+        {
             login_intents.write(LoginIntent::Back);
         }
         if action == FrontendAction::JoinServer {
-            let address = join_address.as_ref().map(|a| a.0.borrow().clone()).unwrap_or_default();
+            let address = join_address
+                .as_ref()
+                .map(|a| a.0.borrow().clone())
+                .unwrap_or_default();
             if address.is_empty() || *state.get() != AppState::MainMenu {
                 continue;
             }
@@ -341,7 +390,10 @@ fn push_frontend_state(
     #[cfg(not(target_arch = "wasm32"))] host: Option<Res<crate::local_host::LocalHost>>,
     (cover, time): (Res<loading::LoadingCover>, Res<Time<Real>>),
     mut shown_lines: Local<Vec<String>>,
-    (login, mut shown_worlds): (Option<Res<LoginSession>>, Local<Vec<(String, String, bool)>>),
+    (login, mut shown_worlds): (
+        Option<Res<LoginSession>>,
+        Local<Vec<(String, String, bool)>>,
+    ),
 ) {
     let Some(layer) = layer else { return };
     let ui = layer.overlay.ui();
@@ -352,7 +404,11 @@ fn push_frontend_state(
     if ui.get_shown() != shown {
         ui.set_shown(shown);
     }
-    let screen = if loading { LOADING_SCREEN } else { screen_index(*state.get()) };
+    let screen = if loading {
+        LOADING_SCREEN
+    } else {
+        screen_index(*state.get())
+    };
     if loading {
         if ui.get_load_screen_progress() != cover.progress {
             ui.set_load_screen_progress(cover.progress);
@@ -385,11 +441,16 @@ fn push_frontend_state(
     let launched = true;
     let status = starting.as_ref().map_or("", |s| s.0.as_str());
     let in_world = *state.get() == AppState::InWorld;
-    let lines: Vec<String> =
-        starting_lines(status, launched, in_world, failed).into_iter().map(String::from).collect();
+    let lines: Vec<String> = starting_lines(status, launched, in_world, failed)
+        .into_iter()
+        .map(String::from)
+        .collect();
     if *shown_lines != lines {
-        let model: Vec<slint_ui::slint::SharedString> = lines.iter().map(|l| l.as_str().into()).collect();
-        ui.set_start_lines(slint_ui::slint::ModelRc::new(slint_ui::slint::VecModel::from(model)));
+        let model: Vec<slint_ui::slint::SharedString> =
+            lines.iter().map(|l| l.as_str().into()).collect();
+        ui.set_start_lines(slint_ui::slint::ModelRc::new(
+            slint_ui::slint::VecModel::from(model),
+        ));
         *shown_lines = lines;
     }
     let start_error = if starting_screen { text } else { "" };
@@ -405,7 +466,11 @@ fn push_frontend_state(
 
 /// The login screens' properties from the [`LoginSession`] (none: no login
 /// service, so no Play online).
-fn push_login_state(ui: &FrontendUi, login: Option<Res<LoginSession>>, shown_worlds: &mut Vec<(String, String, bool)>) {
+fn push_login_state(
+    ui: &FrontendUi,
+    login: Option<Res<LoginSession>>,
+    shown_worlds: &mut Vec<(String, String, bool)>,
+) {
     use slint_ui::slint::{ModelRc, VecModel};
     if ui.get_online_available() != login.is_some() {
         ui.set_online_available(login.is_some());
@@ -441,15 +506,24 @@ fn push_login_state(ui: &FrontendUi, login: Option<Res<LoginSession>>, shown_wor
     let worlds: Vec<(String, String, bool)> = login
         .worlds
         .iter()
-        .map(|w| (w.id.clone(), w.name.clone(), w.status == login_api::WorldStatus::Open))
+        .map(|w| {
+            (
+                w.id.clone(),
+                w.name.clone(),
+                w.status == login_api::WorldStatus::Open,
+            )
+        })
         .collect();
     if *shown_worlds != worlds {
         let rows: Vec<slint_ui::OnlineWorldRow> = worlds
             .iter()
-            .map(|(id, name, open)| slint_ui::OnlineWorldRow { id: id.into(), name: name.into(), open: *open })
+            .map(|(id, name, open)| slint_ui::OnlineWorldRow {
+                id: id.into(),
+                name: name.into(),
+                open: *open,
+            })
             .collect();
         ui.set_worlds(ModelRc::new(VecModel::from(rows)));
         *shown_worlds = worlds;
     }
 }
-

@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use crossbeam::channel::Sender;
 
 use crate::lod::{
-    copy_region_cells_into_tile, downsample_chunks, LodCell, LodKey, LodWater, PackedLodGrid,
+    LodCell, LodKey, LodWater, PackedLodGrid, copy_region_cells_into_tile, downsample_chunks,
 };
 use crate::{
-    load_stored_or_warn, Chunk, ChunkCoords, Column, ColumnCoords, LodPayload, NoStoredTerrain, RegionCoords,
-    StoredTerrain, TerrainSnapshot, Voxel,
+    Chunk, ChunkCoords, Column, ColumnCoords, LodPayload, NoStoredTerrain, RegionCoords,
+    StoredTerrain, TerrainSnapshot, Voxel, load_stored_or_warn,
 };
 
 pub type LodResult = (LodKey, LodPayload, LodWater);
@@ -90,7 +90,9 @@ pub trait LodBuilder: Send {
 
 /// `generate` argument for builders that never receive a `Pristine` job.
 pub fn no_pristine_generator(region: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    unreachable!("Pristine LOD job for {region:?} reached a builder that does not generate pristine terrain")
+    unreachable!(
+        "Pristine LOD job for {region:?} reached a builder that does not generate pristine terrain"
+    )
 }
 
 /// The pure build. Both builder impls call this.
@@ -112,7 +114,11 @@ pub fn build_lod_job(
 ) -> LodResult {
     let (key, payload) = build_terrain(job, coarse, generate, stored);
     let water = water(&key);
-    debug_assert_eq!(water.side, LodWater::side_for(&key), "water layer of {key:?}");
+    debug_assert_eq!(
+        water.side,
+        LodWater::side_for(&key),
+        "water layer of {key:?}"
+    );
     (key, payload, water)
 }
 
@@ -124,18 +130,31 @@ fn build_terrain(
     stored: &dyn StoredTerrain,
 ) -> (LodKey, LodPayload) {
     let job = match job {
-        LodBuildJob::Stored { key, region } => match load_stored_or_warn(stored, region, "LOD build") {
-            Some(snap) => LodBuildJob::Region { key, chunks: snap.chunks },
-            None => LodBuildJob::Pristine { key, region },
-        },
-        LodBuildJob::Tile { key, mut overlays, stored: regions } => {
+        LodBuildJob::Stored { key, region } => {
+            match load_stored_or_warn(stored, region, "LOD build") {
+                Some(snap) => LodBuildJob::Region {
+                    key,
+                    chunks: snap.chunks,
+                },
+                None => LodBuildJob::Pristine { key, region },
+            }
+        }
+        LodBuildJob::Tile {
+            key,
+            mut overlays,
+            stored: regions,
+        } => {
             for (canonical, at) in regions {
                 // Not read: the coarse (pristine) terrain stays.
                 if let Some(snap) = load_stored_or_warn(stored, canonical, "LOD tile build") {
                     overlays.push((at, snap.chunks));
                 }
             }
-            LodBuildJob::Tile { key, overlays, stored: Vec::new() }
+            LodBuildJob::Tile {
+                key,
+                overlays,
+                stored: Vec::new(),
+            }
         }
         job => job,
     };
@@ -160,8 +179,10 @@ fn build_terrain(
             let cells = match overlays.into_iter().next() {
                 Some((_, chunks)) => {
                     let authoritative = downsample_chunks(chunks, key.factor);
-                    let covered: std::collections::BTreeSet<(i32, i32)> =
-                        authoritative.iter().map(|c| (c.group[0], c.group[2])).collect();
+                    let covered: std::collections::BTreeSet<(i32, i32)> = authoritative
+                        .iter()
+                        .map(|c| (c.group[0], c.group[2]))
+                        .collect();
                     let mut cells: Vec<LodCell> = coarse(&key)
                         .into_iter()
                         .filter(|c| !covered.contains(&(c.group[0], c.group[2])))
@@ -174,8 +195,10 @@ fn build_terrain(
             (key, encode_cells(cells))
         }
         LodBuildJob::Tile { key, overlays, .. } => {
-            let mut tile: BTreeMap<[i32; 3], Vec<Voxel>> =
-                coarse(&key).into_iter().map(|c| (c.group, c.grid)).collect();
+            let mut tile: BTreeMap<[i32; 3], Vec<Voxel>> = coarse(&key)
+                .into_iter()
+                .map(|c| (c.group, c.grid))
+                .collect();
             for (rc, chunks) in overlays {
                 let cells = downsample_chunks(chunks, key.factor);
                 copy_region_cells_into_tile(&mut tile, &cells, rc, &key);

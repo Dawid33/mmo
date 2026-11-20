@@ -65,6 +65,7 @@ def _json(response) -> dict:
 
 def running_ref(r: Runner, target: Target, kind: str) -> str:
     """The ref currently running on coordinator (server) or web."""
+    print(f"game: world: reading running {kind} image reference", flush=True)
     name = "coordinator" if kind == "server" else "web"
     response = kubectl(r, target, "get", f"deploy/{name}", "-o", "json")
     containers = _json(response).get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
@@ -76,6 +77,7 @@ def running_ref(r: Runner, target: Target, kind: str) -> str:
 
 def release_simple(r: Runner, target: Target, name: str, ref: str, content: str) -> None:
     """login / panel: set image by digest, wait for the rollout, annotate."""
+    print(f"game: {name}: releasing by digest", flush=True)
     namespace = name
     base = ["kubectl", "--context", target.kube_context, "-n", namespace]
     current = ""
@@ -84,6 +86,7 @@ def release_simple(r: Runner, target: Target, name: str, ref: str, content: str)
         containers = _json(probe).get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
         current = next((c.get("image", "") for c in containers if c.get("image")), "")
 
+    print(f"game: {name}: updating Deployment image", flush=True)
     set_image = r.run(base + ["set", "image", f"deploy/{name}", f"{name}={ref}"], check=False, capture=True)
     if set_image.rc != 0:
         raise DeployError(
@@ -92,6 +95,7 @@ def release_simple(r: Runner, target: Target, name: str, ref: str, content: str)
             code=2,
         )
     timeout = "5m" if name == "login" else "3m"
+    print(f"game: {name}: waiting for rollout (timeout {timeout})", flush=True)
     rollout = r.run(base + ["rollout", "status", f"deploy/{name}", f"--timeout={timeout}"],
                     check=False, capture=True)
     if rollout.rc != 0:
@@ -102,16 +106,28 @@ def release_simple(r: Runner, target: Target, name: str, ref: str, content: str)
             flush=True,
         )
         raise DeployError(f"{name}: rollout of {ref} failed", code=2)
+    print(f"game: {name}: rollout ready; recording content hash", flush=True)
     r.run(base + ["annotate", "--overwrite", "deploy/" + name, f"{images.LABEL}={content}"])
-    print(f"{name}: released {ref} (content {content})")
+    print(f"game: {name}: released {ref} (content {content})", flush=True)
 
 
-def release_world(r: Runner, target: Target, server, web, *, yes: bool, ask) -> bool:
+def release_world(
+    r: Runner,
+    target: Target,
+    server: images.Pushed,
+    web: images.Pushed,
+    *,
+    changed_images: set[str],
+    yes: bool,
+    ask,
+) -> bool:
     server_ref, server_content = server.ref, server.content
     web_ref, web_content = web.ref, web.content
     # If only one image changed, re-send the other at the ref it runs now.
-    server_ref = running_ref(r, target, "server") if images.released_content(r, target, "server") == server_content else server_ref
-    web_ref = running_ref(r, target, "web") if images.released_content(r, target, "web") == web_content else web_ref
+    if "server" not in changed_images:
+        server_ref = running_ref(r, target, "server")
+    if "web" not in changed_images:
+        web_ref = running_ref(r, target, "web")
 
     ns = target.world_namespace
     question = f"release world {ns}: stop the world (players are disconnected), set {server_ref}/{web_ref}, start? [y/N]"
@@ -136,6 +152,10 @@ def release_world(r: Runner, target: Target, server, web, *, yes: bool, ask) -> 
 
 def wait_world_ready(r: Runner, target: Target, timeout: int = 300) -> None:
     """Coordinator, fleet and each host Deployment must report a ready replica."""
+    print(
+        f"game: world: waiting for coordinator, fleet and {target.min_world_hosts} host(s) to be Ready",
+        flush=True,
+    )
     deadline = time.monotonic() + timeout
     while True:
         ready = True
@@ -144,10 +164,14 @@ def wait_world_ready(r: Runner, target: Target, timeout: int = 300) -> None:
             if int(_json(response).get("status", {}).get("readyReplicas", 0) or 0) < 1:
                 ready = False
         hosts = kubectl(r, target, "get", "deploy", "-l", HOST_SELECTOR, "-o", "json")
-        for item in _json(hosts).get("items", []):
+        host_items = _json(hosts).get("items", [])
+        if len(host_items) < target.min_world_hosts:
+            ready = False
+        for item in host_items:
             if int(item.get("status", {}).get("readyReplicas", 0) or 0) < 1:
                 ready = False
         if ready:
+            print("game: world: coordinator, fleet and hosts are Ready", flush=True)
             return
         if time.monotonic() >= deadline:
             raise DeployError("world did not become Ready after the forge")
@@ -156,6 +180,7 @@ def wait_world_ready(r: Runner, target: Target, timeout: int = 300) -> None:
 
 def register_args(r: Runner, target: Target, world_ns: str, name: str = "Errantry") -> list[str]:
     """The `world add …` arguments shared with the `world-register` recipe."""
+    print(f"game: registration: building arguments for {world_ns}", flush=True)
     if "'" in name:
         raise DeployError("the world name must not contain a single quote")
     world_id = world_ns.removeprefix("world-")
@@ -195,18 +220,23 @@ def login_command(target: Target) -> list[str]:
 
 def post_release(r: Runner, target: Target, *, yes: bool, ask, forge_preset: str, report: GameReport) -> None:
     ns = target.world_namespace
+    print(f"game: world: checking post-release readiness in {ns}", flush=True)
     pods = kubectl(r, target, "get", "pods", "-l", "app.kubernetes.io/component=coordinator",
-                   "-o", "jsonpath={.items[0].metadata.name}")
+                   "-o", "jsonpath={.items[0].metadata.name}", check=True)
     pod = pods.out.strip().removeprefix("pod/")
-    readyz = ""
-    if pod:
-        response = kubectl(r, target, "get", "--raw",
-                           f"/api/v1/namespaces/{ns}/pods/{pod}:9100/proxy/readyz")
-        readyz = response.out.strip()
+    if not pod:
+        raise DeployError("world release finished but no coordinator pod exists")
+    response = kubectl(
+        r, target, "get", "--raw",
+        f"/api/v1/namespaces/{ns}/pods/{pod}:9100/proxy/readyz",
+        check=True,
+    )
+    readyz = response.out.strip()
     if readyz == "forge":
         world_id = ns.removeprefix("world-")
         question = f"forge world {world_id} with preset {forge_preset}? [y/N]"
         if yes or ask(question):
+            print(f"game: world: forging {world_id} with preset {forge_preset}", flush=True)
             r.run(["kubectl", "--context", target.kube_context, "-n", ns,
                    "exec", "deploy/toolbox", "-c", "toolbox", "--", "sh", "-c",
                    FORGE_SH, "sh", "--preset", forge_preset])
@@ -215,13 +245,19 @@ def post_release(r: Runner, target: Target, *, yes: bool, ask, forge_preset: str
         else:
             print("game: world not forged; run `just world-ctl forge --preset <p>` when ready")
 
-    listing = r.run(["kubectl", "--context", target.kube_context, "-n", "login",
-                     "exec", "deploy/login", "--", "login", "world", "list"],
-                    check=False, capture=True)
-    if ns.removeprefix("world-") not in listing.out:
+    listing = r.run(
+        ["kubectl", "--context", target.kube_context, "-n", "login",
+         "exec", "deploy/login", "--", "login", "world", "list"],
+        capture=True,
+    )
+    if ns.removeprefix("world-") not in listing.out.split():
+        print("game: registration: world is missing from login; registering it now", flush=True)
         args = register_args(r, target, ns)
         r.run(login_command(target) + args)
         report.registered = True
+        print("game: registration: complete", flush=True)
+    else:
+        print("game: registration: existing login row found", flush=True)
 
 
 def run(
@@ -236,8 +272,12 @@ def run(
     push_only: bool = False,
 ) -> GameReport:
     report = GameReport()
-    status = r.run(["git", "status", "--porcelain", "--", "crates", "Cargo.lock", "assets"],
-                   check=False, capture=True)
+    print(
+        "game: starting component plan for " + ", ".join(sorted(components)),
+        flush=True,
+    )
+    print("game: checking working tree revision state", flush=True)
+    status = r.run(["git", "status", "--porcelain"], check=False, capture=True)
     if status.out.strip():
         print("game: WARNING: the working tree is dirty; the released revision will carry -dirty", flush=True)
         if not ask("the working tree is dirty (-dirty revision): release it anyway? [y/N]"):
@@ -249,42 +289,80 @@ def run(
     image_names: set[str] = set()
     for name in components:
         image_names.update({"server", "web"} if name == "world" else {name})
+    print("game: build phase for images: " + ", ".join(sorted(image_names)), flush=True)
     images.build(r, image_names)
-    pushed = images.push(r, target, image_names)
-    if push_only or dry_run:
+
+    print("game: hashing staged image content", flush=True)
+    desired = {name: images.staged_hash(name) for name in image_names}
+    print("game: reading deployed content hashes", flush=True)
+    released = {name: images.released_content(r, target, name) for name in image_names}
+    changed_images = {name for name in image_names if released[name] != desired[name]}
+    print(
+        "game: change check: changed=" + (", ".join(sorted(changed_images)) or "none"),
+        flush=True,
+    )
+
+    if push_only:
+        print("game: push-only mode: pushing every selected image", flush=True)
+        pushed = images.push(r, target, image_names)
         report.pushed = sorted(pushed)
         print(report.summary())
         return report
+    if dry_run:
+        print("game: dry run: no images will be pushed or released", flush=True)
+        for name in ("login", "world", "panel"):
+            if name not in components:
+                continue
+            component_images = {"server", "web"} if name == "world" else {name}
+            if component_images & changed_images:
+                report.skipped[name] = "dry run (nothing pushed or released)"
+            else:
+                report.unchanged.append(name)
+        print(report.summary())
+        return report
+
+    pushed = images.push(r, target, changed_images) if changed_images else {}
+    if changed_images:
+        print("game: changed images pushed; beginning releases", flush=True)
+    else:
+        print("game: no images need pushing", flush=True)
 
     for name in ("login", "world", "panel"):
         if name not in components:
             continue
         if name == "world":
-            server, web = pushed.get("server"), pushed.get("web")
-            if server is None or web is None:
-                raise DeployError("world needs both server and web images")
             changed = (
-                images.released_content(r, target, "server") != server.content
-                or images.released_content(r, target, "web") != web.content
+                "server" in changed_images
+                or "web" in changed_images
             )
         else:
-            changed = images.released_content(r, target, name) != pushed[name].content
+            changed = name in changed_images
         if not changed:
             report.unchanged.append(name)
-            print(f"{name}: unchanged")
+            print(f"game: {name}: unchanged; no release", flush=True)
             continue
         if name == "world":
-            if release_world(r, target, server, web, yes=yes, ask=ask):
+            print("game: world: preparing coordinated stop/set/start release", flush=True)
+            server = pushed.get("server") or images.Pushed(
+                ref=running_ref(r, target, "server"), content=desired["server"]
+            )
+            web = pushed.get("web") or images.Pushed(
+                ref=running_ref(r, target, "web"), content=desired["web"]
+            )
+            if release_world(
+                r, target, server, web, changed_images=changed_images, yes=yes, ask=ask
+            ):
                 report.released.append(name)
             else:
                 report.skipped[name] = "declined"
         else:
-            release_simple(r, target, name, pushed[name].ref, pushed[name].content)
+            image = pushed[name]
+            release_simple(r, target, name, image.ref, image.content)
             report.released.append(name)
 
-    if "world" in report.released:
+    if "world" in components and "world" not in report.skipped:
         post_release(r, target, yes=yes, ask=ask, forge_preset=forge_preset, report=report)
-    print(report.summary())
+    print(report.summary(), flush=True)
     return report
 
 

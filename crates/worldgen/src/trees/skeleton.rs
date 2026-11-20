@@ -299,12 +299,30 @@ struct Builder<'a> {
 }
 
 fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 impl Builder<'_> {
-    fn push(&mut self, parent: Option<usize>, pos: [f64; 3], radius: f64, level: u8, birth: i32) -> usize {
-        self.nodes.push(Proto { parent, pos, radius, level, birth, flare: 0.0 });
+    fn push(
+        &mut self,
+        parent: Option<usize>,
+        pos: [f64; 3],
+        radius: f64,
+        level: u8,
+        birth: i32,
+    ) -> usize {
+        self.nodes.push(Proto {
+            parent,
+            pos,
+            radius,
+            level,
+            birth,
+            flare: 0.0,
+        });
         self.nodes.len() - 1
     }
 
@@ -319,7 +337,11 @@ impl Builder<'_> {
         let q = self.nodes[node].parent.map_or(p, |i| self.nodes[i].pos);
         let d = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-        let out = if len > 0.0 { [d[0] / len, d[1] / len, d[2] / len] } else { [0.0, 1.0, 0.0] };
+        let out = if len > 0.0 {
+            [d[0] / len, d[1] / len, d[2] / len]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         self.leaf_at(node, p, radius_frac, out);
     }
 
@@ -337,8 +359,17 @@ impl Builder<'_> {
                 p[1] + self.rng.jitter(spread * s * 0.5) - sp.clump_droop as f64,
                 p[2] + self.rng.jitter(spread * s),
             ];
-            let radius = if count == 1 { r } else { r * (0.6 + 0.25 * self.rng.unit()) };
-            self.leaves.push(ProtoLeaf { node, centre, radius, out });
+            let radius = if count == 1 {
+                r
+            } else {
+                r * (0.6 + 0.25 * self.rng.unit())
+            };
+            self.leaves.push(ProtoLeaf {
+                node,
+                centre,
+                radius,
+                out,
+            });
         }
     }
 
@@ -359,7 +390,11 @@ impl Builder<'_> {
         let sp = self.sp;
         let n = ((len / SEGMENT_VOXELS).ceil() as usize).clamp(1, MAX_SEGMENTS);
         let step = len / n as f64;
-        let tip_frac = if sp.tip_radius_pct > 0 { sp.tip_radius_pct as f64 / 100.0 } else { TIP_RADIUS_FRAC };
+        let tip_frac = if sp.tip_radius_pct > 0 {
+            sp.tip_radius_pct as f64 / 100.0
+        } else {
+            TIP_RADIUS_FRAC
+        };
         let r_tip = (r0 * tip_frac).max(r0.min(MIN_BRANCH_TIP_RADIUS));
         let mut chain = vec![self.push(Some(parent), start, r0, level, birth)];
         let mut heads = Vec::with_capacity(n);
@@ -368,7 +403,11 @@ impl Builder<'_> {
         for i in 1..=n {
             let d = dir(az, el);
             heads.push((az, el));
-            pos = [pos[0] + d[0] * step, pos[1] + d[1] * step, pos[2] + d[2] * step];
+            pos = [
+                pos[0] + d[0] * step,
+                pos[1] + d[1] * step,
+                pos[2] + d[2] * step,
+            ];
             let r = r0 + (r_tip - r0) * i as f64 / n as f64;
             let prev = *chain.last().unwrap();
             chain.push(self.push(Some(prev), pos, r, level, birth));
@@ -389,8 +428,8 @@ impl Builder<'_> {
         let count = ((len / CHILD_SPACING_VOXELS).floor() as usize).clamp(1, MAX_CHILDREN);
         let side0 = if self.rng.unit() < 0.5 { 1 } else { -1 };
         for k in 0..count {
-            let f =
-                CHILD_START_FRAC + (1.0 - CHILD_START_FRAC) * (k as f64 + 0.5 + self.rng.jitter(0.3)) / count as f64;
+            let f = CHILD_START_FRAC
+                + (1.0 - CHILD_START_FRAC) * (k as f64 + 0.5 + self.rng.jitter(0.3)) / count as f64;
             let at = f * n as f64;
             let seg = (at.floor() as usize).min(n - 1);
             let u = at - seg as f64;
@@ -401,18 +440,28 @@ impl Builder<'_> {
             let side = if k % 2 == 0 { side0 } else { -side0 };
             let caz = haz + side * (sp.child_angle + self.rng.range(-8, 8));
             let cel = (hel + sp.limb_angle.0) / 2 + self.rng.range(-10, 10);
-            let clen = len * sp.child_length_pct as f64 / 100.0 * (1.15 - 0.5 * f) * self.rng.scale(0.2);
+            let clen =
+                len * sp.child_length_pct as f64 / 100.0 * (1.15 - 0.5 * f) * self.rng.scale(0.2);
             let cbirth = birth + self.rng.range(CHILD_BIRTH_DELAY.0, CHILD_BIRTH_DELAY.1);
-            self.branch(a, p, (caz, cel), clen, r_at * CHILD_RADIUS_FRAC, level + 1, cbirth, leaf_scale);
+            self.branch(
+                a,
+                p,
+                (caz, cel),
+                clen,
+                r_at * CHILD_RADIUS_FRAC,
+                level + 1,
+                cbirth,
+                leaf_scale,
+            );
         }
     }
 
     fn tree(&mut self) {
         let sp = self.sp;
-        let h = self
-            .rng
-            .range(sp.trunk_height_blocks.0 * BLOCK_VOXELS as i32, sp.trunk_height_blocks.1 * BLOCK_VOXELS as i32)
-            as f64;
+        let h = self.rng.range(
+            sp.trunk_height_blocks.0 * BLOCK_VOXELS as i32,
+            sp.trunk_height_blocks.1 * BLOCK_VOXELS as i32,
+        ) as f64;
         let r_base = sp.trunk_radius as f64;
         let r_top = r_base * sp.taper_pct as f64 / 100.0;
         let lean_az = self.rng.range(0, ANGLE_TURN - 1);
@@ -426,7 +475,11 @@ impl Builder<'_> {
             let el = ANGLE_TURN / 4 - lean - self.rng.range(0, sp.trunk_lean / 2 + 1) / 2;
             let az = lean_az + self.rng.range(-12, 12);
             let d = dir(az, el);
-            pos = [pos[0] + d[0] * step, pos[1] + d[1] * step, pos[2] + d[2] * step];
+            pos = [
+                pos[0] + d[0] * step,
+                pos[1] + d[1] * step,
+                pos[2] + d[2] * step,
+            ];
             let r = r_base + (r_top - r_base) * i as f64 / n as f64;
             let prev = *trunk.last().unwrap();
             trunk.push(self.push(Some(prev), pos, r, 0, 0));
@@ -439,7 +492,10 @@ impl Builder<'_> {
                 self.nodes[i].flare = extra * fade * fade;
             }
         }
-        self.tip_leaf(*trunk.last().unwrap(), 0.4 + 0.7 * crown_ratio(sp.crown, 1.0));
+        self.tip_leaf(
+            *trunk.last().unwrap(),
+            0.4 + 0.7 * crown_ratio(sp.crown, 1.0),
+        );
         let start = sp.limb_start_pct as f64 / 100.0;
         // Lopsidedness: limbs towards `bias_az` grow longer.
         let bias_az = self.rng.range(0, ANGLE_TURN - 1);
@@ -462,7 +518,8 @@ impl Builder<'_> {
             let count = self.rng.range(sp.limbs.0, sp.limbs.1);
             let az0 = self.rng.range(0, ANGLE_TURN - 1);
             for k in 0..count {
-                let t = start + (0.92 - start) * (k as f64 + 0.5 + self.rng.jitter(0.35)) / count as f64;
+                let t = start
+                    + (0.92 - start) * (k as f64 + 0.5 + self.rng.jitter(0.35)) / count as f64;
                 limbs.push((t, az0 + k * GOLDEN_ANGLE + self.rng.range(-10, 10)));
             }
         }
@@ -476,9 +533,14 @@ impl Builder<'_> {
             let r_at = self.nodes[a].radius + (self.nodes[b].radius - self.nodes[a].radius) * u;
             let tc = (t - start) / (1.0 - start);
             let side = 1.0 + bias * cos(az - bias_az);
-            let len = h * sp.limb_length_pct as f64 / 100.0 * crown_ratio(sp.crown, tc) * side * self.rng.scale(0.15);
+            let len = h * sp.limb_length_pct as f64 / 100.0
+                * crown_ratio(sp.crown, tc)
+                * side
+                * self.rng.scale(0.15);
             let r0 = r_at * sp.limb_radius_pct as f64 / 100.0;
-            let el = sp.limb_angle.0 + ((sp.limb_angle.1 - sp.limb_angle.0) as f64 * tc) as i32 + self.rng.range(-6, 6);
+            let el = sp.limb_angle.0
+                + ((sp.limb_angle.1 - sp.limb_angle.0) as f64 * tc) as i32
+                + self.rng.range(-6, 6);
             let birth = self.rng.range(LIMB_BIRTH.0, LIMB_BIRTH.1);
             let leaf_scale = 0.4 + 0.6 * crown_ratio(sp.crown, tc);
             if sp.trunk_leaves && seen_heights.last() != Some(&t) {
@@ -496,14 +558,20 @@ impl Builder<'_> {
 /// The skeleton of a `species` tree from `seed` at `age` (clamped to `MAX_AGE`).
 pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
     let sp = &species.shape;
-    let mut b = Builder { sp, rng: Rng { seed, n: 0 }, nodes: Vec::new(), leaves: Vec::new() };
+    let mut b = Builder {
+        sp,
+        rng: Rng { seed, n: 0 },
+        nodes: Vec::new(),
+        leaves: Vec::new(),
+    };
     b.tree();
 
     // Fit the full-grown tree inside the species limits (crown radius from the
     // trunk axis, height from the ground), horizontally and vertically apart.
     let lim_h = (species.crown_radius_blocks * BLOCK_VOXELS as i32) as f64 + AXIS - 2.0;
     let lim_v = (species.max_height_blocks * BLOCK_VOXELS as i32) as f64 - 2.0;
-    let reach = |p: [f64; 3]| ((p[0] - AXIS) * (p[0] - AXIS) + (p[2] - AXIS) * (p[2] - AXIS)).sqrt();
+    let reach =
+        |p: [f64; 3]| ((p[0] - AXIS) * (p[0] - AXIS) + (p[2] - AXIS) * (p[2] - AXIS)).sqrt();
     let (mut sh, mut sv) = (1.0f64, 1.0f64);
     // Wood and leaf clusters keep their size (only growth scales them): the fit
     // pulls the nodes in.
@@ -516,7 +584,11 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
         // of the cluster's (`raster.rs`); block centres sit on the trunk axis
         // lattice, so this keeps those blocks inside the limits too. Younger
         // trees have smaller radii and offsets, so the full-grown fit holds.
-        let off = if l.out == [0.0; 3] { 0.0 } else { tip_offset(l.radius) };
+        let off = if l.out == [0.0; 3] {
+            0.0
+        } else {
+            tip_offset(l.radius)
+        };
         let out_h = (l.out[0] * l.out[0] + l.out[2] * l.out[2]).sqrt() * off;
         sh = sh.min((lim_h - l.radius - out_h) / reach(l.centre).max(1.0));
         sv = sv.min((lim_v - l.radius - l.out[1].max(0.0) * off) / l.centre[1].max(1.0));
@@ -538,7 +610,10 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
     for (k, &i) in order.iter().enumerate() {
         rank[i] = k;
     }
-    let alive = order.iter().take_while(|&&i| b.nodes[i].birth <= age as i32).count();
+    let alive = order
+        .iter()
+        .take_while(|&&i| b.nodes[i].birth <= age as i32)
+        .count();
     let nodes = order[..alive]
         .iter()
         .map(|&i| {
@@ -548,25 +623,47 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
             if n.level == 0 {
                 radius = radius.max(MIN_TRUNK_RADIUS.min((n.radius + 0.5).floor() as i32));
             }
-            Node { parent: n.parent.map(|p| rank[p] as u16), pos: place(n.pos), radius, level: n.level }
+            Node {
+                parent: n.parent.map(|p| rank[p] as u16),
+                pos: place(n.pos),
+                radius,
+                level: n.level,
+            }
         })
         .collect();
-    let leaf_nodes = b.leaves.iter().filter(|l| rank[l.node] < alive).map(|l| rank[l.node] as u16).collect();
+    let leaf_nodes = b
+        .leaves
+        .iter()
+        .filter(|l| rank[l.node] < alive)
+        .map(|l| rank[l.node] as u16)
+        .collect();
     let leaves = b
         .leaves
         .iter()
         .filter(|l| rank[l.node] < alive)
         .map(|l| {
-            let r = ((l.radius * g + 0.5).floor() as i32).max(MIN_LEAF_RADIUS.min((l.radius + 0.5).floor() as i32));
-            let off = if l.out == [0.0; 3] { 0.0 } else { tip_offset(r as f64) };
+            let r = ((l.radius * g + 0.5).floor() as i32)
+                .max(MIN_LEAF_RADIUS.min((l.radius + 0.5).floor() as i32));
+            let off = if l.out == [0.0; 3] {
+                0.0
+            } else {
+                tip_offset(r as f64)
+            };
             let c = place(l.centre);
             let shift = |i: usize| (l.out[i] * off + 0.5).floor() as i32;
             ([c[0] + shift(0), c[1] + shift(1), c[2] + shift(2)], r)
         })
         .collect();
     if sp.leafless {
-        return TreeSkeleton { nodes, leaves: Vec::new(), leaf_nodes: Vec::new() };
+        return TreeSkeleton {
+            nodes,
+            leaves: Vec::new(),
+            leaf_nodes: Vec::new(),
+        };
     }
-    TreeSkeleton { nodes, leaves, leaf_nodes }
+    TreeSkeleton {
+        nodes,
+        leaves,
+        leaf_nodes,
+    }
 }
-

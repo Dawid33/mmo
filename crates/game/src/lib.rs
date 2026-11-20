@@ -22,6 +22,7 @@ pub mod body;
 pub mod buoyancy;
 pub mod camera;
 pub mod climate_wire;
+mod clock_jump;
 pub mod containers;
 pub mod coordinator;
 pub mod creature_shapes;
@@ -33,37 +34,36 @@ pub mod history;
 pub mod input;
 pub mod intents;
 pub mod inventory;
-pub mod items;
 pub mod item_piles;
+pub mod items;
 pub mod lod;
-pub mod map_tile;
-pub mod mining;
 pub mod lod_builder;
+pub mod map_tile;
 pub mod mass_props;
-pub mod monthly_climate;
 mod migrate;
+pub mod mining;
+pub mod monthly_climate;
 pub mod movement;
 pub mod orders;
 pub mod ownership;
-pub mod pathfind;
 pub mod path_plan;
+pub mod pathfind;
+pub mod peer;
+pub mod people;
 pub mod perf;
+mod physics;
 pub mod player;
 pub mod portable;
 pub mod prefab;
-mod clock_jump;
-mod physics;
 pub mod protocol;
 mod region;
 pub mod region_runner;
+pub mod registry;
 pub mod save_cut;
 pub mod season;
-mod slot_order;
-pub mod registry;
-pub mod peer;
-pub mod people;
 pub mod slime;
 pub mod slope;
+mod slot_order;
 pub mod solar;
 pub mod state;
 pub mod stored_terrain;
@@ -78,12 +78,12 @@ pub mod world_clock;
 pub mod world_manager;
 pub mod world_map;
 pub mod world_view;
-pub use parry3d as parry;
-pub use rapier3d;
 /// The physics fork's math: glam 0.33 through glamx (`Vec3`, `Quat`, `Mat4`,
 /// `Pose3`, `IVec3`, …). NOT Bevy's glam (0.32) — the render boundary
 /// converts through arrays (`client/src/renderer/convert.rs`).
 pub use glamx as math;
+pub use parry3d as parry;
+pub use rapier3d;
 /// A body pose (translation + unit-quaternion rotation), rapier's `Pose`.
 pub use rapier3d::math::Pose;
 /// The rollback hash trait (plan D2); `#[derive(StateHash)]` on game types.
@@ -100,60 +100,69 @@ pub use camera::*;
 pub use containers::*;
 pub use coordinator::{
     Claim, CoordMsg, Coordinator, CutDecide, CutFailure, CutsBlocked, HostMsg, InlineWorldLink,
-    OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest, LEAVE_BATCH_MS, LEAVE_CUT_TIMEOUT_SECS,
-    SETTLE_CUT_RETRY_MS, WORLD_CUT_BLOCKED_GRACE_MS, WORLD_CUT_DEADLINE_MS, WORLD_CUT_LEAD_MAX_TICKS, WORLD_CUT_LEAD_TICKS,
+    LEAVE_BATCH_MS, LEAVE_CUT_TIMEOUT_SECS, OnlinePlayer, RequestId, RunningRegion,
+    SETTLE_CUT_RETRY_MS, WORLD_CUT_BLOCKED_GRACE_MS, WORLD_CUT_DEADLINE_MS,
+    WORLD_CUT_LEAD_MAX_TICKS, WORLD_CUT_LEAD_TICKS, WorldLink, WorldReply, WorldRequest,
 };
+pub use debug_render::{ColliderDebug, DEBUG_COLLIDER_RADIUS, DebugFlags, DebugLine};
 pub use ground::*;
-pub use halo::{HaloChunk, HaloDelta, HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};
-pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADIUS};
+pub use halo::{HALO_BLOCKS, HALO_CHUNKS, HaloChunk, HaloDelta, HaloUpdate};
 pub use input::*;
-pub use intents::{Effects, Intent, IntentMsg, IntentRefusal, IntentReply, SentIntent, SentReply, Target};
+pub use intents::{
+    Effects, Intent, IntentMsg, IntentRefusal, IntentReply, SentIntent, SentReply, Target,
+};
 pub use inventory::*;
-pub use items::*;
 pub use item_piles::*;
+pub use items::*;
 pub use lod::*;
 pub use lod_builder::*;
 pub use map_tile::*;
+pub use migrate::Carried;
 pub use mining::*;
 pub use monthly_climate::*;
-pub use migrate::Carried;
 pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use ownership::{
-    crash_policy_from_value, heir_of, ownership_for, rendezvous_among, super_region_of, AllInOne, CrashPolicy, HostLoad, LandMove, MoveId, SrLoad, LAND_LOAD_MAX, MOVE_DEADLINE_MS, MOVE_STANDBY_LEAD_SECS, MOVE_WARNING_SECS, Directory,
-    Declared, HostId, LandlessEnd, Owner, Ownership, PgClaim, Static, Succession, SuccessionId, SuccessionKind, SuperRegion, DEFAULT_SUPER_REGION_REGIONS, DRAIN_WARNING_SECS, HOST_DEAD, HOST_HEARTBEAT_MS, HOST_LEASE_MS,
-    HOST_LIVE, NO_OWNER, SUCCESSION_DEADLINE_MS,
+    AllInOne, CrashPolicy, DEFAULT_SUPER_REGION_REGIONS, DRAIN_WARNING_SECS, Declared, Directory,
+    HOST_DEAD, HOST_HEARTBEAT_MS, HOST_LEASE_MS, HOST_LIVE, HostId, HostLoad, LAND_LOAD_MAX,
+    LandMove, LandlessEnd, MOVE_DEADLINE_MS, MOVE_STANDBY_LEAD_SECS, MOVE_WARNING_SECS, MoveId,
+    NO_OWNER, Owner, Ownership, PgClaim, SUCCESSION_DEADLINE_MS, SrLoad, Static, Succession,
+    SuccessionId, SuccessionKind, SuperRegion, crash_policy_from_value, heir_of, ownership_for,
+    rendezvous_among, super_region_of,
+};
+pub use path_plan::{
+    HINT_LEVEL_REACH, HINT_REACH_BLOCKS, MAX_ROUTE_NODES, PORTAL_DEPTH_BLOCKS, PathPlan,
+    ROUTE_MAX_RELIEF_PER_REGION_M, ROUTE_MAX_WATER_SHARE, RouteMap, line_step, next_region,
+    route_blocked,
 };
 pub use pathfind::*;
 pub use peer::*;
-pub use path_plan::{
-    line_step, next_region, route_blocked, PathPlan, RouteMap, HINT_LEVEL_REACH, HINT_REACH_BLOCKS, MAX_ROUTE_NODES,
-    PORTAL_DEPTH_BLOCKS, ROUTE_MAX_RELIEF_PER_REGION_M, ROUTE_MAX_WATER_SHARE,
-};
 pub use player::*;
-pub use portable::{restore_portable, ChunkTerms, PortableRegion, RegionMeta, StoredRegion};
+pub use portable::{ChunkTerms, PortableRegion, RegionMeta, StoredRegion, restore_portable};
 pub use protocol::*;
 pub use region_runner::*;
-pub use save_cut::{CutId, InFlightRow, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS};
+pub use registry::*;
+pub use save_cut::{
+    CUT_DEADLINE_LEADS, CutId, InFlightRow, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS, WorldCut,
+};
 pub use season::*;
 pub use slot_order::*;
-pub use registry::*;
 // Not a glob: `slope::classify` would collide with `biome::classify`; call it as `slope::classify`.
-pub use slope::{display_name, slope_chisel, walk_up, Side, SlopeShape};
+pub use slope::{Side, SlopeShape, display_name, slope_chisel, walk_up};
 pub use solar::*;
 pub use state::*;
-pub use stored_terrain::{load_stored_or_warn, NoStoredTerrain, StoredTerrain};
+pub use stored_terrain::{NoStoredTerrain, StoredTerrain, load_stored_or_warn};
+pub use trees::*;
 pub use ui::*;
 pub use volume::*;
 pub use voxel::*;
-pub use trees::*;
 pub use voxel_body::*;
 pub use water::*;
-pub use world_view::{EntityRef, Hit, RegionView, WorldAabb, WorldRay, WorldView};
 pub use world_climate::*;
-pub use world_clock::{ticks_due, ClockAnchor, WorldClock, MAX_CATCH_UP_BURST};
+pub use world_clock::{ClockAnchor, MAX_CATCH_UP_BURST, WorldClock, ticks_due};
 pub use world_manager::*;
 pub use world_map::*;
+pub use world_view::{EntityRef, Hit, RegionView, WorldAabb, WorldRay, WorldView};
 
 pub const TICK_RATE: u64 = 50;
 /// TESTING KNOB — deliberately 0 in normal operation. Extra client-ahead lead
@@ -206,7 +215,11 @@ impl Default for StateHasher {
 
 impl StateHasher {
     pub fn new() -> Self {
-        Self { crc: crc32fast::Hasher::new(), len: 0, buf: [0; STATE_HASHER_CHUNK] }
+        Self {
+            crc: crc32fast::Hasher::new(),
+            len: 0,
+            buf: [0; STATE_HASHER_CHUNK],
+        }
     }
 
     fn flush(&mut self) {
@@ -270,7 +283,10 @@ pub(crate) fn digests_taken() -> bool {
 pub(crate) fn hand_digest<H: std::hash::Hasher>(h: &mut H, crc: u32, len: u64) {
     DIGESTS.set(Digests::Handed(crc, len));
     h.write_usize(0);
-    debug_assert!(matches!(DIGESTS.get(), Digests::Taken), "the hasher was not a StateHasher");
+    debug_assert!(
+        matches!(DIGESTS.get(), Digests::Taken),
+        "the hasher was not a StateHasher"
+    );
 }
 
 impl std::hash::Hasher for StateHasher {
@@ -280,7 +296,8 @@ impl std::hash::Hasher for StateHasher {
             Digests::Handed(crc, len) => {
                 DIGESTS.set(Digests::Taken);
                 self.flush();
-                self.crc.combine(&crc32fast::Hasher::new_with_initial_len(crc, len));
+                self.crc
+                    .combine(&crc32fast::Hasher::new_with_initial_len(crc, len));
             }
             _ => self.write(&i.to_ne_bytes()),
         }
@@ -323,11 +340,14 @@ pub enum ConnectionState {
 pub enum ClientUpdateEvent {
     /// Elastic 5: whole seconds until the land under the player moves to another host (0: the
     /// move is under way; `None`: none, or it is off). Sent when the whole seconds change.
-    LandMoving { remaining_secs: Option<u64> },
+    LandMoving {
+        remaining_secs: Option<u64>,
+    },
     NewRegion(
         RegionId,
         GameData,
-        #[serde(skip, default = "crossbeam::channel::never")] crossbeam::channel::Receiver<GameDataUpdate>,
+        #[serde(skip, default = "crossbeam::channel::never")]
+        crossbeam::channel::Receiver<GameDataUpdate>,
     ),
     /// The window moved on (or a region is being replaced): tear down this
     /// region's render state.
@@ -341,7 +361,10 @@ pub enum ClientUpdateEvent {
     /// window, so the replacement is authoritative terrain still on its way
     /// — the renderer keeps the LOD until that region is fully meshed rather
     /// than on a frame deadline.
-    RemoveLod { key: LodKey, near_takeover: bool },
+    RemoveLod {
+        key: LodKey,
+        near_takeover: bool,
+    },
     GameCrash(GameError),
     SetPlayer(ClientId),
     /// Region + connection status for the debug HUD. Edge-triggered by the
@@ -355,7 +378,10 @@ pub enum ClientUpdateEvent {
     /// Sent once by the manager; consumed by the ui_bridge. Widget-only —
     /// separate from the per-region `GameDataUpdate` channel because widgets
     /// hang off a screen-space UI root, not a region's world-space root.
-    UiChannel(#[serde(skip, default = "crossbeam::channel::never")] crossbeam::channel::Receiver<UiUpdate>),
+    UiChannel(
+        #[serde(skip, default = "crossbeam::channel::never")]
+        crossbeam::channel::Receiver<UiUpdate>,
+    ),
     /// Collider wireframe buffer for one region (region-local coords),
     /// regenerated per tick while the debug flag is on — including empty
     /// buffers, so the render side's replace-on-receipt clears stale
@@ -364,8 +390,6 @@ pub enum ClientUpdateEvent {
     /// The server's world map (forged worlds only; sent once on connect).
     /// Boxed: it is the one large variant.
     WorldMap(Box<WorldMap>),
-    /// The server refused a Play request for this region.
-    PlayRefused(RegionCoords, PlayRefusal),
     /// World history: every site (on connect and when the set or a population bucket changes).
     Sites(Vec<SiteMarker>),
     /// World history: the calendar, once per game day.
@@ -375,8 +399,8 @@ pub enum ClientUpdateEvent {
     /// World history: one person, for the inspector.
     PersonInfo(PersonInfo),
     /// Every live predicted region's recent tick times (the F3 Debug tab),
-    /// every `perf::TICK_TIME_REPORT_INTERVAL`; native only (no clock on
-    /// wasm32). A region missing from the list is no longer live.
+    /// every `perf::TICK_TIME_REPORT_INTERVAL`. A region missing from the
+    /// list is no longer live.
     RegionTickTimes(Vec<(RegionId, perf::TickTimeStats)>),
     /// World history: every civ's name (on connect), for the legends.
     Civs(Vec<CivMarker>),
@@ -386,7 +410,21 @@ pub enum ClientUpdateEvent {
     AdventureResult(Result<history::SiteId, history::AdventureRefusal>),
     /// The home host is draining: whole seconds until it leaves (`Some(0)` = it is leaving now);
     /// `None` clears the notice (the home moved, or the session ended).
-    HostDraining { remaining_secs: Option<u64> },
+    HostDraining {
+        remaining_secs: Option<u64>,
+    },
+    /// The blocks being mined or left damaged in the home region (`mining.rs`,
+    /// region-local cells); sent only when the list changes. Drawn by the
+    /// renderer as cracks and a wobble.
+    BlockDamage(RegionId, Vec<BlockDamageView>),
+    /// Per tree block listed in `BlockDamage` (the lead, region-local): the
+    /// other blocks a chop there brings down (`Rollback::shake_blocks`), which
+    /// the renderer shakes with it. Sent only when it changes; a lead no
+    /// longer listed is gone.
+    TreeShake(
+        RegionId,
+        Vec<(edit::BlockPos, Vec<(edit::BlockPos, Block)>)>,
+    ),
     /// Which host serves each live predicted region, from the client's own connection map
     /// (`None` = its host not yet known); sent only when it changed and only while the
     /// scripted autopilot runs (`VOXEL_AUTOPILOT`), which picks its seams from it.
@@ -394,12 +432,15 @@ pub enum ClientUpdateEvent {
     /// The client's unwrapped frame on a world that wraps east–west: the extent
     /// and the anchor (the home's copy in the frame; the client's
     /// `wrap_frame::WrapFrame`). Sent when either changes.
-    WrapFrame { extent: Option<MapExtent>, anchor: RegionCoords },
+    WrapFrame {
+        extent: Option<MapExtent>,
+        anchor: RegionCoords,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use region::RegionTickPerf;
-pub use region::{ReconcileStats, Region, ENTITY_SERIAL_TICK_SHIFT};
+pub use region::{ENTITY_SERIAL_TICK_SHIFT, ReconcileStats, Region};
 
 pub trait Controller: Send {
     fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}
@@ -597,7 +638,13 @@ impl World {
     /// The server's state hash after event `event_id` of `region` arrived
     /// (`ServerPacket::HashedGameEvent`); reconcile checks it when it
     /// confirms that event. `false` = the region is not held, check dropped.
-    pub fn expect_state_hash(&mut self, region: &RegionId, event_id: usize, tick: Tick, hash: u32) -> bool {
+    pub fn expect_state_hash(
+        &mut self,
+        region: &RegionId,
+        event_id: usize,
+        tick: Tick,
+        hash: u32,
+    ) -> bool {
         match self.regions.get_mut(region) {
             Some(r) => {
                 r.expect_state_hash(event_id, tick, hash);
@@ -633,4 +680,3 @@ impl World {
         self.regions.get(&region_id).unwrap().data().clone()
     }
 }
-

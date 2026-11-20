@@ -158,6 +158,50 @@ variable "metrics" {
   default     = true
 }
 
+variable "telemetry" {
+  description = "Application traces and continuous CPU profiles for the coordinator, fleet reconciler and dynamic hosts. Endpoints are credential-free cluster DNS names; each role gets an independent sampling ratio."
+  type = object({
+    tracing_enabled           = optional(bool, true)
+    otlp_endpoint             = optional(string, "http://alloy.monitoring.svc:4318")
+    otlp_protocol             = optional(string, "http/protobuf")
+    trace_sampler             = optional(string, "parentbased_traceidratio")
+    coordinator_sampler_ratio = optional(number, 1.0)
+    fleet_sampler_ratio       = optional(number, 1.0)
+    host_sampler_ratio        = optional(number, 0.1)
+    bsp_max_queue_size        = optional(number, 2048)
+    bsp_schedule_delay_ms     = optional(number, 5000)
+    bsp_max_export_batch_size = optional(number, 512)
+    bsp_export_timeout_ms     = optional(number, 5000)
+    profile_enabled           = optional(bool, false)
+    profile_endpoint          = optional(string, "http://pyroscope.monitoring.svc:4040")
+    profile_sample_rate       = optional(number, 100)
+    environment               = optional(string, "production")
+    cluster                   = optional(string, "orion")
+  })
+  default = {}
+  validation {
+    condition = alltrue([
+      for ratio in [
+        var.telemetry.coordinator_sampler_ratio,
+        var.telemetry.fleet_sampler_ratio,
+        var.telemetry.host_sampler_ratio,
+      ] : ratio >= 0 && ratio <= 1
+    ])
+    error_message = "telemetry sampler ratios must be between 0 and 1."
+  }
+  validation {
+    condition = alltrue([
+      var.telemetry.bsp_max_queue_size > 0,
+      var.telemetry.bsp_schedule_delay_ms > 0,
+      var.telemetry.bsp_max_export_batch_size > 0,
+      var.telemetry.bsp_max_export_batch_size <= var.telemetry.bsp_max_queue_size,
+      var.telemetry.bsp_export_timeout_ms > 0,
+      var.telemetry.profile_sample_rate > 0,
+    ])
+    error_message = "telemetry: queue, batch, timeout and profile sample rate values must be positive; the export batch cannot exceed the queue."
+  }
+}
+
 variable "resources" {
   description = "Per role: { cpu = \"<request>\", memory = \"<request = limit>\" }. No CPU limit (a throttled main loop is a missed heartbeat). toolbox = { memory = \"<limit>\" } (default 1Gi): the forge runs there (`worldctl forge`; an OOM is exit 137 with nothing written); its requests stay small."
   type = object({
@@ -171,4 +215,14 @@ variable "resources" {
     ])
     error_message = "resources: coordinator and host each need cpu and memory."
   }
+}
+
+variable "panel" {
+  description = "The world panel (deploy/modules/panel, output world_binding): binds its ClusterRole in this world's namespace so the panel can read the world, scale it and create forge Jobs here. null = the panel cannot touch this world. Kubernetes accepts the binding before the panel's ServiceAccount or ClusterRole exist, so the roots may be applied in either order."
+  type = object({
+    namespace       = string
+    service_account = string
+    cluster_role    = string
+  })
+  default = null
 }

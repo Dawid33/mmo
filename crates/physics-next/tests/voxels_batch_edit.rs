@@ -29,16 +29,27 @@ fn vhash(v: &Voxels) -> u64 {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     fn key(&mut self) -> IVector {
-        IVector::new((self.next() % EDGE as u64) as i32, (self.next() % EDGE as u64) as i32, (self.next() % EDGE as u64) as i32)
+        IVector::new(
+            (self.next() % EDGE as u64) as i32,
+            (self.next() % EDGE as u64) as i32,
+            (self.next() % EDGE as u64) as i32,
+        )
     }
 }
 
 fn filled(v: &Voxels) -> Vec<IVector> {
-    let mut keys: Vec<IVector> = v.voxels().filter(|d| !d.state.is_empty()).map(|d| d.grid_coords).collect();
+    let mut keys: Vec<IVector> = v
+        .voxels()
+        .filter(|d| !d.state.is_empty())
+        .map(|d| d.grid_coords)
+        .collect();
     keys.sort_unstable_by_key(|k| (k.x, k.y, k.z));
     keys
 }
@@ -67,9 +78,28 @@ fn contacts(v: &Voxels) -> Vec<Option<[u32; 13]>> {
             let x = -SIZE + i as f32 * (span + 2.0 * SIZE) / 8.0 + 0.37;
             let z = -SIZE + j as f32 * (span + 2.0 * SIZE) / 8.0 + 0.11;
             for (k, dir) in dirs.iter().enumerate() {
-                let y = if k < 3 { span + 2.0 * SIZE } else { (i + j) as f32 * span / 16.0 + 1.3 };
-                let start = if k == 3 { Pose::translation(-2.0 * SIZE, y, z) } else if k == 4 { Pose::translation(x, y, span + 2.0 * SIZE) } else { Pose::translation(x, y, z) };
-                let hit = cast_shapes(&Pose::IDENTITY, Vector::ZERO, v, &start, *dir, &capsule, options).unwrap();
+                let y = if k < 3 {
+                    span + 2.0 * SIZE
+                } else {
+                    (i + j) as f32 * span / 16.0 + 1.3
+                };
+                let start = if k == 3 {
+                    Pose::translation(-2.0 * SIZE, y, z)
+                } else if k == 4 {
+                    Pose::translation(x, y, span + 2.0 * SIZE)
+                } else {
+                    Pose::translation(x, y, z)
+                };
+                let hit = cast_shapes(
+                    &Pose::IDENTITY,
+                    Vector::ZERO,
+                    v,
+                    &start,
+                    *dir,
+                    &capsule,
+                    options,
+                )
+                .unwrap();
                 out.push(hit.map(|h| {
                     let f = [
                         h.time_of_impact,
@@ -115,13 +145,35 @@ fn batch_equals_per_voxel_and_fresh() {
         batched.set_voxels(edits);
         let fresh = Voxels::new(Vector::splat(SIZE), &filled(&per_voxel));
 
-        assert_eq!(filled(&per_voxel), filled(&batched), "seed {seed}: same voxels");
-        assert_eq!(vhash(&per_voxel), vhash(&batched), "seed {seed}: batch == per voxel");
-        assert_eq!(vhash(&fresh), vhash(&batched), "seed {seed}: batch == fresh build");
+        assert_eq!(
+            filled(&per_voxel),
+            filled(&batched),
+            "seed {seed}: same voxels"
+        );
+        assert_eq!(
+            vhash(&per_voxel),
+            vhash(&batched),
+            "seed {seed}: batch == per voxel"
+        );
+        assert_eq!(
+            vhash(&fresh),
+            vhash(&batched),
+            "seed {seed}: batch == fresh build"
+        );
         let fresh_contacts = contacts(&fresh);
-        assert!(fresh_contacts.iter().any(Option::is_some), "seed {seed}: the cast grid hits something");
-        assert_eq!(contacts(&per_voxel), fresh_contacts, "seed {seed}: per-voxel contacts");
-        assert_eq!(contacts(&batched), fresh_contacts, "seed {seed}: batched contacts");
+        assert!(
+            fresh_contacts.iter().any(Option::is_some),
+            "seed {seed}: the cast grid hits something"
+        );
+        assert_eq!(
+            contacts(&per_voxel),
+            fresh_contacts,
+            "seed {seed}: per-voxel contacts"
+        );
+        assert_eq!(
+            contacts(&batched),
+            fresh_contacts,
+            "seed {seed}: batched contacts"
+        );
     }
 }
-

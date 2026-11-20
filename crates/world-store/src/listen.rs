@@ -16,8 +16,8 @@
 //!   newer than its own (a `Resync` every [`COORDINATOR_POLL_MS`]), and its HTTP API's waiting
 //!   mailbox polls read again (the hosts read their own mailboxes from any replica).
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossbeam::channel::{Receiver, Sender};
@@ -89,7 +89,9 @@ impl NotifyMode {
         match value.map(str::trim).unwrap_or("") {
             "" | "listen" => Ok(NotifyMode::Listen),
             "poll" => Ok(NotifyMode::Poll),
-            other => Err(format!("{TERRAIN_NOTIFY_ENV}={other:?}: expected `listen` or `poll`")),
+            other => Err(format!(
+                "{TERRAIN_NOTIFY_ENV}={other:?}: expected `listen` or `poll`"
+            )),
         }
     }
 
@@ -106,9 +108,12 @@ pub(crate) fn payload(cut: game::CutId, tick: Tick) -> String {
 
 /// What a notice's payload (`<cut>,<tick>`) says; a malformed one: resync.
 fn notice_of(payload: &str) -> CutNotice {
-    let parsed = payload
-        .split_once(',')
-        .and_then(|(c, t)| c.trim().parse::<u64>().ok().and(t.trim().parse::<Tick>().ok()));
+    let parsed = payload.split_once(',').and_then(|(c, t)| {
+        c.trim()
+            .parse::<u64>()
+            .ok()
+            .and(t.trim().parse::<Tick>().ok())
+    });
     match parsed {
         Some(tick) => CutNotice::Cut { tick },
         None => CutNotice::Resync,
@@ -137,7 +142,11 @@ pub(crate) fn cut_notices() -> impl Fn(Notice) -> CutNotice + Send + Sync + 'sta
 
 /// How long to wait before the next connection, after one that lived `lived`.
 fn reconnect_wait(lived: Duration) -> Duration {
-    if lived < LISTEN_MIN_LIFE { LISTEN_RETRY } else { Duration::ZERO }
+    if lived < LISTEN_MIN_LIFE {
+        LISTEN_RETRY
+    } else {
+        Duration::ZERO
+    }
 }
 
 /// Where the listener connects, for logs: host and database, never the URL (it holds a
@@ -168,31 +177,43 @@ pub(crate) fn start<T: Send + 'static>(
     period: Duration,
     map: impl Fn(Notice) -> T + Send + Sync + 'static,
 ) -> Receiver<T> {
-    let Some(url) = url else { return crossbeam::channel::never() };
+    let Some(url) = url else {
+        return crossbeam::channel::never();
+    };
     let (tx, rx) = crossbeam::channel::unbounded();
     let map = Arc::new(map);
-    let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => return log::error!("[world-store] the {channel} listener's runtime: {e}; no notices"),
-        };
-        rt.block_on(async move {
-            if mode == NotifyMode::Listen {
-                tokio::spawn(listen(url, channel, tx.clone(), map.clone()));
-            } else if tx.send(map(Notice::Resync)).is_err() {
-                return;
-            }
-            // The poll: ends the thread (and the listen task with its runtime) once nobody
-            // reads the notices.
-            let mut every = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-            loop {
-                every.tick().await;
-                if tx.send(map(Notice::Resync)).is_err() {
+    let spawned = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    return log::error!(
+                        "[world-store] the {channel} listener's runtime: {e}; no notices"
+                    );
+                }
+            };
+            rt.block_on(async move {
+                if mode == NotifyMode::Listen {
+                    tokio::spawn(listen(url, channel, tx.clone(), map.clone()));
+                } else if tx.send(map(Notice::Resync)).is_err() {
                     return;
                 }
-            }
+                // The poll: ends the thread (and the listen task with its runtime) once nobody
+                // reads the notices.
+                let mut every =
+                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                loop {
+                    every.tick().await;
+                    if tx.send(map(Notice::Resync)).is_err() {
+                        return;
+                    }
+                }
+            });
         });
-    });
     if let Err(e) = spawned {
         log::error!("[world-store] spawn the {channel} listener: {e}; only the poll's reads");
     }
@@ -213,7 +234,9 @@ where
             Ok(l) => l,
             Err(e) => {
                 if !failing {
-                    log::warn!("[world-store] the {channel} listener cannot connect to {at} ({e}); retrying every {LISTEN_RETRY:?}");
+                    log::warn!(
+                        "[world-store] the {channel} listener cannot connect to {at} ({e}); retrying every {LISTEN_RETRY:?}"
+                    );
                 }
                 failing = true;
                 tokio::time::sleep(LISTEN_RETRY).await;
@@ -238,7 +261,9 @@ where
                     break;
                 }
                 Err(e) => {
-                    log::warn!("[world-store] the {channel} listener lost {at} ({e}); reconnecting");
+                    log::warn!(
+                        "[world-store] the {channel} listener lost {at} ({e}); reconnecting"
+                    );
                     break;
                 }
             };
@@ -254,7 +279,9 @@ where
 /// A listener on one connection of its own (a pool of one, never shared), listening on
 /// `channel`.
 async fn connect(url: &str, channel: &str) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
-    let options = url.parse::<sqlx::postgres::PgConnectOptions>()?.application_name(TERRAIN_LISTENER_APP);
+    let options = url
+        .parse::<sqlx::postgres::PgConnectOptions>()?
+        .application_name(TERRAIN_LISTENER_APP);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .min_connections(0)
@@ -269,4 +296,3 @@ async fn connect(url: &str, channel: &str) -> Result<sqlx::postgres::PgListener,
     listener.listen(channel).await?;
     Ok(listener)
 }
-

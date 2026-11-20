@@ -100,7 +100,11 @@ pub fn build_cubemap_data_with(size: u32, color: impl Fn(f32) -> [u8; 3]) -> Vec
 
 fn cubemap_image(data: Vec<u8>) -> Image {
     let mut image = Image::new(
-        Extent3d { width: FACE_SIZE, height: FACE_SIZE, depth_or_array_layers: 6 },
+        Extent3d {
+            width: FACE_SIZE,
+            height: FACE_SIZE,
+            depth_or_array_layers: 6,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
@@ -118,7 +122,10 @@ fn cubemap_image(data: Vec<u8>) -> Image {
 /// at startup.
 pub fn setup_skybox(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let sky = images.add(cubemap_image(build_cubemap_data(FACE_SIZE)));
-    let underground = images.add(cubemap_image(build_cubemap_data_with(FACE_SIZE, underground_color)));
+    let underground = images.add(cubemap_image(build_cubemap_data_with(
+        FACE_SIZE,
+        underground_color,
+    )));
     commands.insert_resource(SkyboxCubemap(sky));
     commands.insert_resource(UndergroundCubemap(underground));
 }
@@ -140,4 +147,3 @@ pub fn attach_skybox(
         });
     }
 }
-

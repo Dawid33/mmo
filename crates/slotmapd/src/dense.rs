@@ -254,7 +254,10 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     /// ```
     #[inline(always)]
     pub fn insert(&mut self, value: V) -> K {
-        unsafe { self.try_insert_with_key::<_, Never>(move |_| Ok(value)).unwrap_unchecked_() }
+        unsafe {
+            self.try_insert_with_key::<_, Never>(move |_| Ok(value))
+                .unwrap_unchecked_()
+        }
     }
 
     /// Inserts a value given by `f` into the slot map. The key where the
@@ -279,7 +282,10 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     where
         F: FnOnce(K) -> V,
     {
-        unsafe { self.try_insert_with_key::<_, Never>(move |k| Ok(f(k))).unwrap_unchecked_() }
+        unsafe {
+            self.try_insert_with_key::<_, Never>(move |k| Ok(f(k)))
+                .unwrap_unchecked_()
+        }
     }
 
     /// Inserts a value given by `f` into the slot map. The key where the
@@ -517,7 +523,10 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     /// ```
     pub unsafe fn get_unchecked(&self, key: K) -> &V {
         debug_assert!(self.contains_key(key));
-        let idx = self.slots.get_unchecked(key.data().idx as usize).idx_or_free;
+        let idx = self
+            .slots
+            .get_unchecked(key.data().idx as usize)
+            .idx_or_free;
         &self.values.get_unchecked(idx as usize)
     }
 
@@ -567,7 +576,10 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     /// ```
     pub unsafe fn get_unchecked_mut(&mut self, key: K) -> &mut V {
         debug_assert!(self.contains_key(key));
-        let idx = self.slots.get_unchecked(key.data().idx as usize).idx_or_free;
+        let idx = self
+            .slots
+            .get_unchecked(key.data().idx as usize)
+            .idx_or_free;
         self.values.get_unchecked_mut(idx as usize)
     }
 
@@ -1075,12 +1087,11 @@ impl<K: Key, V> IntoIterator for DenseSlotMap<K, V> {
     }
 }
 
-
 // Serialization with serde.
 #[cfg(feature = "serde")]
 mod serialize {
-    use serde::{de, Deserialize, Deserializer};
     use super::*;
+    use serde::{Deserialize, Deserializer, de};
 
     #[derive(Deserialize)]
     struct UnvalidatedDenseSlotMap<K: Key, V> {
@@ -1091,21 +1102,28 @@ mod serialize {
     }
 
     impl<'de, K, V> Deserialize<'de> for DenseSlotMap<K, V>
-        where
-            K: Key + Deserialize<'de>,
-            V: Deserialize<'de>,
+    where
+        K: Key + Deserialize<'de>,
+        V: Deserialize<'de>,
     {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
+        where
+            D: Deserializer<'de>,
         {
             let mut uv: UnvalidatedDenseSlotMap<K, V> = Deserialize::deserialize(deserializer)?;
-            if uv.slots.len() >= u32::MAX as usize || uv.keys.len() >= u32::MAX as usize || uv.values.len() >= u32::MAX as usize {
+            if uv.slots.len() >= u32::MAX as usize
+                || uv.keys.len() >= u32::MAX as usize
+                || uv.values.len() >= u32::MAX as usize
+            {
                 return Err(de::Error::custom(&"too many slots"));
             }
 
             // Ensure the first slot exists and is empty for the sentinel.
-            if uv.slots.get(0).map_or(true, |slot: &Slot| slot.version % 2 == 1) {
+            if uv
+                .slots
+                .get(0)
+                .map_or(true, |slot: &Slot| slot.version % 2 == 1)
+            {
                 return Err(de::Error::custom(&"first slot not empty"));
             }
 
@@ -1150,7 +1168,9 @@ mod serialize {
             }
 
             if uv.values.len() != num_elems as usize {
-                return Err(de::Error::custom(&"occupied slots and values have different lengths"));
+                return Err(de::Error::custom(
+                    &"occupied slots and values have different lengths",
+                ));
             }
 
             Ok(Self {
@@ -1432,7 +1452,6 @@ mod tests {
             TestResult::passed()
         }
     }
-
 
     #[cfg(feature = "serde")]
     #[test]

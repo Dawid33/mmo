@@ -63,7 +63,25 @@ locals {
   # Env both the coordinator and the hosts get (plain values; secrets are refs).
   # VOXEL_WORLD_ID: every link hello names the world and a listener refuses another
   # world's; it is also the world's id in the login registry (`world add <id>`).
-  server_env = merge(local.ownership_env, {
+  telemetry_env = merge({
+    OTEL_SDK_DISABLED           = var.telemetry.tracing_enabled ? "false" : "true"
+    VOXEL_TELEMETRY_ENVIRONMENT = var.telemetry.environment
+    VOXEL_TELEMETRY_CLUSTER     = var.telemetry.cluster
+    }, var.telemetry.tracing_enabled ? {
+    OTEL_EXPORTER_OTLP_ENDPOINT    = var.telemetry.otlp_endpoint
+    OTEL_EXPORTER_OTLP_PROTOCOL    = var.telemetry.otlp_protocol
+    OTEL_TRACES_SAMPLER            = var.telemetry.trace_sampler
+    OTEL_BSP_MAX_QUEUE_SIZE        = tostring(var.telemetry.bsp_max_queue_size)
+    OTEL_BSP_SCHEDULE_DELAY        = tostring(var.telemetry.bsp_schedule_delay_ms)
+    OTEL_BSP_MAX_EXPORT_BATCH_SIZE = tostring(var.telemetry.bsp_max_export_batch_size)
+    OTEL_BSP_EXPORT_TIMEOUT        = tostring(var.telemetry.bsp_export_timeout_ms)
+    } : {}, var.telemetry.profile_enabled ? {
+    PYROSCOPE             = "1"
+    PYROSCOPE_SERVER      = var.telemetry.profile_endpoint
+    PYROSCOPE_SAMPLE_RATE = tostring(var.telemetry.profile_sample_rate)
+  } : {})
+
+  server_env = merge(local.ownership_env, local.telemetry_env, {
     VOXEL_WORLD_ID                   = var.world_id
     VOXEL_SERVICE_TOKEN_FILE         = "${local.service_token_dir}/service-token"
     VOXEL_COORDINATOR_CERT_HASH_FILE = "${local.coordinator_dir}/${local.link_file}"
@@ -83,6 +101,7 @@ locals {
     var.database_url,
     var.service_token,
     tls_self_signed_cert.coordinator.cert_pem,
+    jsonencode(var.telemetry),
   ]))
   coordinator_checksum = local.hosts_checksum
 

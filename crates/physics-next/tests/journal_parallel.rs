@@ -13,10 +13,15 @@ use rapier3d::prelude::*;
 #[test]
 #[should_panic(expected = "step_journaled does not support the `parallel` feature")]
 fn journaled_step_refuses_the_parallel_feature() {
-    let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
-    let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+    let mut w = PhysicsWorld {
+        gravity: Vector::new(0.0, -9.81, 0.0),
+        ..Default::default()
+    };
+    let b = w
+        .bodies
+        .insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
+    w.colliders
+        .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
     let mut p = PhysicsPipeline::new();
     let _ = w.step_journaled(&mut p);
 }
-

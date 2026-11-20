@@ -42,14 +42,22 @@ pub fn integrate_local_look(
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
     cursor: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
+    policy: Option<Res<super::cursor::CursorPolicy>>,
     mut look: ResMut<LocalLook>,
 ) {
-    // Same gate as `input::forward_input`: raw motion from an unfocused window
+    // Exactly the gate of `input::forward_input` (ordered before this): a
+    // frame's travel turns this view only if the sim is sent it too, else the
+    // resync below snaps the view back. Raw motion from an unfocused window
     // must not turn this camera either.
     let grabbed = cursor
         .single()
         .is_ok_and(|(w, c)| w.focused && c.grab_mode == CursorGrabMode::Locked);
-    let delta = if grabbed { motion.delta } else { Vec2::ZERO };
+    let live = policy.as_ref().is_none_or(|p| p.look_live());
+    let delta = if grabbed && live {
+        motion.delta
+    } else {
+        Vec2::ZERO
+    };
     if delta == Vec2::ZERO {
         look.idle = look.idle.saturating_add(time.delta());
         return;
@@ -84,4 +92,3 @@ pub fn apply_local_look(
 pub fn look_rotation(yaw: f32, pitch: f32) -> Quat {
     Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)
 }
-

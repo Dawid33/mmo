@@ -8,7 +8,8 @@ use std::sync::Arc;
 use game::RegionCoords;
 use worldgen::sites::{kit::town_kit, town::TownParams};
 use worldgen::structures::{
-    dev_placements, install, parse_dev_spec, DevHomeSource, DevRegionSource, DevTownSource, StructureList, StructureSource,
+    DevHomeSource, DevRegionSource, DevTownSource, StructureList, StructureSource, dev_placements,
+    install, parse_dev_spec,
 };
 
 /// Extra prefab directories, `:`-separated, loaded together with `assets/prefabs`.
@@ -60,7 +61,10 @@ pub fn announces_region(rc: RegionCoords, forged: bool) -> bool {
 
 /// Whether `VOXEL_DEV_STRUCTURES` asks for anything (the caller then builds a `LandingOf`).
 pub fn requested() -> bool {
-    !std::env::var(DEV_STRUCTURES_ENV).unwrap_or_default().trim().is_empty()
+    !std::env::var(DEV_STRUCTURES_ENV)
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
 }
 
 /// What `install_from_env` installs, built by [`from_env`] without installing anything.
@@ -101,24 +105,38 @@ pub fn parse_town_spec(spec: &str) -> Result<(String, Option<u8>, Option<i32>), 
     let mut parts = spec.split(':');
     let style = parts.next().unwrap_or("").trim();
     if style.is_empty() || style.contains(|c: char| c.is_whitespace() || c == ';') {
-        return Err(format!("the town style \"{style}\" must be a non-empty name"));
+        return Err(format!(
+            "the town style \"{style}\" must be a non-empty name"
+        ));
     }
     let arms = match parts.next() {
         None => None,
         Some(a) => match a.trim().parse::<u8>() {
             Ok(n) if TOWN_ARMS.contains(&n) => Some(n),
-            _ => return Err(format!("the number of streets \"{}\" must be 1..=4", a.trim())),
+            _ => {
+                return Err(format!(
+                    "the number of streets \"{}\" must be 1..=4",
+                    a.trim()
+                ));
+            }
         },
     };
     let arm_len = match parts.next() {
         None => None,
         Some(l) => match l.trim().parse::<i32>() {
             Ok(n) if TOWN_ARM_LEN.contains(&n) => Some(n),
-            _ => return Err(format!("the street length \"{}\" must be 16..=256 blocks", l.trim())),
+            _ => {
+                return Err(format!(
+                    "the street length \"{}\" must be 16..=256 blocks",
+                    l.trim()
+                ));
+            }
         },
     };
     if let Some(extra) = parts.next() {
-        return Err(format!("\"{extra}\": too many ':' parts (town=<style>[:<arms>[:<arm_len>]])"));
+        return Err(format!(
+            "\"{extra}\": too many ':' parts (town=<style>[:<arms>[:<arm_len>]])"
+        ));
     }
     Ok((style.to_string(), arms, arm_len))
 }
@@ -136,20 +154,35 @@ pub fn from_env(
     let builtin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/prefabs");
     let extra = std::env::var(PREFAB_DIRS_ENV).unwrap_or_default();
     let set = if extra.trim().is_empty() {
-        game::prefab::load_builtin_prefabs(Some(&builtin).filter(|d| d.is_dir()).map(|d| d.as_path()), &block_named)?
+        game::prefab::load_builtin_prefabs(
+            Some(&builtin).filter(|d| d.is_dir()).map(|d| d.as_path()),
+            &block_named,
+        )?
     } else {
         let mut dirs: Vec<PathBuf> = vec![builtin];
-        dirs.extend(extra.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+        dirs.extend(
+            extra
+                .split(':')
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from),
+        );
         let refs: Vec<&Path> = dirs.iter().map(|d| d.as_path()).collect();
-        game::prefab::load_prefab_dirs(&refs, &block_named).map_err(|e| format!("{PREFAB_DIRS_ENV}=\"{extra}\": {e}"))?
+        game::prefab::load_prefab_dirs(&refs, &block_named)
+            .map_err(|e| format!("{PREFAB_DIRS_ENV}=\"{extra}\": {e}"))?
     };
 
     let var = std::env::var(DEV_STRUCTURES_ENV).unwrap_or_default();
     if var.trim().is_empty() {
-        return Ok(DevSetup { prefabs: set, source: None, what: DevStructures::Off });
+        return Ok(DevSetup {
+            prefabs: set,
+            source: None,
+            what: DevStructures::Off,
+        });
     }
     let bad = |why: &str| format!("{DEV_STRUCTURES_ENV}=\"{var}\": {why}");
-    let (region, spec) = var.split_once('=').ok_or_else(|| bad("expected <rx>,<rz>=<spec>, all=<spec>, home=<spec> or town=<style>"))?;
+    let (region, spec) = var
+        .split_once('=')
+        .ok_or_else(|| bad("expected <rx>,<rz>=<spec>, all=<spec>, home=<spec> or town=<style>"))?;
     let edge = game::REGION_BLOCKS as i32;
     // The column the row is laid out beside: the region's landing, else its centre.
     let origin_of = move |rc: RegionCoords| {
@@ -160,7 +193,11 @@ pub fn from_env(
     if region.trim() == "town" {
         let (style, arms, arm_len) = parse_town_spec(spec).map_err(|e| bad(&e))?;
         let kit = town_kit(&set, &style).map_err(|e| bad(&e))?;
-        let block = |n: &str| registry.id_of(n).ok_or_else(|| bad(&format!("the block \"{n}\" is not in the block registry")));
+        let block = |n: &str| {
+            registry
+                .id_of(n)
+                .ok_or_else(|| bad(&format!("the block \"{n}\" is not in the block registry")))
+        };
         let mut params = TownParams::small(seed, block("cobbled_road")?, block("smooth_stone")?);
         if let Some(a) = arms {
             params.arms = a;
@@ -169,27 +206,68 @@ pub fn from_env(
             params.arm_len = l;
         }
         let wet = move |x: i32, z: i32| worldgen::is_wet(x, z, seed, mats);
-        let source =
-            DevTownSource::new(kit, params, set.content_hash(), Box::new(origin_of), Box::new(ground), Box::new(wet));
-        return Ok(DevSetup { prefabs: set, source: Some(Arc::new(source)), what: DevStructures::Town { style } });
+        let source = DevTownSource::new(
+            kit,
+            params,
+            set.content_hash(),
+            Box::new(origin_of),
+            Box::new(ground),
+            Box::new(wet),
+        );
+        return Ok(DevSetup {
+            prefabs: set,
+            source: Some(Arc::new(source)),
+            what: DevStructures::Town { style },
+        });
     }
     let entries = parse_dev_spec(spec).map_err(|e| bad(&e))?;
     if region.trim() == "all" {
-        let source = DevRegionSource::new(entries, &set, Box::new(origin_of), Box::new(ground)).map_err(|e| bad(&e))?;
-        let what = DevStructures::EveryRegion { spec: spec.to_string() };
-        return Ok(DevSetup { prefabs: set, source: Some(Arc::new(source)), what });
+        let source = DevRegionSource::new(entries, &set, Box::new(origin_of), Box::new(ground))
+            .map_err(|e| bad(&e))?;
+        let what = DevStructures::EveryRegion {
+            spec: spec.to_string(),
+        };
+        return Ok(DevSetup {
+            prefabs: set,
+            source: Some(Arc::new(source)),
+            what,
+        });
     }
     if region.trim() == "home" {
-        let source = DevHomeSource::new(entries, &set, Box::new(origin_of), Box::new(ground)).map_err(|e| bad(&e))?;
-        let what = DevStructures::Home { spec: spec.to_string() };
-        return Ok(DevSetup { prefabs: set, source: Some(Arc::new(source)), what });
+        let source = DevHomeSource::new(entries, &set, Box::new(origin_of), Box::new(ground))
+            .map_err(|e| bad(&e))?;
+        let what = DevStructures::Home {
+            spec: spec.to_string(),
+        };
+        return Ok(DevSetup {
+            prefabs: set,
+            source: Some(Arc::new(source)),
+            what,
+        });
     }
-    let (rx, rz) = region.split_once(',').ok_or_else(|| bad("the region must be <rx>,<rz>, all or home"))?;
-    let num = |s: &str| s.trim().parse::<i32>().map_err(|_| bad(&format!("\"{}\" is not a number", s.trim())));
-    let rc = RegionCoords { x: num(rx)?, z: num(rz)? };
+    let (rx, rz) = region
+        .split_once(',')
+        .ok_or_else(|| bad("the region must be <rx>,<rz>, all or home"))?;
+    let num = |s: &str| {
+        s.trim()
+            .parse::<i32>()
+            .map_err(|_| bad(&format!("\"{}\" is not a number", s.trim())))
+    };
+    let rc = RegionCoords {
+        x: num(rx)?,
+        z: num(rz)?,
+    };
     let placements = dev_placements(&entries, origin_of(rc), &set, &ground).map_err(|e| bad(&e))?;
     let n = placements.len();
     let source = StructureList::new(placements, set.content_hash());
-    let what = DevStructures::Region { x: rc.x, z: rc.z, placements: n };
-    Ok(DevSetup { prefabs: set, source: Some(Arc::new(source)), what })
+    let what = DevStructures::Region {
+        x: rc.x,
+        z: rc.z,
+        placements: n,
+    };
+    Ok(DevSetup {
+        prefabs: set,
+        source: Some(Arc::new(source)),
+        what,
+    })
 }

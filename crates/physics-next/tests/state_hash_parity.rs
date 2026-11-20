@@ -29,25 +29,55 @@ fn crc<T: StateHash + ?Sized>(v: &T) -> u64 {
 /// A voxels floor (the game's terrain shape), a cuboid tile, a few dynamic
 /// balls, a jointed pair and a kinematic capsule pushing through them.
 fn scene() -> (PhysicsWorld, RigidBodyHandle) {
-    let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
+    let mut w = PhysicsWorld {
+        gravity: Vector::new(0.0, -9.81, 0.0),
+        ..Default::default()
+    };
     w.params.dt = 0.05;
     let floor = w.bodies.insert(RigidBodyBuilder::fixed());
-    let keys: Vec<IVector> = (0..16).flat_map(|x| (0..16).map(move |z| IVector::new(x, 0, z))).collect();
-    w.colliders.insert_with_parent(ColliderBuilder::voxels(Vector::splat(1.0), &keys), floor, &mut w.bodies);
-    let tile = w.bodies.insert(RigidBodyBuilder::fixed().translation(Vector::new(24.0, 0.0, 8.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::cuboid(8.0, 1.0, 8.0), tile, &mut w.bodies);
+    let keys: Vec<IVector> = (0..16)
+        .flat_map(|x| (0..16).map(move |z| IVector::new(x, 0, z)))
+        .collect();
+    w.colliders.insert_with_parent(
+        ColliderBuilder::voxels(Vector::splat(1.0), &keys),
+        floor,
+        &mut w.bodies,
+    );
+    let tile = w
+        .bodies
+        .insert(RigidBodyBuilder::fixed().translation(Vector::new(24.0, 0.0, 8.0)));
+    w.colliders
+        .insert_with_parent(ColliderBuilder::cuboid(8.0, 1.0, 8.0), tile, &mut w.bodies);
     for i in 0..4 {
-        let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(4.0 + i as f32 * 1.1, 2.0 + i as f32, 8.0)));
-        w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+        let b = w
+            .bodies
+            .insert(RigidBodyBuilder::dynamic().translation(Vector::new(
+                4.0 + i as f32 * 1.1,
+                2.0 + i as f32,
+                8.0,
+            )));
+        w.colliders
+            .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
     }
-    let a = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(10.0, 1.5, 4.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), a, &mut w.bodies);
-    let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(11.2, 1.5, 4.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
-    let joint = SphericalJointBuilder::new().local_anchor1(Vector::new(0.6, 0.0, 0.0)).local_anchor2(Vector::new(-0.6, 0.0, 0.0));
+    let a = w
+        .bodies
+        .insert(RigidBodyBuilder::dynamic().translation(Vector::new(10.0, 1.5, 4.0)));
+    w.colliders
+        .insert_with_parent(ColliderBuilder::ball(0.4), a, &mut w.bodies);
+    let b = w
+        .bodies
+        .insert(RigidBodyBuilder::dynamic().translation(Vector::new(11.2, 1.5, 4.0)));
+    w.colliders
+        .insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+    let joint = SphericalJointBuilder::new()
+        .local_anchor1(Vector::new(0.6, 0.0, 0.0))
+        .local_anchor2(Vector::new(-0.6, 0.0, 0.0));
     w.impulse_joints.insert(a, b, joint, true);
-    let k = w.bodies.insert(RigidBodyBuilder::kinematic_position_based().translation(Vector::new(0.0, 1.9, 8.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::capsule_y(0.5, 0.4), k, &mut w.bodies);
+    let k = w.bodies.insert(
+        RigidBodyBuilder::kinematic_position_based().translation(Vector::new(0.0, 1.9, 8.0)),
+    );
+    w.colliders
+        .insert_with_parent(ColliderBuilder::capsule_y(0.5, 0.4), k, &mut w.bodies);
     (w, k)
 }
 
@@ -79,15 +109,31 @@ fn round_trip_keeps_every_hash_and_bytes_track_hashes_tick_to_tick() {
     let mut prev = (w.state_bytes(), w.state_hashes());
     for tick in 0..60 {
         let x = (tick as f32 * 0.4).min(20.0);
-        w.bodies.get_mut(k).unwrap().set_next_kinematic_translation(Vector::new(x, 1.9, 8.0));
+        w.bodies
+            .get_mut(k)
+            .unwrap()
+            .set_next_kinematic_translation(Vector::new(x, 1.9, 8.0));
         w.step(&mut pipeline);
         let now = (w.state_bytes(), w.state_hashes());
         let rt = round_trip(&w);
-        assert_eq!(rt.state_bytes(), now.0, "tick {tick}: bincode round trip is not a fixed point");
-        let lost: Vec<_> = (0..8).filter(|&i| rt.state_hashes()[i] != now.1[i]).map(|i| STATE_PARTS[i]).collect();
-        assert!(lost.is_empty(), "tick {tick}: a bincode round trip changed the hash of {lost:?}");
+        assert_eq!(
+            rt.state_bytes(),
+            now.0,
+            "tick {tick}: bincode round trip is not a fixed point"
+        );
+        let lost: Vec<_> = (0..8)
+            .filter(|&i| rt.state_hashes()[i] != now.1[i])
+            .map(|i| STATE_PARTS[i])
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "tick {tick}: a bincode round trip changed the hash of {lost:?}"
+        );
         let bad = hash_disagreements(&prev, &now);
-        assert!(bad.is_empty(), "tick {tick}: bytes and hash disagree on whether {bad:?} changed");
+        assert!(
+            bad.is_empty(),
+            "tick {tick}: bytes and hash disagree on whether {bad:?} changed"
+        );
         prev = now;
     }
 }
@@ -108,7 +154,12 @@ fn dyn_shape_hashes_its_concrete_type() {
 fn bvh_hash_tracks_tree_changes() {
     use rapier3d::parry::bounding_volume::Aabb;
     use rapier3d::parry::partitioning::Bvh;
-    let aabb = |i: u32| Aabb::new(Vector::new(i as f32 * 2.0, 0.0, 0.0), Vector::new(i as f32 * 2.0 + 1.0, 1.0, 1.0));
+    let aabb = |i: u32| {
+        Aabb::new(
+            Vector::new(i as f32 * 2.0, 0.0, 0.0),
+            Vector::new(i as f32 * 2.0 + 1.0, 1.0, 1.0),
+        )
+    };
     let tree = |n: u32| {
         let mut t = Bvh::new();
         for i in 0..n {
@@ -138,22 +189,47 @@ fn pending_joint_work_is_hashed_although_not_serialized() {
     let b = bodies.insert(RigidBodyBuilder::dynamic());
     let mut joints = ImpulseJointSet::new();
     joints.insert(a, b, SphericalJointBuilder::new(), true);
-    let round_tripped: ImpulseJointSet = bincode::deserialize(&bincode::serialize(&joints).unwrap()).unwrap();
-    assert_eq!(bincode::serialize(&round_tripped).unwrap(), bincode::serialize(&joints).unwrap());
-    assert_ne!(crc(&joints), crc(&round_tripped), "the pending island event is state");
+    let round_tripped: ImpulseJointSet =
+        bincode::deserialize(&bincode::serialize(&joints).unwrap()).unwrap();
+    assert_eq!(
+        bincode::serialize(&round_tripped).unwrap(),
+        bincode::serialize(&joints).unwrap()
+    );
+    assert_ne!(
+        crc(&joints),
+        crc(&round_tripped),
+        "the pending island event is state"
+    );
 }
 
 /// The scene without the voxels floor: `Voxels` hashes its content digest,
 /// not its chunk BVH or free lists, by design (`voxels_hash_cache.rs`).
 fn cuboid_scene() -> PhysicsWorld {
     let (mut w, k) = scene();
-    let floor = w.colliders.iter().find(|(_, c)| c.shape().as_voxels().is_some()).unwrap().0;
-    w.colliders.remove(floor, &mut w.islands, &mut w.bodies, &mut w.soft_bodies, true);
-    let tile = w.bodies.insert(RigidBodyBuilder::fixed().translation(Vector::new(8.0, 0.0, 8.0)));
-    w.colliders.insert_with_parent(ColliderBuilder::cuboid(8.0, 1.0, 8.0), tile, &mut w.bodies);
+    let floor = w
+        .colliders
+        .iter()
+        .find(|(_, c)| c.shape().as_voxels().is_some())
+        .unwrap()
+        .0;
+    w.colliders.remove(
+        floor,
+        &mut w.islands,
+        &mut w.bodies,
+        &mut w.soft_bodies,
+        true,
+    );
+    let tile = w
+        .bodies
+        .insert(RigidBodyBuilder::fixed().translation(Vector::new(8.0, 0.0, 8.0)));
+    w.colliders
+        .insert_with_parent(ColliderBuilder::cuboid(8.0, 1.0, 8.0), tile, &mut w.bodies);
     let mut pipeline = PhysicsPipeline::new();
     for tick in 0..20 {
-        w.bodies.get_mut(k).unwrap().set_next_kinematic_translation(Vector::new(tick as f32 * 0.4, 1.9, 8.0));
+        w.bodies
+            .get_mut(k)
+            .unwrap()
+            .set_next_kinematic_translation(Vector::new(tick as f32 * 0.4, 1.9, 8.0));
         w.step(&mut pipeline);
     }
     w
@@ -191,13 +267,25 @@ fn every_serialized_byte_is_seen_by_the_hash_or_changes_nothing() {
             flipped[i] ^= 1;
             let mut v = round_trip(&w);
             let ok = match part {
-                0 => bincode::deserialize(&flipped).map(|x| v.islands = x).is_ok(),
-                1 => bincode::deserialize(&flipped).map(|x| v.broad_phase = x).is_ok(),
-                2 => bincode::deserialize(&flipped).map(|x| v.narrow_phase = x).is_ok(),
+                0 => bincode::deserialize(&flipped)
+                    .map(|x| v.islands = x)
+                    .is_ok(),
+                1 => bincode::deserialize(&flipped)
+                    .map(|x| v.broad_phase = x)
+                    .is_ok(),
+                2 => bincode::deserialize(&flipped)
+                    .map(|x| v.narrow_phase = x)
+                    .is_ok(),
                 3 => bincode::deserialize(&flipped).map(|x| v.bodies = x).is_ok(),
-                4 => bincode::deserialize(&flipped).map(|x| v.colliders = x).is_ok(),
-                5 => bincode::deserialize(&flipped).map(|x| v.impulse_joints = x).is_ok(),
-                _ => bincode::deserialize(&flipped).map(|x| v.multibody_joints = x).is_ok(),
+                4 => bincode::deserialize(&flipped)
+                    .map(|x| v.colliders = x)
+                    .is_ok(),
+                5 => bincode::deserialize(&flipped)
+                    .map(|x| v.impulse_joints = x)
+                    .is_ok(),
+                _ => bincode::deserialize(&flipped)
+                    .map(|x| v.multibody_joints = x)
+                    .is_ok(),
             };
             if !ok || v.state_hashes()[part] != base[part] {
                 continue;
@@ -210,5 +298,8 @@ fn every_serialized_byte_is_seen_by_the_hash_or_changes_nothing() {
             }
         }
     }
-    assert!(unseen.is_empty(), "flips the hash can't see but the next step can: {unseen:?} (of {invisible} hash-invisible flips)");
+    assert!(
+        unseen.is_empty(),
+        "flips the hash can't see but the next step can: {unseen:?} (of {invisible} hash-invisible flips)"
+    );
 }

@@ -22,11 +22,13 @@ use crate::common;
 use std::fmt::Write as _;
 
 use common::{
-    approach_seam, body, entity_body, floor_chunks, key, r0, seam_row, seam_x, spawn_slime,
-    teleport, ticks, world_of, Body,
+    Body, approach_seam, body, entity_body, floor_chunks, key, r0, seam_row, seam_x, spawn_slime,
+    teleport, ticks, world_of,
 };
-use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};
-use game::{Block, BlockId, Chunk, GameEventKind, Key, Region, World, BLOCK_VOXELS, CHUNK_BLOCKS};
+use game::movement::{
+    CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER,
+};
+use game::{BLOCK_VOXELS, Block, BlockId, CHUNK_BLOCKS, Chunk, GameEventKind, Key, Region, World};
 
 /// Ticks recorded per scenario.
 const SCENARIO_TICKS: usize = 120;
@@ -85,7 +87,9 @@ fn walk_flat_across_chunk_seam() -> Vec<Row> {
 /// chunks): a scale seam and a half-block autostep. Floor: x 96..160,
 /// z 96..576 units.
 fn walk_scale_seam() -> Vec<Row> {
-    let mut world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 24 } else { 16 }));
+    let mut world = world_of(96.0..160.0, 96.0..576.0, |_, z| {
+        Chunk::flat_floor(if z >= seam_row() { 24 } else { 16 })
+    });
     // Start 32 units short of the border (the spawn itself at 2-block chunks).
     approach_seam(&mut world, 32.0);
     run_player(world, |w, t| {
@@ -100,7 +104,9 @@ fn walk_scale_seam() -> Vec<Row> {
 /// than the step height, so it takes a jump, as in Minecraft. Floor: x 96..160,
 /// z 96..576 units.
 fn step_up_one_block() -> Vec<Row> {
-    let mut world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 32 } else { 16 }));
+    let mut world = world_of(96.0..160.0, 96.0..576.0, |_, z| {
+        Chunk::flat_floor(if z >= seam_row() { 32 } else { 16 })
+    });
     // Start 32 units short of the border (the spawn itself at 2-block chunks).
     approach_seam(&mut world, 32.0);
     run_player(world, |w, t| {
@@ -146,7 +152,9 @@ fn jump_in_place() -> Vec<Row> {
 }
 
 /// Sprinting forward (−z) over a one-block trench (z 560..576, one block
-/// deep) with a jump just before its edge, then on to the end.
+/// deep) with a jump just before its edge, then on until W is let go at tick
+/// [`SPRINT_RELEASE_TICK`] (held to the end, a faster sprint ran off the floor
+/// and out of the region).
 fn sprint_jump_over_gap() -> Vec<Row> {
     // The trench is block row 35 along z (units 560..576), spanning the floor's
     // block columns 6..10 (units 96..160).
@@ -168,14 +176,28 @@ fn sprint_jump_over_gap() -> Vec<Row> {
     ticks(&mut world, 2);
     key(&mut world, Key::ControlLeft, true);
     key(&mut world, Key::KeyW, true);
-    run_player(world, |w, t| tap(w, Key::Space, 8, t))
+    run_player(world, |w, t| {
+        tap(w, Key::Space, 8, t);
+        if t == SPRINT_RELEASE_TICK {
+            key(w, Key::KeyW, false);
+        }
+    })
 }
+
+/// When `sprint_jump_over_gap` lets go of W: past the trench, short of the
+/// floor's end (z 64).
+const SPRINT_RELEASE_TICK: usize = 70;
 
 /// Starts 0.3 units sunk into a flat floor — into the solid, past the skin
 /// gap it normally rests on — stands, walks +z, stands.
 fn sunk_start_depenetrates() -> Vec<Row> {
     let mut world = world_of(96.0..160.0, 96.0..224.0, |_, _| Chunk::flat_floor(16));
-    teleport(&mut world, 136.0, rest_y(16.0) - CHARACTER_SKIN - 0.3, 136.0);
+    teleport(
+        &mut world,
+        136.0,
+        rest_y(16.0) - CHARACTER_SKIN - 0.3,
+        136.0,
+    );
     run_player(world, |w, t| {
         if t == 20 {
             key(w, Key::KeyS, true);
@@ -234,7 +256,11 @@ fn from_csv(text: &str) -> Vec<Row> {
     text.lines()
         .skip(1)
         .map(|line| {
-            let f: Vec<f32> = line.split(',').skip(1).map(|v| v.parse().unwrap()).collect();
+            let f: Vec<f32> = line
+                .split(',')
+                .skip(1)
+                .map(|v| v.parse().unwrap())
+                .collect();
             [f[0], f[1], f[2], f[3]]
         })
         .collect()
@@ -248,13 +274,19 @@ const RECORDED_CHUNK_BLOCKS: usize = 16;
 /// first chunk border past the spawn (x/z 160 at 2-block chunks, 256 at 16 —
 /// the same trajectory translated), and the slime's hop rolls are seeded by
 /// its entity key, which follows the number of chunk entities created first.
-const CHUNK_SIZE_DEPENDENT: &[&str] =
-    &["walk_flat_across_chunk_seam", "walk_scale_seam", "step_up_one_block", "slime_hop_sequence"];
+const CHUNK_SIZE_DEPENDENT: &[&str] = &[
+    "walk_flat_across_chunk_seam",
+    "walk_scale_seam",
+    "step_up_one_block",
+    "slime_hop_sequence",
+];
 
 /// Records the fixture in record mode; otherwise compares against it.
 fn check(name: &str) {
     if CHUNK_BLOCKS != RECORDED_CHUNK_BLOCKS && CHUNK_SIZE_DEPENDENT.contains(&name) {
-        eprintln!("{name}: recorded at {RECORDED_CHUNK_BLOCKS}-block chunks, skipped at {CHUNK_BLOCKS}");
+        eprintln!(
+            "{name}: recorded at {RECORDED_CHUNK_BLOCKS}-block chunks, skipped at {CHUNK_BLOCKS}"
+        );
         return;
     }
     let actual = run_scenario(name);
@@ -266,10 +298,19 @@ fn check(name: &str) {
         eprintln!("recorded {}", path.display());
         return;
     }
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{}: {e} — record it with PHYSICS_GOLDENS_RECORD=1", path.display()));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{}: {e} — record it with PHYSICS_GOLDENS_RECORD=1",
+            path.display()
+        )
+    });
     let golden = from_csv(&text);
-    assert_eq!(golden.len(), SCENARIO_TICKS, "{name}: fixture has {} rows", golden.len());
+    assert_eq!(
+        golden.len(),
+        SCENARIO_TICKS,
+        "{name}: fixture has {} rows",
+        golden.len()
+    );
     let transition_near = |t: usize| {
         let lo = t.saturating_sub(GROUNDED_SLACK_TICKS).max(1);
         let hi = (t + GROUNDED_SLACK_TICKS).min(SCENARIO_TICKS - 1);
