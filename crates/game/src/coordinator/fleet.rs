@@ -151,6 +151,9 @@ pub enum FleetWhy {
     ScaleDown,
     /// Rule 7: the last host goes, nobody online (`min == 0`).
     ToZero,
+    /// Elastic 5, rule 6b: an evacuated scale-down victim drains (at once when its land holds
+    /// nobody, else with the warning: its moves gave up).
+    Evacuated,
 }
 
 impl FleetWhy {
@@ -158,7 +161,7 @@ impl FleetWhy {
     pub fn scale_word(self) -> Option<&'static str> {
         match self {
             FleetWhy::ScaleUp => Some("up"),
-            FleetWhy::ScaleDown => Some("down"),
+            FleetWhy::ScaleDown | FleetWhy::Evacuated => Some("down"),
             FleetWhy::ToZero => Some("zero"),
             _ => None,
         }
@@ -242,14 +245,35 @@ impl Coordinator {
         if self.fleet_pending || !self.ticking_now() {
             return;
         }
-        let Some(desired) = self.fleet_desired.as_deref() else { return };
+        // Cloned: the evacuation step below changes the core (a handful of rows).
+        let Some(desired) = self.fleet_desired.clone() else { return };
         if self.fleet_read_after.is_some_and(|n| self.leases.reads() <= n) {
             return;
         }
         if self.fleet_last_ms.is_some_and(|at| now_ms.saturating_sub(at) < SCALE_DECISION_EVERY_MS) {
             return;
         }
-        let Some((why, decision)) = self.fleet_rule(dials, desired) else { return };
+        // Elastic 5, rule 6b (ahead of rules 4–7, no scale gates): an evacuating host's next step.
+        if let Some(drain) = self.evacuation_step(now_ms) {
+            log::info!("coordinator: fleet: {:?}: {drain:?}", FleetWhy::Evacuated);
+            self.fleet_pending = true;
+            self.fleet_why = Some(FleetWhy::Evacuated);
+            self.push_decision(StoreDecision::DrainHost(drain));
+            return;
+        }
+        if self.move_open().is_some() {
+            // One move at a time, and no other fleet decision under it but the marks' rules.
+            return;
+        }
+        let Some((why, decision)) = self.fleet_rule(dials, &desired) else { return };
+        // Elastic 5, rule 6 with players: the victim is emptied by moves first, drained after.
+        if let (FleetWhy::ScaleDown, StoreDecision::DrainHost(DrainHost { name, host: Some((victim, boot)), .. })) = (&why, &decision) {
+            if self.leases.row(*victim).is_some_and(|r| r.load.players > 0) {
+                log::info!("coordinator: fleet: scale down: host {victim} ({name}) holds players: its occupied land moves first");
+                self.start_evacuation(*victim, *boot, name.clone(), now_ms);
+                return;
+            }
+        }
         // Rules 2b, 5, 6 and 7 logged their evidence already, with the decision.
         if !matches!(why, FleetWhy::LeftMarked | FleetWhy::ScaleUp | FleetWhy::ScaleDown | FleetWhy::ToZero) {
             log::info!("coordinator: fleet: {why:?}: {decision:?}");

@@ -1451,6 +1451,8 @@ impl super::Coordinator {
     /// directives and claim answers) is dropped.
     pub(super) fn host_succeeded(&mut self, host: HostId) {
         self.move_party_gone(host, "is gone (succeeded or ended)");
+        // Elastic 5: an evacuating host that is gone leaves the set.
+        self.moves.evacuating.remove(&host);
         self.drop_unsent_directives(host);
         self.drop_unsent(host, "claim answers", |m| matches!(m, CoordMsg::ClaimIs { .. } | CoordMsg::HopIs { .. }));
         let parked: Vec<crate::RegionCoords> =

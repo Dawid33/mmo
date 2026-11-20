@@ -137,6 +137,68 @@ impl Coordinator {
         self.move_counts
     }
 
+    /// Rule 6 with players (`fleet.rs`): `victim` is emptied by moves before it drains.
+    pub(super) fn start_evacuation(&mut self, victim: HostId, boot: u64, name: String, now_ms: u64) {
+        self.moves.evacuating.insert(victim, (boot, name, now_ms));
+        self.moves.evac_abandoned.remove(&victim);
+        self.clean_checked = false;
+    }
+
+    /// Rule 6b (`fleet.rs`, the ticker's): an evacuating host's next step — a drain decision to
+    /// issue (`Some`), or a move opened / nothing to do yet (`None`). A host whose live row is gone
+    /// (ended, succeeded, another boot) leaves the set. Waits for a `hosts` read after the last
+    /// move settled (the beat must show the land the move took away).
+    pub(super) fn evacuation_step(&mut self, now_ms: u64) -> Option<super::DrainHost> {
+        if self.moves.evacuating.is_empty() || self.moves.open.is_some() {
+            return None;
+        }
+        if self.move_settled_reads.is_some_and(|n| self.leases.reads() <= n) {
+            return None;
+        }
+        let hosts: Vec<(HostId, (u64, String, u64))> = self.moves.evacuating.iter().map(|(h, v)| (*h, v.clone())).collect();
+        for (h, (boot, name, since)) in hosts {
+            let Some(row) = self.leases.row(h).filter(|r| r.boot == boot && !r.clean && r.state == HOST_LIVE).cloned() else {
+                log::info!("coordinator: evacuation of host {h} ({name}) ends: its row is gone");
+                self.moves.evacuating.remove(&h);
+                self.moves.evac_abandoned.remove(&h);
+                self.clean_checked = false;
+                continue;
+            };
+            let occupied = row.load.land.iter().filter(|l| l.players > 0).max_by_key(|l| (l.players, std::cmp::Reverse(l.sr))).map(|l| l.sr);
+            let give_up = self.moves.evac_abandoned.get(&h).copied().unwrap_or(0) >= MOVE_ABANDON_MAX
+                || now_ms.saturating_sub(since) >= EVACUATE_MAX_MS;
+            let drain = |in_ms: u64| super::DrainHost { name: name.clone(), host: Some((h, boot)), in_ms };
+            let Some(sr) = occupied.filter(|_| row.load.players > 0) else {
+                log::info!("coordinator: evacuation of host {h} ({name}) is done: no player left on its land; it drains now");
+                self.end_evacuation(h);
+                return Some(drain(0));
+            };
+            if give_up {
+                log::warn!("coordinator: evacuation of host {h} ({name}) gives up (moves abandoned or {EVACUATE_MAX_MS} ms passed): the warned drain");
+                self.end_evacuation(h);
+                return Some(drain(crate::DRAIN_WARNING_SECS * 1000));
+            }
+            match self.pick_taker(sr, h) {
+                Some((taker, _)) => {
+                    self.open_move(sr, h, taker, MoveWhy::ScaleDown);
+                }
+                None => {
+                    log::warn!("coordinator: evacuation of host {h} ({name}): no host can take {sr:?}: the warned drain");
+                    self.end_evacuation(h);
+                    return Some(drain(crate::DRAIN_WARNING_SECS * 1000));
+                }
+            }
+            return None;
+        }
+        None
+    }
+
+    fn end_evacuation(&mut self, h: HostId) {
+        self.moves.evacuating.remove(&h);
+        self.moves.evac_abandoned.remove(&h);
+        self.clean_checked = false;
+    }
+
     /// Whether `h` gives land in the open move: it takes no logins meanwhile.
     pub(super) fn gives_land(&self, h: HostId) -> bool {
         self.moves.open.as_ref().is_some_and(|r| r.mv.giver == h)
@@ -168,7 +230,6 @@ impl Coordinator {
             .filter(|h| *h != giver && self.takes_logins(*h) && !self.evacuating(*h))
             .filter_map(|h| {
                 let r = self.leases.row(h).filter(|r| !r.clean && r.state == HOST_LIVE && !r.draining)?;
-                (self.attachment(h) == Some(r.boot)).then_some(())?;
                 (self.leases.known_for(h, watch_now) >= super::ASSIGN_MIN_ATTACHED_MS).then_some(())?;
                 (r.load.tick_permille <= 1000 - super::ASSIGN_HEADROOM_MIN_PERMILLE).then_some(())?;
                 Some((h, r.boot, (r.load.tick_permille, r.load.players, r.load.regions)))
@@ -266,11 +327,10 @@ impl Coordinator {
                 run.mv.taker,
                 cut.0
             );
-            let giver = run.mv.giver;
             self.moves.open = None;
             self.move_counts.committed += 1;
-            // An evacuation's progress is read from the next beats.
-            let _ = giver;
+            // An evacuation's next step reads a beat taken after this.
+            self.move_settled_reads = Some(self.leases.reads());
             return;
         }
         let parties_here = g_now == Some(run.giver_boot) && t_now == Some(run.mv.taker_boot);
@@ -414,6 +474,7 @@ impl Coordinator {
             *self.moves.evac_abandoned.entry(mv.giver).or_default() += 1;
         }
         self.move_counts.abandoned += 1;
+        self.move_settled_reads = Some(self.leases.reads());
         self.clean_checked = false;
     }
 }

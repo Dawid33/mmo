@@ -354,6 +354,9 @@ pub struct Coordinator {
     move_counts: MoveCounts,
     /// Elastic 5: when (store ms) the probe last looked for a move (`VOXEL_MOVE_PROBE_MS`).
     move_probe_ms: Option<u64>,
+    /// Elastic 5: the lease watch's read count when the last move settled: an evacuation's next
+    /// step waits for a later read (the beat must show what the move took away).
+    move_settled_reads: Option<u64>,
 }
 
 /// How a transition's messages for hosts leave the coordinator ([`Coordinator::set_delivery`]):
@@ -521,6 +524,7 @@ projection! {
             move_dials = MoveDials::default(),
             move_counts = MoveCounts::default(),
             move_probe_ms = None,
+            move_settled_reads = None,
         }
         reset {
             out = Vec::new(),
@@ -641,6 +645,7 @@ impl Coordinator {
             move_dials: MoveDials::default(),
             move_counts: MoveCounts::default(),
             move_probe_ms: None,
+            move_settled_reads: None,
         };
         c.push_view(Target::Every);
         c
