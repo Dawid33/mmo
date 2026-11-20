@@ -412,6 +412,9 @@ pub fn embark_allowed_in(
     if !grid.contains(region) {
         return Err(EmbarkRefusal::OffMap);
     }
+    // Sites are stored canonical: an off-edge alias of an abandoned site's
+    // region must still compare equal below.
+    let region = grid.canonical(region);
     if grid.capacity(region) == 0 {
         return Err(EmbarkRefusal::NotHabitable);
     }
