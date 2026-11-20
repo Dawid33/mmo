@@ -318,6 +318,9 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::Login(order) => format!("Login({order:?})"),
         CoordMsg::Assigned { rows } => format!("Assigned {rows:?}"),
         CoordMsg::LandIs { sr, owner, epoch } => format!("LandIs {sr:?}: host {owner} at epoch {epoch}"),
+        CoordMsg::MoveLand { id, sr, taker, at_tick } => format!("MoveLand {} {sr:?} to host {taker} at {at_tick}", id.0),
+        CoordMsg::ExpectLand { id, sr, giver, at_tick } => format!("ExpectLand {} {sr:?} from host {giver} at {at_tick}", id.0),
+        CoordMsg::MoveOff { id, sr } => format!("MoveOff {} {sr:?}", id.0),
     }
 }
 
@@ -2931,13 +2934,15 @@ impl CoordinatorRuntime {
     /// transitions inserted (`mailbox_rows=`, `login_rows=`) and how many transitions wrote no
     /// core (`core_less=`) — the write volume of the coordinator HTTP API plan's Review Focus 5 —
     /// and the refreshes onto another replica's row (`refreshes=`, what each version bump costs
-    /// the other replicas).
+    /// the other replicas); Elastic 5: `moves=opened/committed/abandoned` since this replica started.
     fn report_writes(&mut self) {
         let window = self.tally.since.elapsed();
         if window < game::METRICS_REPORT_INTERVAL {
             return;
         }
         let t = std::mem::replace(&mut self.tally, WriteTally::new());
+        // Elastic 5: the moves this replica saw opened / committed / abandoned since it started.
+        let moves = self.core.move_counts();
         if t.transitions == 0
             && t.conflicts == 0
             && t.failures == 0
@@ -2950,7 +2955,8 @@ impl CoordinatorRuntime {
         }
         log::info!(
             "[coordinator] window={:.1}s transitions={} core_bytes={} history_bytes={} conflicts={} write_failures={} version={} \
-             assigned={} added={} drained={} removed={} scale={} stalled={} mailbox_rows={} login_rows={} core_less={} refreshes={}",
+             assigned={} added={} drained={} removed={} scale={} stalled={} mailbox_rows={} login_rows={} core_less={} refreshes={} \
+             moves={}/{}/{}",
             window.as_secs_f32(),
             t.transitions,
             t.core_bytes,
@@ -2967,7 +2973,10 @@ impl CoordinatorRuntime {
             t.mailbox_rows,
             t.login_rows,
             t.core_less,
-            t.refreshes
+            t.refreshes,
+            moves.opened,
+            moves.committed,
+            moves.abandoned
         );
     }
 

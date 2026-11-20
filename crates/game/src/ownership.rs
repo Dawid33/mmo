@@ -84,6 +84,15 @@ pub struct LandMove {
     pub taker_boot: u64,
 }
 
+/// Elastic 5: the default warning before occupied land moves to another host
+/// (`VOXEL_MOVE_WARNING_SECS`): the players on it see a notice this long, then a pause of seconds.
+pub const MOVE_WARNING_SECS: u64 = 60;
+/// Elastic 5: how long (ms) past the warning's end a move may wait for a cut that carries it
+/// before it is abandoned (four cut deadlines).
+pub const MOVE_DEADLINE_MS: u64 = 120_000;
+/// Elastic 5: how long before a move's tick a client opens its standby connection to the taker.
+pub const MOVE_STANDBY_LEAD_SECS: u64 = 60;
+
 /// How long a host's lease lasts without a beat: the coordinator declares a host dead once
 /// it has read the same `seen_ms` over this long of its own successful reads; a booting host
 /// counts another host alive while `db_now - seen_ms` is within it.

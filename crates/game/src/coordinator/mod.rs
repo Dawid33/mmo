@@ -44,6 +44,7 @@ mod decisions;
 mod fleet;
 mod input;
 mod link;
+mod moves;
 mod msg;
 mod replicas;
 mod state;
@@ -56,6 +57,7 @@ pub use decisions::*;
 pub use fleet::*;
 pub use input::*;
 pub use link::*;
+pub use moves::*;
 pub use msg::*;
 pub use replicas::*;
 pub use state::*;
@@ -344,6 +346,14 @@ pub struct Coordinator {
     /// When (store ms) this replica last asked for the world's first host
     /// ([`Input::StartWanted`]): the next ask waits [`fleet::WORLD_START_ASK_EVERY_MS`].
     start_asked_ms: Option<u64>,
+    /// Elastic 5: the move runs (`moves.rs`): durable.
+    moves: moves::MoveRuns,
+    /// Elastic 5: the move dials the runtime set ([`Self::set_move_dials`]).
+    move_dials: MoveDials,
+    /// Elastic 5: the moves this replica saw open, commit and be abandoned (the window line).
+    move_counts: MoveCounts,
+    /// Elastic 5: when (store ms) the probe last looked for a move (`VOXEL_MOVE_PROBE_MS`).
+    move_probe_ms: Option<u64>,
 }
 
 /// How a transition's messages for hosts leave the coordinator ([`Coordinator::set_delivery`]):
@@ -455,6 +465,7 @@ projection! {
         rolled_back_to: Option<u64>,
         replicas: BTreeSet<ReplicaId>,
         draining: BTreeSet<HostId>,
+        moves: moves::MoveRuns,
     }
     process(replica, now_ms) {
         kept {
@@ -505,6 +516,11 @@ projection! {
             // answers `NotNeeded` if a wanted row exists by then. Never cleared there, the replay
             // would be paced out and the world would start only at a later login's ask.
             start_asked_ms = None,
+            // Elastic 5: the runtime's configuration; this replica's counters; the probe's
+            // pacing (an observation of the ticker's reads, as the fleet's timers).
+            move_dials = MoveDials::default(),
+            move_counts = MoveCounts::default(),
+            move_probe_ms = None,
         }
         reset {
             out = Vec::new(),
@@ -621,6 +637,10 @@ impl Coordinator {
             fleet_down_since: None,
             fleet_zero_since: None,
             start_asked_ms: None,
+            moves: moves::MoveRuns::default(),
+            move_dials: MoveDials::default(),
+            move_counts: MoveCounts::default(),
+            move_probe_ms: None,
         };
         c.push_view(Target::Every);
         c
@@ -702,6 +722,7 @@ impl Coordinator {
     fn rebase_deadlines(&mut self, now_ms: u64) {
         self.rebase_cut_deadlines(now_ms);
         self.rebase_succession_deadlines(now_ms);
+        self.rebase_move_deadlines(now_ms);
     }
 
     pub fn history(&self) -> &History {
@@ -841,6 +862,7 @@ impl Coordinator {
                 }
                 self.attach(host, epoch, running, online, handed);
                 self.cut_attach(host, pending_cut, boot);
+                self.move_attach(host, boot);
                 self.succession_attach(host, successions);
                 // Its mailbox rows, decided before this `Attach` (which reconciles them), are
                 // deleted by the transition holding it, before its `Attached` row.
@@ -976,6 +998,7 @@ impl Coordinator {
         // replica: a non-ticker never does), answered once the ticker does.
         self.drain_listed_early();
         self.maintain_successions(now_ms);
+        self.maintain_moves(now_ms);
         self.maintain_cuts(now_ms);
         self.maintain_fleet(now_ms);
     }
@@ -1289,7 +1312,8 @@ impl Coordinator {
     /// showed its row marked, `worldctl drain`; a failed read keeps the marks — durable, so a
     /// replica that reads no `hosts` rows knows them too).
     fn takes_logins(&self, host: HostId) -> bool {
-        !self.leave_asked(host) && !self.draining.contains(&host)
+        // Elastic 5: nor a host giving land in the open move, nor one scale-down empties.
+        !self.leave_asked(host) && !self.draining.contains(&host) && !self.gives_land(host) && !self.evacuating(host)
     }
 
     /// An order of the login service: for the world's gate host of this moment
@@ -1748,6 +1772,7 @@ impl Coordinator {
     /// hosts' generation says so.
     fn first_of_generation(&mut self, host: HostId, generation: u64) {
         self.attached_generation = generation;
+        self.moves_world_changed("a newer world generation attached");
         let gone: BTreeSet<HostId> =
             self.region_host.values().chain(self.online_on.values()).copied().filter(|h| *h != host).collect();
         for h in gone {

@@ -338,7 +338,11 @@ impl Coordinator {
     /// writer of the row it rebased onto by a few milliseconds never moves a recorded time
     /// backwards (plan decision 3, "Clock").
     pub fn clock_floor(&self) -> u64 {
-        self.calendar_seen_ms.max(self.calendar_anchor.0).max(self.cuts_clock_floor()).max(self.successions_clock_floor())
+        self.calendar_seen_ms
+            .max(self.calendar_anchor.0)
+            .max(self.cuts_clock_floor())
+            .max(self.successions_clock_floor())
+            .max(self.moves_clock_floor())
     }
 
     /// Replace the projection by a newer row's — `core`, and `history` (`None`: the cached

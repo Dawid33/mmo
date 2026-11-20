@@ -243,6 +243,9 @@ pub enum CutFailure {
     Aborted,
     /// The store refused or failed the part.
     Store(String),
+    /// Elastic 5: the giver's part cannot carry a move the cut names (its land not owned at the
+    /// fence's epoch, the taker not a participant, a spawn pin or a held order on the land).
+    MoveRefused,
 }
 
 /// Where a coordinator message goes ([`crate::coordinator::Coordinator::take_out`]).
@@ -306,7 +309,12 @@ pub enum CoordMsg {
     /// ([`crate::Reliable::CutMark`]) and stages its part; `leaving` are the hosts that
     /// leave in this cut (among `hosts`; [`HostMsg::LeaveRequest`]). `generation`: the world generation the cut is of — a
     /// host of another generation refuses it.
-    BeginCut { cut: CutId, tick: Tick, hosts: Vec<HostId>, leaving: Vec<HostId>, generation: u64 },
+    ///
+    /// Elastic 5: `moves`, the land this cut hands from a giver to a taker ([`crate::LandMove`]):
+    /// the giver parks the players there keeping their sessions, stops and masks it and its part
+    /// carries the move; the taker expects it; every other participant masks it until it learns
+    /// the new owner.
+    BeginCut { cut: CutId, tick: Tick, hosts: Vec<HostId>, leaving: Vec<HostId>, generation: u64, moves: Vec<crate::LandMove> },
     /// World cut `cut` is decided: `committed` (every part visible) or aborted (none).
     CutDone { cut: CutId, committed: bool },
     /// Host `predecessor` (its process `predecessor_boot`) was declared dead (or left) and
@@ -353,6 +361,16 @@ pub enum CoordMsg {
     /// Super-region `sr` is host `owner`'s at `epoch` (Elastic 3: the answer to a
     /// [`HostMsg::LandNeeded`] of land another host holds or was just assigned).
     LandIs { sr: SuperRegion, owner: HostId, epoch: u64 },
+    /// Elastic 5, to the giver: occupied super-region `sr` moves to host `taker` with a world cut
+    /// at or after `at_tick` (the warning's end): warn the players on it, open their standby
+    /// connections to the taker. Re-sent at the giver's `Attach` while the move runs.
+    MoveLand { id: crate::MoveId, sr: SuperRegion, taker: HostId, at_tick: Tick },
+    /// Elastic 5, to the taker: super-region `sr` comes from host `giver` with a world cut at or
+    /// after `at_tick`: do not ask for it, keep the standby sessions of its players.
+    ExpectLand { id: crate::MoveId, sr: SuperRegion, giver: HostId, at_tick: Tick },
+    /// Elastic 5, to both: move `id` of `sr` is called off (abandoned): the notices clear, the land
+    /// stays the giver's.
+    MoveOff { id: crate::MoveId, sr: SuperRegion },
 }
 
 /// One POST of a host to the coordinator's HTTP API (`POST /v1/hosts/{host}/messages`): its

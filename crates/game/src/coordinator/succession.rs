@@ -899,6 +899,7 @@ impl super::Coordinator {
         };
         match outcome {
             Declared::Done(list) => {
+                self.moves_world_changed("a succession was declared");
                 for s in list {
                     self.successions.land_wanted.remove(&s.predecessor);
                     log::warn!(
@@ -1135,6 +1136,7 @@ impl super::Coordinator {
 
     /// The world was rolled back to `generation` ([`Self::rolled_back`]).
     fn rolled_back_to_generation(&mut self, generation: u64) {
+        self.moves_world_changed("the world rolled back");
         let open = std::mem::take(&mut self.successions.open);
         for id in open.into_keys() {
             self.closed_here(id);
@@ -1352,6 +1354,13 @@ impl super::Coordinator {
 
     /// Whether an open succession is answered by everyone and nothing else holds cuts back: a
     /// cut is due at once to settle it (`maintain_cuts`, [`super::SETTLE_CUT_RETRY_MS`]).
+    /// Elastic 5: no succession run is open, being declared or rolling back, and the open ones are
+    /// known — a move may open.
+    pub(super) fn successions_quiet(&self) -> bool {
+        let r = &self.successions;
+        r.enabled && self.successions_known() && !self.declaring() && r.rollback.is_none() && r.rolling.is_none() && r.open.is_empty()
+    }
+
     pub(super) fn settle_due(&self) -> bool {
         let r = &self.successions;
         r.enabled && !r.open.is_empty() && self.successions_block_cuts().is_none()
@@ -1441,6 +1450,7 @@ impl super::Coordinator {
     /// coordinator knew of it (`region_host`, `online_on`) and still meant to send it (its
     /// directives and claim answers) is dropped.
     pub(super) fn host_succeeded(&mut self, host: HostId) {
+        self.move_party_gone(host, "is gone (succeeded or ended)");
         self.drop_unsent_directives(host);
         self.drop_unsent(host, "claim answers", |m| matches!(m, CoordMsg::ClaimIs { .. } | CoordMsg::HopIs { .. }));
         let parked: Vec<crate::RegionCoords> =

@@ -68,7 +68,10 @@ pub use target::LinkTarget;
 /// long-polling the answers (`login_outbox`); svc-link carries host↔host peer links only
 /// (`PeerRole::Coordinator` and `PeerRole::Login` are never sent: they stay in the enum for the
 /// wire's order).
-pub const LINK_PROTOCOL_VERSION: u32 = 12;
+/// 13: Elastic 5 — moving occupied land in place: `CoordMsg::BeginCut.moves`, `MoveLand`,
+/// `ExpectLand`, `MoveOff`, `CutFailure::MoveRefused`, `Reliable::PlayerMove.place`,
+/// `ServerPacket::LandMoving`.
+pub const LINK_PROTOCOL_VERSION: u32 = 13;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

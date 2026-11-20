@@ -120,7 +120,7 @@ pub use migrate::Carried;
 pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use ownership::{
-    crash_policy_from_value, heir_of, ownership_for, rendezvous_among, super_region_of, AllInOne, CrashPolicy, HostLoad, LandMove, MoveId, SrLoad, LAND_LOAD_MAX, Directory,
+    crash_policy_from_value, heir_of, ownership_for, rendezvous_among, super_region_of, AllInOne, CrashPolicy, HostLoad, LandMove, MoveId, SrLoad, LAND_LOAD_MAX, MOVE_DEADLINE_MS, MOVE_STANDBY_LEAD_SECS, MOVE_WARNING_SECS, Directory,
     Declared, HostId, LandlessEnd, Owner, Ownership, PgClaim, Static, Succession, SuccessionId, SuccessionKind, SuperRegion, DEFAULT_SUPER_REGION_REGIONS, DRAIN_WARNING_SECS, HOST_DEAD, HOST_HEARTBEAT_MS, HOST_LEASE_MS,
     HOST_LIVE, NO_OWNER, SUCCESSION_DEADLINE_MS,
 };

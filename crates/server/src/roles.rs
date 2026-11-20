@@ -492,7 +492,13 @@ pub fn run_coordinator() -> ServerExit {
         ),
         None => log::info!("[coordinator] fleet: {FLEET_MAX_ENV} is unset: the coordinator adds, drains and removes no host"),
     }
+    // Elastic 5: the move warning and the dev / twin probe (refused beside the fleet's dials).
+    let moves = move_dials_from(|name| std::env::var(name).ok(), fleet.is_some()).unwrap_or_else(|e| fatal(e));
+    if let Some(every) = moves.probe_ms {
+        log::warn!("[coordinator] move probe: every {every} ms the busiest occupied super-region moves (dev / twin only)");
+    }
     start.coordinator.set_fleet(fleet);
+    start.coordinator.set_move_dials(moves);
     let token = svc_link::service_token_from_env().unwrap_or_else(|e| fatal(format!("the service token: {e}")));
     let cert_file = cert_hash_file_from(std::env::var(COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
     let fenced = Fenced::default();
@@ -560,6 +566,37 @@ pub fn run_fleet() -> ServerExit {
         .unwrap_or_else(|e| fatal(format!("the Kubernetes API ({}): {e}", crate::fleet::FLEET_KUBE_API_ENV)));
     let stop = crate::watch_stop_signals_on_thread();
     crate::fleet::run(url, config, kube, &stop)
+}
+
+/// Elastic 5: the warning before occupied land moves, in seconds (unset or empty:
+/// [`game::MOVE_WARNING_SECS`]).
+pub const MOVE_WARNING_SECS_ENV: &str = "VOXEL_MOVE_WARNING_SECS";
+/// Elastic 5: the dev / twin move trigger, ms (unset or empty: off) — with no move open, every
+/// that many ms the ticker moves the busiest occupied super-region. Not an operator interface:
+/// refused beside [`FLEET_MAX_ENV`].
+pub const MOVE_PROBE_MS_ENV: &str = "VOXEL_MOVE_PROBE_MS";
+
+/// The move dials from the environment (`var` reads one variable; `fleet`: the fleet's dials are
+/// set). A value that is not a number above 0, or the probe beside the fleet, refuses the start.
+pub fn move_dials_from(var: impl Fn(&str) -> Option<String>, fleet: bool) -> Result<game::coordinator::MoveDials, String> {
+    let read = |name: &str| var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let number = |name: &str, value: &str| -> Result<u64, String> {
+        match value.parse::<u64>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(format!("invalid {name} value `{value}` (expected a number above 0)")),
+        }
+    };
+    let mut dials = game::coordinator::MoveDials::default();
+    if let Some(v) = read(MOVE_WARNING_SECS_ENV) {
+        dials.warning_ms = number(MOVE_WARNING_SECS_ENV, &v)?.saturating_mul(1000);
+    }
+    if let Some(v) = read(MOVE_PROBE_MS_ENV) {
+        if fleet {
+            return Err(format!("{MOVE_PROBE_MS_ENV} is a dev / twin trigger: it is refused beside {FLEET_MAX_ENV}"));
+        }
+        dials.probe_ms = Some(number(MOVE_PROBE_MS_ENV, &v)?);
+    }
+    Ok(dials)
 }
 
 /// The most desired hosts (Elastic 4; unset or empty: no fleet decision at all).

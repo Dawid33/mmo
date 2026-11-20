@@ -36,8 +36,9 @@ use crate::history::persist::HistoryLoadError;
 /// each with the hosts that asked); 6 stamped each attachment with the replica it attached to
 /// (the coordinator HTTP API: an attachment is a host's boot only); 7 had no store time per
 /// attachment (`WorldCuts::attached_ms`, which tells a stalled mailbox's row of the current
-/// attachment from an earlier one's). Nothing was released at 7.
-pub const COORDINATOR_STATE_VERSION: u8 = 8;
+/// attachment from an earlier one's). Nothing was released at 7. 8 had no move runs (Elastic 5:
+/// `moves`, `CutRun.moves`).
+pub const COORDINATOR_STATE_VERSION: u8 = 9;
 
 /// One transition of the core ([`super::Coordinator::take_transition`]): the projection as
 /// bytes — `core`, and `history` when it changed — the messages it released, and the store

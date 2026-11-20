@@ -154,6 +154,8 @@ struct CutRun {
     generation: u64,
     /// [`CutDecide::settles`].
     settles: Vec<SuccessionId>,
+    /// [`CutDecide::moves`] (Elastic 5).
+    moves: Vec<crate::LandMove>,
     /// Participants whose part is staged.
     prepared: BTreeSet<HostId>,
     /// `clock_ms` past which it is aborted.
@@ -413,6 +415,7 @@ impl Coordinator {
     /// (it sends it again with its `Attach`); its mailbox rows are deleted with the transition
     /// holding this (`outbox_drop`).
     pub(super) fn detach_host(&mut self, host: HostId) {
+        self.move_party_gone(host, "is detached");
         self.cuts.attached_ms.remove(&host);
         if self.cuts.attached.remove(&host).is_some() {
             self.drop_mailbox(host);
@@ -555,8 +558,7 @@ impl Coordinator {
             leaving: run.leaving.clone(),
             generation: run.generation,
             settles: run.settles.clone(),
-            // Elastic 5: filled from the run by Task 3.
-            moves: Vec::new(),
+            moves: run.moves.clone(),
         };
         self.push_decision(StoreDecision::DecideCut(d.clone()));
         Some(d)
@@ -705,6 +707,9 @@ impl Coordinator {
         if committed {
             self.successions_settled(&run.settles);
         }
+        if !run.moves.is_empty() {
+            self.move_cut_decided(cut, committed);
+        }
     }
 
     /// `(host, cut)` pairs whose outcome is not known here: look each up in the store
@@ -742,6 +747,21 @@ impl Coordinator {
     /// The lead the next world cut is placed at.
     pub fn world_cut_lead(&self) -> Tick {
         self.cuts.lead
+    }
+
+    /// The world tick as the runtime last set it (Elastic 5: a move's warning counts from it).
+    pub(super) fn world_tick_now(&self) -> Tick {
+        self.cuts.world_tick
+    }
+
+    /// [`Self::world_tick_now`] (a retried move is due at once).
+    pub(super) fn cuts_world_tick(&self) -> Tick {
+        self.cuts.world_tick
+    }
+
+    /// The outcome of cut `cut` if this core remembers it.
+    pub(super) fn cut_outcome_remembered(&self, cut: CutId) -> Option<bool> {
+        self.cuts.outcomes.get(&cut).copied()
     }
 
     /// An `Attach` of `host`: it is attached; a cut not decided yet that it takes part in is
@@ -830,7 +850,9 @@ impl Coordinator {
         // R4: an open succession every recipient answered is settled by the next cut — due
         // `SETTLE_CUT_RETRY_MS` after the last cut ended, not a save period.
         let settle_due = self.settle_due() && now_ms >= self.cuts.last_ms.saturating_add(every.min(SETTLE_CUT_RETRY_MS));
-        if !leave_due && !settle_due && now_ms < self.cuts.last_ms.saturating_add(every) {
+        // Elastic 5: a move whose warning ends within the lead is carried by a cut begun at once.
+        let move_due = self.move_due();
+        if !leave_due && !settle_due && !move_due && now_ms < self.cuts.last_ms.saturating_add(every) {
             return;
         }
         // Every expected host attached, and no attached host outside the set (one that
@@ -889,13 +911,14 @@ impl Coordinator {
         // Only answered successions (every survivor applied, the heir ADOPTED: its part
         // carries `adopts`, Task 9) — none begins otherwise; the store does not check it.
         let settles = self.successions_to_settle();
+        let moves = self.moves_for_cut(cut, &hosts, &leaving);
         log::info!(
             "coordinator: world cut {} at tick {tick} (lead {}) of hosts {hosts:?}, leaving {leaving:?}",
             cut.0,
             self.cuts.lead
         );
         for &h in &hosts {
-            let msg = CoordMsg::BeginCut { cut, tick, hosts: hosts.clone(), leaving: leaving.clone(), generation };
+            let msg = CoordMsg::BeginCut { cut, tick, hosts: hosts.clone(), leaving: leaving.clone(), generation, moves: moves.clone() };
             self.push(Target::Host(h), msg);
         }
         // Its begin is recorded by the transition that starts it (Elastic 1 Task 4: the decision
@@ -908,6 +931,7 @@ impl Coordinator {
             leaving,
             generation,
             settles,
+            moves,
             prepared: BTreeSet::new(),
             deadline_ms: now_ms + WORLD_CUT_DEADLINE_MS,
             verdict: None,
