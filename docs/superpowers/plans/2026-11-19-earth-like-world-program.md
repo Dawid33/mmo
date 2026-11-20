@@ -570,9 +570,14 @@ made during execution, the deferred minors). Code commits `99fc8643` … `c30da2
   too (3.894, rank 0.008) but at 32 m it is `yes` (0.368, rank 0.569), so the monthly miss at 32 m is not inherited
   from the fine raster (the climate grid is a coarser sampling of the same world); under the ruled seed-set rule
   (at most 2 of 8 `no`, median rank ≥ 0.25) both cells pass. The annual-vs-monthly temperature gap (Ruling 13: a p99
-  above 0.3 °C is a finding): Dev 32 m p99 ≤ 0.296 on every seed, Dev 64 m 0.050, Small 32 m 0.148, Medium 32 m
-  0.062, Large 32 m 0.051 — and **Tiny 32 m 0.569 (max 1.046), above the bar**; the ledger's ruling accepting the
-  polar gap was made before Tiny was measured, so this one is open for the whole-plan review (the plan's "As built").
+  above 0.3 °C is a finding), p99 and max: Dev 32 m p99 ≤ 0.296 on every seed (max ≤ 0.545), Dev 64 m 0.050 (max
+  ≤ 0.052), Small 32 m 0.148 (max 1.204), Medium 32 m 0.062 (max 0.664), Large 32 m 0.051 (max 0.342) — and **Tiny 32
+  m 0.569 (max 1.046), above the bar, ACCEPTED by ruling** (the ledger's, verbatim in the plan's "As built": the
+  sea-level placeholder at the polar rows, not a datum defect; Phase 3 replaces the values). The whole-plan review
+  confirmed the cause by the lattice arithmetic: the report's fine lattice takes every 7th row from row 0, and the gap
+  lives in the half climate cell beside each pole (the sampler clamps to its outermost row) — on Tiny at 32 m both row
+  0 and row 399 are sampled, 3.4 % of the points, so the p99 falls inside the cap; on Dev at 32 m row 0 only, 2.7 %;
+  on Small, Medium and Large under 1 %, so their p99 lies outside it and only their maxima show it.
 - **Nothing in this phase moved a forged or stored bit of the existing world.** Both 8-seed reports above are
   identical, line for line, to the ones taken after Task 4 (`diff` of `after4-{32,64}.txt` against today's, the
   recipe's echo lines stripped: no output, 837 lines each), so Tasks 5 and 6 changed no world; and every line of
@@ -582,8 +587,11 @@ made during execution, the deferred minors). Code commits `99fc8643` … `c30da2
   forge_lib::forge_quality_matches_baseline ... ok`, `1 passed; 0 failed`.
 - **Every size timed** (`just forge-bench`): the design's Measurements, "Phase 1b" — Dev 32 m 1.41 s, Tiny 2.52 /
   10.09 s, Small 9.36 / 39.32 s, Medium 39.45 / 162.00 s, Large 169.78 s at 32 m and 666.74 s / 13.5 GB at 16 m;
-  every row from Tiny up within +9 % (time) and +8 % (memory) of Phase 1a's; Dev at 32 m +36 % / +65 % — the world
-  file's zstd encode of the family, not the artifact step (measured against the pre-1b binary). The estimate in
+  every row from Tiny up within +9 % (time) and +8 % (memory) of Phase 1a's; Dev at 32 m +36 % / +65 % — not the
+  artifact step: measured against the pre-1b binary, the world file's zstd level-19 encode of the family explains all
+  of the time (+0.36 s) and +36 of the +51 MB of memory; about 14 MB is not attributed (the third new run's peak is
+  127,656 KiB, corrected in the design). The bench ran on the working tree at `c30da2a4`, which carried the owner's
+  uncommitted `crates/game` edits (`crates/worldgen` itself clean), so it is not strictly `c30da2a4`. The estimate in
   `forge::play` was not refitted (a ruling in the plan's "As built").
 - **Maps:** `just world-map --world target/world-forge/phase1b.world --layer monthly-temperature|monthly-rain
   --month 4|10 --out target/world-forge/phase1b` → `target/world-forge/phase1b-monthly-{temperature,rain}-{04,10}.png`
@@ -601,3 +609,22 @@ made during execution, the deferred minors). Code commits `99fc8643` … `c30da2
   (`cargo clippy -p game -p worldgen --lib --examples -- --cap-lints warn`): no warning on a line from a Phase 1b
   commit (`git blame` of every warned line in the files Phase 1b touched).
 - Status: the controller sets the Status row after the whole-plan review.
+
+**The close (2026-11-20).** Whole-plan review by one reviewer on the most capable model: no Critical finding; two
+Important — the safety net Phases 2 and 3 stand on (`height_crc` + `artifact_rasters_crc`) covered neither the
+monthly family nor the header and knobs, and the design's "raster lists stop being fixed arrays of five and five"
+was dropped without a ruling. One fix wave (commits `db5a8008`, `40def97b` and the closing docs commit): two report
+lines appended after every other, `artifact_climate_crc` (the stored family) and `artifact_header_crc` (`seed`, size,
+cell, grid, `edges`, knobs; not the version or `spawn`) — for the default seed `418415f1` / `4cad807b` at 32 m and
+`6b4efc30` / `3f18af5e` at 64 m; the summary's conservation and gap lines reformatted; the placeholder asserts whole
+climate strides; `bilinear_cells` takes its neighbour index saturating; the docs of `normals_at` (wrap), of the
+canonical ground read (`ground_normals`, `f64`; `lowered_by` does not bit-match it) and of what the gap line can see;
+the dropped clause, the Tiny gap and the crcs recorded as rulings. No test added; both 8-seed dev reports are
+identical to `after4-{32,64}.txt` but for the appended crc lines and the two reformatted summary lines; the gate
+passes untouched. What the review established for the phases that follow: the encodings' ranges hold for a real
+climate with no format change (Phase 3 replaces values only; a saturated value is counted by
+`climate_clamped_values`); Phase 5's bit-identity with the runtime holds at fine-cell centres in MAP metres (power-of-two
+forge cells; the lapse read as `knobs_from_map(&a.knobs).lapse_c_per_km / 1000.0`), not through engine metres; the
+family reaches no client yet — not even single-player's — and the delta codec that packs it is private to `worldgen`
+and compiled out on wasm32, so Phase 6 moves it into `game` (a Known limit). Rulings and accepted leftovers: the
+plan's "As built".

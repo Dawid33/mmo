@@ -599,15 +599,20 @@ So the family can be LOOKED at before Phase 3 fills it with a model, and so the 
 - The container is coarser than Phase 3's planet grid on Dev, Tiny, Small and Medium (1.4° to 1.9°, 0.92° on Medium, against 0.35° to 0.70°): Phase 3 averages down onto it, or raises `CLIMATE_MIN_ROWS` — a value, not a format (Ruling 1).
 - Nothing in the game reads the family yet: biomes, habitat, snow and ice still read the annual rasters (Phases 5 and 6).
 - The annual temperature raster is at the ground and the monthly family at sea level (Review Focus 1).
-- The family reaches a remote client by no path yet (Phase 6 decides how `game` on the client gets it).
+- NO client holds the family yet — not a remote client and not single-player's client either (the world lives in
+  the spawned server; `crates/client` names only paths and version constants). The delta codec that makes it small
+  (`climate_to_wire` / `climate_from_wire`, the row-delta wire helpers) is private to `worldgen` and compiled out on
+  wasm32, so Phase 6 must move it into `game` or re-implement it there to give the family to a client (plain
+  bincode is 28 MiB at Large).
 - The in-game world map shows no monthly layer; only the `world_map` tool does.
 - A world whose sides are not whole climate cells does not forge (Ruling 2).
 - The old-format refusal of a Postgres store is argued from the shared code path, not run (Ruling 17).
 
 ## As built (2026-11-20)
 
-Built in six tasks, each task-reviewed; the whole-plan review and the program's Status row follow this closing task
-(the controller's). Ledger: `.superpowers/sdd/2026-11-20-monthly-climate-container-1b/progress.md` (git-ignored
+Built in six tasks, each task-reviewed (Task 6's review: `task-6-review.md`), then one whole-plan review (one
+reviewer on the most capable model: no Critical, 2 Important) and its one fix wave; the program's Status row is the
+controller's. Ledger: `.superpowers/sdd/2026-11-20-monthly-climate-container-1b/progress.md` (git-ignored
 workspace; the task reports, reviews and the safety-net baselines sit beside it). Evidence: the program's Evidence
 section ("Phase 1b"); measurements: the design's Measurements ("Phase 1b").
 
@@ -621,7 +626,8 @@ section ("Phase 1b"); measurements: the design's Measurements ("Phase 1b").
 | 3 The container in the world file and the tiled store (artifact v10, tiles v3) | `50ebc1ed` |
 | 4 The world-position sampler API | `1fa81891` |
 | 5 A month on the map tool | `c30da2a4` |
-| 6 Measure, evidence, close | this commit and the ones beside it in `git log` |
+| 6 Measure, evidence, close | `057999fa` |
+| Whole-plan review fix wave | `db5a8008` (the two crc lines, the summary, the gap line's wording), `40def97b` (the placeholder's assert, `bilinear_cells` total, the ground-read docs), and the docs commit that carries this section's closing text |
 
 (`7b45b2c4`, between Tasks 3 and 4, is the Phase 3 plan's draft, not this plan's.)
 
@@ -630,6 +636,23 @@ section ("Phase 1b"); measurements: the design's Measurements ("Phase 1b").
 The ledger's, verbatim, in order:
 
 - Ruling: the monthly-vs-annual temperature gap near the poles is accepted as measured (Ruling 13's "p99 above 0.3 is a finding" is met at p99; the maxima 0.55–1.20 °C sit within half a climate cell of the north/south edges and within ~10° of a pole, where the placeholder's latitude + meander clamps at ±90°) — it is a property of the PLACEHOLDER at the polar rows, off the caps the gap is ≤ 0.08 °C, and Phase 3 replaces the values — costs: Phase 6, if started on the placeholder, sees up to ~1 °C inconsistency between annual and monthly temperature at the polar edge.
+- Ruling: `monthly_annual_temp_gap_c` on Tiny at 32 m (p99 0.569, max 1.046 — above Ruling 13's 0.3 bar) is accepted for the same reason as the dev maxima: Tiny's climate cell is 128 m = 1.8° of latitude, so the sampler's clamp to the outermost climate row sits further from the polar edge and the placeholder's latitude clamp kinks there; the lapse cancels at the sampled points (Task 4's review), so it is the sea-level placeholder at the polar rows, not a datum defect — Phase 3 replaces the values and its plan states no latitude is clamped and the annual raster uses the same clamped read as the sampler — costs: until Phase 3 a Tiny world's monthly and annual temperatures disagree by up to ~1 °C within a cell of the poles.
+- Ruling (Task 6's, in "As built"): the forge estimate is not refitted — Dev is 31% / 30% off but is not a menu size; every menu size is within 5.3% (time) and 21.5% (memory).
+
+Made at the close (the controller's, after the whole-plan review):
+
+- Ruling (1): the design's "raster lists stop being fixed arrays of five and five" is NOT built in this phase — the
+  monthly family is a separate resident container, not a generalisation of the fine raster lists, and nothing needs
+  variable-length lists yet — cost: a later phase that adds a FINE raster must still extend the fixed lists
+  (`qrasters`, `byte_rasters`, `q_scale`) and bump the formats. The design's Artifact bullet is struck with a pointer
+  here.
+- Ruling (2): `artifact_rasters_crc` stays as recorded (its fixed list of 19 fields; every baseline depends on it);
+  `artifact_climate_crc` (the stored monthly family: grid, `wrap_x`, the six planes) and `artifact_header_crc`
+  (`seed`, `width_m`, `height_m`, `cell_m`, `nx`, `nz`, `edges`, the knob map; not the version, not `spawn`, which
+  `forge_proto --spawn` rewrites after the build) are appended beside it as the report's last two lines, so Phases 2
+  and 3 can prove "no stored byte changed" on all three — cost: none (appended lines; no existing line moved).
+- Ruling (3): the workspace `.superpowers/sdd/2026-11-20-monthly-climate-container-1b/` is kept after the close —
+  the program's Evidence cites its files — cost: a git-ignored directory on disk.
 
 Made by the tasks (each task report's "Rulings", verbatim):
 
@@ -663,13 +686,28 @@ Made by the tasks (each task report's "Rulings", verbatim):
 - Task 6 — Ruling: Large at 16 m was measured with exactly 21 GB available (the dispatch's bar: more than 20) — it
   peaked at 13.5 GB as in Phase 1a — cost: none.
 
-### Open finding for the whole-plan review
+### Tiny's gap: accepted by ruling
 
-- Ruling 13's bar ("a p99 above 0.3 °C on any size is a finding") is crossed on Tiny: `monthly_annual_temp_gap_c: p99
-  0.569, max 1.046` (`just forge-report --size tiny --cell 32`, default seed; Task 6). The ledger's ruling above
-  accepted the polar gap because the p99 stayed at or under 0.3 on the sizes then measured (Dev 32 m 0.24–0.30, Dev
-  64 m 0.050, Small 32 m 0.148); Medium 32 m is 0.062 (max 0.664) and Large 32 m 0.051 (max 0.342). Where on the
-  Tiny world the gap sits was not measured by this task.
+Ruling 13's bar ("a p99 above 0.3 °C on any size is a finding") is crossed on Tiny: `monthly_annual_temp_gap_c: p99
+0.569, max 1.046` (`just forge-report --size tiny --cell 32`, default seed; Task 6). It is no longer open: the
+ledger's second ruling above ACCEPTS it, and the whole-plan review confirmed the cause by the lattice arithmetic
+(derived, not run): "the lattice takes every 7th fine row from row 0. The gap lives in the half climate cell beside
+each pole (the sampler clamps z to its outermost row). Tiny at 32 m: 400 rows, half-cell = 2 rows, sampled rows 0 …
+399 include BOTH row 0 and row 399 → 2 of 58 rows = 3.4 % of points, so the p99 falls inside the cap. Dev 32 m: row
+0 only, 1 of 37 = 2.7 % → p99 0.24–0.30. Small / Medium / Large: row 0 only, 0.9 % / 0.6 % / 0.6 % → p99 outside
+(0.148 / 0.062 / 0.051). Dev 64 m: stride 1, no half-cell → 0.050." The per-size figures at 32 m, p99 and max: Dev
+0.24–0.30 (max 0.55 over 8 seeds), Tiny 0.569 (max 1.046), Small 0.148 (max 1.204), Medium 0.062 (max 0.664), Large
+0.051 (max 0.342); Dev at 64 m 0.050.
+
+### Measurement corrections (Task 6's review)
+
+- Dev at 32 m, memory: +51 MB measured against the pre-1b binary, of which the zstd level-19 encode of the larger
+  world-file body explains +36 MB; about 14 MB is not attributed. The time (+0.36 s) is fully explained by that
+  encode.
+- The third new run's peak memory is 127,656 KiB (the raw output), not 127,652 (that figure is another run's); the
+  design's Measurements are corrected.
+- The bench ran on the working tree at `c30da2a4`, which carried the owner's uncommitted `crates/game` edits
+  (`crates/worldgen` itself clean), so it is not strictly `c30da2a4`; the design says so.
 
 ### Deferred minors still open (as the ledger words them)
 
@@ -685,6 +723,15 @@ Made by the tasks (each task report's "Rulings", verbatim):
 - Task 4: minor (deferred): summary prints `monthly_precip_conserved_max_rel` with float noise and loses the worst p99 of the gap across seeds → final review fix wave (cosmetic)
 - Task 4: minor (deferred): `game::MonthlyNormals::lowered_by(f32)` vs `ground_normals` lowering in f64 — a Phase 6 caller using the former will not bit-match `monthly_at_ground` → final review fix wave (doc which is canonical)
 - Task 5: minor (deferred): the tool loads the world file twice (bounds, then the layer); the report quotes rain for month 4 only (no month-10 rain values) → Task 6 evidence renders both; final review triage
+
+The whole-plan review's triage (its section C) and the fix wave: fixed — the wrap clause of `normals_at`'s doc
+(Task 1), the header and family crcs (Task 2, as ruling (2)), the gap line's wording (Task 4: it catches a missing or
+mis-scaled lapse on land at fine-cell centres, otherwise it checks the sea-level field), the summary's two lines
+(Task 4), the canonical ground read (`ground_normals`, `f64`; `lowered_by` does not bit-match — Task 4); also the
+placeholder's whole-stride assert and `bilinear_cells`' saturating neighbour index (the review's new minors). Accepted
+as they stand — `read`'s `&dyn Fn`, `latitude_at` beside `latitudes` (not merged: routing one through the other can
+move a bit of the temperature raster), the meta error's prefix, the transient copies, the exact span check, the map
+tool's double load. Already fixed before the review: the 0207 wording, the placeholder's peak memory.
 
 What Task 6 did with the three routed to it: the 0207 wording — at 32 m seed 0207's monthly precipitation seam is
 `no` (2.802, rank 0.016) while its fine precipitation seam is `yes` (0.368, rank 0.569), so it is NOT inherited

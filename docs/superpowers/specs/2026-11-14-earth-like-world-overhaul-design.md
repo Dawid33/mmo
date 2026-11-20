@@ -279,8 +279,12 @@ phase, not once per commit.
   Ice on those edges comes from the climate, as today.
 - **Latitude.** `pole = 3` with the full 90°–0°–90° span over `height_m`.
 - **Artifact.** Stores the knobs, pole and lapse it was forged with (the runtime stops assuming defaults);
-  raster lists stop being fixed arrays of five and five; a coarse raster family exists with its own cell
-  size. Version constants are bumped once for all of it.
+  ~~raster lists stop being fixed arrays of five and five~~ (dropped 2026-11-20 by Phase 1b's closing ruling
+  (1), `2026-11-20-monthly-climate-container-1b.md` "As built": the monthly family is a separate resident
+  container, not a generalisation of the fine raster lists; a later phase that adds a FINE raster still extends
+  the fixed lists and bumps the formats); a coarse raster family exists with its own cell size —
+  `game::MonthlyClimate`, resident whole in the world file and in the tile store's meta (`ForgedMeta`), never in
+  tiles. Version constants are bumped once for all of it.
 - **What it looks like.** The Planet on the CURRENT plate belts and annual climate: today's continents on
   a wider, wrapped, two-pole map. That is the gate, not the goal.
 
@@ -386,7 +390,8 @@ at 16 / 32 m, Large at 32 m only (Large at 16 m is estimated at 13.6 GB).
 
 ### Phase 1b (the monthly-climate container: the Planet plus twelve months of coarse climate)
 
-Measured 2026-11-20 at `c30da2a4` (Phase 1b's last code commit) with the same recipe and machine as Phase 1a, the
+Measured 2026-11-20 at `c30da2a4` (Phase 1b's last code commit) — on the working tree, which carried the owner's
+uncommitted `crates/game` edits (`crates/worldgen` itself clean), so not strictly `c30da2a4` — with the same recipe and machine as Phase 1a, the
 day after: `just forge-bench <width> <height> <cell>` (release; `cap` pins only the build, the forge runs on all 20
 logical cores; i7-12700H laptop, 31 GB RAM; `free -g` showed 21 GB available before the series and again right
 before Large at 16 m, so that row was run; wall time includes writing the PNGs and the world file). One run each,
@@ -429,9 +434,10 @@ each) except the frequency reading; the comparison is still INDICATIVE, a day ap
 32 m is more than 25 % above Phase 1a** (+0.37 s, +0.05 GB) and it is real, not noise: the same command run three times
 each, alternating, with the binary of `758431e7` (the tree before Phase 1b, exported and built apart) gave 1.06 /
 0.99 / 1.02 s and 79,272 / 78,284 / 77,376 KiB against this build's 1.38 / 1.36 / 1.39 s and 128,832 / 129,256 /
-127,652 KiB, and a 429,508 B world file against 980,790 B. It is NOT the artifact step (0.04 s): it is writing the
-world file, whose zstd level-19 body grows from 2.26 to 5.41 MB of bincode on Dev (the family's 3 MiB) — `zstd -19
--T1` over the two bodies, outside the forge, takes 0.47 s / 56 MB and 0.83 s / 92 MB (+0.36 s, +36 MB). It is a
+127,656 KiB, and a 429,508 B world file against 980,790 B. It is NOT the artifact step (0.04 s): the cost is in
+writing the world file, whose zstd level-19 body grows from 2.26 to 5.41 MB of bincode on Dev (the family's 3 MiB) — `zstd -19
+-T1` over the two bodies, outside the forge, takes 0.47 s / 56 MB and 0.83 s / 92 MB (+0.36 s, +36 MB). That
+explains all of the time (+0.36 s) but only +36 of the +51 MB of memory measured; about 14 MB is not attributed. It is a
 per-world cost that the larger sizes hide (their family is 9–13 % of the file; the Dev family is larger than its
 terrain, as the plan's Ruling 1 foresaw). The world files grow by the packed family (+0.37 to +2.66 MB). Against the
 forge's estimate (`forge::play`, Phase 1a's refit: 7.7 s × Mcells^1.02, 70 MB + 172 B per cell) Dev at 32 m is now
