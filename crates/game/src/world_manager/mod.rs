@@ -1901,6 +1901,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.note_unowned(target);
             return false;
         }
+        if self.parking.contains_key(&id) {
+            // Its body is being parked (a move's park keeps the session): no second body.
+            log::debug!("client {id}: a move to {target:?} while its body is parking: refused");
+            return false;
+        }
         let bodiless = !self.homes.contains_key(&id) && !self.moving.contains_key(&id);
         if bodiless && self.is_foreign(target) {
             log::debug!("client {id}: a move to {target:?}, another host's, with no body here: refused");
@@ -2051,7 +2056,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             ServerEvent::ClientPacket(packet, id) if self.observer_drops(id, &packet) => {
                 log::debug!("client {id}: a {} packet from an observer session dropped", client_packet_name(&packet));
             }
-            ServerEvent::ClientPacket(packet, id) if self.restore_pending(id) && defers_until_restored(&packet) => {
+            // Elastic 5 (final review F-C1): a session parked for a move keeps its session and has no
+            // body until the move's cut is decided: what would make it a body waits too.
+            ServerEvent::ClientPacket(packet, id) if (self.restore_pending(id) || self.kept_for_move(id)) && defers_until_restored(&packet) => {
                 self.deferred_packets.entry(id).or_default().push(packet);
             }
             ServerEvent::ClientPacket(packet, id) => match packet {

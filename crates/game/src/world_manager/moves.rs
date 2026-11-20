@@ -51,6 +51,8 @@ pub(super) struct MoveOut {
     kept: Vec<(ClientId, PlayerId)>,
     /// The home sessions told of the move.
     notified: BTreeSet<ClientId>,
+    /// `MoveOff` came while the land was masked (final review F-I1): the cut's abort ends the move.
+    off: bool,
 }
 
 /// The taker's state of one move ([`WorldManager::expect_land`]).
@@ -84,7 +86,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             _ => {
                 log::info!("[server] move {}: super-region {sr:?} moves to host {taker} at tick {at_tick}: warning its players", id.0);
                 self.moving_out
-                    .insert(sr, MoveOut { id, taker, at_tick, masked: None, kept: Vec::new(), notified: BTreeSet::new() });
+                    .insert(sr, MoveOut { id, taker, at_tick, masked: None, kept: Vec::new(), notified: BTreeSet::new(), off: false });
             }
         }
         let now = self.clock_ms;
@@ -103,6 +105,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `CoordMsg::MoveOff`: the move is called off. The giver's warned sessions are told; the
     /// taker releases what it held (the ordinary path).
     pub(super) fn move_off(&mut self, id: MoveId, sr: SuperRegion) {
+        // Masked (its cut not settled here yet): the abort that is coming ends it (final review F-I1).
+        if let Some(m) = self.moving_out.get_mut(&sr).filter(|m| m.id == id && m.masked.is_some()) {
+            m.off = true;
+        }
         if let Some(m) = self.moving_out.get(&sr).filter(|m| m.id == id && m.masked.is_none()) {
             log::info!("[server] move {} of super-region {sr:?} is off", id.0);
             let told: Vec<ClientId> = m.notified.iter().copied().collect();
@@ -135,6 +141,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.release_held(m);
             }
         }
+    }
+
+    /// Whether `client`'s session is parked for a move here (its restore waits for the cut).
+    pub(super) fn kept_for_move(&self, client: ClientId) -> bool {
+        self.moving_out.values().any(|m| m.kept.iter().any(|(c, _)| *c == client))
     }
 
     /// Whether `sr` is masked by a move here (the giver's part moves it, or a peer's does).
@@ -311,6 +322,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// moved land and turns into an observer.
     fn hand_over_moved(&mut self, c: ClientId, player: PlayerId, taker: HostId, now_ms: u64) {
         self.parking.remove(&c);
+        // What it asked during the pause is its new home's to answer (the client asks again there).
+        self.deferred_packets.remove(&c);
         let Some(record) = self.parked_players.remove(&player) else {
             log::error!("[server] move: player {} (client {c}) has no parked record here; the store holds it on the taker's land", player.0);
             return;
@@ -359,7 +372,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             let kept = std::mem::take(&mut m.kept);
             log::info!("[server] world cut {} aborted: move {} of {sr:?} stays here; {} player(s) restored", cut.0, m.id.0, kept.len());
             for (c, player) in kept {
-                self.parking.remove(&c);
+                if self.parking.get(&c).is_some_and(|p| p.player == player) {
+                    // Its park has not answered yet (the cut aborted first): the park stays in
+                    // flight and the session waits for it — `park_settled` restores it and replays
+                    // what it asked meanwhile. Never dropped: the record is on its way.
+                    if self.sessions.contains_key(&c) && self.player_of.get(&c) == Some(&player) {
+                        self.awaiting_park.insert(player, (c, None));
+                    }
+                    continue;
+                }
                 if !self.sessions.contains_key(&c) || self.player_of.get(&c) != Some(&player) {
                     // Gone meanwhile: its parked record stays (a login places it).
                     continue;
@@ -367,6 +388,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                 match self.take_parked(player) {
                     Some(record) => self.restore_player(c, record, now_ms),
                     None => log::error!("[server] move aborted: player {} (client {c}) has no parked record to restore", player.0),
+                }
+                // What it asked during the pause goes on now (final review F-C1).
+                for packet in self.deferred_packets.remove(&c).unwrap_or_default() {
+                    self.handle_server_event(crate::ServerEvent::ClientPacket(packet, c), now_ms);
+                }
+            }
+            // `MoveOff` came during the cut (final review F-I1): the move ends here, the notices clear.
+            if self.moving_out.get(&sr).is_some_and(|m| m.off) {
+                if let Some(m) = self.moving_out.remove(&sr) {
+                    log::info!("[server] move {} of {sr:?} is off", m.id.0);
+                    for c in m.notified {
+                        let _ = self.out.send((Some(c), ServerPacket::LandMoving { super_region: sr, at_tick: None, standby: None }));
+                    }
                 }
             }
         }
@@ -395,7 +429,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ends and what was held for it is delivered here.
     pub(super) fn moved_in(&mut self, sr: SuperRegion) {
         if let Some(m) = self.expecting.remove(&sr) {
-            log::info!("[server] move {}: super-region {sr:?} is this host's; {} held player(s) placed", m.id.0, m.held.len());
+            log::info!("[server] move {}: super-region {sr:?} from host {} is this host's; {} held player(s) placed", m.id.0, m.giver, m.held.len());
             self.release_held(m);
         }
     }
@@ -443,12 +477,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             .map(|(sr, _)| *sr)
             .collect();
         for sr in late {
-            if let Some(m) = self.expecting.get_mut(&sr) {
+            // The expectation ends (final review F-I2): released, a player is not held again — it
+            // takes the ordinary path (parked here: the client rejoins).
+            if let Some(m) = self.expecting.remove(&sr) {
                 log::warn!("[server] move {}: {sr:?} is not this host's after {MOVE_HOP_WAIT_MS} ms; its held players take the ordinary path", m.id.0);
-                let held = std::mem::take(&mut m.held);
-                let id = m.id;
-                let giver = m.giver;
-                self.release_held(MoveIn { id, giver, cut: None, committed: false, held });
+                self.release_held(m);
             }
         }
         if let Some(directory) = self.ownership.0.directory() {

@@ -37,6 +37,9 @@ use crate::{CutId, HostId, LandMove, MoveId, SuperRegion, Tick, HOST_LIVE};
 pub const MOVE_CUT_TRIES: u32 = 3;
 /// How long (store ms) land whose move was abandoned is not warned again.
 pub const MOVE_RETRY_AFTER_MS: u64 = 600_000;
+/// How long (ms) a move whose cut the giver refused waits before the next cut (a login on the land
+/// settles meanwhile).
+pub const MOVE_REFUSED_RETRY_MS: u64 = 5_000;
 /// How many abandoned moves an evacuation takes before it falls back to the warned drain.
 pub const MOVE_ABANDON_MAX: u32 = 2;
 /// How long (store ms) an evacuation may run before it falls back to the warned drain.
@@ -74,6 +77,11 @@ struct MoveRun {
     deadline_ms: u64,
     /// Store ms the run was opened at.
     opened_ms: u64,
+    /// The giver refused the running cut's part (`CutFailure::MoveRefused`: a spawn order or a
+    /// player between states on the land): its abort is retried after [`MOVE_REFUSED_RETRY_MS`]
+    /// and spends no try (final review F-I4); the deadline still ends the run.
+    #[serde(default)]
+    refused: bool,
 }
 
 /// The move runs (durable, in the projection).
@@ -275,10 +283,18 @@ impl Coordinator {
             at_tick,
             deadline_ms: now_ms + warning_ms + crate::MOVE_DEADLINE_MS,
             opened_ms: now_ms,
+            refused: false,
         });
         self.move_counts.opened += 1;
         self.clean_checked = false;
         true
+    }
+
+    /// The giver refused cut `cut`'s part for a move (`CutFailure::MoveRefused`, `world_cut.rs`).
+    pub(super) fn move_refused(&mut self, cut: CutId) {
+        if let Some(run) = self.moves.open.as_mut().filter(|r| matches!(r.state, MoveState::Cutting { cut: c, .. } if c == cut)) {
+            run.refused = true;
+        }
     }
 
     /// Whether the open move wants a cut now (`maintain_cuts`: a cut begins at once).
@@ -334,10 +350,21 @@ impl Coordinator {
             return;
         }
         let parties_here = g_now == Some(run.giver_boot) && t_now == Some(run.mv.taker_boot);
+        let refused = std::mem::take(&mut run.refused);
+        if refused {
+            // A refusal spends no try (final review F-I4): it waits for the land to settle.
+            run.tries = run.tries.saturating_sub(1);
+        }
         if !doomed && parties_here && run.tries < MOVE_CUT_TRIES && now_ms < run.deadline_ms {
-            log::info!("coordinator: move {}: cut {} aborted; tried again with the next cut", run.mv.id.0, cut.0);
+            let wait = if refused { MOVE_REFUSED_RETRY_MS / crate::TICK_RATE } else { 0 };
+            log::info!("coordinator: move {}: cut {} aborted; tried again in {wait} ticks", run.mv.id.0, cut.0);
             run.state = MoveState::Warning;
-            run.at_tick = world_tick;
+            run.at_tick = world_tick + wait;
+            // The orders again (final review F-I3): a party that re-attached during the cut lost
+            // them, and the clients' tick moves.
+            let (mv, at_tick) = (run.mv, run.at_tick);
+            self.push(Target::Host(mv.giver), CoordMsg::MoveLand { id: mv.id, sr: mv.sr, taker: mv.taker, at_tick });
+            self.push(Target::Host(mv.taker), CoordMsg::ExpectLand { id: mv.id, sr: mv.sr, giver: mv.giver, at_tick });
             return;
         }
         let why = if doomed || !parties_here { "a party is gone" } else if run.tries >= MOVE_CUT_TRIES { "its cuts aborted" } else { "past its deadline" };
@@ -446,10 +473,8 @@ impl Coordinator {
             self.move_party_gone(host, "came back as another process");
             return;
         }
-        if run.state != MoveState::Warning {
-            // `cut_attach` aborted the cut it takes part in: the outcome retries (or abandons).
-            return;
-        }
+        // Re-sent in every state (final review F-I3): the `Attach` dropped its older rows — a
+        // `BeginCut` among them; the host keeps a masked or cut entry of the same id as it is.
         let at_tick = run.at_tick;
         if is_giver {
             self.push(Target::Host(host), CoordMsg::MoveLand { id: mv.id, sr: mv.sr, taker: mv.taker, at_tick });

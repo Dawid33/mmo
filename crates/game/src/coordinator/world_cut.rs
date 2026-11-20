@@ -816,6 +816,9 @@ impl Coordinator {
     }
 
     pub(super) fn cut_failed(&mut self, host: HostId, cut: CutId, why: CutFailure) {
+        if why == CutFailure::MoveRefused {
+            self.move_refused(cut);
+        }
         match self.cuts.run.as_mut() {
             Some(run) if run.cut == cut => {
                 if run.verdict.is_none() && run.has(host) {
