@@ -135,7 +135,7 @@ The Phase 1a plan and the design were written against the tree and the rules of 
 | 3 | Monthly climate | PLANNED 2026-11-20 (builder check settled; re-check Phases 1b's and 2's symbols at dispatch) | `2026-11-20-monthly-climate-3.md` | — |
 | 4 | Water and ice | PLANNED 2026-11-20 (builder check settled; 11 items in a reduced first form by ruling; re-check Phases 2's and 3's symbols at dispatch) | `2026-11-20-water-and-ice-4.md` | — |
 | 5 | Biomes | TODO | — | — |
-| 6 | Runtime seasons and weather | TODO | — | — |
+| 6 | Runtime seasons and weather | PLANNED 2026-11-20 (builder check settled; Tasks 1–17 may run on the placeholder; the close waits for Phase 3) | `2026-11-20-runtime-seasons-and-weather-6.md` | — |
 | 7 | The wrap across hosts (`claim` worlds) | TODO | — | — |
 
 DEFERRED is allowed only where a phase's notes say so, with the reason written in the row.
