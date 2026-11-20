@@ -148,7 +148,9 @@ fn drive_full_map(
         if let Some(at) = player_block(&body, cam.as_deref()) {
             view.centre = at;
         }
-        view.m_per_px = MINIMAP_M_PER_PX.clamp(FULL_MAP_MIN_M_PER_PX, max_m);
+        // The minimap's zoom is per window (logical) pixel; the view's per physical pixel.
+        let dpi = window.single().map_or(1.0, |w| w.scale_factor());
+        view.m_per_px = (MINIMAP_M_PER_PX / dpi).clamp(FULL_MAP_MIN_M_PER_PX, max_m);
     }
     pushed.open = open;
     // View logical px → window physical px.

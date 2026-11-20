@@ -659,10 +659,6 @@ fn push_hud_state(
         let image = |data: &[[u8; 4]], edge: u32| {
             SlintImage::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(data.as_flattened(), edge, edge))
         };
-        if pixels.base_dirty {
-            ui.set_minimap_base(image(&pixels.base, minimap::BASE_PX));
-            pixels.base_dirty = false;
-        }
         if pixels.overlay_dirty {
             ui.set_minimap_overlay(image(&pixels.overlay, minimap::OVERLAY_PX));
             pixels.overlay_dirty = false;

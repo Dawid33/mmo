@@ -1,18 +1,20 @@
-//! The minimap: a square in the bottom-left corner showing the home region
-//! (the one the commander plays in) from above. Two stacked images: the terrain (coloured from the height grid,
-//! rebuilt when it changes) and an overlay redrawn at [`OVERLAY_HZ`] with a
-//! dot per entity and the camera's ground footprint. Left press or drag on it
-//! moves the camera there; right click stays free for Phase 4 orders.
-//!
-//! Orientation: north (−z) up, like the camera; image row 0 is the region's
-//! minimum z. Nothing shows until the home region is known.
+//! The minimap: a square in the bottom-left corner, the world map's tiles (`renderer/map`) drawn by a
+//! [`MapView`] centred on the player (the commander camera's focus in the mayor's view), north (−z) up,
+//! [`MinimapZoom`] metres per window pixel (the wheel over it zooms, [`MINIMAP_M_PER_PX_MIN`] ..=
+//! [`MINIMAP_M_PER_PX_MAX`]). Over it the HUD draws an overlay redrawn at [`OVERLAY_HZ`]: a dot per
+//! entity and the camera's ground footprint, placed through the same view. Left press or drag on it moves
+//! the camera there; right click stays free for Phase 4 orders. Nothing shows until the home region is
+//! known.
 
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::math::DVec2;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::EntityKind;
 
-use super::height::HeightGrid;
 use super::selection::Selection;
+use crate::renderer::map::views::MINIMAP_M_PER_PX;
+use crate::renderer::map::MapView;
 use super::{CommanderCamera, CommanderView};
 use crate::renderer::bridge::{SimEntity, SimKind};
 use crate::renderer::cursor::CursorPolicy;
@@ -25,11 +27,13 @@ pub const MINIMAP_MARGIN_PX: f32 = 12.0;
 pub const OVERLAY_HZ: f32 = 10.0;
 /// Overlay image edge in pixels (finer than the terrain so lines stay thin).
 pub const OVERLAY_PX: u32 = 440;
-/// Terrain image edge in pixels. Each pixel samples the block column at its
-/// centre, so a region wider than this many blocks is subsampled.
-pub const BASE_PX: u32 = 256;
-/// Shortest gap between two terrain rebuilds while chunks stream in.
-pub const BASE_REBUILD_S: f32 = 0.25;
+/// The closest and farthest minimap zoom (metres per window pixel).
+pub const MINIMAP_M_PER_PX_MIN: f32 = 0.5;
+pub const MINIMAP_M_PER_PX_MAX: f32 = 8.0;
+/// The wheel's zoom per notch over the minimap.
+pub const MINIMAP_ZOOM_STEP: f32 = 1.25;
+/// Pixels of a wheel "line" (as the Slint layers count one).
+const WHEEL_LINE_PX: f32 = 40.0;
 /// Entity dot half-size, overlay pixels.
 pub const DOT_RADIUS_PX: i32 = 2;
 /// How far a footprint corner whose ray misses the ground plane is put, as a
@@ -47,15 +51,74 @@ pub fn screen_rect(window: Vec2) -> Rect {
     Rect::new(x0, y1 - MINIMAP_SIZE_PX, x0 + MINIMAP_SIZE_PX, y1)
 }
 
-/// Window point on the minimap → world (x, z) on the map.
-pub fn screen_to_map(cursor: Vec2, screen: Rect, map: Rect) -> Vec2 {
-    let t = ((cursor - screen.min) / screen.size()).clamp(Vec2::ZERO, Vec2::ONE);
-    map.min + t * map.size()
+/// The minimap's view entity.
+#[derive(Component)]
+pub struct MinimapView;
+
+/// The minimap's zoom (metres per window pixel); a preference, kept across sessions.
+#[derive(Resource)]
+pub struct MinimapZoom(pub f32);
+
+impl Default for MinimapZoom {
+    fn default() -> Self {
+        MinimapZoom(MINIMAP_M_PER_PX)
+    }
 }
 
-/// World (x, z) → minimap pixel (fractional) in an image of edge `px`.
-pub fn map_to_pixel(world: Vec2, map: Rect, px: u32) -> Vec2 {
-    (world - map.min) / map.size() * px as f32
+/// World `p` (render-frame sim units, x, z) → overlay pixel (fractional) in an image of edge `px`
+/// covering `view`'s rect.
+pub fn world_to_overlay(view: &MapView, p: Vec2, px: u32) -> Vec2 {
+    let unit = game::movement::UNITS_PER_METER as f64;
+    let s = view.world_to_screen(DVec2::new(p.x as f64 / unit, p.y as f64 / unit));
+    (s - view.rect.min) / view.rect.size() * px as f32
+}
+
+/// Keep the minimap's view on the player, its rect on the HUD's square and its zoom on the wheel over it.
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
+pub fn update_minimap_view(
+    mut commands: Commands,
+    mut views: Query<&mut MapView, With<MinimapView>>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    hud: Option<NonSend<crate::renderer::slint_overlay::SlintLayer<slint_ui::HudUi>>>,
+    game_ui: Option<NonSend<crate::renderer::slint_overlay::SlintLayer<slint_ui::GameUi>>>,
+    body: Query<&GlobalTransform, With<crate::renderer::bridge::LocalBody>>,
+    cam: Res<CommanderCamera>,
+    policy: Res<CursorPolicy>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut zoom: ResMut<MinimapZoom>,
+) {
+    let Ok(mut view) = views.single_mut() else {
+        commands.spawn((MinimapView, MapView::default(), crate::session::SessionScoped));
+        return;
+    };
+    let Ok(window) = window.single() else { return };
+    let rect = screen_rect(window.size());
+    let over = window.cursor_position().is_some_and(|c| rect.contains(c)) && !policy.blocks_game() && !policy.ui_pointer;
+    for event in wheel.read() {
+        if !over {
+            continue;
+        }
+        let notches = match event.unit {
+            MouseScrollUnit::Line => event.y,
+            MouseScrollUnit::Pixel => event.y / WHEEL_LINE_PX,
+        };
+        zoom.0 = (zoom.0 * MINIMAP_ZOOM_STEP.powf(-notches)).clamp(MINIMAP_M_PER_PX_MIN, MINIMAP_M_PER_PX_MAX);
+    }
+    let scale = window.scale_factor();
+    view.rect = Rect::from_corners(rect.min * scale, rect.max * scale);
+    view.m_per_px = zoom.0 / scale;
+    if let Some(at) = crate::renderer::map::full::player_block(&body, Some(&cam)) {
+        view.centre = at;
+    }
+    // Shown with the HUD's minimap, and never under the open full map (both are the map pass's).
+    let shown = hud.is_some_and(|h| h.overlay.ui().get_minimap_visible());
+    let map_open = game_ui.is_some_and(|g| g.overlay.ui().get_map_open());
+    view.visible = shown && !map_open;
+}
+
+/// Whether the window point `cursor` (logical px) is over the minimap.
+pub fn over_minimap(window: &Window, cursor: Vec2) -> bool {
+    screen_rect(window.size()).contains(cursor)
 }
 
 /// Pointer state: a left press that started on the minimap drags the camera
@@ -65,30 +128,23 @@ pub struct MinimapPointer {
     pub dragging: bool,
 }
 
-/// The minimap's pixels (RGBA, row 0 = the region's minimum z), drawn by the
-/// HUD layer (`HudUi`): the terrain base and the dots/footprint overlay. A
-/// buffer is uploaded to Slint when its `*_dirty` flag is set.
+/// The minimap overlay's pixels (RGBA, row 0 = the view's top), drawn by the HUD layer (`HudUi`) over
+/// the map pass: the dots and the footprint. Uploaded to Slint when `overlay_dirty` is set.
 #[derive(Resource)]
 pub struct MinimapPixels {
-    pub base: Vec<[u8; 4]>,
     pub overlay: Vec<[u8; 4]>,
-    pub base_dirty: bool,
     pub overlay_dirty: bool,
 }
 
 impl Default for MinimapPixels {
     fn default() -> Self {
-        Self {
-            base: vec![[0; 4]; (BASE_PX * BASE_PX) as usize],
-            overlay: vec![[0; 4]; (OVERLAY_PX * OVERLAY_PX) as usize],
-            base_dirty: false,
-            overlay_dirty: false,
-        }
+        Self { overlay: vec![[0; 4]; (OVERLAY_PX * OVERLAY_PX) as usize], overlay_dirty: false }
     }
 }
 
 /// Left press / drag on the minimap → move the camera focus there.
 pub fn minimap_pointer(
+    views: Query<&MapView, With<MinimapView>>,
     mut follow: ResMut<super::follow::Follow>,
     buttons: Res<ButtonInput<MouseButton>>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -109,87 +165,13 @@ pub fn minimap_pointer(
     {
         pointer.dragging = true;
     }
-    if let (true, Some(bounds)) = (pointer.dragging, cam.bounds) {
-        cam.focus = screen_to_map(cursor, rect, bounds);
+    let Ok(view) = views.single() else { return };
+    if pointer.dragging && view.visible {
+        let unit = game::movement::UNITS_PER_METER as f64;
+        let at = view.screen_to_world(cursor.clamp(rect.min, rect.max) * window.scale_factor()) * unit;
+        cam.focus = Vec2::new(at.x as f32, at.y as f32);
         follow.0 = None;
     }
-}
-
-/// Colour of one map column (port of `worldgen/examples/world_map.rs`
-/// `base_color`): water darkens with depth, sand at the shore, land by the
-/// shared elevation ramp `worldgen::tile_map::height_color`. Heights in
-/// metres; NaN = not loaded.
-pub fn column_color(surface_m: f32, ground_m: f32) -> [u8; 4] {
-    if surface_m.is_nan() {
-        return [0, 0, 0, 0];
-    }
-    let sea = worldgen::pipeline::SEA_LEVEL as f32;
-    let rgb = if ground_m.is_nan() || surface_m > ground_m + 0.01 {
-        let depth = if ground_m.is_nan() { 128.0 } else { surface_m - ground_m };
-        ramp(
-            &[
-                (0.0, [110.0, 190.0, 215.0]),
-                (8.0, [60.0, 140.0, 200.0]),
-                (40.0, [30.0, 80.0, 160.0]),
-                (128.0, [12.0, 30.0, 90.0]),
-            ],
-            depth,
-        )
-    } else if ground_m <= sea + 1.0 {
-        [222.0, 205.0, 150.0]
-    } else {
-        worldgen::tile_map::height_color(f64::from(ground_m - sea)).map(|c| c as f32)
-    };
-    [rgb[0] as u8, rgb[1] as u8, rgb[2] as u8, 255]
-}
-
-/// Piecewise-linear colour ramp over ascending `(value, rgb)` stops.
-fn ramp(stops: &[(f32, [f32; 3])], v: f32) -> [f32; 3] {
-    let mut prev = stops[0];
-    for &stop in stops {
-        if v <= stop.0 {
-            let span = (stop.0 - prev.0).max(f32::EPSILON);
-            let t = ((v - prev.0) / span).clamp(0.0, 1.0);
-            return std::array::from_fn(|i| prev.1[i] + (stop.1[i] - prev.1[i]) * t);
-        }
-        prev = stop;
-    }
-    prev.1
-}
-
-/// Recolour the terrain image when the height grid changed (rate-limited
-/// while the join streams chunks in).
-pub fn rebuild_minimap_base(
-    grid: Res<HeightGrid>,
-    cam: Res<CommanderCamera>,
-    mut pixels: ResMut<MinimapPixels>,
-    time: Res<Time>,
-    mut built: crate::session::SessionLocal<Option<(u64, Option<Rect>)>>,
-    mut since: Local<f32>,
-) {
-    let built = built.get();
-    *since += time.delta_secs();
-    let key = (grid.version, cam.bounds);
-    if *built == Some(key) || *since < BASE_REBUILD_S {
-        return;
-    }
-    let data = &mut pixels.base;
-    let unit = game::movement::UNITS_PER_METER;
-    let px = BASE_PX as usize;
-    for py in 0..px {
-        for pxx in 0..px {
-            let i = pxx + px * py;
-            let color = cam.bounds.and_then(|b| {
-                let at = b.min + (Vec2::new(pxx as f32, py as f32) + 0.5) / px as f32 * b.size();
-                grid.column_at(at.x, at.y)
-            });
-            let color = color.map_or([0; 4], |(surface, ground)| column_color(surface / unit, ground / unit));
-            data[i] = color;
-        }
-    }
-    pixels.base_dirty = true;
-    *built = Some(key);
-    *since = 0.0;
 }
 
 /// The camera's ground footprint: where the four screen-corner rays meet the
@@ -222,6 +204,7 @@ pub fn draw_minimap_overlay(
     selection: Res<Selection>,
     cam: Res<CommanderCamera>,
     view: Query<(&Camera, &Transform), With<CommanderView>>,
+    map: Query<&MapView, With<MinimapView>>,
 ) {
     *since += time.delta_secs();
     if *since < 1.0 / OVERLAY_HZ {
@@ -233,7 +216,9 @@ pub fn draw_minimap_overlay(
     let data = &mut *scratch;
     data.clear();
     data.resize((OVERLAY_PX * OVERLAY_PX) as usize, [0; 4]);
-    draw_overlay(data, &entities, &selection, &cam, &view);
+    if let Ok(map) = map.single() {
+        draw_overlay(data, &entities, &selection, &cam, &view, map);
+    }
     if *data != pixels.overlay {
         std::mem::swap(data, &mut pixels.overlay);
         pixels.overlay_dirty = true;
@@ -246,8 +231,11 @@ fn draw_overlay(
     selection: &Selection,
     cam: &CommanderCamera,
     view: &Query<(&Camera, &Transform), With<CommanderView>>,
+    map: &MapView,
 ) {
-    let Some(map) = cam.bounds else { return };
+    if !map.visible || map.rect.width() <= 0.0 {
+        return;
+    }
     let px = OVERLAY_PX;
     let mut put = |x: i32, y: i32, c: [u8; 4]| {
         if x >= 0 && y >= 0 && (x as u32) < px && (y as u32) < px {
@@ -259,7 +247,7 @@ fn draw_overlay(
             continue; // commanders have no body to show
         }
         let p = gt.translation();
-        let at = map_to_pixel(Vec2::new(p.x, p.z), map, px).as_ivec2();
+        let at = world_to_overlay(map, Vec2::new(p.x, p.z), px).as_ivec2();
         let color = if selection.contains(sim.region, sim.key) { SELECTED_DOT_COLOR } else { DOT_COLOR };
         for dy in -DOT_RADIUS_PX..=DOT_RADIUS_PX {
             for dx in -DOT_RADIUS_PX..=DOT_RADIUS_PX {
@@ -275,8 +263,8 @@ fn draw_overlay(
             if let [Some(a), Some(b), Some(c), Some(d)] = rays {
                 let quad = footprint([a, b, c, d], cam.ground_y);
                 for k in 0..4 {
-                    let from = map_to_pixel(quad[k], map, px);
-                    let to = map_to_pixel(quad[(k + 1) % 4], map, px);
+                    let from = world_to_overlay(map, quad[k], px);
+                    let to = world_to_overlay(map, quad[(k + 1) % 4], px);
                     let steps = from.distance(to).ceil().max(1.0) as i32;
                     for s in 0..=steps {
                         let p = from.lerp(to, s as f32 / steps as f32);

@@ -32,12 +32,23 @@ const COLUMNS: usize = CHUNK_BLOCKS * CHUNK_BLOCKS;
 pub struct ChunkTops {
     pub surface: [u16; COLUMNS],
     pub ground: [u16; COLUMNS],
+    /// The block at `surface` (the map's colour; `AIR` where `surface` is 0).
+    pub surface_block: [BlockId; COLUMNS],
 }
 
 impl Default for ChunkTops {
     fn default() -> Self {
-        Self { surface: [0; COLUMNS], ground: [0; COLUMNS] }
+        Self { surface: [0; COLUMNS], ground: [0; COLUMNS], surface_block: [BlockId::AIR; COLUMNS] }
     }
+}
+
+/// One loaded block column as the map paints it (`renderer/map/paint.rs`): the top of its top block
+/// (whole metres, world y), that block, and its recipe water's top block, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapColumn {
+    pub height_m: i16,
+    pub block: BlockId,
+    pub water_top: Option<i16>,
 }
 
 /// Topmost voxel of voxel column `(vx, vz)` that is neither air nor liquid
@@ -85,6 +96,7 @@ pub fn chunk_tops(chunk: &Chunk) -> ChunkTops {
             let (vx, vz) = (bx * BLOCK_VOXELS + centre, bz * BLOCK_VOXELS + centre);
             let column = bx + CHUNK_BLOCKS * bz;
             tops.surface[column] = surface.0[column].map_or(0, |(y, _)| y);
+            tops.surface_block[column] = surface.0[column].map_or(BlockId::AIR, |(_, id)| id);
             tops.ground[column] = match chunk.column_top(vx as u32, vz as u32) {
                 Some((y, id)) if !game::block_props().is_liquid(id) => (y + 1) as u16,
                 Some(_) => top_not(chunk, vx, vz).map_or(0, |y| (y + 1) as u16),
@@ -123,6 +135,10 @@ pub struct HeightGrid {
     /// Recipe water per world block column: the topmost water block y
     /// (`ColumnGround::water_top`), from the regions' ground recipes.
     water_tops: HashMap<(i32, i32), i16>,
+    /// Per loaded block column with a top block: what the map paints there.
+    map_columns: HashMap<(i32, i32), MapColumn>,
+    /// Chunk columns (cx, cz) re-derived since the map last took them ([`Self::take_dirty`]).
+    dirty: std::collections::BTreeSet<(i32, i32)>,
     /// Bumped on every change, so readers (the minimap) can rebuild lazily.
     pub version: u64,
 }
@@ -140,6 +156,8 @@ impl HeightGrid {
             stacks: HashMap::new(),
             by_entity: HashMap::new(),
             water_tops: HashMap::new(),
+            map_columns: HashMap::new(),
+            dirty: std::collections::BTreeSet::new(),
             version: 0,
         }
     }
@@ -154,6 +172,16 @@ impl HeightGrid {
     /// (x, z); `None` where nothing is loaded (either may be NaN).
     pub fn column_at(&self, x: f32, z: f32) -> Option<(f32, f32)> {
         self.columns.get(&block_of(x, z)).copied()
+    }
+
+    /// Block column (x, z) as the map paints it; `None` where nothing (or only air) is loaded.
+    pub fn map_column(&self, x: i32, z: i32) -> Option<MapColumn> {
+        self.map_columns.get(&(x, z)).copied()
+    }
+
+    /// The chunk columns (cx, cz) re-derived since the last call.
+    pub fn take_dirty(&mut self) -> std::collections::BTreeSet<(i32, i32)> {
+        std::mem::take(&mut self.dirty)
     }
 
     /// Lowest and highest solid surface over the loaded columns (world y, sim
@@ -238,6 +266,7 @@ impl HeightGrid {
                 let block = (cx * blocks + bx as i32, cz * blocks + bz as i32);
                 let Some(stack) = stack else {
                     self.columns.remove(&block);
+                    self.map_columns.remove(&block);
                     continue;
                 };
                 let column = bx + CHUNK_BLOCKS * bz;
@@ -252,6 +281,20 @@ impl HeightGrid {
                         .map_or(f32::NAN, |(cy, t)| *cy as f32 * chunk + pick(t)[column] as f32)
                 };
                 let (mut surface, ground) = (top(|t| &t.surface), top(|t| &t.ground));
+                // The map's column: the highest chunk's top block, in whole metres.
+                let map = stack.iter().rev().find(|(_, t)| t.surface[column] > 0).map(|(cy, t)| {
+                    let voxels = *cy as i64 * CHUNK_EDGE as i64 + i64::from(t.surface[column]);
+                    let m = (voxels + BLOCK_VOXELS as i64 - 1).div_euclid(BLOCK_VOXELS as i64);
+                    MapColumn {
+                        height_m: m.clamp(i16::MIN as i64, i16::MAX as i64) as i16,
+                        block: t.surface_block[column],
+                        water_top: self.water_tops.get(&block).copied(),
+                    }
+                });
+                match map {
+                    Some(c) => self.map_columns.insert(block, c),
+                    None => self.map_columns.remove(&block),
+                };
                 // Recipe water stands over the ground; the column must be loaded.
                 if let Some(&water) = self.water_tops.get(&block) {
                     surface = surface.max((i32::from(water) + 1) as f32 * BLOCK_VOXELS as f32);
@@ -259,6 +302,7 @@ impl HeightGrid {
                 self.columns.insert(block, (surface, ground));
             }
         }
+        self.dirty.insert((cx, cz));
         self.version += 1;
     }
 

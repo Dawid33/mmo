@@ -5,6 +5,7 @@
 //! [`MapTiles`], which belongs to the WORLD: a session end keeps it, another world clears it.
 
 pub mod full;
+pub mod paint;
 pub mod palette;
 pub mod pass;
 pub mod store;
@@ -23,6 +24,7 @@ impl Plugin for MapPlugin {
         store::build(app);
         pass::build(app);
         full::build(app);
+        paint::build(app);
         app.add_systems(PostUpdate, views::collect_map_draws);
     }
 

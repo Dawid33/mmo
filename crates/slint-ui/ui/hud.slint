@@ -41,9 +41,9 @@ export component HudUi inherits Window {
     in property <length> band-width;
     in property <length> band-height;
 
-    // Commander minimap: terrain base + entity/footprint overlay.
+    // The minimap: the client draws the map under this layer into the square (`renderer/map`); this
+    // draws its outline and the entity/footprint overlay over it.
     in property <bool> minimap-visible;
-    in property <image> minimap-base;
     in property <image> minimap-overlay;
 
     // The chat's newest lines while its box is closed (the client drops each
@@ -72,22 +72,17 @@ export component HudUi inherits Window {
         y: root.height - HudConfig.minimap-margin - HudConfig.minimap-size - HudConfig.minimap-outline;
         width: HudConfig.minimap-size + 2 * HudConfig.minimap-outline;
         height: self.width;
-        background: rgba(0, 0, 0, 0.8);
+        // A border only: the map shows through the square inside it.
+        border-width: HudConfig.minimap-outline;
+        border-color: rgba(0, 0, 0, 0.8);
 
         Rectangle {
             x: HudConfig.minimap-outline;
             y: HudConfig.minimap-outline;
             width: HudConfig.minimap-size;
             height: HudConfig.minimap-size;
-            background: rgb(5, 13, 26);
-
-            Image {
-                width: parent.width;
-                height: parent.height;
-                source: root.minimap-base;
-                image-fit: fill;
-                image-rendering: pixelated;
-            }
+            // Transparent: the map shows through (the HUD is pass-through, so no pointer to keep).
+            background: transparent;
 
             Image {
                 width: parent.width;

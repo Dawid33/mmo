@@ -491,6 +491,7 @@ impl Plugin for CommanderPlugin {
             })
             .add_session_reset::<minimap::MinimapPointer>()
             .add_session_reset::<minimap::MinimapPixels>()
+            .init_resource::<minimap::MinimapZoom>()
             .add_session_reset::<selection::Selection>()
             .add_session_reset::<selection::GroundPick>()
             .add_session_reset::<selection::SelectionBand>()
@@ -528,7 +529,7 @@ impl Plugin for CommanderPlugin {
                     tiles::update_tile_mirror,
                     track_home_region,
                     place_on_body,
-                    minimap::minimap_pointer,
+                    (minimap::update_minimap_view, minimap::minimap_pointer).chain(),
                     hold_pointer_while_orbiting.run_if(first_person::inactive),
                     grab_orbit_pivot.run_if(first_person::inactive).run_if(top_down::inactive),
                     // After `level_input`: a C that turns the cut off leaves top-down
@@ -565,7 +566,7 @@ impl Plugin for CommanderPlugin {
                     follow::rekey_local_player,
                     selection::prune_selection,
                     selection::draw_selection_rings,
-                    (minimap::rebuild_minimap_base, minimap::draw_minimap_overlay).chain(),
+                    minimap::draw_minimap_overlay,
                 )
                     .chain()
                     .after(super::interpolate::interpolate_transforms)

@@ -132,6 +132,9 @@ pub struct MapTiles {
     fetches: u64,
     failures: u64,
     logged_at: f64,
+    /// Tiles a served answer replaced (levels a local painting covers): painted again in full.
+    replaced: Vec<MapTileKey>,
+    paints: u64,
 }
 
 impl MapTiles {
@@ -160,6 +163,34 @@ impl MapTiles {
     /// A loaded tile's samples.
     pub fn tile(&self, key: MapTileKey) -> Option<&MapTile> {
         self.active.then(|| self.entries.get(&key).map(|e| &e.tile)).flatten()
+    }
+
+    /// Paint `key`'s loaded tile in place with `f` (which says whether it changed anything): its textures
+    /// are rewritten and it is marked painted — kept until a served tile with a NEWER etag replaces it
+    /// (spec 5.3). `false` when the tile is not loaded (or nothing changed).
+    pub fn paint(&mut self, key: MapTileKey, images: &mut Assets<Image>, f: impl FnOnce(&mut MapTile) -> bool) -> bool {
+        if !self.active {
+            return false;
+        }
+        let Some(e) = self.entries.get_mut(&key) else { return false };
+        if !f(&mut e.tile) {
+            return false;
+        }
+        e.painted = true;
+        e.real = true;
+        let (h, b, w) = planes(&e.tile);
+        for (handle, data) in [(&e.gpu.height, h), (&e.gpu.block, b), (&e.gpu.water_flags, w)] {
+            if let Some(mut image) = images.get_mut(handle) {
+                image.data = Some(data);
+            }
+        }
+        self.paints += 1;
+        true
+    }
+
+    /// Keys a served answer replaced since the last call (to paint again).
+    pub fn take_replaced(&mut self) -> Vec<MapTileKey> {
+        std::mem::take(&mut self.replaced)
     }
 
     /// The source tiles come from.
@@ -346,14 +377,21 @@ fn upload(images: &mut Assets<Image>, tile: &MapTile) -> GpuTile {
         image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::nearest());
         image
     };
-    let height = tile.samples.iter().flat_map(|s| s.height.to_le_bytes()).collect();
-    let block = tile.samples.iter().flat_map(|s| s.block.0.to_le_bytes()).collect();
-    let water_flags = tile.samples.iter().flat_map(|s| [s.water, s.flags]).collect();
+    let (height, block, water_flags) = planes(tile);
     GpuTile {
         height: images.add(image(height, TextureFormat::R16Sint)),
         block: images.add(image(block, TextureFormat::R16Uint)),
         water_flags: images.add(image(water_flags, TextureFormat::Rg8Uint)),
     }
+}
+
+/// A tile's texture bytes: height (i16), block (u16), water and flags (u8 pairs).
+fn planes(tile: &MapTile) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    (
+        tile.samples.iter().flat_map(|s| s.height.to_le_bytes()).collect(),
+        tile.samples.iter().flat_map(|s| s.block.0.to_le_bytes()).collect(),
+        tile.samples.iter().flat_map(|s| [s.water, s.flags]).collect(),
+    )
 }
 
 /// The fetch loop: answers in, new and stale wanted tiles out (at most `MAP_FETCH_IN_FLIGHT`), the
@@ -389,6 +427,9 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
                     images.remove(&old.gpu.water_flags);
                 }
                 let real = tile.samples.iter().any(|s| s.flags & sample_flags::REAL != 0);
+                if key.level <= super::paint::MAP_PAINT_MAX_LEVEL {
+                    tiles.replaced.push(key);
+                }
                 tiles.stamp += 1;
                 let used = tiles.stamp;
                 tiles.insert(key, Entry { tile, gpu, etag, fetched_at: now, real, painted: false, used });
@@ -450,6 +491,13 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
     tiles.wanted.clear();
     if now - tiles.logged_at >= MAP_LOG_EVERY_MS as f64 / 1000.0 {
         tiles.logged_at = now;
-        info!("[map] tiles={} bytes={} fetches={} failures={}", tiles.entries.len(), tiles.bytes, tiles.fetches, tiles.failures);
+        info!(
+            "[map] tiles={} bytes={} fetches={} failures={} paints={}",
+            tiles.entries.len(),
+            tiles.bytes,
+            tiles.fetches,
+            tiles.failures,
+            tiles.paints
+        );
     }
 }
