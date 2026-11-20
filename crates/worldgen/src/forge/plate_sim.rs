@@ -22,7 +22,7 @@
 
 use crate::forge::periodic::PeriodicX;
 use crate::forge::planet::{
-    planet_deg, planet_step, CrustKind, OrogenyKind, PlanetKey, PlanetNoise, PLANET_CELLS, PLANET_NX,
+    planet_deg, planet_step, CrustKind, OrogenyKind, PlanetKey, PlanetNoise, PLANET_CELLS, PLANET_NX, PLANET_NZ,
 };
 use crate::forge::world::hash01;
 
@@ -147,9 +147,12 @@ struct Next {
     fold: Vec<[f32; 2]>,
     /// Per destination: the best source cell seen (`NO_SOURCE` = none).
     winner: Vec<u32>,
+    /// Per SOURCE cell: its destination this step (`NO_DEST` = past a pole).
+    dest: Vec<u32>,
 }
 
 const NO_SOURCE: u32 = u32::MAX;
+const NO_DEST: u32 = u32::MAX;
 
 #[derive(Default, Clone, Debug)]
 pub struct Counters {
@@ -378,97 +381,165 @@ impl PlateState {
             }
             moves[p] = (d[0], d[1]);
         }
-        // 2. The snapshot, the destination arrays cleared.
-        let mut cells = [0u32; PLATES_MAX];
-        let mut cont = [0u32; PLATES_MAX];
-        for c in 0..PLANET_CELLS {
-            let p = self.plate[c] as usize;
-            cells[p] += 1;
-            cont[p] += (self.crust[c] == CrustKind::Continental as u8) as u32;
-        }
+        // 2. Clear what is read before it is written: `next.plate` (the gap
+        // fill looks for `NO_PLATE`) and `next.winner`. Pass B or the gap fill
+        // writes every other field of every destination.
         let next = &mut self.next;
         next.plate.clear();
         next.plate.resize(PLANET_CELLS, NO_PLATE);
+        next.winner.clear();
+        next.winner.resize(PLANET_CELLS, NO_SOURCE);
+        next.dest.resize(PLANET_CELLS, NO_DEST);
         for v in [&mut next.crust, &mut next.kind] {
-            v.clear();
             v.resize(PLANET_CELLS, 0);
         }
         for v in [&mut next.born_my, &mut next.base_m, &mut next.strength, &mut next.orogeny_my] {
-            v.clear();
             v.resize(PLANET_CELLS, 0.0);
         }
-        next.fold.clear();
         next.fold.resize(PLANET_CELLS, [0.0; 2]);
-        next.winner.clear();
-        next.winner.resize(PLANET_CELLS, NO_SOURCE);
-        // Pass A: the winner of each destination under one total order.
-        let dest = |c: usize, plate: &[u8]| {
-            let (dx, dz) = moves[plate[c] as usize];
-            planet_step(c, dx, dz)
-        };
-        for c in order {
-            if let Some(d) = dest(c, &self.plate) {
-                let w = self.next.winner[d];
-                if w == NO_SOURCE || self.beats(c, w as usize, &cont) {
-                    self.next.winner[d] = c as u32;
+        // Pass A, first loop (row-major): each source's destination, once
+        // (`NO_DEST` past a pole; the row wrap by a compare), and the per-plate
+        // snapshot the contest reads. Every pass below works on local slices
+        // (the borrows split by field), so nothing is re-loaded per cell.
+        let Next {
+            plate: n_plate,
+            crust: n_crust,
+            born_my: n_born,
+            base_m: n_base,
+            strength: n_strength,
+            orogeny_my: n_orogeny,
+            kind: n_kind,
+            fold: n_fold,
+            winner,
+            dest,
+        } = &mut self.next;
+        let (plate, crust, born_my) =
+            (&self.plate[..PLANET_CELLS], &self.crust[..PLANET_CELLS], &self.born_my[..PLANET_CELLS]);
+        let (n_plate, winner, dest) =
+            (&mut n_plate[..PLANET_CELLS], &mut winner[..PLANET_CELLS], &mut dest[..PLANET_CELLS]);
+        let mut cells = [0u32; PLATES_MAX];
+        let mut cont = [0u32; PLATES_MAX];
+        // Sources past a pole, by crust (`[oceanic, continental]`).
+        let mut lost = [0u64; 2];
+        let nx = PLANET_NX as i32;
+        for cz in 0..PLANET_NZ as i32 {
+            let row = cz as usize * PLANET_NX;
+            // A row is counted by runs of one plate (the counts stay in
+            // registers; a plate's move is looked up once per run).
+            let mut cx = 0i32;
+            while cx < nx {
+                let p = plate[row + cx as usize] as usize;
+                let (dx, dz) = moves[p];
+                let z = cz + dz;
+                let polar = z < 0 || z >= PLANET_NZ as i32;
+                let start = cx;
+                let mut run_cont = 0u32;
+                while cx < nx && plate[row + cx as usize] as usize == p {
+                    let c = row + cx as usize;
+                    run_cont += u32::from(crust[c] == CrustKind::Continental as u8);
+                    dest[c] = if polar {
+                        NO_DEST
+                    } else {
+                        let mut x = cx + dx;
+                        if x < 0 {
+                            x += nx;
+                        } else if x >= nx {
+                            x -= nx;
+                        }
+                        (z * nx + x) as u32
+                    };
+                    cx += 1;
+                }
+                let run = (cx - start) as u32;
+                cells[p] += run;
+                cont[p] += run_cont;
+                if polar {
+                    lost[1] += u64::from(run_cont);
+                    lost[0] += u64::from(run - run_cont);
                 }
             }
         }
-        // Pass B: winners move, the rest are consumed or lost at a pole.
-        for c in 0..PLANET_CELLS {
-            let continental = self.crust[c] == CrustKind::Continental as u8;
-            let Some(d) = dest(c, &self.plate) else {
-                if continental {
-                    self.counters.polar_lost_continental += 1;
-                } else {
-                    self.counters.polar_lost_oceanic += 1;
+        // Pass A, the contest: the winner of each destination under one
+        // total order (the result does not depend on `order`).
+        for c in order {
+            let d = dest[c] as usize;
+            if d < PLANET_CELLS {
+                let w = winner[d];
+                if w == NO_SOURCE || beats(plate, crust, born_my, &cont, c, w as usize) {
+                    winner[d] = c as u32;
                 }
+            }
+        }
+        // Pass B: winners move, the rest are consumed (lost at a pole: counted above).
+        let (base_m, strength, orogeny_my, kind, fold) = (
+            &self.base_m[..PLANET_CELLS],
+            &self.strength[..PLANET_CELLS],
+            &self.orogeny_my[..PLANET_CELLS],
+            &self.kind[..PLANET_CELLS],
+            &self.fold[..PLANET_CELLS],
+        );
+        let (n_crust, n_born, n_base, n_strength, n_orogeny, n_kind, n_fold) = (
+            &mut n_crust[..PLANET_CELLS],
+            &mut n_born[..PLANET_CELLS],
+            &mut n_base[..PLANET_CELLS],
+            &mut n_strength[..PLANET_CELLS],
+            &mut n_orogeny[..PLANET_CELLS],
+            &mut n_kind[..PLANET_CELLS],
+            &mut n_fold[..PLANET_CELLS],
+        );
+        let mut counters = self.counters.clone();
+        counters.polar_lost_oceanic += lost[0];
+        counters.polar_lost_continental += lost[1];
+        for c in 0..PLANET_CELLS {
+            // `NO_DEST` is above every cell: one compare skips it and lets
+            // the compiler drop the bounds checks below.
+            let d = dest[c] as usize;
+            if d >= PLANET_CELLS {
                 continue;
-            };
-            if self.next.winner[d] == c as u32 {
-                let next = &mut self.next;
-                next.plate[d] = self.plate[c];
-                next.crust[d] = self.crust[c];
-                next.born_my[d] = self.born_my[c];
-                next.base_m[d] = self.base_m[c];
-                next.strength[d] = self.strength[c];
-                next.orogeny_my[d] = self.orogeny_my[c];
-                next.kind[d] = self.kind[c];
-                next.fold[d] = self.fold[c];
-            } else if continental {
-                self.counters.collided += 1;
+            }
+            if winner[d] == c as u32 {
+                n_plate[d] = plate[c];
+                n_crust[d] = crust[c];
+                n_born[d] = born_my[c];
+                n_base[d] = base_m[c];
+                n_strength[d] = strength[c];
+                n_orogeny[d] = orogeny_my[c];
+                n_kind[d] = kind[c];
+                n_fold[d] = fold[c];
+            } else if crust[c] == CrustKind::Continental as u8 {
+                counters.collided += 1;
             } else {
-                self.counters.subducted += 1;
+                counters.subducted += 1;
             }
         }
         // 3. Gaps: new oceanic crust, born at the step's end.
         let time = (self.step + 1) as f64 * PLATE_DT_MY;
         let lowest_live = (0..PLATES_MAX).find(|&p| self.alive[p]).unwrap_or(0) as u8;
         for d in 0..PLANET_CELLS {
-            if self.next.plate[d] != NO_PLATE {
+            if n_plate[d] != NO_PLATE {
                 continue;
             }
-            let before = self.plate[d];
+            let before = plate[d];
             let owner = if before != NO_PLATE && cells[before as usize] > 0 {
                 before
             } else {
                 let (row, cx) = (d - d % PLANET_NX, d % PLANET_NX);
                 (1..PLANET_NX)
-                    .map(|k| self.next.plate[row + (cx + k) % PLANET_NX])
+                    .map(|k| n_plate[row + (cx + k) % PLANET_NX])
                     .find(|&p| p != NO_PLATE)
                     .unwrap_or(lowest_live)
             };
-            let next = &mut self.next;
-            next.plate[d] = owner;
-            next.crust[d] = CrustKind::Oceanic as u8;
-            next.born_my[d] = time as f32;
-            next.base_m[d] = 0.0;
-            next.strength[d] = 0.0;
-            next.orogeny_my[d] = f32::NEG_INFINITY;
-            next.kind[d] = OrogenyKind::None as u8;
-            next.fold[d] = [0.0; 2];
-            self.counters.created += 1;
+            n_plate[d] = owner;
+            n_crust[d] = CrustKind::Oceanic as u8;
+            n_born[d] = time as f32;
+            n_base[d] = 0.0;
+            n_strength[d] = 0.0;
+            n_orogeny[d] = f32::NEG_INFINITY;
+            n_kind[d] = OrogenyKind::None as u8;
+            n_fold[d] = [0.0; 2];
+            counters.created += 1;
         }
+        self.counters = counters;
         // 4. Swap.
         let next = &mut self.next;
         std::mem::swap(&mut self.plate, &mut next.plate);
@@ -482,32 +553,32 @@ impl PlateState {
         self.step += 1;
     }
 
-    /// Source `a` beats source `b` for one destination: continental beats
-    /// oceanic; between continental cells the plate with more continental
-    /// cells in the snapshot `cont`, between oceanic cells the younger (larger
-    /// `born_my`); ties the lower plate id.
-    fn beats(&self, a: usize, b: usize, cont: &[u32; PLATES_MAX]) -> bool {
-        let continental = CrustKind::Continental as u8;
-        let (ca, cb) = (self.crust[a] == continental, self.crust[b] == continental);
-        if ca != cb {
-            return ca;
-        }
-        let (pa, pb) = (self.plate[a], self.plate[b]);
-        if ca {
-            let (na, nb) = (cont[pa as usize], cont[pb as usize]);
-            if na != nb {
-                return na > nb;
-            }
-        } else if self.born_my[a] != self.born_my[b] {
-            return self.born_my[a] > self.born_my[b];
-        }
-        pa < pb
-    }
-
     /// Model time, My.
     pub fn time_my(&self) -> f64 {
         self.step as f64 * PLATE_DT_MY
     }
+}
+
+/// Source `a` beats source `b` for one destination: continental beats
+/// oceanic; between continental cells the plate with more continental cells
+/// in the snapshot `cont`, between oceanic cells the younger (larger
+/// `born_my`); ties the lower plate id.
+fn beats(plate: &[u8], crust: &[u8], born_my: &[f32], cont: &[u32; PLATES_MAX], a: usize, b: usize) -> bool {
+    let continental = CrustKind::Continental as u8;
+    let (ca, cb) = (crust[a] == continental, crust[b] == continental);
+    if ca != cb {
+        return ca;
+    }
+    let (pa, pb) = (plate[a], plate[b]);
+    if ca {
+        let (na, nb) = (cont[pa as usize], cont[pb as usize]);
+        if na != nb {
+            return na > nb;
+        }
+    } else if born_my[a] != born_my[b] {
+        return born_my[a] > born_my[b];
+    }
+    pa < pb
 }
 
 /// Chamfer distance (steps of `unit` to the 4 edge neighbours, `√2 · unit` to

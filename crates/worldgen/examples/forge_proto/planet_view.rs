@@ -123,7 +123,24 @@ fn lines(start: &PlateState, end: &PlateState, stage_ms: f64) -> Vec<(String, St
             format!("{:.4}", end.counters.polar_lost_continental as f64 / cont0.max(1) as f64),
         ),
         ("planet.stage_ms".into(), format!("{stage_ms:.0}")),
+        ("planet.state_crc".into(), state_crc(end)),
     ]
+}
+
+/// crc32 of the final `plate`, `crust` and the little-endian bytes of
+/// `born_my`, `strength` and `kind`, in that order: equal crcs = the same planet.
+fn state_crc(s: &PlateState) -> String {
+    let mut h = crc32fast::Hasher::new();
+    h.update(&s.plate);
+    h.update(&s.crust);
+    for v in &s.born_my {
+        h.update(&v.to_le_bytes());
+    }
+    for v in &s.strength {
+        h.update(&v.to_le_bytes());
+    }
+    h.update(&s.kind);
+    format!("{:08x}", h.finalize())
 }
 
 /// One colour per plate id (hues a golden angle apart), continental cells brighter.

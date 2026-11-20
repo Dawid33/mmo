@@ -692,7 +692,7 @@ fn monthly_lines(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
 /// Keys whose values are never numbers, however they read (a crc can be all
 /// digits).
 const NOT_NUMBERS: &[&str] =
-    &["seed", "height_crc", "artifact_rasters_crc", "artifact_climate_crc", "artifact_header_crc"];
+    &["seed", "height_crc", "artifact_rasters_crc", "artifact_climate_crc", "artifact_header_crc", "planet.state_crc"];
 
 /// The summary of the keys whose generic line reads badly: the conservation
 /// error in the per-seed lines' short form (no float noise), and the
