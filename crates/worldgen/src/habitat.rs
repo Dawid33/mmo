@@ -207,7 +207,10 @@ pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, wrap_x: bool, is_sea
             }
         }
         // The cap is a bound, not a proof: a debug build checks that one
-        // more pass pair would change nothing.
+        // more pass pair would change nothing. That pair runs on the real
+        // state, which is safe: it only gets to run when the cap ran out, and
+        // then either it changes nothing (the assert holds, the state is the
+        // release build's) or the assert fails.
         debug_assert!(settled || !pair(&mut d), "chamfer distance not settled after the capped pass pairs");
     }
     d

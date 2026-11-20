@@ -7,7 +7,7 @@ use worldgen::forge::climate;
 use worldgen::forge::knobs::CHOICES;
 use worldgen::forge::world::EDGE_NAMES;
 use worldgen::forge::{forge, ForgeParams, Forged, World};
-use worldgen::forged::WorldArtifact;
+use worldgen::forged::{ForgedWorld, WorldArtifact};
 
 use crate::Params;
 
@@ -125,15 +125,6 @@ fn p99(mut v: Vec<f64>) -> f64 {
     v[((v.len() - 1) as f64 * 0.99).round() as usize]
 }
 
-/// The seam's step against the interior's: the 99th percentile over rows of
-/// `|v(nx - 1, z) - v(0, z)|` over the 99th percentile of every interior
-/// column-to-column `|v(x + 1, z) - v(x, z)|`.
-fn seam_step_ratio(v: &[f64], nx: usize, nz: usize) -> f64 {
-    let seam = p99((0..nz).map(|z| (v[z * nx + nx - 1] - v[z * nx]).abs()).collect());
-    let interior = p99((0..nz).flat_map(|z| (0..nx - 1).map(move |x| (v[z * nx + x + 1] - v[z * nx + x]).abs())).collect());
-    if interior > 0.0 { seam / interior } else { f64::INFINITY }
-}
-
 /// The seam's step against every interior column pair's, for a field whose
 /// step between cells `a` and `b` is `step(a, b)` and whose statistic over a
 /// column pair's rows is `stat`: (seam ÷ the pooled interior's statistic,
@@ -157,6 +148,131 @@ fn mean(v: Vec<f64>) -> f64 {
 const SEAM_RATIO_OK: f64 = 1.5;
 /// …or the seam is not among the roughest this share of column pairs.
 const SEAM_RANK_OK: f64 = 0.05;
+/// A field passes over a seed set when at most this many seeds fail
+/// (`seam_ok_*: no`; an ordinary column pair fails about 5% of the time, so
+/// 3 or more of 8 has a chance of about 0.5%)…
+const SEAM_PASS_MAX_NOT_OK: usize = 2;
+/// …and the median rank is at least this (an ordinary seam's ranks are
+/// uniform on 0–1).
+const SEAM_PASS_MEDIAN_RANK: f64 = 0.25;
+
+/// Rows of the map `aliased_regions_identical` compares.
+const ALIAS_ROWS: i32 = 4;
+/// Rows of the map `seam_region_cliff` measures.
+const CLIFF_ROWS: i32 = 8;
+
+/// The block registry's materials (the game's, with trees and biome cover).
+fn materials() -> worldgen::material::Materials {
+    let manifest = include_str!("../../../../assets/blocks/blocks.ron");
+    let reg = game::BlockRegistry::from_ron(manifest).expect("valid block manifest");
+    game::install_block_props(reg.props());
+    worldgen::material::Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")))
+}
+
+/// Surface block y of region-local block column `(x, z)` of generated columns.
+fn surface(columns: &[(game::ColumnCoords, game::Column)], x: usize, z: usize) -> i32 {
+    let cb = game::CHUNK_BLOCKS;
+    let (_, column) = columns.iter().find(|(c, _)| c.x == x / cb && c.z == z / cb).expect("a generated column");
+    i32::from(column.ground().expect("generated column has ground").surface[(x % cb) * cb + z % cb])
+}
+
+/// The world-runtime seam lines (Task 12) of a world that wraps east–west:
+/// `aliased_regions_identical`, `seam_region_cliff`, `world_map_wraps`,
+/// `rivers_across_seam` (+ its gaps). `n/a` for a world that does not wrap.
+fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
+    let a = world.artifact().expect("whole world");
+    let wraps = a.edges[1] == worldgen::forge::world::EdgeKind::Wrap;
+    let keys = [
+        "aliased_regions_identical",
+        "seam_region_cliff",
+        "world_map_wraps",
+        "rivers_across_seam",
+        "rivers_across_seam_max_gap_cells",
+        "rivers_across_seam_gaps_cells",
+    ];
+    if !wraps {
+        return keys.iter().map(|k| (k.to_string(), "n/a".to_string())).collect();
+    }
+    let mats = materials();
+    let map = worldgen::tile_map::build_world_map(world);
+    let (o, w, h) = (map.origin, map.width as i32, map.height as i32);
+    let mut rows = Vec::new();
+    // A region one lap east is its canonical image, column for column.
+    let encode = |rc: game::RegionCoords| bincode::serialize(&worldgen::generate_region_forged(world, rc, mats)).expect("columns serialize");
+    let identical = (1..=ALIAS_ROWS).all(|k| {
+        let z = o.z + k * h / (ALIAS_ROWS + 1);
+        encode(game::RegionCoords::new(o.x + w + 2, z)) == encode(game::RegionCoords::new(o.x + 2, z))
+    });
+    rows.push((keys[0].to_string(), (if identical { "yes" } else { "no" }).to_string()));
+    // The surface step from the last canonical region's east column to the
+    // first's west column, over the largest step between neighbouring
+    // columns inside either.
+    let n = game::REGION_BLOCKS as usize;
+    let (mut seam, mut interior) = (0i32, 0i32);
+    for k in 1..=CLIFF_ROWS {
+        let z = o.z + k * h / (CLIFF_ROWS + 1);
+        let east = worldgen::generate_region_forged(world, game::RegionCoords::new(o.x + w - 1, z), mats);
+        let west = worldgen::generate_region_forged(world, game::RegionCoords::new(o.x, z), mats);
+        for lz in 0..n {
+            seam = seam.max((surface(&east, n - 1, lz) - surface(&west, 0, lz)).abs());
+            for columns in [&east, &west] {
+                for lx in 0..n - 1 {
+                    interior = interior.max((surface(columns, lx + 1, lz) - surface(columns, lx, lz)).abs());
+                }
+            }
+        }
+    }
+    let cliff = if interior > 0 { f64::from(seam) / f64::from(interior) } else if seam > 0 { f64::INFINITY } else { 0.0 };
+    rows.push((keys[1].to_string(), format!("{cliff:.3}")));
+    let tile_m = game::REGION_BLOCKS as f64;
+    let exact = f64::from(map.width) * tile_m == a.width_m;
+    rows.push((keys[2].to_string(), (if map.wrap_x && exact { "yes" } else { "no" }).to_string()));
+    // Rivers with a stored pair across the seam: along their pairs within a
+    // few cells of the seam, sampled every metre, the largest gap between
+    // consecutive carved water columns (in raster cells).
+    let (width, cell) = (a.width_m, a.cell_m);
+    let (min, _) = world.artifact_bounds_engine_m();
+    let near_seam = |x: f64| x < 3.0 * cell || x > width - 3.0 * cell;
+    let mut gaps: Vec<f64> = Vec::new();
+    for reach in &a.rivers {
+        let crosses = reach.points.windows(2).any(|q| (f64::from(q[1].x) - f64::from(q[0].x)).abs() > 0.5 * width);
+        if !crosses {
+            continue;
+        }
+        let (mut along, mut last_wet, mut gap) = (0.0f64, None::<f64>, 0.0f64);
+        for q in reach.points.windows(2) {
+            let (x0, z0) = (f64::from(q[0].x), f64::from(q[0].z));
+            let (mut x1, z1) = (f64::from(q[1].x), f64::from(q[1].z));
+            if x1 - x0 > 0.5 * width {
+                x1 -= width;
+            } else if x0 - x1 > 0.5 * width {
+                x1 += width;
+            }
+            let len = ((x1 - x0).powi(2) + (z1 - z0).powi(2)).sqrt();
+            if near_seam(x0) || near_seam(x1.rem_euclid(width)) {
+                let steps = len.ceil().max(1.0) as usize;
+                for s in 0..=steps {
+                    let t = s as f64 / steps as f64;
+                    let (x, z) = (x0 + (x1 - x0) * t, z0 + (z1 - z0) * t);
+                    if world.sample(min[0] + x, min[1] + z).water_y.is_some() {
+                        let here = along + t * len;
+                        if let Some(prev) = last_wet {
+                            gap = gap.max(here - prev);
+                        }
+                        last_wet = Some(here);
+                    }
+                }
+            }
+            along += len;
+        }
+        gaps.push(gap / cell);
+    }
+    rows.push((keys[3].to_string(), gaps.len().to_string()));
+    rows.push((keys[4].to_string(), format!("{:.3}", gaps.iter().copied().fold(0.0, f64::max))));
+    let list: Vec<String> = gaps.iter().map(|g| format!("{g:.3}")).collect();
+    rows.push((keys[5].to_string(), if list.is_empty() { "none".to_string() } else { list.join(",") }));
+    rows
+}
 
 /// Stored lake bodies with a cell in both column 0 and column `nx - 1`.
 fn lakes_across_seam(a: &WorldArtifact) -> usize {
@@ -213,15 +329,16 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     row("sea_level_temp_c.middle", format!("{:.1}", row_temp(w.nz / 2)));
     row("sea_level_temp_c.south", format!("{:.1}", row_temp(w.nz - 1)));
     row("drains_to_sea", format!("{:.3}", drains_to_sea(forged)));
-    row("seam_step_ratio_height", format!("{:.3}", seam_step_ratio(&w.h, w.nx, w.nz)));
-    let precip: Vec<f64> = forged.climate.precip_mm.iter().map(|&v| v as f64).collect();
-    row("seam_step_ratio_precip", format!("{:.3}", seam_step_ratio(&precip, w.nx, w.nz)));
-    row("lakes_across_seam", lakes_across_seam(&artifact).to_string());
-    // Task 11 (periodic noise and geometry): the biome's seam, and each
-    // field's seam ranked among the interior column pairs.
+    // The seam's steps (Task 11 ranks them among the interior column pairs;
+    // the ratios are the same p99 numbers `seam_ok_*` judges).
     let (nx, nz) = (w.nx, w.nz);
+    let precip: Vec<f64> = forged.climate.precip_mm.iter().map(|&v| v as f64).collect();
     let height = seam_steps(nx, nz, |a, b| (w.h[b] - w.h[a]).abs(), p99);
     let precip_steps = seam_steps(nx, nz, |a, b| (precip[b] - precip[a]).abs(), p99);
+    row("seam_step_ratio_height", format!("{:.3}", height.0));
+    row("seam_step_ratio_precip", format!("{:.3}", precip_steps.0));
+    row("lakes_across_seam", lakes_across_seam(&artifact).to_string());
+    // Task 11 (periodic noise and geometry): the biome's seam.
     let biome = seam_steps(nx, nz, |a, b| if artifact.biome[a] != artifact.biome[b] { 1.0 } else { 0.0 }, mean);
     row("seam_step_ratio_biome", format!("{:.3}", biome.0));
     row("seam_step_rank_height", format!("{:.3}", height.1));
@@ -230,6 +347,11 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     for (name, (ratio, rank)) in [("height", height), ("precip", precip_steps), ("biome", biome)] {
         let ok = ratio <= SEAM_RATIO_OK || rank >= SEAM_RANK_OK;
         row(&format!("seam_ok_{name}"), (if ok { "yes" } else { "no" }).to_string());
+    }
+    // Task 12 (the runtime sampler wraps): regions, the world map and rivers
+    // at the seam, read through the game's sampler.
+    for (key, value) in runtime_seam(&ForgedWorld::new(artifact)) {
+        row(&key, value);
     }
     rows
 }
@@ -292,5 +414,25 @@ pub fn run(base: &Params) {
                 println!("{key}: {} distinct values", distinct.len());
             }
         }
+    }
+    // The seam rule over the seed set, per field: at most
+    // `SEAM_PASS_MAX_NOT_OK` seeds fail and the median rank is at least
+    // `SEAM_PASS_MEDIAN_RANK` (one seed: that seed's own rule).
+    let values = |key: &str| -> Vec<String> {
+        all.iter().flat_map(|rows| rows.iter().filter(|(k, _)| k == key).map(|(_, v)| v.clone())).collect()
+    };
+    for field in ["height", "precip", "biome"] {
+        let oks = values(&format!("seam_ok_{field}"));
+        if oks.is_empty() {
+            continue;
+        }
+        let not_ok = oks.iter().filter(|v| *v == "no").count();
+        let mut ranks: Vec<f64> = values(&format!("seam_step_rank_{field}")).iter().filter_map(|v| v.parse().ok()).collect();
+        ranks.sort_by(f64::total_cmp);
+        let n = ranks.len();
+        let median = if n == 0 { 0.0 } else if n % 2 == 1 { ranks[n / 2] } else { (ranks[n / 2 - 1] + ranks[n / 2]) / 2.0 };
+        let pass = if seeds == 1 { not_ok == 0 } else { not_ok <= SEAM_PASS_MAX_NOT_OK && median >= SEAM_PASS_MEDIAN_RANK };
+        println!("seam_seeds_not_ok_{field}: {not_ok}");
+        println!("seam_pass_{field}: {}", if pass { "yes" } else { "no" });
     }
 }

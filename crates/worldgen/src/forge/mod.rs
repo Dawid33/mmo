@@ -191,10 +191,14 @@ impl Forged {
                 }
             }
             cells.sort_unstable();
+            // On a wrapping world a lake may hold the last cell of one row
+            // and the first of the next: a run never continues into the
+            // next row, so every run stays within one.
+            let row_start = |i: usize| w.wrap_x && i % w.nx == 0;
             let mut runs: Vec<(u32, u32)> = Vec::new();
             for &i in &cells {
                 match runs.last_mut() {
-                    Some((s, len)) if (*s + *len) as usize == i => *len += 1,
+                    Some((s, len)) if (*s + *len) as usize == i && !row_start(i) => *len += 1,
                     _ => runs.push((i as u32, 1)),
                 }
             }
@@ -305,13 +309,52 @@ pub fn schedule(p: &ForgeParams) -> Vec<(f64, usize)> {
         .collect()
 }
 
+/// Whether `p` may be forged as far as its east–west wrap goes: a world that
+/// wraps is at least `play::MIN_WRAP_WIDTH_M` wide, a whole number of its
+/// coarsest erosion cells (`upsample_onto` samples x round the circle: a
+/// width between two coarse cells would put the mismatch on the seam) and of
+/// `play::WRAP_WIDTH_STEP_M` (its regions tile the circle). Always `Ok` for
+/// a world that does not wrap.
+pub fn check_wrap(p: &ForgeParams) -> Result<(), String> {
+    if periodic::PeriodicX::for_world(p).is_none() {
+        return Ok(());
+    }
+    if let Some(why) = play::too_narrow_to_wrap(p.width_m) {
+        return Err(why);
+    }
+    let whole = |step: f64| (p.width_m / step).fract() == 0.0;
+    let coarsest_m = schedule(p)[0].0;
+    if !whole(coarsest_m) {
+        return Err(format!(
+            "a world that wraps east–west must be a whole number of its coarsest erosion cells wide \
+             ({:.0} m is not a multiple of {coarsest_m:.0} m)",
+            p.width_m
+        ));
+    }
+    if !whole(play::WRAP_WIDTH_STEP_M) {
+        return Err(format!(
+            "a world that wraps east–west must be a whole number of {:.0} m regions wide ({:.0} m is not)",
+            play::WRAP_WIDTH_STEP_M,
+            p.width_m
+        ));
+    }
+    Ok(())
+}
+
 /// `forge` with a progress callback, called at each stage boundary and after
 /// every erosion iteration (numbered across all levels of the schedule).
 /// Returning `Break` abandons the forge (`None`).
+///
+/// # Panics
+/// On a world [`check_wrap`] refuses (every caller catches the panic and
+/// shows its message).
 pub fn forge_with(
     p: &ForgeParams,
     on_progress: &mut dyn FnMut(ForgeProgress) -> std::ops::ControlFlow<()>,
 ) -> Option<Forged> {
+    if let Err(why) = check_wrap(p) {
+        panic!("{why}");
+    }
     let levels = schedule(p);
     let iters: usize = levels.iter().map(|&(_, n)| n).sum();
     let mut report = |stage, iter| on_progress(ForgeProgress { stage, iter, iters }).is_break();

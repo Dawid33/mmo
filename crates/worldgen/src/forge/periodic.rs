@@ -90,6 +90,24 @@ impl PeriodicX {
         theta.cos() * f(x, z) + theta.sin() * f(x - self.period_m, z)
     }
 
+    /// [`Self::sample`] in exact arithmetic only (+ − × ÷, sqrt), for the
+    /// runtime sampler (`forged.rs`), which may not call `cos` / `sin`: the
+    /// weights are `(1 − s, s)` for s = smoothstep(t) across the band,
+    /// divided by their norm, so their squares still sum to 1 (the noise
+    /// keeps its variance) and they meet `f(x − period)` — what x = 0 reads —
+    /// at the seam.
+    pub fn sample_exact(&self, x: f64, z: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
+        let x = self.fold(x);
+        let start = self.period_m - self.band_m;
+        if x < start {
+            return f(x, z);
+        }
+        let s = smoothstep(start, self.period_m, x);
+        let (a, b) = (1.0 - s, s);
+        let norm = (a * a + b * b).sqrt();
+        (a / norm) * f(x, z) + (b / norm) * f(x - self.period_m, z)
+    }
+
     /// Each item plus its copies at x − period and x + period
     /// (`shift(item, ∓period)`), in that order per item: entry `j` is a copy
     /// of `items[j / 3]`. `x_of` says where an item stands (checked finite).

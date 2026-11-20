@@ -407,10 +407,11 @@ pub fn generate_columns(
     seed: u64,
     mats: Materials,
 ) -> Vec<(ColumnCoords, Column)> {
-    let cb = CHUNK_BLOCKS as i32;
-    let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
-    let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
     if let Some(world) = forged::active() {
+        let coords = canonical_region(world, coords);
+        let cb = CHUNK_BLOCKS as i32;
+        let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
+        let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
         let trees_from = TreeSource { habitat: world, seed: world.seed() };
         let patch = world.patch(ox, oz, span);
         return columns_from_patch(&patch, coords, xs, zs, mats, trees_from, structures::active());
@@ -451,6 +452,7 @@ pub fn ground_y(x: i32, z: i32, seed: u64, mats: Materials) -> i32 {
 
 /// `ground_y` for an explicit forged world.
 pub fn ground_y_forged(world: &forged::ForgedWorld, x: i32, z: i32, mats: Materials) -> i32 {
+    let x = x - wrap_shift_blocks(world, x);
     let (ox, oz, span) = chunk_window(x, z, &mats);
     column_sample(&world.patch(ox, oz, span), &mats, x, z).s
 }
@@ -459,12 +461,44 @@ pub fn ground_y_forged(world: &forged::ForgedWorld, x: i32, z: i32, mats: Materi
 /// water top lies above its ground). Uses the installed forged world, else `seed`; the patch is the one
 /// [`ground_y`] reads.
 pub fn is_wet(x: i32, z: i32, seed: u64, mats: Materials) -> bool {
-    let (ox, oz, span) = chunk_window(x, z, &mats);
     let c = match forged::active() {
-        Some(world) => column_sample(&world.patch(ox, oz, span), &mats, x, z),
-        None => column_sample(&ProceduralPatch(TerrainPipeline::new(seed).profile_grid(ox, oz, span)), &mats, x, z),
+        Some(world) => {
+            let x = x - wrap_shift_blocks(world, x);
+            let (ox, oz, span) = chunk_window(x, z, &mats);
+            column_sample(&world.patch(ox, oz, span), &mats, x, z)
+        }
+        None => {
+            let (ox, oz, span) = chunk_window(x, z, &mats);
+            column_sample(&ProceduralPatch(TerrainPipeline::new(seed).profile_grid(ox, oz, span)), &mats, x, z)
+        }
     };
     c.water_top > c.top
+}
+
+/// The multiple of `world`'s width (blocks) that takes world block column
+/// `x` onto the map's canonical regions (`tile_map::map_extent`'s
+/// `[origin.x, origin.x + width)`): 0 on a world that does not wrap
+/// east–west. Generation reads `x - shift`, so every image of a region or LOD
+/// key yields the terrain (trees and structures included) of its canonical
+/// image, laid out where the caller asked.
+fn wrap_shift_blocks(world: &forged::ForgedWorld, x: i32) -> i32 {
+    let g = world.globals();
+    // A width that is not whole regions cannot shift a region onto a region
+    // (the forge refuses such a wrapping world): the sampler still folds
+    // every point it reads.
+    if g.edges[1] != forged::EdgeKind::Wrap || g.width_m % f64::from(REGION_BLOCKS) != 0.0 {
+        return 0;
+    }
+    let width = g.width_m as i32;
+    let (origin, _, _) = tile_map::map_extent(world);
+    (x - origin.x * REGION_BLOCKS).div_euclid(width) * width
+}
+
+/// Region `coords` folded onto `world`'s canonical regions (itself on a
+/// world that does not wrap east–west).
+fn canonical_region(world: &forged::ForgedWorld, coords: RegionCoords) -> RegionCoords {
+    let shift = wrap_shift_blocks(world, coords.x * REGION_BLOCKS);
+    RegionCoords::new(coords.x - shift / REGION_BLOCKS, coords.z)
 }
 
 /// `patch_window` of the one-chunk window holding world block column `(x, z)`.
@@ -508,6 +542,7 @@ pub fn prefetch_region(rc: RegionCoords) -> Result<forged_tiles::TilePins, Strin
 
 /// [`prefetch_region`] for an explicit forged world.
 pub fn prefetch_region_forged(world: &forged::ForgedWorld, rc: RegionCoords) -> Result<forged_tiles::TilePins, String> {
+    let rc = canonical_region(world, rc);
     // The wider (trees on) margin, whatever the materials.
     let (x, z) = (f64::from(rc.x * REGION_BLOCKS), f64::from(rc.z * REGION_BLOCKS));
     let (min, max) = read_rect(x, z, f64::from(REGION_BLOCKS), TREE_PATCH_MARGIN);
@@ -525,7 +560,7 @@ pub fn prefetch_lod(key: &game::lod::LodKey) -> Result<forged_tiles::TilePins, S
 pub fn prefetch_lod_forged(world: &forged::ForgedWorld, key: &game::lod::LodKey) -> Result<forged_tiles::TilePins, String> {
     // `coarse_tile_forged`'s window with the trees' margin (it contains
     // `coarse_water_forged`'s).
-    let (ox, oz, span) = coarse_window(key);
+    let (ox, oz, span) = coarse_window(key, coarse_shift(world, key));
     let margin = TREE_PATCH_MARGIN + coarse_ring(key);
     let (min, max) = read_rect(f64::from(ox), f64::from(oz), f64::from(span), margin);
     world.prefetch_rect(min, max)
@@ -547,6 +582,7 @@ pub fn generate_region_forged_with(
     mats: Materials,
     structures: &dyn structures::StructureSource,
 ) -> Vec<(ColumnCoords, Column)> {
+    let coords = canonical_region(world, coords);
     let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS, &mats);
     let trees_from = TreeSource { habitat: world, seed: world.seed() };
     let patch = world.patch(ox, oz, span);
@@ -1028,10 +1064,10 @@ pub fn coarse_tile_with(
     mats: Materials,
     structures: &dyn structures::StructureSource,
 ) -> Vec<game::lod::LodCell> {
-    let (ox, oz, span) = coarse_patch_window(key, &mats);
+    let (ox, oz, span) = coarse_patch_window(key, &mats, 0);
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
     let habitat = habitat::ProceduralHabitat::new(seed);
-    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed }, structures)
+    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed }, structures, 0)
 }
 
 /// `coarse_tile` for an explicit forged world (tests, tools). A coarse cell is
@@ -1056,10 +1092,18 @@ pub fn coarse_tile_forged_with(
     // neighbours (rounded to the profile lattice, so surfaces stay
     // bit-identical to any other window's).
     let ring = coarse_ring(key);
-    let (ox, oz, span) = coarse_patch_window(key, &mats);
+    let shift = coarse_shift(world, key);
+    let (ox, oz, span) = coarse_patch_window(key, &mats, shift);
     let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
     let trees_from = TreeSource { habitat: world, seed: world.seed() };
-    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from, structures)
+    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from, structures, shift)
+}
+
+/// `wrap_shift_blocks` of a coarse key's window: LOD keys arrive in the
+/// client's frame, unwrapped past the seam; the key's terrain is its
+/// canonical image's.
+fn coarse_shift(world: &forged::ForgedWorld, key: &game::lod::LodKey) -> i32 {
+    wrap_shift_blocks(world, key.origin_region().x * REGION_BLOCKS)
 }
 
 /// The cell-column margin (blocks) `coarse_tile_forged` adds past a key,
@@ -1096,9 +1140,9 @@ pub fn coarse_water_with(
     mats: Materials,
     structures: &dyn structures::StructureSource,
 ) -> game::lod::LodWater {
-    let (ox, oz, span) = coarse_window(key);
+    let (ox, oz, span) = coarse_window(key, 0);
     let grid = TerrainPipeline::new(seed).profile_grid(ox as f64, oz as f64, span as f64);
-    water_from_patch(&ProceduralPatch(grid), key, &mats, structures)
+    water_from_patch(&ProceduralPatch(grid), key, &mats, structures, 0)
 }
 
 /// `coarse_water` for an explicit forged world (tests, tools).
@@ -1117,8 +1161,9 @@ pub fn coarse_water_forged_with(
     mats: Materials,
     structures: &dyn structures::StructureSource,
 ) -> game::lod::LodWater {
-    let (ox, oz, span) = coarse_window(key);
-    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats, structures)
+    let shift = coarse_shift(world, key);
+    let (ox, oz, span) = coarse_window(key, shift);
+    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats, structures, shift)
 }
 
 /// One LOD column's `(water_top, depth)` (see [`coarse_water`]).
@@ -1135,10 +1180,11 @@ fn water_from_patch(
     key: &game::lod::LodKey,
     mats: &Materials,
     structures: &dyn structures::StructureSource,
+    shift: i32,
 ) -> game::lod::LodWater {
     let side = game::lod::LodWater::side_for(key);
     let n = usize::from(side);
-    let (ox, oz, span_blocks) = coarse_window(key);
+    let (ox, oz, span_blocks) = coarse_window(key, shift);
     // Structures whose pads reach the key: every sample is inside it. None: the water is exactly what it
     // is without a structure source.
     let near_owned = structures.placements_in(ox, oz, ox + span_blocks, oz + span_blocks, 0);
@@ -1182,15 +1228,17 @@ fn water_from_patch(
     game::lod::LodWater::encode(&tops, side)
 }
 
-/// World block origin and span of a coarse key.
-fn coarse_window(key: &game::lod::LodKey) -> (i32, i32, i32) {
+/// World block origin and span of a coarse key, its x moved `shift` blocks
+/// west (`coarse_shift`: the canonical image of a key on a world that wraps
+/// east–west; 0 otherwise).
+fn coarse_window(key: &game::lod::LodKey, shift: i32) -> (i32, i32, i32) {
     let origin = key.origin_region();
-    (origin.x * REGION_BLOCKS, origin.z * REGION_BLOCKS, key.region_span() * REGION_BLOCKS)
+    (origin.x * REGION_BLOCKS - shift, origin.z * REGION_BLOCKS, key.region_span() * REGION_BLOCKS)
 }
 
 /// The patch a coarse key samples: its window, plus the trees' margin.
-fn coarse_patch_window(key: &game::lod::LodKey, mats: &Materials) -> (f64, f64, f64) {
-    let (ox, oz, span) = coarse_window(key);
+fn coarse_patch_window(key: &game::lod::LodKey, mats: &Materials, shift: i32) -> (f64, f64, f64) {
+    let (ox, oz, span) = coarse_window(key, shift);
     let m = if mats.trees.enabled() { TREE_PATCH_MARGIN } else { 0 };
     ((ox - m) as f64, (oz - m) as f64, (span + 2 * m) as f64)
 }
@@ -1225,6 +1273,7 @@ fn coarse_from_patch(
     mats: Materials,
     trees_from: TreeSource,
     structures: &dyn structures::StructureSource,
+    shift: i32,
 ) -> Vec<game::lod::LodCell> {
     use game::lod::LodCell;
     use game::Voxel;
@@ -1245,7 +1294,7 @@ fn coarse_from_patch(
     let cells = span_blocks / cb; // cell columns per key edge: 64 at factor 16, else 32
     debug_assert_eq!(cells % G, 0, "a key is a whole number of 32³ grids");
 
-    let (ox, oz, _) = coarse_window(key);
+    let (ox, oz, _) = coarse_window(key, shift);
     // Tree placement reads surfaces up to `tree_m` past the key; each surface's
     // slope reads one block further (still inside the patch's
     // `TREE_PATCH_MARGIN`).

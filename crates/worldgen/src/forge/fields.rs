@@ -295,7 +295,10 @@ fn nearest_water(nx: usize, nz: usize, dx: f64, wrap_x: bool, level: &[f64], q: 
             }
         }
         // The cap is a bound, not a proof: a debug build checks that one
-        // more pass pair would change nothing.
+        // more pass pair would change nothing. That pair runs on the real
+        // state, which is safe: it only gets to run when the cap ran out, and
+        // then either it changes nothing (the assert holds, the state is the
+        // release build's) or the assert fails.
         debug_assert!(settled || !pair(&mut dist, &mut at), "chamfer distance not settled after the capped pass pairs");
     }
     (dist, at)

@@ -69,17 +69,33 @@ fn block_m() -> f64 {
 /// v3: `WorldMap::wrap_x` (east–west wrap).
 pub const WORLD_MAP_VERSION: u32 = 3;
 
-/// The map of every engine region tile intersecting `world`'s artifact, row-major
-/// by z then x. See [`summarize_tile`] for what each tile holds.
-pub fn build_world_map(world: &ForgedWorld) -> WorldMap {
-    let a = world.artifact().expect("whole world");
+/// Whether `world` wraps east–west.
+fn wraps(world: &ForgedWorld) -> bool {
+    world.globals().edges[1] == crate::forged::EdgeKind::Wrap
+}
+
+/// The map's first tile and its size in tiles: every tile intersecting the
+/// artifact — on a world that wraps east–west exactly `width_m / tile`
+/// columns from the first (the forge makes a wrapping world a whole number
+/// of tiles wide), the canonical regions `[origin.x, origin.x + width)`.
+pub(crate) fn map_extent(world: &ForgedWorld) -> (RegionCoords, u32, u32) {
     let (min, max) = world.artifact_bounds_engine_m();
     let t = tile_m();
     let first = |v: f64| (v / t).floor() as i32;
     // The last tile whose start lies before the (exclusive) max edge.
     let last = |v: f64| (v / t).ceil() as i32 - 1;
     let origin = RegionCoords::new(first(min[0]), first(min[1]));
-    let (width, height) = ((last(max[0]) - origin.x + 1) as u32, (last(max[1]) - origin.z + 1) as u32);
+    let width =
+        if wraps(world) { (world.globals().width_m / t).round() as u32 } else { (last(max[0]) - origin.x + 1) as u32 };
+    (origin, width, (last(max[1]) - origin.z + 1) as u32)
+}
+
+/// The map of every engine region tile intersecting `world`'s artifact, row-major
+/// by z then x (on a world that wraps east–west, its canonical regions). See
+/// [`summarize_tile`] for what each tile holds.
+pub fn build_world_map(world: &ForgedWorld) -> WorldMap {
+    let a = world.artifact().expect("whole world");
+    let (origin, width, height) = map_extent(world);
     let reaches = reaches_by_tile(world);
     let mut tiles = Vec::with_capacity((width * height) as usize);
     for dz in 0..height as i32 {
@@ -96,17 +112,19 @@ pub fn build_world_map(world: &ForgedWorld) -> WorldMap {
         tiles,
         rock_names: a.rock_names.clone(),
         region_types: a.regions.iter().map(|r| r.kind).collect(),
-        wrap_x: false,
+        wrap_x: wraps(world),
     }
 }
 
 /// Whether artifact point `(x, z)` lies in tile `rc`'s footprint — the one
-/// test for which tile a river point or volcano belongs to.
+/// test for which tile a river point or volcano belongs to. On a world that
+/// wraps east–west, x is taken round the world to the footprint's image.
 fn in_footprint(world: &ForgedWorld, rc: RegionCoords, x: f32, z: f32) -> bool {
     let (min, _) = world.artifact_bounds_engine_m();
     let t = tile_m();
     let (fx0, fz0) = (f64::from(rc.x) * t - min[0], f64::from(rc.z) * t - min[1]);
     let (x, z) = (f64::from(x), f64::from(z));
+    let x = if wraps(world) { fx0 + (x - fx0).rem_euclid(world.globals().width_m) } else { x };
     x >= fx0 && x < fx0 + t && z >= fz0 && z < fz0 + t
 }
 
@@ -116,6 +134,11 @@ fn in_footprint(world: &ForgedWorld, rc: RegionCoords, x: f32, z: f32) -> bool {
 fn reaches_by_tile(world: &ForgedWorld) -> std::collections::HashMap<(i32, i32), Vec<usize>> {
     let (min, _) = world.artifact_bounds_engine_m();
     let t = tile_m();
+    // On a world that wraps east–west a point's tile is folded onto the
+    // map's canonical columns (a point past the last column's end lies in
+    // the first's image).
+    let (origin, width, _) = map_extent(world);
+    let fold = |x: i32| if wraps(world) { origin.x + (x - origin.x).rem_euclid(width as i32) } else { x };
     let mut by_tile: std::collections::HashMap<(i32, i32), Vec<usize>> = Default::default();
     for (k, reach) in world.artifact().expect("whole world").rivers.iter().enumerate() {
         for p in &reach.points {
@@ -125,7 +148,7 @@ fn reaches_by_tile(world: &ForgedWorld) -> std::collections::HashMap<(i32, i32),
             );
             // The guess, or a neighbour when it rounds across a tile edge.
             for (dx, dz) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)] {
-                let rc = RegionCoords::new(guess.0 + dx, guess.1 + dz);
+                let rc = RegionCoords::new(fold(guess.0 + dx), guess.1 + dz);
                 if in_footprint(world, rc, p.x, p.z) {
                     let list = by_tile.entry((rc.x, rc.z)).or_default();
                     if list.last() != Some(&k) {
@@ -184,14 +207,22 @@ fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crat
         if end > first { first..end } else { let i = ((lo + 0.5 * t - origin) / cell_m).floor() as i64; i..i + 1 }
     };
     let (xs, zs) = (range(tile_min[0], min[0]), range(tile_min[1], min[1]));
-    let inside = |ix: i64, iz: i64| (0..nx).contains(&ix) && (0..nz).contains(&iz);
+    // On a world that wraps east–west a column index is taken round the
+    // world (the last tile reads the first columns again).
+    let wrap = wraps(world);
+    let fold = move |ix: i64| if wrap { ix.rem_euclid(nx) } else { ix };
+    let inside = |ix: i64, iz: i64| (0..nx).contains(&fold(ix)) && (0..nz).contains(&iz);
     let height = |ix: i64, iz: i64| {
-        if inside(ix, iz) { f64::from(a.height.get((iz * nx + ix) as usize)) } else { world.extended_cell_height(ix, iz) }
+        if inside(ix, iz) {
+            f64::from(a.height.get((iz * nx + fold(ix)) as usize))
+        } else {
+            world.extended_cell_height(ix, iz)
+        }
     };
     let cells: Vec<Cell> = zs
         .flat_map(|iz| xs.clone().map(move |ix| (ix, iz)))
         .map(|(ix, iz)| Cell {
-            ix,
+            ix: fold(ix),
             iz,
             x: min[0] + (ix as f64 + 0.5) * cell_m,
             z: min[1] + (iz as f64 + 0.5) * cell_m,
@@ -325,8 +356,10 @@ fn landing(world: &ForgedWorld, cells: &[Cell], tile_min: [f64; 2]) -> Option<[u
     let dist2 = |c: &Cell| (c.x - centre[0]).powi(2) + (c.z - centre[1]).powi(2);
     order.sort_by(|p, q| dist2(p).total_cmp(&dist2(q)).then(p.iz.cmp(&q.iz)).then(p.ix.cmp(&q.ix)));
     let (bounds_min, bounds_max) = world.artifact_bounds_engine_m();
-    let in_artifact =
-        |x: f64, z: f64| x >= bounds_min[0] && z >= bounds_min[1] && x < bounds_max[0] && z < bounds_max[1];
+    let wrap = wraps(world);
+    let in_artifact = |x: f64, z: f64| {
+        (wrap || (x >= bounds_min[0] && x < bounds_max[0])) && z >= bounds_min[1] && z < bounds_max[1]
+    };
     let column = |v: f64, lo: f64| (((v - lo) / block_m()).floor().max(0.0) as u32).min(REGION_BLOCKS as u32 - 1);
     let at = |b: u32, lo: f64| lo + (f64::from(b) + 0.5) * block_m();
     std::iter::once(centre)

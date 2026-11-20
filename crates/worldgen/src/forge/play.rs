@@ -117,6 +117,18 @@ pub const DEV_WORLD_SIZE: WorldSize = WorldSize { name: "Dev", width_m: 16_384.0
 /// planet looks like.
 pub const MIN_WRAP_WIDTH_M: f64 = 8192.0;
 
+/// A world that wraps east–west is a whole number of this many metres wide:
+/// the largest region edge (`REGION_BLOCKS` 512), so its regions tile the
+/// circle at every region size.
+pub const WRAP_WIDTH_STEP_M: f64 = 512.0;
+
+/// The refusal of a world that would wrap east–west but is narrower than
+/// [`MIN_WRAP_WIDTH_M`] (forge time and load); `None` when it is wide enough.
+pub fn too_narrow_to_wrap(width_m: f64) -> Option<String> {
+    (width_m < MIN_WRAP_WIDTH_M)
+        .then(|| format!("this world is too narrow to walk around ({width_m:.0} m; needs {MIN_WRAP_WIDTH_M:.0} m)"))
+}
+
 /// The size called `name` (any case): one of [`WORLD_SIZES`] or `"dev"`.
 pub fn world_size_named(name: &str) -> Option<WorldSize> {
     WORLD_SIZES.iter().chain([&DEV_WORLD_SIZE]).find(|s| s.name.eq_ignore_ascii_case(name)).copied()

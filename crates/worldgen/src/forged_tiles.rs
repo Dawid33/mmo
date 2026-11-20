@@ -324,14 +324,16 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Ti
             let region = indices().map(|i| artifact.region[i]).collect();
             let coast = indices().map(|i| rasters.coast(i)).collect();
             // Lake runs from the whole world's per-cell answer, so a tile
-            // answers exactly what the whole world answers.
+            // answers exactly what the whole world answers. A run never
+            // continues into the next row (a tile as wide as a wrapping
+            // world holds a lake across the seam in two runs).
             let mut lake_runs: Vec<(u32, u32, f32)> = Vec::new();
             for iz in z0..z0 + h {
                 for ix in x0..x0 + w {
                     let i = iz as usize * n + ix as usize;
                     let Some(level) = rasters.lake_level(i) else { continue };
                     match lake_runs.last_mut() {
-                        Some(run) if run.1 as usize == i && run.2.to_bits() == level.to_bits() => run.1 += 1,
+                        Some(run) if run.1 as usize == i && ix != x0 && run.2.to_bits() == level.to_bits() => run.1 += 1,
                         _ => lake_runs.push((i as u32, i as u32 + 1, level)),
                     }
                 }
@@ -727,10 +729,19 @@ impl TileCache {
     /// grid), row by row. The first tile that fails ends it with an error
     /// naming the tile; the tiles pinned so far are unpinned.
     pub(crate) fn pin_rect(self: &Arc<Self>, (tx0, tz0): (u32, u32), (tx1, tz1): (u32, u32)) -> Result<TilePins, String> {
-        let (last_x, last_z) = (self.geometry.tiles_x - 1, self.geometry.tiles_z - 1);
+        let last_x = self.geometry.tiles_x - 1;
+        let columns: Vec<u32> = (tx0.min(last_x)..=tx1.min(last_x)).collect();
+        self.pin_tiles(&columns, (tz0, tz1))
+    }
+
+    /// Loads and pins the tiles of tile columns `columns` (each in the grid)
+    /// in rows `tz0..=tz1` (clamped to the grid), row by row; errors as
+    /// [`Self::pin_rect`].
+    pub(crate) fn pin_tiles(self: &Arc<Self>, columns: &[u32], (tz0, tz1): (u32, u32)) -> Result<TilePins, String> {
+        let last_z = self.geometry.tiles_z - 1;
         let mut pins = TilePins { tiles: Vec::new(), cache: Some(self.clone()) };
         for tz in tz0.min(last_z)..=tz1.min(last_z) {
-            for tx in tx0.min(last_x)..=tx1.min(last_x) {
+            for &tx in columns {
                 let t = TileCoords { tx, tz };
                 let tile = self.pin(t).map_err(|e| format!("forged tile ({tx}, {tz}): {e}"))?;
                 pins.tiles.push((t, tile));
@@ -967,6 +978,21 @@ impl TileCache {
                 .collect::<Vec<_>>()
         });
         crate::forged::SegmentsRef::Tiled(segments.into_iter())
+    }
+
+    /// The tile columns, ascending, holding raster columns `x0..=x1` of a
+    /// world that wraps east–west: a column past the last one continues at
+    /// column 0 (`ix mod nx`; the last tile column may be partial), so a
+    /// read across the seam pins the tiles on both sides.
+    pub(crate) fn tile_columns_wrapping(&self, x0: i64, x1: i64) -> Vec<u32> {
+        let (nx, c) = (i64::from(self.geometry.nx), self.geometry.tile_cells);
+        if x1 - x0 + 1 >= nx {
+            return (0..self.geometry.tiles_x).collect();
+        }
+        let mut columns: Vec<u32> = (x0..=x1).map(|ix| ix.rem_euclid(nx) as u32 / c).collect();
+        columns.sort_unstable();
+        columns.dedup();
+        columns
     }
 
     /// The tiles holding raster cells `x0..=x1` x `z0..=z1` (clamped).

@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use game::{Biome, BlockId, CellClimate};
 
 use crate::forge::geology::rock_index;
+use crate::forge::periodic::PeriodicX;
 pub use crate::forge::regions::RegionRecord;
 pub use crate::forge::world::EdgeKind;
 use crate::material::Materials;
@@ -505,6 +506,7 @@ impl WorldArtifact {
     pub fn validate(&self) -> Result<(), ArtifactError> {
         let artifact = self;
         validate_grid(artifact.nx, artifact.nz, artifact.cell_m, artifact.width_m, artifact.height_m)?;
+        validate_wrap(&artifact.edges, artifact.width_m)?;
         let cells = artifact.nx as usize * artifact.nz as usize;
         if artifact.qrasters().iter().any(|raster| raster.len() != cells)
             || artifact.byte_rasters().iter().any(|raster| raster.len() != cells)
@@ -561,6 +563,15 @@ fn validate_grid(nx: u32, nz: u32, cell_m: f64, width_m: f64, height_m: f64) -> 
     Ok(())
 }
 
+/// A world that wraps east–west is wide enough to walk round
+/// (`forge::play::MIN_WRAP_WIDTH_M`).
+fn validate_wrap(edges: &[EdgeKind; 4], width_m: f64) -> Result<(), ArtifactError> {
+    match PeriodicX::for_edges(edges, width_m).and_then(|_| crate::forge::play::too_narrow_to_wrap(width_m)) {
+        Some(why) => Err(ArtifactError::Format(why)),
+        None => Ok(()),
+    }
+}
+
 /// The checks on a world's global tables that every reader relies on (whole
 /// and tiled worlds): known rocks, a non-empty rock column sorted by
 /// descending top (the strata lookups binary-search it), region records
@@ -606,6 +617,13 @@ pub struct Segment {
     pub(crate) water: (f64, f64),
     pub(crate) half_width: f64,
     pub(crate) depth: f64,
+}
+
+impl Segment {
+    /// This segment moved `dx` metres along x (an image across the seam).
+    fn shifted(self, dx: f64) -> Segment {
+        Segment { a: (self.a.0 + dx, self.a.1), b: (self.b.0 + dx, self.b.1), ..self }
+    }
 }
 
 /// The five quantised rasters (`WorldArtifact::qrasters` order).
@@ -707,6 +725,7 @@ impl WorldGlobals {
     /// artifact passes `WorldArtifact::validate` instead).
     pub fn validate(&self) -> Result<(), ArtifactError> {
         validate_grid(self.nx, self.nz, self.cell_m, self.width_m, self.height_m)?;
+        validate_wrap(&self.edges, self.width_m)?;
         validate_tables(&self.column, &self.rock_names, &self.regions)
     }
 }
@@ -737,23 +756,13 @@ impl WholeRasters {
         let (buckets_x, buckets_z) = (buckets_along(artifact.width_m), buckets_along(artifact.height_m));
         let mut segments = Vec::new();
         let mut buckets = vec![Vec::new(); buckets_x * buckets_z];
+        let wrap = PeriodicX::for_edges(&artifact.edges, artifact.width_m);
         for reach in &artifact.rivers {
             let half_width = reach.width_m as f64 * 0.5;
             let depth = (CHANNEL_DEPTH_PER_SQRT_M * (reach.width_m as f64).sqrt())
                 .clamp(CHANNEL_DEPTH_M.0, CHANNEL_DEPTH_M.1);
-            for pair in reach.points.windows(2) {
-                let (p, q) = (pair[0], pair[1]);
-                if p.in_lake && q.in_lake {
-                    continue; // the lake's own water covers this stretch
-                }
-                let seg = Segment {
-                    a: (p.x as f64, p.z as f64),
-                    b: (q.x as f64, q.z as f64),
-                    water: (p.water as f64, q.water as f64),
-                    half_width,
-                    depth,
-                };
-                let reach_m = half_width + LEVEE_WIDTH_M + BANK_REACH_M;
+            let reach_m = half_width + LEVEE_WIDTH_M + BANK_REACH_M;
+            let mut add = |seg: Segment| {
                 let bucket = |v: f64, per: usize| ((v / BUCKET_M).floor().max(0.0) as usize).min(per - 1);
                 let x0 = bucket(seg.a.0.min(seg.b.0) - reach_m, buckets_x);
                 let x1 = bucket(seg.a.0.max(seg.b.0) + reach_m, buckets_x);
@@ -765,6 +774,41 @@ impl WholeRasters {
                     }
                 }
                 segments.push(seg);
+            };
+            for pair in reach.points.windows(2) {
+                let (p, q) = (pair[0], pair[1]);
+                if p.in_lake && q.in_lake {
+                    continue; // the lake's own water covers this stretch
+                }
+                let mut seg = Segment {
+                    a: (p.x as f64, p.z as f64),
+                    b: (q.x as f64, q.z as f64),
+                    water: (p.water as f64, q.water as f64),
+                    half_width,
+                    depth,
+                };
+                let Some(wrap) = wrap else {
+                    add(seg);
+                    continue;
+                };
+                // Stored points are folded into the map's width: a pair that
+                // steps across the seam is read the short way round (`b`
+                // unwrapped past the edge), and the piece reaching past an
+                // edge is bucketed again shifted by the width — the copy a
+                // point on the other side of the seam finds.
+                let width = wrap.period_m;
+                if seg.b.0 - seg.a.0 > 0.5 * width {
+                    seg.b.0 -= width;
+                } else if seg.a.0 - seg.b.0 > 0.5 * width {
+                    seg.b.0 += width;
+                }
+                add(seg);
+                if seg.a.0.min(seg.b.0) - reach_m < 0.0 {
+                    add(seg.shifted(width));
+                }
+                if seg.a.0.max(seg.b.0) + reach_m >= width {
+                    add(seg.shifted(-width));
+                }
             }
         }
         // Height is held once, as the artifact's `QRaster`: the sampler reads
@@ -917,6 +961,12 @@ pub struct ForgedWorld {
     dither: [OctaveNoise; 2],
     /// Tundra snow patches.
     snow_patch: OctaveNoise,
+    /// x's period on a world that wraps east–west (`None`: it does not, and
+    /// every read takes the edge-clamped path).
+    wrap: Option<PeriodicX>,
+    /// The same period with the blend band of the runtime noises above
+    /// (`PeriodicX::sample_exact`), so they meet themselves at the seam.
+    noise_wrap: Option<PeriodicX>,
     /// Cooling per metre of height (deg C / m): the lapse the world was
     /// forged with (`WorldGlobals::knobs`).
     lapse_c_per_m: f64,
@@ -1052,8 +1102,22 @@ impl ForgedWorld {
         };
         let g = &self.globals;
         let grow = f64::from(crate::forged_tiles::MAX_READ_RADIUS_CELLS) * g.cell_m + BUCKET_M;
-        let (a0, a1) = (self.to_artifact(min_m[0], min_m[1]), self.to_artifact(max_m[0], max_m[1]));
         let cell = |v: f64, n: u32| ((v / g.cell_m).floor() as i64).clamp(0, i64::from(n) - 1) as u32;
+        if self.wrap.is_some() {
+            // The rect in the frame of its west edge's image (x may run past
+            // the east edge); the columns it reads fold onto the map.
+            let shift = min_m[0] - self.fold_engine_x(min_m[0]);
+            let (a0, a1) = (self.to_artifact_raw(min_m[0] - shift, min_m[1]), self.to_artifact_raw(max_m[0] - shift, max_m[1]));
+            let column = |v: f64| (v / g.cell_m).floor() as i64;
+            let columns =
+                cache.tile_columns_wrapping(column(a0.0.min(a1.0) - grow), column(a0.0.max(a1.0) + grow));
+            let (t0, t1) = cache.tiles_of_cells(
+                (0, cell(a0.1.min(a1.1) - grow, g.nz)),
+                (0, cell(a0.1.max(a1.1) + grow, g.nz)),
+            );
+            return cache.pin_tiles(&columns, (t0.1, t1.1));
+        }
+        let (a0, a1) = (self.to_artifact(min_m[0], min_m[1]), self.to_artifact(max_m[0], max_m[1]));
         let (t0, t1) = cache.tiles_of_cells(
             (cell(a0.0.min(a1.0) - grow, g.nx), cell(a0.1.min(a1.1) - grow, g.nz)),
             (cell(a0.0.max(a1.0) + grow, g.nx), cell(a0.1.max(a1.1) + grow, g.nz)),
@@ -1070,6 +1134,10 @@ impl ForgedWorld {
         ];
         let snow_patch = OctaveNoise::new(seed ^ 0x5_0B47, TUNDRA_SNOW_FIRST_OCTAVE, vec![1.0, 0.6]);
         let lapse_c_per_m = globals.knobs().lapse_c_per_km / 1000.0;
+        let wrap = PeriodicX::from_globals(&globals);
+        // The longest wavelength of the three noises (each first octave 2^-o m).
+        let longest_m = 2f64.powi(-DETAIL_FIRST_OCTAVE.min(BIOME_DITHER_FIRST_OCTAVE).min(TUNDRA_SNOW_FIRST_OCTAVE));
+        let noise_wrap = wrap.map(|w| w.for_noise(longest_m));
         ForgedWorld {
             globals,
             rasters,
@@ -1077,6 +1145,8 @@ impl ForgedWorld {
             detail,
             dither,
             snow_patch,
+            wrap,
+            noise_wrap,
             lapse_c_per_m,
         }
     }
@@ -1107,19 +1177,59 @@ impl ForgedWorld {
         self.content_crc
     }
 
-    /// Engine world meters -> artifact meters.
+    /// Engine world meters -> artifact meters; on a world that wraps
+    /// east–west x is folded onto the map first ([`Self::fold_engine_x`]),
+    /// so every image of a point reads the same.
     fn to_artifact(&self, x: f64, z: f64) -> (f64, f64) {
+        self.to_artifact_raw(self.fold_engine_x(x), z)
+    }
+
+    /// Engine world meters -> artifact meters, x not folded (a patch's own
+    /// frame, which may run past the east edge).
+    fn to_artifact_raw(&self, x: f64, z: f64) -> (f64, f64) {
         (x - ENGINE_SPAWN_M + self.globals.spawn[0], z - ENGINE_SPAWN_M + self.globals.spawn[1])
+    }
+
+    /// The image of engine x whose artifact x lies in `[0, width)`:
+    /// `x − k · width` for a whole `k` (exact for block and voxel
+    /// coordinates), the smallest such image whose artifact x is not
+    /// negative. `x` itself on a world that does not wrap.
+    fn fold_engine_x(&self, x: f64) -> f64 {
+        if self.wrap.is_none() || !x.is_finite() {
+            return x;
+        }
+        let width = self.globals.width_m;
+        let ax = |x: f64| self.to_artifact_raw(x, 0.0).0;
+        let mut x = x - (ax(x) / width).floor() * width;
+        // The division may round across a whole period: settle exactly.
+        while ax(x) < 0.0 {
+            x += width;
+        }
+        while ax(x - width) >= 0.0 {
+            x -= width;
+        }
+        x
+    }
+
+    /// A noise of this world at `(x, z)`: periodic in x on a world that
+    /// wraps (`PeriodicX::sample_exact`), the plain noise otherwise.
+    fn noise2(&self, noise: &OctaveNoise, x: f64, z: f64) -> f64 {
+        match &self.noise_wrap {
+            Some(wrap) => wrap.sample_exact(x, z, |x, z| noise.sample2(x, z)),
+            None => noise.sample2(x, z),
+        }
     }
 
     fn cell(&self, ix: i64, iz: i64) -> f64 {
         self.q_cell(QRasterId::Height, ix, iz)
     }
 
-    /// Global index of raster cell `(ix, iz)`, clamped to the edge.
+    /// Global index of raster cell `(ix, iz)`, clamped to the edge — x
+    /// wrapped round instead on a world that wraps east–west.
     fn clamped(&self, ix: i64, iz: i64) -> usize {
         let (nx, nz) = (i64::from(self.globals.nx), i64::from(self.globals.nz));
-        let (ix, iz) = (ix.clamp(0, nx - 1), iz.clamp(0, nz - 1));
+        let ix = if self.wrap.is_some() { ix.rem_euclid(nx) } else { ix.clamp(0, nx - 1) };
+        let iz = iz.clamp(0, nz - 1);
         (iz * nx + ix) as usize
     }
 
@@ -1269,7 +1379,7 @@ impl ForgedWorld {
     /// The point a block column reads its biome at: engine metres `(x, z)`
     /// displaced by up to `BIOME_DITHER_M` on each axis.
     fn dithered(&self, x_m: f64, z_m: f64) -> (f64, f64) {
-        let d = |k: usize| BIOME_DITHER_M * (BIOME_DITHER_GAIN * self.dither[k].sample2(x_m, z_m)).clamp(-1.0, 1.0);
+        let d = |k: usize| BIOME_DITHER_M * (BIOME_DITHER_GAIN * self.noise2(&self.dither[k], x_m, z_m)).clamp(-1.0, 1.0);
         (x_m + d(0), z_m + d(1))
     }
 
@@ -1312,7 +1422,7 @@ impl ForgedWorld {
             self.bilinear_cells(dax, daz, |i| f64::from(r.byte(ByteRasterId::Salinity, i))) >= SALT_FLAT_MIN_SALINITY
                 && self.bilinear_coast(ax, az) > f64::from(crate::habitat::SALT_REACH_M)
         };
-        let snow_patch = biome == Biome::Tundra && self.snow_patch.sample2(x_m, z_m) > TUNDRA_SNOW_PATCH_MIN;
+        let snow_patch = biome == Biome::Tundra && self.noise2(&self.snow_patch, x_m, z_m) > TUNDRA_SNOW_PATCH_MIN;
         ColumnClimate {
             biome,
             snow_line_m: self.snow_line_m(x_m, z_m),
@@ -1326,31 +1436,37 @@ impl ForgedWorld {
     /// Where artifact point `(ax, az)` lies: inside, past a land edge (the
     /// point clamped onto the map's border, whose ground continues outward),
     /// or past a sea edge. A point past two edges (a corner) is sea if
-    /// either is.
+    /// either is. On a world that wraps east–west no point is past the east
+    /// or west edge: x runs on round the world.
     fn place(&self, ax: f64, az: f64) -> Place {
         let (width, height) = (self.globals.width_m, self.globals.height_m);
+        let wrap = self.wrap.is_some();
         // `edges` order: north (z < 0), east (x >= width), south (z >= height), west (x < 0).
-        let past = [az < 0.0, ax >= width, az >= height, ax < 0.0];
+        let past = [az < 0.0, !wrap && ax >= width, az >= height, !wrap && ax < 0.0];
         if !past.contains(&true) {
             return Place::Inside;
         }
         if (0..4).any(|e| past[e] && self.globals.edges[e] == EdgeKind::Sea) {
             return Place::Sea;
         }
-        Place::Land(ax.clamp(0.0, width), az.clamp(0.0, height))
+        Place::Land(if wrap { ax } else { ax.clamp(0.0, width) }, az.clamp(0.0, height))
     }
 
-    /// Whether artifact point `(ax, az)` lies on the map.
+    /// Whether artifact point `(ax, az)` lies on the map (any x on a world
+    /// that wraps east–west).
     fn inside(&self, ax: f64, az: f64) -> bool {
-        ax >= 0.0 && az >= 0.0 && ax < self.globals.width_m && az < self.globals.height_m
+        let x_inside = self.wrap.is_some() || (ax >= 0.0 && ax < self.globals.width_m);
+        x_inside && az >= 0.0 && az < self.globals.height_m
     }
 
     /// Height of raster cell `(ix, iz)` as the sampler extends the map: the
     /// cell itself inside, the nearest border cell past a land edge, and
-    /// [`OUTSIDE_HEIGHT_M`] past a sea edge (`place`'s rules, by cell).
+    /// [`OUTSIDE_HEIGHT_M`] past a sea edge (`place`'s rules, by cell; x
+    /// wraps round on a world that wraps east–west).
     pub fn extended_cell_height(&self, ix: i64, iz: i64) -> f64 {
         let (nx, nz) = (i64::from(self.globals.nx), i64::from(self.globals.nz));
-        let past = [iz < 0, ix >= nx, iz >= nz, ix < 0];
+        let wrap = self.wrap.is_some();
+        let past = [iz < 0, !wrap && ix >= nx, iz >= nz, !wrap && ix < 0];
         if (0..4).any(|e| past[e] && self.globals.edges[e] == EdgeKind::Sea) {
             return OUTSIDE_HEIGHT_M;
         }
@@ -1405,11 +1521,14 @@ impl ForgedWorld {
         );
         let slope = (dx * dx + dz * dz).sqrt();
         let amplitude = (DETAIL_BASE_M + DETAIL_PER_SLOPE_M * slope).min(DETAIL_MAX_M);
-        g + fade * amplitude * 2.0 * self.detail.sample2(ax, az)
+        g + fade * amplitude * 2.0 * self.noise2(&self.detail, ax, az)
     }
 
+    /// Lake level of raster cell `(ix, iz)`; none off the map (x wraps
+    /// round on a world that wraps east–west).
     fn lake_level_at(&self, ix: i64, iz: i64) -> Option<f64> {
         let (nx, nz) = (i64::from(self.globals.nx), i64::from(self.globals.nz));
+        let ix = if self.wrap.is_some() { ix.rem_euclid(nx) } else { ix };
         if ix < 0 || iz < 0 || ix >= nx || iz >= nz {
             return None;
         }
@@ -1500,6 +1619,7 @@ impl ForgedWorld {
     fn bucket_segments(&self, ax: f64, az: f64) -> impl Iterator<Item = Segment> + '_ {
         let index = self.inside(ax, az).then(|| {
             let (per_x, per_z) = self.globals.buckets();
+            // (A folded x can round up to the width itself: the last bucket.)
             let (bx, bz) = ((ax / BUCKET_M) as usize, (az / BUCKET_M) as usize);
             bz.min(per_z - 1) * per_x + bx.min(per_x - 1)
         });
@@ -1527,24 +1647,38 @@ impl ForgedWorld {
             let (ax, az) = self.to_artifact(x, z);
             ColumnProfile::from_surface(SEA_LEVEL + self.ground(ax, az))
         });
+        // The window's own frame: artifact metres from its west edge's image
+        // on (`shift` = 0 unless the world wraps), so x runs on past the
+        // east edge of a world that wraps instead of jumping back.
+        let shift = origin_x - self.fold_engine_x(origin_x);
         // Every river segment that can touch the window.
-        let (a0, a1) = (self.to_artifact(origin_x, origin_z), self.to_artifact(origin_x + span_m, origin_z + span_m));
+        let (a0, a1) =
+            (self.to_artifact_raw(origin_x - shift, origin_z), self.to_artifact_raw(origin_x + span_m - shift, origin_z + span_m));
         let (width, height) = (self.globals.width_m, self.globals.height_m);
-        let overlaps = a1.0 >= 0.0 && a1.1 >= 0.0 && a0.0 < width && a0.1 < height;
-        let mut found: Vec<(u32, Segment)> = Vec::new();
+        let wrap = self.wrap.is_some();
+        let overlaps = (wrap || (a1.0 >= 0.0 && a0.0 < width)) && a1.1 >= 0.0 && a0.1 < height;
+        // (segment id, image k, the segment moved k widths east), by id then k.
+        let mut found: Vec<(u32, u32, Segment)> = Vec::new();
         if overlaps {
             let (per_x, per_z) = self.globals.buckets();
             let bucket = |v: f64, per: usize| ((v / BUCKET_M).floor().max(0.0) as usize).min(per - 1);
-            for bz in bucket(a0.1, per_z)..=bucket(a1.1, per_z) {
-                for bx in bucket(a0.0, per_x)..=bucket(a1.0, per_x) {
-                    found.extend(self.rasters.bucket(bz * per_x + bx));
+            // Each image k of the map the window reaches, as a folded x span.
+            let images = if wrap { (a1.0 / width).floor().max(0.0) as u32 } else { 0 };
+            for k in 0..=images {
+                let off = f64::from(k) * width;
+                let (lo, hi) = if wrap { ((a0.0 - off).max(0.0), (a1.0 - off).min(width)) } else { (a0.0, a1.0) };
+                for bz in bucket(a0.1, per_z)..=bucket(a1.1, per_z) {
+                    for bx in bucket(lo, per_x)..=bucket(hi, per_x) {
+                        let segs = self.rasters.bucket(bz * per_x + bx);
+                        found.extend(segs.map(|(id, seg)| (id, k, if k == 0 { seg } else { seg.shifted(off) })));
+                    }
                 }
             }
-            found.sort_unstable_by_key(|&(id, _)| id);
-            found.dedup_by_key(|&mut (id, _)| id);
+            found.sort_unstable_by_key(|&(id, k, _)| (id, k));
+            found.dedup_by_key(|&mut (id, k, _)| (id, k));
         }
         // Ascending segment id, as `refine` expects; cells index into it.
-        let segments: Vec<Segment> = found.into_iter().map(|(_, seg)| seg).collect();
+        let segments: Vec<Segment> = found.into_iter().map(|(_, _, seg)| seg).collect();
         // Narrow to PATCH_CELL_M cells (artifact coordinates, window-local).
         let cells_per_side = (span_m / PATCH_CELL_M).ceil() as usize + 1;
         let mut cells = vec![Vec::new(); if segments.is_empty() { 0 } else { cells_per_side * cells_per_side }];
@@ -1575,8 +1709,15 @@ impl ForgedWorld {
         };
         let ((x0, x1), (z0, z1)) = (range(a0.0, a1.0, nx), range(a0.1, a1.1, nz));
         let lakes = overlaps
-            && (z0..=z1).any(|iz| (x0..=x1).any(|ix| self.lake_level_of((iz * nx + ix) as usize).is_some()));
-        ForgedPatch { world: self, grid, origin: a0, segments, cells, cells_per_side, lakes }
+            && if wrap {
+                // Columns unclamped (`lake_level_at` wraps them), at most one lap.
+                let (x0, x1) = ((a0.0 / cell_m).floor() as i64 - 1, (a1.0 / cell_m).floor() as i64 + 1);
+                let x1 = x1.min(x0 + nx - 1);
+                (z0..=z1).any(|iz| (x0..=x1).any(|ix| self.lake_level_at(ix, iz).is_some()))
+            } else {
+                (z0..=z1).any(|iz| (x0..=x1).any(|ix| self.lake_level_of((iz * nx + ix) as usize).is_some()))
+            };
+        ForgedPatch { world: self, grid, origin: a0, shift, segments, cells, cells_per_side, lakes }
     }
 }
 
@@ -1594,8 +1735,13 @@ enum Place {
 pub struct ForgedPatch<'a> {
     world: &'a ForgedWorld,
     grid: ProfileGrid,
-    /// Window origin in artifact meters.
+    /// Window origin in artifact meters (the window's own frame: see `shift`).
     origin: (f64, f64),
+    /// Engine metres between the window and the image of it that the
+    /// artifact frame starts from (a multiple of the width; 0 unless the
+    /// world wraps): a point's artifact x in the window's frame is
+    /// `to_artifact_raw(x - shift)`, past the east edge where the window is.
+    shift: f64,
     /// Every river segment that can touch the window, by ascending id.
     segments: Vec<Segment>,
     /// River segment candidates per PATCH_CELL_M cell (indices into
@@ -1621,7 +1767,7 @@ impl crate::Patch for ForgedPatch<'_> {
 
     fn sample(&self, x: f64, z: f64) -> (ColumnProfile, i32, bool) {
         let prof = self.grid.profile_at(x, z);
-        let (ax, az) = self.world.to_artifact(x, z);
+        let (ax, az) = self.world.to_artifact_raw(x - self.shift, z);
         if self.world.place(ax, az) != Place::Inside {
             // No rivers or lakes off the map: they stop at its edge.
             return (ColumnProfile::from_surface(prof.surface_y()), SEA_TOP_BLOCK, false);
