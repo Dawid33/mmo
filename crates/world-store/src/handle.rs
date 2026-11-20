@@ -413,6 +413,15 @@ impl StoreHandle {
         self.ask(|r| Request::LoadTerrain(rc, r))
     }
 
+    /// The region's `terrain_version` and the top of every stored chunk (`chunks.top`, derived from
+    /// `data` where it is NULL); `None` when the region has no row. A read: allowed read-only.
+    pub fn region_tops(
+        &self,
+        rc: RegionCoords,
+    ) -> Result<Option<(u64, Vec<(game::ChunkCoords, game::map_tile::ChunkTop)>)>, StoreError> {
+        self.ask(|r| Request::RegionTops(rc, r))
+    }
+
     /// Every stored region with its `terrain_version`.
     pub fn stored_regions(&self) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
         self.ask(Request::StoredRegions)

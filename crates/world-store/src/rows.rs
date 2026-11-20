@@ -1319,6 +1319,49 @@ macro_rules! engine_rows {
                 Ok(Some(TerrainSnapshot { chunks, ground }))
             }
 
+            /// The region's `terrain_version` and every stored chunk's top (`chunks.top`, derived from
+            /// `data` where it is NULL — a row saved before migration 0021); `None` when the region has
+            /// no row. Plain reads in one read transaction: allowed on a read-only handle, and never
+            /// waiting behind a staged part's row locks.
+            pub(crate) async fn region_tops(
+                pool: &Pool,
+                rc: RegionCoords,
+            ) -> Result<Option<(u64, Vec<(ChunkCoords, game::map_tile::ChunkTop)>)>, StoreError> {
+                let mut tx = begin_read(pool).await?;
+                let row = sqlx::query("SELECT terrain_version FROM regions WHERE rx = $1 AND rz = $2")
+                    .bind(rc.x as i64)
+                    .bind(rc.z as i64)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                let Some(row) = row else {
+                    tx.commit().await?;
+                    return Ok(None);
+                };
+                let version: i64 = row.try_get(0)?;
+                let rows = sqlx::query("SELECT cx, cy, cz, top, data FROM chunks WHERE rx = $1 AND rz = $2")
+                    .bind(rc.x as i64)
+                    .bind(rc.z as i64)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                let mut tops = Vec::with_capacity(rows.len());
+                for r in rows {
+                    let coords = chunk_of(rc, r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)?;
+                    let top: Option<Vec<u8>> = r.try_get(3)?;
+                    let top = match top {
+                        Some(bytes) => decode(FORMAT_CHUNK_TOP, &bytes),
+                        None => {
+                            let data: Vec<u8> = r.try_get(4)?;
+                            decode::<Chunk>(FORMAT_CHUNK, &data).map(|c| game::map_tile::chunk_top(&c))
+                        }
+                    }
+                    .map_err(|e| StoreError::Corrupt(format!("region {rc:?} chunk {coords:?} top: {e}")))?;
+                    tops.push((coords, top));
+                }
+                tops.sort_by_key(|(c, _)| *c);
+                Ok(Some((u(version), tops)))
+            }
+
             pub(crate) async fn stored_regions(pool: &Pool) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
                 let rows = sqlx::query("SELECT rx, rz, terrain_version FROM regions").fetch_all(pool).await?;
                 let mut out = BTreeMap::new();
@@ -1798,8 +1841,8 @@ macro_rules! engine_rows {
                     versions.push((*rc, u(version)));
                     for (c, chunk) in &region.chunks {
                         sqlx::query(
-                            "INSERT INTO chunks (rx, rz, cx, cy, cz, data) VALUES ($1, $2, $3, $4, $5, $6) \
-                             ON CONFLICT (rx, rz, cx, cy, cz) DO UPDATE SET data = excluded.data",
+                            "INSERT INTO chunks (rx, rz, cx, cy, cz, data, top) VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                             ON CONFLICT (rx, rz, cx, cy, cz) DO UPDATE SET data = excluded.data, top = excluded.top",
                         )
                         .bind(rx)
                         .bind(rz)
@@ -1807,6 +1850,8 @@ macro_rules! engine_rows {
                         .bind(c.y as i64)
                         .bind(c.z as i64)
                         .bind(encode(FORMAT_CHUNK, chunk))
+                        // The map's top of this chunk, in the chunk's own statement: never a row of its own.
+                        .bind(encode(FORMAT_CHUNK_TOP, &game::map_tile::chunk_top(chunk)))
                         .execute(&mut *conn)
                         .await?;
                     }

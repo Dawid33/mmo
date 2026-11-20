@@ -15,6 +15,8 @@ pub const FORMAT_PLAYER_RECORD: u8 = 2;
 pub const FORMAT_INTENT_MSG: u8 = 1;
 /// `regions.ground`: a region's `Vec<(ColumnCoords, ColumnGround)>`.
 pub const FORMAT_REGION_GROUND: u8 = 1;
+/// `chunks.top`: the chunk's `game::map_tile::ChunkTop`, written beside `data`.
+pub const FORMAT_CHUNK_TOP: u8 = 1;
 
 /// `forged_world_map.bytes`: the forged world's `game::WorldMap`, framed by
 /// [`encode_world_map`] (not [`encode`]): format 1 was the plain

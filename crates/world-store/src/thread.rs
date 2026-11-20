@@ -96,6 +96,7 @@ pub(crate) enum Request {
     ForgedWorldMap(Reply<Option<Vec<u8>>>),
     LoadRegion(RegionCoords, Fence, Reply<Option<game::StoredRegion>>),
     LoadTerrain(RegionCoords, Reply<Option<game::TerrainSnapshot>>),
+    RegionTops(RegionCoords, Reply<Option<(u64, Vec<(game::ChunkCoords, game::map_tile::ChunkTop)>)>>),
     StoredRegions(Reply<std::collections::BTreeMap<RegionCoords, u64>>),
     StoredRegionsSince(Tick, Reply<std::collections::BTreeMap<RegionCoords, u64>>),
     /// `pg_notify` of a committed cut (SQLite: nothing to do).
@@ -552,6 +553,7 @@ async fn serve(
                 tokio::spawn(async move { r.send(on_pool!(&pool, load_region(rc, &fence, s))) })
             }
             Request::LoadTerrain(rc, r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_terrain(rc))) }),
+            Request::RegionTops(rc, r) => tokio::spawn(async move { r.send(on_pool!(&pool, region_tops(rc))) }),
             Request::StoredRegions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions())) }),
             Request::StoredRegionsSince(tick, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions_since(tick))) })
