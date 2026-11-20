@@ -3118,3 +3118,13 @@ quest-fuzz-replay target:
     files=(fuzz/regressions/{{target}}/*)
     [ ${#files[@]} -gt 0 ] || { echo "no inputs under quest/fuzz/regressions/{{target}}/"; exit 0; }
     {{cap}} "$root/bin/cargo-fuzz" fuzz run "{{target}}" "${files[@]}" -- -timeout=10 -rss_limit_mb=2048
+
+# Elastic 5's live probe of a move of occupied land in place — a LIVE run: Dawid's, after the
+# coordinator HTTP plan's hand checks (a), (c), (d) (TODO.md, Elastic 5). `dev-r3` with two
+# `claim` hosts and the coordinator's dev / twin move trigger: every `every` ms with no move open
+# the busiest occupied super-region moves to the other host after a `warning`-second notice
+# (`VOXEL_MOVE_PROBE_MS`, `VOXEL_MOVE_WARNING_SECS`; refused beside VOXEL_FLEET_MAX). Join with
+# `just client`, stand still, and read the hosts' `[server] move …` lines and the client's
+# countdown; the pause is the last snapshot from the giver to the first from the taker.
+move-probe every="15000" warning="20":
+    VOXEL_MOVE_PROBE_MS={{every}} VOXEL_MOVE_WARNING_SECS={{warning}} just dev-r3 2

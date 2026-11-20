@@ -409,7 +409,8 @@ Verify with:
   compare-and-set is the ONLY fence — never a replica count, a budget, a lease, a sticky route or the ticker
   preference. Migrations `0017_coordinator_replicas` (`coordinator_replicas`, `outbox`, `coordinator.next_replica`,
   `coordinator.history_version`) and `0020_mailbox` (`outbox.at_ms`, `login_outbox`). `COORDINATOR_STATE_VERSION` is
-  8 since the coordinator HTTP API (attachments by boot, with their store time; 7 lived only inside that plan); a row
+  9 since Elastic 5 (the move runs, `CutRun.moves`); 8 was the coordinator HTTP API (attachments by boot, with their
+  store time; 7 lived only inside that plan); a row
   of an older format beside saved regions is refused: re-forge (`just pg-reset`, `just run --reset`).
   - **Replicas**: `register_replica` issues a `ReplicaId`; a split replica beats `coordinator_replicas.seen_ms` every
     `REPLICA_BEAT_MS` (2 s) from its main loop. Its first input is `Input::ReplicaJoined { me, alone }` (`alone`: no
@@ -720,6 +721,36 @@ Verify with:
     free. Lock walks: `world-store/src/succession.rs`'s notes. Metrics (coordinator): `mmo_fleet_wanted`,
     `mmo_fleet_draining` (the ticker's last read; 0 on the others), `mmo_fleet_{added,drained,removed,full}_total`;
     `added=` / `drained=` / `removed=` / `scale=` on the `[coordinator] window=` line.
+  - **Moving occupied land in place** (Elastic 5, plan `docs/superpowers/plans/2026-11-20-elastic-5-move-occupied-land.md`;
+    `coordinator/moves.rs`, `world_manager/moves.rs`; built, NOT accepted — `TODO.md`): ONE move per world, a durable
+    run in the core (`MoveRuns`, in `projection!`): the ticker opens it (`CoordMsg::MoveLand` to the giver G,
+    `ExpectLand` to the taker T, rows of the opening transition; the giver takes no logins from then on), the warning
+    (`VOXEL_MOVE_WARNING_SECS`, default `MOVE_WARNING_SECS` 60) ends at `at_tick`, a cut begins at once and carries it
+    (`BeginCut` / `CutRun` / `CutDecide.moves`); committed → the run ends; aborted → retried (`MOVE_CUT_TRIES` 3) or
+    abandoned (`MoveOff` to both; the land held out `MOVE_RETRY_AFTER_MS`); a lost party, a declaration, a rollback, a
+    newer generation or the deadline (`at_tick` + `MOVE_DEADLINE_MS`) abandons a `Warning` run — a `Cutting` one is only
+    doomed (the store may hold the decision): its cut's outcome decides. **The store**: G's part hands the row to T at
+    `epoch + 1` (`WorldCut::moves`, locked with the releases, written after them, NO `hosts` lock); `decide_in` records an
+    abort unless every taker is a live, dirty, undrained, freshly beaten listed participant not leaving at the move's
+    boot, and its giver is listed; `declare_in` / `end_landless_in` answer `StoreError::Busy` while a part of a cut
+    decided COMMITTED is still staged (a taker dying before `COMMIT PREPARED`). **G**: warns the home sessions on the land
+    (`ServerPacket::LandMoving` with a standby ticket to T); at the `BeginCut` refuses its part (`MoveRefused`) unless it
+    owns the land, T takes part, no spawn order is held or pinned there and no player there is between states; else
+    masks it, parks its players KEEPING their sessions and stops its regions; at the commit (`land_moved`, before
+    `drop_stored_parked`; the fence shrank by the moved rows, `release_epochs_of`) names T at `epoch + 1` (no
+    `Released`) and sends each kept record as `Reliable::PlayerMove { place: MovePlace::Pose }`, the session turning
+    observer; an abort restores them in place. A peer's hand-off into the land during the mask takes the release path
+    (a reconnect). **T**: never asks for the land; after the committed `CutDone` its keeper reads until a read shows the
+    row as T's and fences it even while a succession is open (`expected_committed`), then `moved_in` places the
+    `PlayerMove`s it held (noted in `cut_transit`) at their pose, promoting the standby session (none: parked, the
+    client rejoins; held past `MOVE_HOP_WAIT_MS` 30 s: the ordinary path); idle observers are spared while a move is
+    expected. Other participants mask the land until a newer epoch is known. Hosts report load per super-region in the
+    beat (`HostLoad::land`, `hosts.land_load`, migration `0022`). **Scale-down** (rule 6 with players): the victim
+    EVACUATES (takes no logins); rule 6b moves its most occupied super-region to `pick_taker`'s host one at a time and
+    drains it with no notice once its beat shows no player on its land — `MOVE_ABANDON_MAX` (2) abandons,
+    `EVACUATE_MAX_MS` (30 min) or no taker → the warned drain. Dev / twin trigger `VOXEL_MOVE_PROBE_MS` (refused beside
+    `VOXEL_FLEET_MAX`; `just move-probe`, a live run). Client: the move's countdown beside the drain line, a standby
+    connection opened on `LandMoving`. Hotspot relief is not built.
   - Login calls the COORDINATOR's HTTP API (`login/src/host_link.rs` `WorldClients`: per world ONE pinned HTTP/2
     client and ONE standing answers poll; `host_link` = a URL or comma list, `host_link_cert` = the coordinator's pin;
     no per-replica links): a join POSTs `SpawnPlayer` to `/v1/login/orders` (a transport failure or a 503 `not_ready` /
@@ -829,8 +860,10 @@ Verify with:
   HTTP/2 connection to ONE replica until it breaks (kube-proxy balances connections, not requests). Role `all`
   (`jwt` + a service token) serves the two login routes itself on `VOXEL_HOST_LINK_BIND` (an in-memory answer queue,
   `LOGIN_ANSWERS_HELD_MAX` 4096): the login service has one transport; kicks are durable in its store until acked
-  (login migration 0003). `svc-link` carries host↔host peer links only. `LINK_PROTOCOL_VERSION` is 12 (the
-  coordinator as an HTTP service: the `X-Link-Version` header and the peer hello; 11 was Elastic 4:
+  (login migration 0003). `svc-link` carries host↔host peer links only. `LINK_PROTOCOL_VERSION` is 13 (Elastic 5:
+  `CoordMsg::BeginCut.moves`, `MoveLand`, `ExpectLand`, `MoveOff`, `CutFailure::MoveRefused`,
+  `Reliable::PlayerMove.place`, `ServerPacket::LandMoving`; 12 was the coordinator as an HTTP service: the
+  `X-Link-Version` header and the peer hello; 11 was Elastic 4:
   `HostToLogin::Starting`; 10 Elastic 3: `HostMsg::LandNeeded`, `CoordMsg::Assigned`, `CoordMsg::LandIs`,
   `Reliable::Released`; the unsent `HostMsg::LandWanted` / `Volatile::ClaimWanted`, `HostToLogin::NoGate` /
   `Starting` and `PeerRole::Coordinator` / `Login` stay in their append-only enums) — older hosts, login services and
