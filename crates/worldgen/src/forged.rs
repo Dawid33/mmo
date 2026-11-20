@@ -1162,6 +1162,39 @@ impl ForgedWorld {
         self.rasters.climate()
     }
 
+    /// The monthly family behind the runtime's integer frame (Phase 6): one
+    /// more resident copy, in an `Arc`. The origin is the spawn offset rounded
+    /// to the nearest 1/256 m (a fractional spawn costs ≤ 1/512 m), the lapse
+    /// `lapse_per_m() · 10^6` rounded (half away from zero). `Err` when the
+    /// climate grid does not span the world in whole 1/256 m (the caller then
+    /// runs with no climate).
+    pub fn world_climate(&self) -> Result<game::WorldClimate, String> {
+        let g = &self.globals;
+        let monthly = self.monthly_climate();
+        let q8 = |what: &str, m: f64| -> Result<i64, String> {
+            let v = m * 256.0;
+            if v.fract() != 0.0 || !(1.0..=game::CLIMATE_MAX_EXTENT_Q8 as f64).contains(&v) {
+                return Err(format!("world {what} {m} m is not a whole number of 1/256 m within 2^30 m"));
+            }
+            Ok(v as i64)
+        };
+        let frame = game::ClimateFrame {
+            seed: g.seed,
+            origin_q8: [
+                ((g.spawn[0] - ENGINE_SPAWN_M) * 256.0).round() as i64,
+                ((g.spawn[1] - ENGINE_SPAWN_M) * 256.0).round() as i64,
+            ],
+            width_q8: q8("width", g.width_m)?,
+            height_q8: q8("height", g.height_m)?,
+            cell_q8: q8("climate cell", monthly.cell_m)?,
+            wrap_x: monthly.wrap_x,
+            lapse_uc_per_m: (self.lapse_per_m() * 1_000_000.0).round() as i64,
+            sea_top_block: SEA_TOP_BLOCK,
+            monthly_crc: monthly.content_crc(),
+        };
+        game::WorldClimate::new(frame, std::sync::Arc::new(monthly.clone()))
+    }
+
     /// The tile cache of a tiled world (`None` for a whole one).
     pub fn tile_cache(&self) -> Option<&crate::forged_tiles::TileCache> {
         match &self.rasters {
