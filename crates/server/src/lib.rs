@@ -769,6 +769,9 @@ pub fn run() -> claims::ServerExit {
         info!("[server] stop signal while waiting for a world: exiting");
         return claims::ServerExit::Clean;
     };
+    if let Some(map) = opened.map.as_mut() {
+        roles::seam_for_role(role, map);
+    }
     let store = opened.store.clone();
     // Which regions this process simulates (`VOXEL_OWNERSHIP`), and the super-region side that
     // decides it: a bad setting stops the start, naming the variable. A host's ownership is

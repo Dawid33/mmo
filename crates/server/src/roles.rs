@@ -42,6 +42,20 @@ pub const SPLIT_ROLES_NEED_POSTGRES: &str = "split roles need a Postgres world (
 /// How often the coordinator process checks for a stop signal or a stopped thread.
 const COORDINATOR_PROCESS_POLL: Duration = Duration::from_millis(100);
 
+/// Outside role `all` the seam between hosts does not exist yet: a wrapping world runs with its
+/// east and west edges CLOSED (the terrain stays periodic, the stored map is not rewritten).
+/// Clears `map.wrap_x` for such a role and says so once; returns whether it did.
+pub fn seam_for_role(role: Role, map: &mut game::WorldMap) -> bool {
+    if !map.wrap_x || role == Role::All {
+        return false;
+    }
+    map.wrap_x = false;
+    log::warn!(
+        "[server] this world wraps east–west, but only a single process (VOXEL_ROLE=all) runs the seam yet: its east and west edges are closed here"
+    );
+    true
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     /// The whole world in this process.
@@ -419,12 +433,15 @@ pub fn run_coordinator() -> ServerExit {
     let empty = world_file::empty_store_from_env().unwrap_or_else(|e| fatal(e));
     // Watched before the store opens only when waiting for a world; otherwise where it always was.
     let early_stop = (empty == world_file::EmptyStore::Wait).then(crate::watch_stop_signals_on_thread);
-    let Some(opened) = world_file::open_world_with(&source, &worldgen::forge::ForgeParams::default(), empty, early_stop.as_deref())
+    let Some(mut opened) = world_file::open_world_with(&source, &worldgen::forge::ForgeParams::default(), empty, early_stop.as_deref())
         .unwrap_or_else(|e| fatal(e))
     else {
         log::info!("[coordinator] stop signal while waiting for a world: exiting");
         return ServerExit::Clean;
     };
+    if let Some(map) = opened.map.as_mut() {
+        seam_for_role(Role::Coordinator, map);
+    }
     let store = opened.store.clone().expect("a Postgres world has a store");
     let map = opened.map.clone().expect("a stored world has a map");
     // Elastic 1: no host count. `claim` (R4): any number of hosts, each with an issued id, all
