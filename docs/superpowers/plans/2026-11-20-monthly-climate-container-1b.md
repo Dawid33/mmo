@@ -603,3 +603,91 @@ So the family can be LOOKED at before Phase 3 fills it with a model, and so the 
 - The in-game world map shows no monthly layer; only the `world_map` tool does.
 - A world whose sides are not whole climate cells does not forge (Ruling 2).
 - The old-format refusal of a Postgres store is argued from the shared code path, not run (Ruling 17).
+
+## As built (2026-11-20)
+
+Built in six tasks, each task-reviewed; the whole-plan review and the program's Status row follow this closing task
+(the controller's). Ledger: `.superpowers/sdd/2026-11-20-monthly-climate-container-1b/progress.md` (git-ignored
+workspace; the task reports, reviews and the safety-net baselines sit beside it). Evidence: the program's Evidence
+section ("Phase 1b"); measurements: the design's Measurements ("Phase 1b").
+
+### Commits per task
+
+| Task | Commits |
+|---|---|
+| Plan | `a6fb06f9` |
+| 1 `game::MonthlyClimate` and its exact sampler | `99fc8643`, `fc15f88f` (fix round 1: the sampler's index math saturates on far coordinates) |
+| 2 The placeholder seasonal climate in the forge | `3c0b8856` |
+| 3 The container in the world file and the tiled store (artifact v10, tiles v3) | `50ebc1ed` |
+| 4 The world-position sampler API | `1fa81891` |
+| 5 A month on the map tool | `c30da2a4` |
+| 6 Measure, evidence, close | this commit and the ones beside it in `git log` |
+
+(`7b45b2c4`, between Tasks 3 and 4, is the Phase 3 plan's draft, not this plan's.)
+
+### Rulings made during execution
+
+The ledger's, verbatim, in order:
+
+- Ruling: the monthly-vs-annual temperature gap near the poles is accepted as measured (Ruling 13's "p99 above 0.3 is a finding" is met at p99; the maxima 0.55–1.20 °C sit within half a climate cell of the north/south edges and within ~10° of a pole, where the placeholder's latitude + meander clamps at ±90°) — it is a property of the PLACEHOLDER at the polar rows, off the caps the gap is ≤ 0.08 °C, and Phase 3 replaces the values — costs: Phase 6, if started on the placeholder, sees up to ~1 °C inconsistency between annual and monthly temperature at the polar edge.
+
+Made by the tasks (each task report's "Rulings", verbatim):
+
+- Task 1 — Ruling: the midpoint check compares bit-exact against the mean of the `f64` decodes, not of the `f32` normals —
+  the sampler interpolates in `f64` and casts last, so the `f32`-based mean double-rounds — cost if wrong: none
+  (a temporary test).
+- Task 2 — Ruling: the report's `monthly_temp_mean_err_c` / `monthly_precip_sum_err_mm` recompute T and P from the public
+  functions instead of the placeholder exposing them — why: no extra public API beyond the brief's list, and it
+  checks the formula independently — cost if wrong: a duplicate of ~10 lines to keep in step until Phase 3 deletes
+  the placeholder.
+- Task 2 — Ruling: a NaN value counts as clamped and stores 0 in `quantise` — why: `clamped_values` should flag any value
+  the integers cannot carry — cost if wrong: none (none occur; count 0).
+- Task 3 — Ruling: `delta_plane` / `undelta_plane` are one generic pair over a `fn(T, T) -> T` (`i16/u16/u8/i8::wrapping_*`)
+  applied to the whole plane vector in rows of `nx`, rather than four copies of `delta_rows` per month — why: a month
+  plane is exactly `nz` rows of `nx`, so row-chunking the vector IS per-month encoding, and the bytes are the same
+  as `delta_rows`' rule; fewer functions to keep in step — cost if wrong: none (a format detail inside v10).
+- Task 3 — Ruling: `MONTHLY_ROWS_PER_BATCH = 64` — why: bounds the placeholder's transient arrays (~12 MB at Large) while
+  keeping enough parallel work per batch (64 rows of up to 784 cells); output identical (the baselines' monthly lines
+  unchanged) — cost if wrong: a little parallelism at the batch boundaries (the placeholder takes milliseconds:
+  `artifact: 0.04 s` at dev 32 m).
+- Task 4 — Ruling: the report's fine lattice stride is `max(7, ceil(sqrt(cells / 50,000)))` — why: keeps the lines linear in
+  ~50,000 points at every size (Large 16 m: stride 21) — cost if wrong: a coarser lattice at Medium/Large sees fewer
+  coastal points (the lines are summaries; the temporary tests checked the properties exhaustively on dev).
+- Task 4 — Ruling: `climate_roundtrip_max_err`'s wind is the max over both components — why: one number per field as the line's
+  format has one wind slot — cost: none.
+- Task 6 — Ruling: the forge's estimate (`forge::play`) is NOT refitted although Dev at 32 m is now 31 % slower and 30 %
+  heavier than it predicts — why: Dev is not a menu size, the miss is a fixed per-world cost (writing the family's
+  3 MiB through zstd level 19: +0.36 s, +36 MB, measured against the pre-1b binary) and every menu size stays within
+  5.3 % on time and 21.5 % on memory — cost if wrong: the menu shows Tiny at 32 m as 125 MB where it takes 159 MB,
+  far below the 12 GiB Play cap.
+- Task 6 — Ruling: Large at 16 m was measured with exactly 21 GB available (the dispatch's bar: more than 20) — it
+  peaked at 13.5 GB as in Phase 1a — cost: none.
+
+### Open finding for the whole-plan review
+
+- Ruling 13's bar ("a p99 above 0.3 °C on any size is a finding") is crossed on Tiny: `monthly_annual_temp_gap_c: p99
+  0.569, max 1.046` (`just forge-report --size tiny --cell 32`, default seed; Task 6). The ledger's ruling above
+  accepted the polar gap because the p99 stayed at or under 0.3 on the sizes then measured (Dev 32 m 0.24–0.30, Dev
+  64 m 0.050, Small 32 m 0.148); Medium 32 m is 0.062 (max 0.664) and Large 32 m 0.051 (max 0.342). Where on the
+  Tiny world the gap sits was not measured by this task.
+
+### Deferred minors still open (as the ledger words them)
+
+- Task 1: minor (deferred): `read` takes `&dyn Fn` (dynamic dispatch, 5 planes × 12 months × 4 taps) → revisit in Phase 6 if `normals_at` runs per frame
+- Task 1: minor (deferred): the doc's "saturates to the edge cell" for a far coordinate is exact only without wrap (with wrap: i64::MAX mod nx — arbitrary but deterministic) → final review triage
+- Task 2: minor (deferred): the report's note "seed 0207's monthly precip `no` is inherited from the fine precip seam" holds at 64 m only → final review triage / Task 6 evidence wording
+- Task 2: minor (deferred): `artifact_rasters_crc` (the plan's fixed list) leaves out the header fields the runtime also reads (seed, width_m, height_m, cell_m, nx, nz, knobs) — the `size:` and `seed:` report lines cover all but `knobs`; changing the crc now would invalidate baseline2 mid-phase → final review (add a `knobs_crc` line or extend the list at the phase's end, for Phase 2's safety net)
+- Task 2: minor (deferred): `monthly_placeholder` peak ≈ 1.8× its planes → Task 3 was asked to fill row by row; `latitude_at` duplicates `latitudes`' formula → final review triage
+- Task 3: minor (deferred): a meta's climate error reads "forged_meta: world file: monthly climate: …" (misleading prefix) → final review triage
+- Task 3: minor (deferred): transient copies while WRITING a tiled world (~3–4 × 28 MiB at Large) and at `load_forged` (~2 ×) → Task 6 records it in the measurements
+- Task 3: minor (deferred): the grid-span check is exact f64 equality (a hand-built artifact with a rounding-different cell is refused, not misread) → accept
+- Task 4: minor (deferred): `monthly_annual_temp_gap_c` samples cell CENTRES, where the lapse cancels — it cannot detect a lapse / datum defect (Ruling 13's stated purpose) → final review fix wave (sample off-centre too, or state that the line checks the sea-level field only)
+- Task 4: minor (deferred): summary prints `monthly_precip_conserved_max_rel` with float noise and loses the worst p99 of the gap across seeds → final review fix wave (cosmetic)
+- Task 4: minor (deferred): `game::MonthlyNormals::lowered_by(f32)` vs `ground_normals` lowering in f64 — a Phase 6 caller using the former will not bit-match `monthly_at_ground` → final review fix wave (doc which is canonical)
+- Task 5: minor (deferred): the tool loads the world file twice (bounds, then the layer); the report quotes rain for month 4 only (no month-10 rain values) → Task 6 evidence renders both; final review triage
+
+What Task 6 did with the three routed to it: the 0207 wording — at 32 m seed 0207's monthly precipitation seam is
+`no` (2.802, rank 0.016) while its fine precipitation seam is `yes` (0.368, rank 0.569), so it is NOT inherited
+there; at 64 m both are `no` (fine 3.894, rank 0.008; monthly 4.392, rank 0.000), as the Evidence says. The transient
+copies are recorded in the design's Measurements as not measured (from the code). The month-10 rain map was rendered
+(`target/world-forge/phase1b-monthly-rain-10.png`) and its values are in the program's Owner hand checks.

@@ -384,6 +384,64 @@ Mcells^1.02` (worst 6.8 %) and `70 MB + 172 B per cell` (worst 16 %, the small w
 up). With the Play forge's 12 GiB cap the menu still offers every size: Tiny and Small at 16 / 32 / 8 m, Medium
 at 16 / 32 m, Large at 32 m only (Large at 16 m is estimated at 13.6 GB).
 
+### Phase 1b (the monthly-climate container: the Planet plus twelve months of coarse climate)
+
+Measured 2026-11-20 at `c30da2a4` (Phase 1b's last code commit) with the same recipe and machine as Phase 1a, the
+day after: `just forge-bench <width> <height> <cell>` (release; `cap` pins only the build, the forge runs on all 20
+logical cores; i7-12700H laptop, 31 GB RAM; `free -g` showed 21 GB available before the series and again right
+before Large at 16 m, so that row was run; wall time includes writing the PNGs and the world file). One run each,
+one after another, nothing else of ours running (the owner's k3s and desktop were up, as in Phase 1a), so ±20 %.
+`scaling_cur_freq` was read on ALL cores before and after each run (Phase 1a read cpu0 only): minimum 395–401 MHz,
+median 0.48–2.84 GHz, maximum 3.30–4.56 GHz — idle snapshots between runs, no sign of clamping, not a reading under
+load. "Artifact" is the `artifact: … s` line (`Forged::artifact`, now including the monthly placeholder: the coarse
+chamfer and the six planes); Phase 1a printed no such line. The Phase 1a figures are that table's (rounded there);
+the difference is against them.
+
+| Size | Cell | Cells | Wall time (1a; Δ) | Artifact | Peak memory (1a; Δ) | World file (1a; Δ) |
+|---|---|---|---|---|---|---|
+| Dev 16,384 × 8,192 | 32 m | 0.13 M | 1.41 s (1.04; +36 %) | 0.04 s | 0.13 GB (0.08; +65 %) | 0.98 MB (0.4; +0.58) |
+| Tiny 25,600 × 12,800 | 32 m | 0.32 M | 2.52 s (2.31; +9 %) | 0.06 s | 0.16 GB (0.15; +6 %) | 1.24 MB (0.8; +0.44) |
+| Tiny | 16 m | 1.28 M | 10.09 s (9.99; +1 %) | 0.23 s | 0.33 GB (0.33; −1 %) | 2.41 MB (2.0; +0.41) |
+| Small 50,176 × 25,088 | 32 m | 1.23 M | 9.36 s (9.31; +1 %) | 0.22 s | 0.33 GB (0.31; +8 %) | 2.87 MB (2.5; +0.37) |
+| Small | 16 m | 4.9 M | 39.32 s (39.3; 0 %) | 0.97 s | 0.93 GB (0.93; 0 %) | 6.22 MB (5.8; +0.42) |
+| Medium 100,352 × 50,176 | 32 m | 4.9 M | 39.45 s (38.5; +2 %) | 1.04 s | 0.95 GB (0.94; +1 %) | 9.07 MB (8.0; +1.07) |
+| Medium | 16 m | 19.7 M | 162.00 s (160.9; +1 %) | 4.54 s | 3.38 GB (3.38; 0 %) | 19.82 MB (18.8; +1.02) |
+| Large 200,704 × 100,352 | 32 m | 19.7 M | 169.78 s (164.5; +3 %) | 4.73 s | 3.44 GB (3.40; +1 %) | 29.83 MB (27.2; +2.63) |
+| Large | 16 m | 78.7 M | 666.74 s (655.3; +2 %) | 20.99 s | 13.51 GB (13.5; 0 %) | 67.16 MB (64.5; +2.66) |
+
+(Peak memory is `/usr/bin/time`'s max RSS, KiB × 1,024; MB and GB are 10⁶ and 10⁹ bytes. The artifact step is 2.3
+to 3.1 % of each run.)
+
+The monthly family per size (`just forge-report --size <name> --cell 32`, default seed; at the cells in use a size
+has one climate grid whatever the forge cell; "packed" is the family alone through the world file's encoding):
+
+| Size | Climate grid | Degrees per cell | Raw = resident | Packed | Its share of the 32 m world file |
+|---|---|---|---|---|---|
+| Dev | 256 × 128 of 64 m | 1.41° | 3,145,728 B (3.00 MiB) | 556,910 B | 57 % of 980,790 B |
+| Tiny | 200 × 100 of 128 m | 1.80° | 1,920,000 B (1.83 MiB) | 392,621 B | 32 % of 1,235,597 B |
+| Small | 196 × 98 of 256 m | 1.84° | 1,843,968 B (1.76 MiB) | 384,784 B | 13 % of 2,868,552 B |
+| Medium | 392 × 196 of 256 m | 0.92° | 7,375,872 B (7.03 MiB) | 1,044,793 B | 12 % of 9,071,245 B |
+| Large | 784 × 392 of 256 m | 0.46° | 29,503,488 B (28.1 MiB) | 2,644,575 B | 8.9 % of 29,828,883 B |
+
+What they say. Every row from Tiny at 32 m up is within the ±20 % of one run on a machine in use: time +0 to +9 %,
+memory −1 to +8 %, so nothing there is attributed. The method is the same as Phase 1a's (recipe, machine, one run
+each) except the frequency reading; the comparison is still INDICATIVE, a day apart on a machine in use. **Dev at
+32 m is more than 25 % above Phase 1a** (+0.37 s, +0.05 GB) and it is real, not noise: the same command run three times
+each, alternating, with the binary of `758431e7` (the tree before Phase 1b, exported and built apart) gave 1.06 /
+0.99 / 1.02 s and 79,272 / 78,284 / 77,376 KiB against this build's 1.38 / 1.36 / 1.39 s and 128,832 / 129,256 /
+127,652 KiB, and a 429,508 B world file against 980,790 B. It is NOT the artifact step (0.04 s): it is writing the
+world file, whose zstd level-19 body grows from 2.26 to 5.41 MB of bincode on Dev (the family's 3 MiB) — `zstd -19
+-T1` over the two bodies, outside the forge, takes 0.47 s / 56 MB and 0.83 s / 92 MB (+0.36 s, +36 MB). It is a
+per-world cost that the larger sizes hide (their family is 9–13 % of the file; the Dev family is larger than its
+terrain, as the plan's Ruling 1 foresaw). The world files grow by the packed family (+0.37 to +2.66 MB). Against the
+forge's estimate (`forge::play`, Phase 1a's refit: 7.7 s × Mcells^1.02, 70 MB + 172 B per cell) Dev at 32 m is now
+31 % slow and 30 % over in memory; every menu size is within 5.3 % on time and 21.5 % on memory (Tiny at 32 m:
+125 MB estimated, 159 MB measured; from 4.9 M cells up within 3.4 %). The estimate was NOT refitted: Dev is not a
+menu size and the miss is a fixed cost of tens of MB, far below the Play forge's 12 GiB cap. Not measured here:
+the family's transient copies while a server WRITES a tiled world (about 3–4 × the family, 84–112 MiB at Large) and
+in `load_forged` (about 2 ×), from the code (Phase 1b Task 3); a running process keeps one resident copy (28 MiB at
+Large, 3 MiB at Dev), outside the tile cache's budget.
+
 ## Left to the builder
 
 - All internal names, module layout, and how width/height thread through each API.

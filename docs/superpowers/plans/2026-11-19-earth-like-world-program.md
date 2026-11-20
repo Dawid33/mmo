@@ -342,6 +342,28 @@ To be appended as phases finish. Already known:
   6. Re-forge every world before running this build (artifact v9, world map v3; as in step 1, only a stored v8
      Planet would still load, without this phase's tuning): dev worlds (`just run --reset`, `worlds/`), the web
      world, dev Postgres worlds (`just pg-reset`), the twin and orion.
+- After Phase 1b (built 2026-11-20; evidence below):
+  1. Re-forge EVERY world before running a build from `50ebc1ed` on (artifact v10, tiled format v3): dev worlds
+     (`just run --reset`, the menu's worlds under `worlds/`), the web world (move its store aside before `just
+     deploy`), dev Postgres worlds (`just pg-reset`), the twin and orion (a new empty database, as their runbooks).
+     What an old world does (Task 3, run unless marked): a v9 world file → "world file version 9 is older than 10:
+     re-forge this world" (also from `just world-map` and `worldctl retile`); the menu's world list → "needs re-forge:
+     world file version 9 is older than 10: re-forge this world"; a SQLite store of tiles v2 → "this world's forged
+     tiles use format 2 but this build reads format 3; it keeps no archived forge file this build can re-tile from, so
+     re-forge the world" (no re-tile, nothing forged over saved regions); a Postgres store → the same message from the
+     same code path (argued, not run: the plan's Ruling 17).
+  2. Look at the four month maps of the dev world `target/world-forge/phase1b.world` (1,024 × 512, pole to pole):
+     `target/world-forge/phase1b-monthly-temperature-04.png` and `…-10.png` (month 4 = the northern midsummer: the
+     north warm, the south cold; month 10 the reverse; the left and right edges continuous), and
+     `target/world-forge/phase1b-monthly-rain-04.png` and `…-10.png`. The values the tool printed (middle column, at
+     the ground): temperature month 4 at 75° N / 45° N / 0° / 45° S / 75° S −9.3 / 13.6 / 25.5 / −9.6 / −20.1 °C,
+     month 10 −18.9 / 6.3 / 26.4 / 20.8 / −10.4 °C (the 30 °C swing at 45° S is an inland point, the placeholder's
+     continental amplitude); rain month 4 39.7 / 117.6 / 553.2 / 42.7 / 13.3 mm, month 10 13.8 / 41.0 / 627.4 /
+     122.4 / 38.0 mm. Values are a placeholder (Phase 3 replaces them).
+  3. Memory of a running world: every process that loads the world (role `all`, each host and coordinator pod)
+     holds the family resident, outside the tile cache's budget — 3.0 MiB at Dev, 1.8 MiB at Tiny and Small, 7.0 MiB
+     at Medium, 28.1 MiB at Large (and transiently about 2–4 × that while loading or writing the tiled world). Check
+     it against the pods' memory requests (`deploy/modules/world`) before a Large world runs there.
 - After Phases 2–5: `just world-map` on a Medium world — do the continents, ranges, climates and coasts read
   as a small Earth?
 - Before or during Phase 6: decide the day length.
@@ -505,3 +527,77 @@ wrap, the polar seas, biomes, tiles and the sampler rest on `forge_proto --repor
 one past the edge can still be subscribed and is generated as a copy of the far edge (a Known limit, Phase 7's);
 `SocietyGrid::world_id` was made independent of `wrap_x` so a world's history id does not depend on the role that
 opens it. Rulings and accepted leftovers: the plan's "As built".
+
+### Phase 1b — the monthly-climate container (2026-11-20)
+
+Plan `docs/superpowers/plans/2026-11-20-monthly-climate-container-1b.md` ("As built": commits per task, the rulings
+made during execution, the deferred minors). Code commits `99fc8643` … `c30da2a4`; every number below was taken at
+`c30da2a4` (the later `8c1d0f2f` changes only a document). Raw outputs: the plan's workspace,
+`task-6-report.md`.
+
+- **`just forge-report --size dev --cell 32 --seeds 8`** (seeds `…0206`–`…020D`), its monthly lines over the eight
+  seeds (min / median / max; "July" = month 3, "January" = month 9, sea level, °C):
+
+  | band | `sea_temp_jan_c` | `sea_temp_jul_c` | `seasonal_swing_c` (Jul − Jan) |
+  |---|---|---|---|
+  | 75N | −17.42 / −16.74 / −16.58 | −7.06 / −6.905 / −6.23 | 9.52 / 9.835 / 11.19 |
+  | 45N | 3.2 / 4.54 / 7.49 | 15.66 / 18.61 / 19.95 | 8.17 / 14.07 / 16.75 |
+  | 15N | 22.31 / 22.78 / 23.52 | 26.46 / 27.2 / 27.67 | 2.95 / 4.425 / 5.36 |
+  | 0 | 26.65 / 26.72 / 26.8 | 26.65 / 26.73 / 26.8 | −0.15 / 0.01 / 0.14 |
+  | 15S | 26.54 / 27.24 / 27.77 | 22.22 / 22.74 / 23.44 | −5.55 / −4.5 / −3.1 |
+  | 45S | 15.85 / 18.195 / 20.07 | 3.08 / 4.955 / 7.3 | −17 / −13.24 / −8.55 |
+  | 75S | −7.07 / −7.02 / −6.7 | −16.94 / −16.63 / −16.58 | −10.24 / −9.61 / −9.52 |
+
+  Also: `climate_grid: 256 × 128 cells of 64 m, stride 2`; `climate_clamped_values` 0 on every seed;
+  `climate_roundtrip_max_err: temp 0.0050 C, diurnal 0.050 C, precip 0.050 mm, wet 0.00196, wind 0.125 m/s` (half a
+  step on every field), `climate_roundtrip_ok`, `climate_tiles_identical` and `monthly_aliased_identical` yes on every
+  seed; `monthly_precip_conserved_max_rel` 2.62e-7 … 2.87e-7; `monthly_temp_mean_err_c` ≤ 9.09e-7,
+  `monthly_precip_sum_err_mm` ≤ 2.44e-4; `monthly_annual_temp_gap_c` p99 0.237 … 0.296 per seed, max 0.424 … 0.545;
+  `world_file_bytes` 968,875 … 1,128,917 (median 1,035,448.5); `climate_bytes_packed` 551,121 … 646,876 (raw and
+  resident 3,145,728). Seam of the monthly fields (Ruling 15: the Phase 1a rule on climate-grid columns, month 3):
+  temperature ratio 0.675 … 1.148, rank 0.165 … 0.843, `yes` on 8 of 8, `seam_pass_monthly_temp: yes`; precipitation
+  ratio 0.213 … 2.802, median rank 0.592, `no` on 1 of 8 — seed 0207, ratio 2.802, rank 0.016 —
+  `seam_pass_monthly_precip: yes`. At 64 m (`--cell 64 --seeds 8`): swings 75N 9.52 … 11.14, 45N 8.09 … 16.64, 15N
+  2.92 … 5.3, 0 −0.15 … 0.15, 15S −5.53 … −3.05, 45S −16.84 … −8.5, 75S −10.19 … −9.52; the same round-trip errors
+  and `yes` lines; gap p99 0.050 on every seed (max ≤ 0.052); world files 707,009 … 820,869 B; temperature seam `yes`
+  8 of 8; precipitation `no` on 1 of 8 — again 0207 (4.392, rank 0.000), `seam_pass_monthly_precip: yes`.
+- **Judged against the Phase 1b row:** opposite signs of the seasonal swing in the two hemispheres — met at both
+  cells on every seed (every northern band's minimum is positive, 2.92 or more; every southern band's maximum
+  negative, −3.05 or less). Near zero at the equator — met: −0.15 … 0.15 °C at 32 and 64 m, within the plan's
+  1.0 °C. World-file size per world size — recorded (the design's Measurements, "Phase 1b": 0.98 MB Dev to 29.8 MB
+  Large at 32 m and 67.2 MB Large at 16 m; the family packs to 0.38–2.64 MB, 9–57 % of a 32 m file). The seam of the
+  monthly precipitation has one `no` seed at each cell, 0207; at 64 m that seed's FINE precipitation seam is `no`
+  too (3.894, rank 0.008) but at 32 m it is `yes` (0.368, rank 0.569), so the monthly miss at 32 m is not inherited
+  from the fine raster (the climate grid is a coarser sampling of the same world); under the ruled seed-set rule
+  (at most 2 of 8 `no`, median rank ≥ 0.25) both cells pass. The annual-vs-monthly temperature gap (Ruling 13: a p99
+  above 0.3 °C is a finding): Dev 32 m p99 ≤ 0.296 on every seed, Dev 64 m 0.050, Small 32 m 0.148, Medium 32 m
+  0.062, Large 32 m 0.051 — and **Tiny 32 m 0.569 (max 1.046), above the bar**; the ledger's ruling accepting the
+  polar gap was made before Tiny was measured, so this one is open for the whole-plan review (the plan's "As built").
+- **Nothing in this phase moved a forged or stored bit of the existing world.** Both 8-seed reports above are
+  identical, line for line, to the ones taken after Task 4 (`diff` of `after4-{32,64}.txt` against today's, the
+  recipe's echo lines stripped: no output, 837 lines each), so Tasks 5 and 6 changed no world; and every line of
+  the Task 2 baselines `baseline2-{32,64}.txt` is present and unchanged (0 removed or changed lines), among them each
+  seed's `height_crc` and `artifact_rasters_crc`. **The quality gate was NOT re-recorded** and passes untouched:
+  `just test-one worldgen "--test it -- --include-ignored forge_lib::"` → `test
+  forge_lib::forge_quality_matches_baseline ... ok`, `1 passed; 0 failed`.
+- **Every size timed** (`just forge-bench`): the design's Measurements, "Phase 1b" — Dev 32 m 1.41 s, Tiny 2.52 /
+  10.09 s, Small 9.36 / 39.32 s, Medium 39.45 / 162.00 s, Large 169.78 s at 32 m and 666.74 s / 13.5 GB at 16 m;
+  every row from Tiny up within +9 % (time) and +8 % (memory) of Phase 1a's; Dev at 32 m +36 % / +65 % — the world
+  file's zstd encode of the family, not the artifact step (measured against the pre-1b binary). The estimate in
+  `forge::play` was not refitted (a ruling in the plan's "As built").
+- **Maps:** `just world-map --world target/world-forge/phase1b.world --layer monthly-temperature|monthly-rain
+  --month 4|10 --out target/world-forge/phase1b` → `target/world-forge/phase1b-monthly-{temperature,rain}-{04,10}.png`
+  (1,024 × 512 each); the values they print are in "Owner hand checks", after Phase 1b.
+- **`just test`** (once, 2026-11-20, tree at `c30da2a4` + the owner's uncommitted work): `PASS test-audit`, `FAIL
+  workspace`, `PASS physics-next-upstream`, `PASS slotmapd`, `PASS quest`, `PASS site-test`. The workspace stage's one
+  failure is `game --test wasm_determinism` `scene_hash_native` — `native scene digest 0xE6CD22F6 != golden
+  0x38D86635`, the same value as in Phase 1a; no Phase 1b commit touched `crates/game/tests/` (`git log
+  758431e7..HEAD -- crates/game/tests/wasm_determinism.rs`: empty; in `game` Phase 1b added only `monthly_climate.rs`
+  and its two lines in `lib.rs`), and the same test on the COMMITTED tree (`git archive` of `8c1d0f2f`, its own
+  target directory) passes, 7 of 7. Not Phase 1b's. Every other test passed.
+- **`just clippy`** fails as before Phase 1b, in crates it did not touch: `block-mesh` (1 error), `bbmodel` (5),
+  `macros` (17) (`git log 758431e7..HEAD -- crates/block-mesh crates/bbmodel crates/macros`: empty). Since those stop
+  the workspace run before `game` and `worldgen`, the two were linted on their own with lints capped at warnings
+  (`cargo clippy -p game -p worldgen --lib --examples -- --cap-lints warn`): no warning on a line from a Phase 1b
+  commit (`git blame` of every warned line in the files Phase 1b touched).
+- Status: the controller sets the Status row after the whole-plan review.
