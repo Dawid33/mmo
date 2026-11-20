@@ -59,6 +59,9 @@ wgpu-hal = { version = "29.0.4", optional = true }
 # Only to enumerate adapters before Bevy starts (`adapter_pick.rs`). Same version
 # as Bevy's wgpu and no features of its own, so it adds no build.
 wgpu = { version = "29.0.4", default-features = false }
+# The world map's single-player source: the world's own store read beside its server (`renderer/map/`).
+map-tiles = { path = "../map-tiles" }
+world-store = { path = "../world-store" }
 
 [features]
 default = ["dev_ui"]

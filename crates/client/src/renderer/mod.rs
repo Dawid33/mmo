@@ -44,6 +44,7 @@ pub mod item_icons;
 pub mod item_flights;
 pub mod item_piles;
 pub mod lod_rings;
+pub mod map; // the world map's tiles: one pyramid behind the minimap, the full map and the site choice
 pub mod meshing;
 pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
@@ -115,6 +116,7 @@ impl Plugin for SimBridgePlugin {
             fortress_view::FortressOverlayPlugin,
             model::BbModelPlugin,
             item_piles::ItemPilesPlugin,
+            map::MapPlugin,
         ))
         .insert_resource(ClientUpdates(self.client_recv.clone()))
         .insert_resource(GameEvents(self.game_send.clone()))
@@ -1117,6 +1119,9 @@ fn setup_scene(
     // embedded texture map. Returns None on any failure (build_layers then
     // falls the block back to the layer-0 missing texture).
     let (rgba_layers, block_layers) = build_layers(&registry, load_block_texture);
+    // The map's block colours: each block's top layer, before the crack layers join the array.
+    let map_rgb = map::palette::block_colours(&registry, &rgba_layers, &block_layers);
+    commands.insert_resource(map::palette::make_palette(&mut images, map_rgb));
 
     let (w, h) = (rgba_layers[0].width(), rgba_layers[0].height());
     // Every layer carries its full mip chain (see `block_textures::mip_chain`),

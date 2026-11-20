@@ -740,6 +740,9 @@ mod flow {
         );
         let addr = host.addr;
         world.insert_resource(host);
+        // The map reads this world's own store beside its server (`renderer::map`).
+        let store = worldgen::world_store::store_path_for(&pending.terrain);
+        world.insert_resource(crate::renderer::map::MapWorld::local(&pending.entry_dir, &store));
         connect_session(world, addr, None, None);
     }
 
