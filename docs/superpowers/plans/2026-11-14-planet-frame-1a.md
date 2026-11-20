@@ -409,7 +409,7 @@ competes with its 3×3 neighbours, so the last lattice column of the map must co
 - `#[derive(Resource, Clone, Copy, Default)] pub struct WrapFrame { pub extent: Option<MapExtent>, pub anchor: RegionCoords }`
 - `alias(&self, rc) -> RegionCoords` (the copy of canonical `rc` nearest `anchor`), `offset(&self, rc) -> [f32; 3]` (`alias(rc).world_offset()`), `canonical(&self, rc)`, `region_at_world(&self, x: f32, z: f32) -> RegionCoords` (canonical owner of a render-space point), `follow_home(&mut self, home)` (anchor becomes the alias of `home` nearest the old anchor, so the camera never jumps), `set_extent(&mut self, extent: Option<MapExtent>)`
 - `pub const MIN_WRAP_WIDTH_M: f64 = 8192.0` in `worldgen::forge::play`: the NEAR window (subscribed regions) must never hold one region twice. The LOD horizon may: `MAX_VIEW_DISTANCE_M` is 16,384 m, more than half of the dev and Tiny worlds, so far rings can show a second image of terrain — that is what a small planet looks like, and Task 15 handles it (rings compare aliases).
-- No lap re-centring: after two laps of a 200 km world f32 precision is still centimetres (Known limits).
+- No lap re-centring: after two laps of a 200 km world f32 precision is still centimetres (Known limits). The server refuses LOD keys more than `LOD_WRAP_REACH_WIDTHS` map widths off the map (`crates/game/src/world_manager/mod.rs`, Task 8: 2) — measured in the client's never-re-centred frame, so a player who circles a small world more than twice would silently lose far LOD. Raise that const to 64 in this task (the alias index holds only live subscriptions, so the bound costs nothing per edit; it only keeps key arithmetic far from `i32` limits) and say so in its comment; a new session starts at the canonical frame.
 
 - [ ] **Step 1: Temporary tests** (client lib): extent origin 0, width 10, wrapped, anchor (9, 0): `alias((0, 0)) == (10, 0)`, `alias((8, 0)) == (8, 0)`, `canonical((10, 0)) == (0, 0)`; anchor (9, 0), `follow_home((0, 0))` → anchor (10, 0), then `follow_home((9, 0))` → (9, 0); no extent → identity and `offset == world_offset`; home (9, 0) on a width-10 wrap, radius 1 → the subscribed set is the 9 canonical regions with x ∈ {8, 9, 0}; a hovered tile in alias region (10, 0) gives `Goal.region == (0, 0)`.
 - [ ] **Step 2: Implement.**
@@ -496,7 +496,7 @@ The live check (walk east across the seam, pan the LOD rings, look at the world 
 - One process only. Under split roles the seam is closed (Task 16); the seam between hosts (peer links, ownership, land assignment, placement, observer sessions) is the program's Phase 7.
 - A dev structure or town (`VOXEL_DEV_STRUCTURES`) placed across the seam is not handled.
 - With a view distance past half the world's width the far LOD rings show a second image of the terrain.
-- No lap re-centring of the client frame: fine for many laps of the largest world.
+- No lap re-centring of the client frame: fine for many laps of the largest world; after 64 laps in one session the server stops answering far LOD keys (a new session re-centres).
 - The world-map window does not scroll around the seam; it shows the canonical rectangle.
 - A voxel body that straddles the seam (a felled tree) keeps its existing in-region rule.
 - The Planet's land is still today's "continents" formula and annual climate. Plates, monthly climate, water features and biomes are Phases 2–5.
