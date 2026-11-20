@@ -376,6 +376,10 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     // Phase 1b: the crc of what the runtime reads from the artifact (taken
     // before the artifact moves into the sampler below; printed after it).
     let rasters_crc = artifact_rasters_crc(&artifact);
+    // Phase 1b fix wave: the monthly family's and the header's crcs (printed
+    // last, after every other line).
+    let climate_crc = artifact_climate_crc(&artifact);
+    let header_crc = artifact_header_crc(&artifact);
     // Phase 1b Task 3: the world file's size and the monthly family's share
     // of it (raw, packed alone, resident), taken before the move too.
     let world_bytes = artifact.to_bytes();
@@ -402,6 +406,8 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     for (key, value) in monthly_api_lines(forged, p, &world_bytes) {
         row(&key, value);
     }
+    row("artifact_climate_crc", climate_crc);
+    row("artifact_header_crc", header_crc);
     rows
 }
 
@@ -522,7 +528,12 @@ fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Ve
         .fold(0.0f64, f64::max);
     row("monthly_precip_conserved_max_rel", format!("{rel:.2e}"));
     // The annual mean of the monthly temperatures against the annual raster
-    // (Ruling 13: two reads of one curve).
+    // (Ruling 13: two reads of one curve). Sampled at fine-cell CENTRES: there
+    // it catches a missing, mis-signed or mis-scaled lapse on land (it shows as
+    // `lapse · h`), but not how the ground is interpolated between cells, so
+    // otherwise it is a check of the sea-level field — and its maxima are the
+    // polar rows' clamp (the placeholder's latitude clamp, the sampler's
+    // outermost climate row).
     let gaps: Vec<f64> = fine
         .iter()
         .map(|&(x, z)| (f64::from(whole.monthly_at_ground(x, z).annual_mean_temp_c()) - whole.annual_climate(x, z).0).abs())
@@ -558,6 +569,49 @@ fn artifact_rasters_crc(a: &WorldArtifact) -> String {
     feed(enc(bincode::serialize(&a.column)));
     feed(enc(bincode::serialize(&a.rock_names)));
     feed(enc(bincode::serialize(&a.volcanoes)));
+    format!("{:08x}", h.finalize())
+}
+
+/// crc32 of the bincode (little-endian, fixed-width) of the artifact's
+/// monthly climate family as stored: its grid (`nx`, `nz`, `cell_m`,
+/// `wrap_x`), then the six planes in declaration order, fed to one hasher.
+/// Beside `artifact_rasters_crc`, which leaves the family out.
+fn artifact_climate_crc(a: &WorldArtifact) -> String {
+    let c = &a.climate;
+    let mut h = crc32fast::Hasher::new();
+    let mut feed = |bytes: Vec<u8>| h.update(&bytes);
+    let enc = |e: bincode::Result<Vec<u8>>| e.expect("climate field serializes");
+    feed(enc(bincode::serialize(&c.nx)));
+    feed(enc(bincode::serialize(&c.nz)));
+    feed(enc(bincode::serialize(&c.cell_m)));
+    feed(enc(bincode::serialize(&c.wrap_x)));
+    feed(enc(bincode::serialize(&c.temp_sea_centi_c)));
+    feed(enc(bincode::serialize(&c.diurnal_deci_c)));
+    feed(enc(bincode::serialize(&c.precip_deci_mm)));
+    feed(enc(bincode::serialize(&c.wet_day_255)));
+    feed(enc(bincode::serialize(&c.wind_east_q)));
+    feed(enc(bincode::serialize(&c.wind_south_q)));
+    format!("{:08x}", h.finalize())
+}
+
+/// crc32 of the bincode (little-endian, fixed-width) of the artifact's header
+/// fields the runtime reads: `seed`, `width_m`, `height_m`, `cell_m`, `nx`,
+/// `nz`, `edges` and the knob map (a `BTreeMap`: key order). Not `version`
+/// (a format bump is not a changed world), not `spawn` (`forge_proto
+/// --spawn` rewrites it after the artifact is built; `artifact_rasters_crc`
+/// covers the forge's own).
+fn artifact_header_crc(a: &WorldArtifact) -> String {
+    let mut h = crc32fast::Hasher::new();
+    let mut feed = |bytes: Vec<u8>| h.update(&bytes);
+    let enc = |e: bincode::Result<Vec<u8>>| e.expect("header field serializes");
+    feed(enc(bincode::serialize(&a.seed)));
+    feed(enc(bincode::serialize(&a.width_m)));
+    feed(enc(bincode::serialize(&a.height_m)));
+    feed(enc(bincode::serialize(&a.cell_m)));
+    feed(enc(bincode::serialize(&a.nx)));
+    feed(enc(bincode::serialize(&a.nz)));
+    feed(enc(bincode::serialize(&a.edges)));
+    feed(enc(bincode::serialize(&a.knobs)));
     format!("{:08x}", h.finalize())
 }
 
@@ -637,7 +691,34 @@ fn monthly_lines(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
 
 /// Keys whose values are never numbers, however they read (a crc can be all
 /// digits).
-const NOT_NUMBERS: &[&str] = &["seed", "height_crc", "artifact_rasters_crc"];
+const NOT_NUMBERS: &[&str] =
+    &["seed", "height_crc", "artifact_rasters_crc", "artifact_climate_crc", "artifact_header_crc"];
+
+/// The summary of the keys whose generic line reads badly: the conservation
+/// error in the per-seed lines' short form (no float noise), and the
+/// temperature gap's worst p99 and worst max over the seeds (its values are
+/// `p99 <a>, max <b>`). `None` = the generic line.
+fn summary_special(key: &str, values: &[&str], numbers: &[f64]) -> Option<String> {
+    match key {
+        "monthly_precip_conserved_max_rel" if numbers.len() == values.len() && !numbers.is_empty() => {
+            let mut v = numbers.to_vec();
+            v.sort_by(f64::total_cmp);
+            let n = v.len();
+            let median = if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 };
+            Some(format!("min {:.2e} median {median:.2e} max {:.2e}", v[0], v[n - 1]))
+        }
+        "monthly_annual_temp_gap_c" => {
+            let (mut p99, mut max) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for v in values {
+                let (a, b) = v.strip_prefix("p99 ")?.split_once(", max ")?;
+                p99 = p99.max(a.parse().ok()?);
+                max = max.max(b.parse().ok()?);
+            }
+            Some(format!("worst p99 {p99:.3}, worst max {max:.3}"))
+        }
+        _ => None,
+    }
+}
 
 /// The `--report` run: each seed in turn (`seed`, `seed + 1`, …), then the
 /// summary (min / median / max of every numeric key; `NOT_NUMBERS` and any
@@ -678,7 +759,9 @@ pub fn run(base: &Params) {
         let values: Vec<&str> =
             all.iter().flat_map(|rows| rows.iter().filter(|(k, _)| k == key).map(|(_, v)| v.as_str())).collect();
         let mut numbers: Vec<f64> = values.iter().filter_map(|v| v.parse::<f64>().ok()).collect();
-        if !NOT_NUMBERS.contains(&key) && numbers.len() == values.len() && !numbers.is_empty() {
+        if let Some(line) = summary_special(key, &values, &numbers) {
+            println!("{key}: {line}");
+        } else if !NOT_NUMBERS.contains(&key) && numbers.len() == values.len() && !numbers.is_empty() {
             numbers.sort_by(f64::total_cmp);
             let n = numbers.len();
             let median = if n % 2 == 1 { numbers[n / 2] } else { (numbers[n / 2 - 1] + numbers[n / 2]) / 2.0 };

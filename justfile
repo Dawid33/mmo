@@ -787,7 +787,16 @@ forge-bench width="16384" height="8192" cell="32":
 # monthly climate: its grid, saturated values, January / July sea-level temperature
 # and the swing per latitude band, the annual mean / sum checks and the seam of the
 # monthly temperature and precipitation; the world file's bytes and the monthly
-# climate's (raw, packed alone, resident) — per seed, then min / median / max
+# climate's (raw, packed alone, resident); the world-position API's checks
+# (climate_roundtrip_max_err / _ok: stored against forged, half a step at most;
+# climate_tiles_identical, monthly_aliased_identical: tiled = whole, a point = its
+# image one lap east; monthly_precip_conserved_max_rel: the fine annual rain kept
+# by the monthly split; monthly_annual_temp_gap_c: the annual mean of the monthly
+# temperatures against the annual raster at fine-cell centres — it catches a
+# missing or mis-scaled lapse on land, otherwise it checks the sea-level field,
+# its maxima the polar rows' clamp); last, artifact_climate_crc (a crc of the
+# stored monthly family) and artifact_header_crc (seed, size, cell, grid, edges,
+# knobs; not the version or spawn) — per seed, then min / median / max
 # over them and the seam rule over the seeds (`seam_pass_*`: at most a quarter of 4
 # or more seeds fail; n/a for 2 or 3). Takes forge_proto's flags plus `--seeds <n>`
 # (seed, seed + 1, …; default 1), forged one after another.
