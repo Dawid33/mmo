@@ -133,7 +133,7 @@ The Phase 1a plan and the design were written against the tree and the rules of 
 | 1b | The stored monthly-climate family, filled by a placeholder seasonal curve | DONE 2026-11-20 | `2026-11-20-monthly-climate-container-1b.md` (6 tasks; "As built"); commits `99fc8643` … `bbfd9b9b` | Evidence § Phase 1b |
 | 2 | Plates and aged relief | IN PROGRESS (plan re-based onto the built Phase 1b, 2026-11-20) | `2026-11-20-plates-and-aged-relief-2.md` | — |
 | 3 | Monthly climate | PLANNED 2026-11-20 (builder check settled; re-check Phases 1b's and 2's symbols at dispatch) | `2026-11-20-monthly-climate-3.md` | — |
-| 4 | Water and ice | PLAN DRAFTED 2026-11-20 (builder check running) | `2026-11-20-water-and-ice-4.md` | — |
+| 4 | Water and ice | PLANNED 2026-11-20 (builder check settled; 11 items in a reduced first form by ruling; re-check Phases 2's and 3's symbols at dispatch) | `2026-11-20-water-and-ice-4.md` | — |
 | 5 | Biomes | TODO | — | — |
 | 6 | Runtime seasons and weather | TODO | — | — |
 | 7 | The wrap across hosts (`claim` worlds) | TODO | — | — |
