@@ -47,6 +47,7 @@ use super::RightPress;
 use crate::renderer::bridge::{LocalBody, SimEntity};
 use crate::renderer::cursor::CursorPolicy;
 use crate::renderer::{GameEvents, LocalPlayer};
+use crate::wrap_frame::WrapFrame;
 
 /// Expansion budget of one preview search, in nodes. The sim searches up to
 /// `game::MAX_PATH_NODES` (32 768), which measured ~87 ms on the main thread
@@ -80,10 +81,12 @@ pub fn is_click(accumulated_motion_px: f32) -> bool {
 /// The `MoveTo` goal for a hover at `local` (sim units, local to `region`):
 /// its block column, at the hovered level when the pick is `exact` and in
 /// `home`; elsewhere the level is left to the sim (`y: None`, the topmost
-/// standable tile of the column).
-pub fn goal_from_hover(region: RegionId, local: Vec3, exact: bool, home: RegionId) -> Goal {
+/// standable tile of the column). `region` may be any copy of a region in
+/// `frame`; the goal names its canonical form (the sims' and the server's).
+pub fn goal_from_hover(frame: &WrapFrame, region: RegionId, local: Vec3, exact: bool, home: RegionId) -> Goal {
+    let region = frame.canonical(region);
     let t = game::feet_tile(Vector::new(local.x, local.y, local.z));
-    Goal::local(region, [t[0], t[2]], (exact && region == home).then_some(t[1]))
+    Goal::local(region, [t[0], t[2]], (exact && region == frame.canonical(home)).then_some(t[1]))
 }
 
 /// The `MoveTo` goal for a picked block-selection tile in `home`: that
@@ -108,11 +111,13 @@ pub fn pick_move_tile(ray: (Vector, Vector), working: &WorkingLevel, mirror: &Ti
 }
 
 /// The hovered tile in `home`'s block coordinates (outside `0..REGION_BLOCKS`
-/// for a hover in another region): the preview's key.
-pub fn hover_tile(region: RegionId, local: Vec3, home: RegionId) -> TilePos {
+/// for a hover in another region; across a wrapping map's seam by the nearest
+/// copy, `WrapFrame::delta`): the preview's key.
+pub fn hover_tile(frame: &WrapFrame, region: RegionId, local: Vec3, home: RegionId) -> TilePos {
     let n = REGION_BLOCKS as i32;
     let t = game::feet_tile(Vector::new(local.x, local.y, local.z));
-    [t[0] + (region.x - home.x) * n, t[1], t[2] + (region.z - home.z) * n]
+    let (dx, dz) = frame.delta(home, region);
+    [t[0] + dx * n, t[1], t[2] + dz * n]
 }
 
 /// The stretch the sim would plan from `from` toward `goal` (`here` is the
@@ -241,6 +246,7 @@ pub fn update_path_preview(
     bodies: Query<(&SimEntity, &GlobalTransform), With<LocalBody>>,
     xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     world_map: Option<Res<crate::renderer::world_map::WorldMapState>>,
+    frame: Option<Res<WrapFrame>>,
     mut preview: ResMut<PathPreview>,
     mut sent: ResMut<SentPath>,
 ) {
@@ -274,15 +280,16 @@ pub fn update_path_preview(
         }
         return;
     };
+    let frame = frame.as_deref().copied().unwrap_or_default();
     // Block selection's tile first; the ground pick only off the region's blocks.
-    let ray = window.single().ok().zip(view.single().ok()).and_then(|(w, v)| designate::cursor_ray(w, v, home));
+    let ray = window.single().ok().zip(view.single().ok()).and_then(|(w, v)| designate::cursor_ray(w, v, home, &frame));
     if let Some(tile) = ray.and_then(|ray| pick_move_tile(ray, &working, &mirror, crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut))) {
         preview.update(&tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(tile, home));
         return;
     }
-    let goal = goal_from_hover(region, local, pick.1, home);
-    let world = local + Vec3::from_array(region.world_offset());
-    preview.update(&tiles, from, hover_tile(region, local, home), goal, home, map, world);
+    let goal = goal_from_hover(&frame, region, local, pick.1, home);
+    let world = local + Vec3::from_array(frame.offset(region));
+    preview.update(&tiles, from, hover_tile(&frame, region, local, home), goal, home, map, world);
 }
 
 /// The world's coarse-route map, as the sim's regions are bounded by it and

@@ -128,6 +128,9 @@ impl Plugin for SimBridgePlugin {
         .add_session_message_clear::<world_map::WorldMapMsg>()
         .add_session_reset::<history_view::HistoryView>()
         .add_session_reset::<drain_notice::DrainNotice>()
+        // The unwrapped frame the bridge keeps (`ClientUpdateEvent::WrapFrame`):
+        // a new session starts at the canonical frame.
+        .add_session_reset::<crate::wrap_frame::WrapFrame>()
         .add_message::<history_view::HistoryMsg>()
         .add_session_message_clear::<history_view::HistoryMsg>()
         .add_session_reset::<LocalPlayer>()

@@ -108,6 +108,15 @@ pub const DEFAULT_WORLD_SIZE: usize = 2;
 /// The developers' size (not in the menu): small enough to forge in seconds.
 pub const DEV_WORLD_SIZE: WorldSize = WorldSize { name: "Dev", width_m: 16_384.0, height_m: 8_192.0 };
 
+/// The narrowest world that may wrap east–west, metres: the client's NEAR window
+/// (the regions it subscribes, `client::wrap_frame`) must never hold one region
+/// twice, which a world this wide guarantees with room (the widest near window
+/// allowed, radius 3 of 512 m regions, spans 3,584 m). The LOD horizon may reach
+/// round: `MAX_VIEW_DISTANCE_M` is 16,384 m, more than half of the Dev and Tiny
+/// worlds, so far rings can show a second image of the terrain — what a small
+/// planet looks like.
+pub const MIN_WRAP_WIDTH_M: f64 = 8192.0;
+
 /// The size called `name` (any case): one of [`WORLD_SIZES`] or `"dev"`.
 pub fn world_size_named(name: &str) -> Option<WorldSize> {
     WORLD_SIZES.iter().chain([&DEV_WORLD_SIZE]).find(|s| s.name.eq_ignore_ascii_case(name)).copied()

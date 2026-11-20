@@ -196,7 +196,8 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
         DevAction::DropBody => {
             let target = world.get_resource::<DevDropTarget>().and_then(|t| t.0);
             let home = world.get_resource::<HudStatus>().and_then(|h| h.home_region);
-            if let (Some(client), Some(order)) = (world.resource::<LocalPlayer>().0, drop_body_order(target, home)) {
+            let frame = world.get_resource::<crate::wrap_frame::WrapFrame>().copied().unwrap_or_default();
+            if let (Some(client), Some(order)) = (world.resource::<LocalPlayer>().0, drop_body_order(&frame, target, home)) {
                 let _ = world.resource::<GameEvents>().0.send(game::GameEventKind::Order(client, order));
             }
         }
@@ -207,9 +208,13 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
 /// its local frame): the tile under it in the `home` region's block
 /// coordinates — orders run in the home region, which refuses a tile off its
 /// columns. `None` without a point or a home.
-pub fn drop_body_order(target: Option<(game::RegionCoords, Vec3)>, home: Option<game::RegionCoords>) -> Option<game::Order> {
+pub fn drop_body_order(
+    frame: &crate::wrap_frame::WrapFrame,
+    target: Option<(game::RegionCoords, Vec3)>,
+    home: Option<game::RegionCoords>,
+) -> Option<game::Order> {
     let ((region, local), home) = (target?, home?);
-    Some(game::Order::DevDropBody { at: super::commander::move_order::hover_tile(region, local, home) })
+    Some(game::Order::DevDropBody { at: super::commander::move_order::hover_tile(frame, region, local, home) })
 }
 
 /// Keeps [`DevDropTarget`] on the ground under the cursor while the cursor

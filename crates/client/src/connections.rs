@@ -9,6 +9,10 @@
 //! there, `ServerPacket::HomeHop` — makes its connection the home; the old home's stays
 //! as an observer connection for the regions it serves.
 //!
+//! Regions are keyed by their canonical form (what the server names): on a world that
+//! wraps east–west every lookup folds its argument first ([`ConnectionSet::set_extent`]),
+//! so a copy of a region in the client's unwrapped frame finds the same connection.
+//!
 //! Pure game-thread state (no sockets, no clock): the transport behind each
 //! connection is a [`ConnHandle`] from a [`ConnOpener`] (`netcode::NetThread` on
 //! native; the harness's fake connections in tests). Lives and dies with the game
@@ -16,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use crossbeam::channel::Sender;
-use game::{ClientPacket, Credential, HostEndpoint, HostId, ObserverTicket, RegionId, ServerPacket};
+use game::{ClientPacket, Credential, HostEndpoint, HostId, MapExtent, ObserverTicket, RegionId, ServerPacket};
 
 /// How long after an observer connection closed its regions are asked for again,
 /// through the home (which answers with a fresh `RegionElsewhere`), the first time in
@@ -131,6 +135,8 @@ pub struct ConnectionSet {
     home_hop: u64,
     /// A `HomeHop` each connection sent, for the `PlayerRegion` that follows it there.
     hop_of: BTreeMap<u32, u64>,
+    /// The world's extent: region keys are canonical under it (`None`: as given).
+    extent: Option<MapExtent>,
 }
 
 impl ConnectionSet {
@@ -144,7 +150,23 @@ impl ConnectionSet {
             region_conn: BTreeMap::new(),
             home_hop: 0,
             hop_of: BTreeMap::new(),
+            extent: None,
         }
+    }
+
+    /// The world's extent is `extent` now (its `WorldMap`): region keys are folded to
+    /// their canonical form under it, the ones held so far too.
+    pub fn set_extent(&mut self, extent: Option<MapExtent>) {
+        self.extent = extent;
+        self.region_conn = std::mem::take(&mut self.region_conn)
+            .into_iter()
+            .map(|(region, conn)| (game::canonical(extent, region), conn))
+            .collect();
+    }
+
+    /// `region`'s key here: its canonical form.
+    fn key(&self, region: RegionId) -> RegionId {
+        game::canonical(self.extent, region)
     }
 
     /// The home connection's key.
@@ -184,7 +206,7 @@ impl ConnectionSet {
 
     /// The connection that serves `region` (the home unless another does).
     pub fn connection_of(&self, region: RegionId) -> u32 {
-        self.region_conn.get(&region).copied().unwrap_or(self.home)
+        self.region_conn.get(&self.key(region)).copied().unwrap_or(self.home)
     }
 
     /// Connection `conn`'s `Host` packet named host `ordinal`: the login connection learns
@@ -219,7 +241,7 @@ impl ConnectionSet {
             Outgoing::Region(region, packet) => {
                 let conn = self.connection_of(region);
                 if matches!(packet, ClientPacket::RequestRegionConnection(_)) {
-                    self.region_conn.insert(region, conn);
+                    self.region_conn.insert(self.key(region), conn);
                 }
                 (conn, packet)
             }
@@ -265,6 +287,7 @@ impl ConnectionSet {
         ticket: ObserverTicket,
         opener: Option<&mut dyn ConnOpener>,
     ) -> Named {
+        let region = self.key(region);
         let ordinal = endpoint.id;
         let Some(home) = self.home_ordinal() else {
             log::warn!("[client] {region:?} is said to be host {ordinal}'s before the home named itself: ignored");
@@ -304,6 +327,7 @@ impl ConnectionSet {
     /// it, R4: it inherited the region from the host that served it): another connection
     /// that served it lets it go. [`Self::on_region_named`] subscribes it on the home.
     fn remap_to_home(&mut self, region: RegionId) {
+        let region = self.key(region);
         let home = self.home;
         if let Some(old) = self.region_conn.insert(region, home).filter(|old| *old != home) {
             self.route(Outgoing::Conn(old, ClientPacket::ReleaseRegionConnection(region)));
@@ -379,6 +403,7 @@ impl ConnectionSet {
 
     /// `region` is no longer subscribed: forget which connection served it.
     pub fn release(&mut self, region: RegionId) {
+        let region = self.key(region);
         self.region_conn.remove(&region);
     }
 

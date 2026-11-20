@@ -6,6 +6,7 @@ use crossbeam::channel::{Receiver, Sender};
 use crossbeam::select;
 use crate::connections::{Closed, ConnEvent, ConnHandle, ConnOpener, ConnectionSet, Named, Outgoing};
 use crate::regions::runner::{RegionCmd, RegionReport};
+use crate::wrap_frame::WrapFrame;
 use game::{ClientId, HostId, ReconcileStats, RegionCoords, RegionId, Rollback, ServerPacket};
 use game::{
     ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind,
@@ -232,6 +233,14 @@ pub struct GameInstanceManager {
     /// over it, as the server's do (`Region::set_route_map`). `None` =
     /// unbounded (procedural).
     route_map: Option<std::sync::Arc<game::RouteMap>>,
+    /// The unwrapped frame the window, the LOD rings and (Task 15) the render
+    /// read on a map that wraps east–west (`wrap_frame`); it follows the home.
+    /// Every region key held here is canonical (the server's and the sims'),
+    /// but the window's centre, `lod_assigned` and the LOD keys, which are in
+    /// this frame.
+    frame: WrapFrame,
+    /// The frame the render world was last told (`ClientUpdateEvent::WrapFrame`).
+    frame_sent: Option<WrapFrame>,
     buffer: Vec<GameEvent>,
     tick_rate: Arc<AtomicU64>,
     ready: bool,
@@ -242,7 +251,8 @@ pub struct GameInstanceManager {
     region_ticks: BTreeMap<RegionId, game::Tick>,
     client_id: Option<ClientId>,
     home_region: Option<RegionCoords>,
-    /// Sticky centre of the near window + LOD rings; see `advance_window_center`.
+    /// Sticky centre of the near window + LOD rings, a region of `frame`; see
+    /// `advance_window_center`.
     window_center: Option<RegionCoords>,
     /// Regions we have requested (and not released) — the desired window.
     subscribed: std::collections::BTreeSet<RegionCoords>,
@@ -667,7 +677,8 @@ impl ShiftProbe {
         self.waiting.insert(rc, Instant::now());
     }
 
-    /// The near window changed: `wanted` were just requested, `stale` released.
+    /// The near window changed: `wanted` were just requested, `stale` released
+    /// (canonical regions; `center` is a region of the client's `WrapFrame`).
     fn window_shift(&mut self, center: RegionCoords, wanted: &[RegionCoords], stale: &[RegionCoords], subscribed: usize) {
         for rc in stale {
             self.waiting.remove(rc);
@@ -840,6 +851,24 @@ fn desired_window(
     desired
 }
 
+/// The near window in `frame`'s unwrapped frame: [`desired_window`] around
+/// `center` (a region of that frame) with the copies there of `home` and of
+/// `extra` (a move's target), both canonical — and the same window
+/// de-duplicated to canonical regions, what is subscribed. On a map that does
+/// not wrap (or none) the two are one set.
+fn framed_window(
+    frame: &WrapFrame,
+    center: RegionCoords,
+    home: Option<RegionCoords>,
+    extra: Option<RegionCoords>,
+    radius: i32,
+) -> (std::collections::BTreeSet<RegionCoords>, std::collections::BTreeSet<RegionCoords>) {
+    let mut unwrapped = desired_window(center, home.map(|rc| frame.alias(rc)), radius);
+    unwrapped.extend(extra.map(|rc| frame.alias(rc)));
+    let canonical = unwrapped.iter().map(|rc| frame.canonical(*rc)).collect();
+    (unwrapped, canonical)
+}
+
 /// A memoised [`desired_lod`] result: the key set, and what it was computed for.
 struct LodDesired {
     center: RegionCoords,
@@ -852,7 +881,9 @@ struct LodDesired {
 /// shared `ring_factor_in` (sticky against `prev`), minus `excluded`
 /// (near-window members render authoritative state). Returns the
 /// region->factor map (the next `prev`) and the deduped key set to hold
-/// subscriptions for.
+/// subscriptions for. Everything here is in one frame — the client's
+/// `WrapFrame` (unwrapped on a planet): `viewer`, `excluded`, `prev` and the
+/// keys, which are sent as they are.
 pub fn desired_lod(
     viewer: RegionCoords,
     excluded: &std::collections::BTreeSet<RegionCoords>,
@@ -925,6 +956,8 @@ impl GameInstanceManager {
             clock: Default::default(),
             drain: Default::default(),
             route_map: None,
+            frame: WrapFrame::default(),
+            frame_sent: None,
             buffer: Vec::new(),
             tick_rate: Arc::new(AtomicU64::new(game::TICK_RATE)),
             ready: false,
@@ -1489,9 +1522,11 @@ impl GameInstanceManager {
         for (bundle, target) in departures {
             let is_local_player = bundle.client.as_ref().map(|(c, _)| *c) == self.client_id
                 && self.client_id.is_some();
+            // Targets are canonical (the sims name them so): the body moves by the
+            // nearest copy's delta, never `width - 1` regions the wrong way.
             if self.host.contains(&target) {
                 let mut b = bundle;
-                b.rebase(source, target);
+                b.rebase_by(self.frame.delta(source, target));
                 self.host.send(target, RegionCmd::Arrival(b, stamp));
             }
             if is_local_player {
@@ -1503,13 +1538,13 @@ impl GameInstanceManager {
                     let hosts = (self.region_host(source), self.region_host(target));
                     self.crossing.flip(source, target, stalled, hosts);
                 }
-                self.home_region = Some(target);
+                self.set_home(target);
             }
         }
         for (msg, target) in halo_entities {
             if self.host.contains(&target) {
                 let mut m = msg;
-                m.rebase(source, target);
+                m.rebase_by(self.frame.delta(source, target));
                 self.host.send(target, RegionCmd::HaloEntity(m, stamp));
             }
         }
@@ -1611,26 +1646,80 @@ impl GameInstanceManager {
         info!("Region recieved and loaded!");
     }
 
-    /// The viewer's current region, from the local player's sim body in the
-    /// home region (region-local pose + home offset). Free-cam local coords
-    /// run past the region bounds on purpose; from_world floor-divides them
-    /// into the right neighbour. Falls back to home when the player entity
-    /// isn't readable yet.
+    /// The viewer's current region IN THE FRAME (`frame`; not canonical), from
+    /// the local player's sim body in the home region (region-local pose + the
+    /// home's offset there). Free-cam local coords run past the region bounds
+    /// on purpose; from_world floor-divides them into the right neighbour.
+    /// Falls back to the home's copy when the player entity isn't readable yet.
     fn viewer_region(&self) -> Option<RegionCoords> {
         let home = self.home_region?;
         Some(match self.viewer_world_xz() {
             Some((x, z)) => RegionCoords::from_world(x, z),
-            None => home,
+            None => self.frame.alias(home),
         })
     }
 
-    /// The viewer's world-space (x, z): the local player's sim body in the
-    /// home region, rebased by home's offset. `None` until that body exists.
+    /// The viewer's (x, z) in the frame: the local player's sim body in the
+    /// home region, rebased by the offset of home's copy there. `None` until
+    /// that body exists.
     fn viewer_world_xz(&self) -> Option<(f32, f32)> {
         let home = self.home_region?;
         let t = self.local_player_translation()?;
-        let off = home.world_offset();
+        let off = self.frame.offset(home);
         Some((t[0] + off[0], t[2] + off[2]))
+    }
+
+    /// `home` (canonical) is the home region now: the frame follows it
+    /// (`WrapFrame::follow_home`; the first home starts it at its canonical
+    /// copy) and the render world is told.
+    fn set_home(&mut self, home: RegionCoords) {
+        if self.home_region.is_none() {
+            self.frame.anchor = self.frame.canonical(home);
+        } else {
+            self.frame.follow_home(home);
+        }
+        self.home_region = Some(home);
+        self.sync_frame();
+    }
+
+    /// The world's extent is `extent` now (its `WorldMap` came): the frame and the
+    /// connection map take it. A changed frame re-keys what was keyed before it: the
+    /// first `PlayerRegion`'s window, asked on the same stream right before the map,
+    /// may name regions off the map's columns — the server canonicalises every
+    /// subscribe and answers under the canonical key — and the window's centre is
+    /// moved to its copy in the new frame.
+    fn set_extent(&mut self, extent: Option<game::MapExtent>) {
+        let before = self.frame;
+        self.frame.set_extent(extent);
+        self.conns.set_extent(extent);
+        if self.frame != before {
+            let frame = self.frame;
+            self.subscribed = std::mem::take(&mut self.subscribed).into_iter().map(|rc| frame.canonical(rc)).collect();
+            let mut asked = BTreeMap::new();
+            for (rc, (n, at)) in std::mem::take(&mut self.asked_home) {
+                let entry = asked.entry(frame.canonical(rc)).or_insert((0, 0));
+                *entry = (entry.0 + n, entry.1.max(at));
+            }
+            self.asked_home = asked;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.shift.waiting =
+                    std::mem::take(&mut self.shift.waiting).into_iter().map(|(rc, at)| (frame.canonical(rc), at)).collect();
+            }
+            self.window_center = self.window_center.map(|c| frame.alias(c));
+        }
+        self.sync_frame();
+    }
+
+    /// Tell the render world the frame, when it changed since it was last told.
+    fn sync_frame(&mut self) {
+        if self.frame_sent == Some(self.frame) {
+            return;
+        }
+        self.frame_sent = Some(self.frame);
+        let _ = self
+            .client_event_send
+            .send(ClientUpdateEvent::WrapFrame { extent: self.frame.extent, anchor: self.frame.anchor });
     }
 
     /// The home region's view of the local client (`None` until it holds it).
@@ -1638,14 +1727,16 @@ impl GameInstanceManager {
         self.views.get(&self.home_region?)
     }
 
-    /// The simulated set for a window centred on `center` (see
-    /// [`desired_window`]); `update_window` and `update_lod_window` share it,
-    /// so streamed LOD never covers a simulated region.
-    fn window_for(&self, center: RegionCoords) -> std::collections::BTreeSet<RegionCoords> {
-        let mut window = desired_window(center, self.home_region, self.near_radius);
-        // A move's target, until its `PlayerRegion` makes it the home.
-        window.extend(self.pending_move);
-        window
+    /// The simulated set for a window centred on `center` (a region of the
+    /// frame; see [`framed_window`]): in the frame, and canonical.
+    /// `update_window` subscribes the second and `update_lod_window` excludes
+    /// the first, so streamed LOD never covers a simulated region's copy there.
+    fn window_for(
+        &self,
+        center: RegionCoords,
+    ) -> (std::collections::BTreeSet<RegionCoords>, std::collections::BTreeSet<RegionCoords>) {
+        // With a move's target, until its `PlayerRegion` makes it the home.
+        framed_window(&self.frame, center, self.home_region, self.pending_move, self.near_radius)
     }
 
     /// Centre of the near window and the LOD rings: the viewer's region, but
@@ -1665,7 +1756,7 @@ impl GameInstanceManager {
                 window_recenter_margin(),
             )),
             // No readable body yet (join) or mid-handoff: keep what we have.
-            None => self.window_center.or(self.home_region),
+            None => self.window_center.or(self.home_region.map(|home| self.frame.alias(home))),
         };
         self.window_center = center;
         center
@@ -1724,6 +1815,7 @@ impl GameInstanceManager {
         let (Some(home), Some(viewer)) = (self.home_region, self.viewer_region()) else {
             return;
         };
+        let viewer = self.frame.canonical(viewer);
         let conn = self.connection_state();
         if conn == game::ConnectionState::Ready && !self.join.connection_ready {
             // First time clock-synced AND caught up on the event stream.
@@ -1801,7 +1893,7 @@ impl GameInstanceManager {
         let Some(center) = self.advance_window_center() else {
             return;
         };
-        let desired = self.window_for(center);
+        let (_, desired) = self.window_for(center);
         if desired == self.subscribed {
             return;
         }
@@ -1894,7 +1986,9 @@ impl GameInstanceManager {
         let Some(center) = self.window_center.or_else(|| self.viewer_region()) else {
             return;
         };
-        let excluded = self.window_for(center);
+        // In the frame, as the LOD keys are: on a small planet a far ring may hold
+        // another copy of a near region, and gets its LOD.
+        let (excluded, _) = self.window_for(center);
         // The assignment walks every region within the horizon (~15,000 at
         // a 15 km view) through three ordered maps: ~10 ms there, on every tick. It only
         // depends on these inputs — `lod_assigned` is its own previous
@@ -2220,7 +2314,10 @@ impl GameInstanceManager {
     /// be handed to its host any moment (`connections::OBSERVER_RETRY_NEAR_MAX_MS`).
     fn near_body(&self, rc: RegionCoords) -> bool {
         Some(rc) == self.pending_move
-            || self.home_region.is_some_and(|home| (rc.x - home.x).abs() <= 1 && (rc.z - home.z).abs() <= 1)
+            || self.home_region.is_some_and(|home| {
+                let (dx, dz) = self.frame.delta(home, rc);
+                dx.abs() <= 1 && dz.abs() <= 1
+            })
     }
 
     /// Ask the home again for the regions of a closed observer connection whose
@@ -2439,7 +2536,7 @@ impl GameInstanceManager {
                     }
                     _ => self.crossing.confirmed(home),
                 }
-                self.home_region = Some(home);
+                self.set_home(home);
                 if first_home {
                     game::perf_event!(
                         "player_region",
@@ -2452,7 +2549,8 @@ impl GameInstanceManager {
                     // update_window keeps it in sync from then on. Later
                     // pushes (handoff confirmations) must NOT re-burst —
                     // that would resnapshot nine regions per crossing.
-                    for rc in home.window_radius(self.near_radius) {
+                    let (_, window) = framed_window(&self.frame, self.frame.alias(home), None, None, self.near_radius);
+                    for rc in window {
                         self.request_region(rc);
                         self.subscribed.insert(rc);
                     }
@@ -2513,6 +2611,7 @@ impl GameInstanceManager {
                 info!("[client] world map received: {}x{} tiles", map.width, map.height);
                 let had = self.route_map.as_ref().map(|r| r.extent());
                 self.route_map = Some(std::sync::Arc::new(game::RouteMap::from_world_map(&map)));
+                self.set_extent(Some(map.extent()));
                 let route = self.route_map.clone();
                 self.host.broadcast(|| RegionCmd::SetRouteMap(route.clone()));
                 // Every packet travels on its own stream, so a region snapshot can

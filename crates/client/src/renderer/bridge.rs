@@ -882,11 +882,12 @@ pub fn drain_client_updates(
     mut roots: ResMut<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
     // Paired to stay within Bevy's 16 system parameters.
-    (mut hud_status, mut tick_times, mut drain, mut region_hosts): (
+    (mut hud_status, mut tick_times, mut drain, mut region_hosts, mut wrap_frame): (
         ResMut<HudStatus>,
         Option<ResMut<super::hud::RegionTickTimes>>,
         Option<ResMut<super::drain_notice::DrainNotice>>,
         Option<ResMut<RegionHosts>>,
+        Option<ResMut<crate::wrap_frame::WrapFrame>>,
     ),
     mut ui_updates: ResMut<crate::renderer::slint_overlay::UiUpdates>,
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
@@ -1064,6 +1065,11 @@ pub fn drain_client_updates(
             #[cfg(target_arch = "wasm32")]
             ClientUpdateEvent::RegionHosts(_) => {
                 let _ = &mut region_hosts;
+            }
+            ClientUpdateEvent::WrapFrame { extent, anchor } => {
+                if let Some(frame) = wrap_frame.as_mut() {
+                    **frame = crate::wrap_frame::WrapFrame { extent, anchor };
+                }
             }
             ClientUpdateEvent::PersonInfo(p) => history_out.write(HistoryMsg::PersonInfo(p)),
             ClientUpdateEvent::Civs(c) => history_out.write(HistoryMsg::Civs(c)),

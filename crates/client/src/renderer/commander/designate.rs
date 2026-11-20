@@ -479,15 +479,17 @@ pub fn update_hover(
     mirror: Res<TileMirror>,
     working: Res<WorkingLevel>,
     xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
+    frame: Option<Res<crate::wrap_frame::WrapFrame>>,
     mut state: ResMut<DesignateState>,
 ) {
     let xray = crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut);
+    let frame = frame.as_deref().copied().unwrap_or_default();
     let hover = (|| {
         let tool = state.tool?;
         if policy.blocks_game() || policy.ui_pointer {
             return None;
         }
-        let ray = cursor_ray(window.single().ok()?, view.single().ok()?, mirror.region()?)?;
+        let ray = cursor_ray(window.single().ok()?, view.single().ok()?, mirror.region()?, &frame)?;
         let visible = (!working.cut).then(|| pick_visible_xray(ray, tool == Tool::Build, &mirror, xray)).flatten();
         let p = visible.or_else(|| pick_level_cell(ray.0, ray.1, working.level?, |p| game::block_props().blocks_ray(mirror.block(p))))?;
         Some(clamp_to_region(p))
@@ -498,10 +500,15 @@ pub fn update_hover(
 }
 
 /// The cursor's ray as (origin, normalised direction) in `region`'s local
-/// sim units; `None` off the window.
-pub fn cursor_ray(window: &Window, (camera, tf): (&Camera, &Transform), region: RegionId) -> Option<(Vector, Vector)> {
+/// sim units (`region`'s copy in `frame`); `None` off the window.
+pub fn cursor_ray(
+    window: &Window,
+    (camera, tf): (&Camera, &Transform),
+    region: RegionId,
+    frame: &crate::wrap_frame::WrapFrame,
+) -> Option<(Vector, Vector)> {
     let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), window.cursor_position()?).ok()?;
-    let origin = ray.origin - Vec3::from_array(region.world_offset());
+    let origin = ray.origin - Vec3::from_array(frame.offset(region));
     let dir = *ray.direction;
     Some((Vector::new(origin.x, origin.y, origin.z), Vector::new(dir.x, dir.y, dir.z)))
 }

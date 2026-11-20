@@ -377,6 +377,10 @@ pub enum ClientUpdateEvent {
     /// (`None` = its host not yet known); sent only when it changed and only while the
     /// scripted autopilot runs (`VOXEL_AUTOPILOT`), which picks its seams from it.
     RegionHosts(Vec<(RegionId, Option<HostId>)>),
+    /// The client's unwrapped frame on a world that wraps east–west: the extent
+    /// and the anchor (the home's copy in the frame; the client's
+    /// `wrap_frame::WrapFrame`). Sent when either changes.
+    WrapFrame { extent: Option<MapExtent>, anchor: RegionCoords },
 }
 
 #[cfg(not(target_arch = "wasm32"))]

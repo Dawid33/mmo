@@ -101,13 +101,16 @@ pub const DESPAWNED_ARRIVAL_IDS_KEPT: usize = 256;
 /// `evict_lod_cache`).
 pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
 /// How far past a wrapping map's west or east edge, in map widths, a LOD key
-/// may reach (keys are in the client's unwrapped frame): a client sees at most
-/// its view distance (`MAX_VIEW_DISTANCE_M`, 16 km) past the seam, as wide as
-/// the narrowest world, plus a tile's overhang and a frame that has not
-/// re-centred yet after a crossing — two widths cover that with room. A key
-/// reaching farther is dropped (no `LodData`, as for an invalid factor) and
-/// indexes nothing.
-pub const LOD_WRAP_REACH_WIDTHS: i64 = 2;
+/// may reach (keys are in the client's unwrapped frame, `client::wrap_frame`):
+/// that frame is never re-centred, so a player who has circled the world `k`
+/// times asks for keys `k` widths off the map, plus its view distance
+/// (`MAX_VIEW_DISTANCE_M`, 16 km, as wide as the narrowest world) and a tile's
+/// overhang. 64 laps is far past any session; the bound only keeps the key
+/// arithmetic far from `i32` limits — it costs nothing per edit, since the
+/// image index holds only live subscriptions. A key reaching farther is dropped
+/// (no `LodData`, as for an invalid factor) and indexes nothing; a new session
+/// starts at the canonical frame.
+pub const LOD_WRAP_REACH_WIDTHS: i64 = 64;
 /// LRU cap on *pristine* `terrain_cache` entries — full-resolution snapshots
 /// generated only to feed a factor 2/4/16 LOD build for a region that has
 /// never run. Only reached with a builder that does not

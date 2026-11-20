@@ -52,8 +52,9 @@ impl Selection {
     }
 }
 
-/// The terrain point under the cursor: the region it lies in and the point in
-/// that region's local frame (sim units, as sim events use) — `None` off the
+/// The terrain point under the cursor: the (canonical) region it lies in and
+/// the point in that region's local frame (sim units, as sim events use; the
+/// region's copy in `WrapFrame`, `WrapFrame::region_at_world`) — `None` off the
 /// loaded terrain. Cut-away rock is not in the way
 /// ([`super::visible::visible_ground`]). Orders and designations aim at it.
 ///
@@ -181,8 +182,10 @@ pub fn update_ground_pick(
     working: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
     xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
+    frame: Option<Res<crate::wrap_frame::WrapFrame>>,
     mut pick: ResMut<GroundPick>,
 ) {
+    let frame = frame.as_deref().copied().unwrap_or_default();
     pick.0 = (|| {
         let cursor = window.single().ok()?.cursor_position()?;
         let (camera, tf) = view.single().ok()?;
@@ -198,8 +201,8 @@ pub fn update_ground_pick(
             &tiles,
             crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut),
         )?;
-        let region = RegionId::from_world(hit.x, hit.z);
-        Some((region, hit - Vec3::from_array(region.world_offset())))
+        let region = frame.region_at_world(hit.x, hit.z);
+        Some((region, hit - Vec3::from_array(frame.offset(region))))
     })();
 }
 
@@ -216,8 +219,10 @@ pub fn fallback_ground_pick(
     window: Query<&Window, With<PrimaryWindow>>,
     view: Query<(&Camera, &Transform), With<CommanderView>>,
     cam: Res<super::CommanderCamera>,
+    frame: Option<Res<crate::wrap_frame::WrapFrame>>,
     mut pick: ResMut<GroundPick>,
 ) {
+    let frame = frame.as_deref().copied().unwrap_or_default();
     if pick.0.is_some() {
         if !pick.1 {
             pick.1 = true;
@@ -230,8 +235,8 @@ pub fn fallback_ground_pick(
         let (camera, tf) = view.single().ok()?;
         let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), cursor).ok()?;
         let hit = plane_hit(ray.origin, *ray.direction, cam.ground_y)?;
-        let region = RegionId::from_world(hit.x, hit.z);
-        Some((region, hit - Vec3::from_array(region.world_offset())))
+        let region = frame.region_at_world(hit.x, hit.z);
+        Some((region, hit - Vec3::from_array(frame.offset(region))))
     })();
 }
 
