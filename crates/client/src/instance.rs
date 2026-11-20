@@ -2624,11 +2624,17 @@ impl GameInstanceManager {
                 self.set_extent(Some(map.extent()));
                 let route = self.route_map.clone();
                 self.host.broadcast(|| RegionCmd::SetRouteMap(route.clone()));
-                // Every packet travels on its own stream, so a region snapshot can
-                // overtake the map: a region built (and predicted) without a WRAPPING
-                // extent may have run a seam tick the server ran with it. Each held
-                // region is asked for again; the fresh snapshot replaces it (a
-                // non-wrapping extent changes nothing at a seam: no resync).
+                // A defence, not a race: the streams are read in order and the
+                // server sends `WorldMap` before any `Region` packet, so today no
+                // region is held when a wrapping map arrives. Should one ever be
+                // (a map that arrives late or changes), it was built (and
+                // predicted) without the WRAPPING extent and may have run a seam
+                // tick the server ran with it; its alias in the frame changes too.
+                // Each held region is asked for again and the fresh snapshot
+                // replaces it — what keeps `wrap_frame.rs`'s invariant (an alias
+                // changes only when the extent arrives, and then every held region
+                // is asked again). A non-wrapping extent changes nothing at a
+                // seam: no resync.
                 if map.extent().wraps() && had != Some(map.extent()) {
                     let held: Vec<RegionCoords> =
                         self.subscribed.iter().copied().filter(|rc| self.host.contains(rc)).collect();
