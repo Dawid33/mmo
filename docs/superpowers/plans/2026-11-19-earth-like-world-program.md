@@ -130,10 +130,10 @@ The Phase 1a plan and the design were written against the tree and the rules of 
 |---|---|---|---|---|
 | 0 | Resume: review Task 2; re-base the 1a plan; amend the design | DONE 2026-11-19 | `2026-11-14-planet-frame-1a.md` (re-based, Tasks 3–19) | Evidence § Phase 0 |
 | 1a | Planet frame: 2:1 sizes, east–west wrap (role `all`; closed seam elsewhere), polar seas, one layout, old options deleted | DONE 2026-11-20 | `2026-11-14-planet-frame-1a.md` (19 tasks; "As built"); commits `804d85c0` … `4176aacd` (Tasks 1–2: `8d6b29a2`, `77f8e8a3`) | Evidence § Phase 1a |
-| 1b | The stored monthly-climate family, filled by a placeholder seasonal curve | PLANNED 2026-11-20 (builder check settled) | `2026-11-20-monthly-climate-container-1b.md` | — |
-| 2 | Plates and aged relief | PLANNED 2026-11-20 (builder check settled; re-check Phase 1b's symbols at dispatch) | `2026-11-20-plates-and-aged-relief-2.md` | — |
+| 1b | The stored monthly-climate family, filled by a placeholder seasonal curve | DONE 2026-11-20 | `2026-11-20-monthly-climate-container-1b.md` (6 tasks; "As built"); commits `99fc8643` … `bbfd9b9b` | Evidence § Phase 1b |
+| 2 | Plates and aged relief | IN PROGRESS (plan re-based onto the built Phase 1b, 2026-11-20) | `2026-11-20-plates-and-aged-relief-2.md` | — |
 | 3 | Monthly climate | PLANNED 2026-11-20 (builder check settled; re-check Phases 1b's and 2's symbols at dispatch) | `2026-11-20-monthly-climate-3.md` | — |
-| 4 | Water and ice | TODO | — | — |
+| 4 | Water and ice | PLAN DRAFTED 2026-11-20 (builder check running) | `2026-11-20-water-and-ice-4.md` | — |
 | 5 | Biomes | TODO | — | — |
 | 6 | Runtime seasons and weather | TODO | — | — |
 | 7 | The wrap across hosts (`claim` worlds) | TODO | — | — |
