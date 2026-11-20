@@ -235,6 +235,11 @@ pub fn water_discharge(w: &World, a: &Analysis) -> Vec<f64> {
         .collect()
 }
 
+/// A wrapping `nearest_water` whose pass-pair cap ran out counts as settled
+/// (debug check) when one more pair lowers no distance by more than this
+/// (m): float rounding, far below anything the drainage raster resolves.
+const CHAMFER_SETTLED_M: f64 = 1e-6;
+
 /// For each cell, the distance (m) to the nearest cell with a water level
 /// (not NaN), that level and that water's discharge: a two-pass chamfer
 /// carrying the source's (level, q). (INFINITY, NaN, NaN) when there is no
@@ -289,12 +294,21 @@ fn nearest_water(nx: usize, nz: usize, dx: f64, wrap_x: bool, level: &[f64], q: 
                 break;
             }
         }
-        // The cap is a bound, not a proof: a debug build checks that one
-        // more pass pair would change nothing. That pair runs on the real
-        // state, which is safe: it only gets to run when the cap ran out, and
-        // then either it changes nothing (the assert holds, the state is the
-        // release build's) or the assert fails.
-        debug_assert!(settled || !pair(&mut dist, &mut at), "chamfer distance not settled after the capped pass pairs");
+        // The cap is a bound, not a proof: when it ran out a debug build
+        // checks that one more pass pair (on a copy, so a debug forge stays
+        // the release build's) moves no distance by more than rounding. Equal
+        // chamfer paths summed in another order differ in the last bits: the
+        // default dev Planet's gate forge saw a fourth pair lower 122 cells by
+        // at most 9.1e-13 m.
+        if cfg!(debug_assertions) && !settled {
+            let (mut more, mut more_at) = (dist.clone(), at.clone());
+            pair(&mut more, &mut more_at);
+            let moved = dist.iter().zip(&more).map(|(a, b)| a - b).fold(0.0, f64::max);
+            assert!(
+                moved <= CHAMFER_SETTLED_M,
+                "chamfer distance not settled after the capped pass pairs: one more lowers it by {moved} m"
+            );
+        }
     }
     (dist, at)
 }
