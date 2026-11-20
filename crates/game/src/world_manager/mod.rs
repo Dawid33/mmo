@@ -690,6 +690,12 @@ struct RegionLink {
     /// window queue in `resubscribe_pending` and re-run after Stopped.
     stopping: bool,
     resubscribe_pending: Vec<ClientId>,
+    /// It got the world map before its first tick (`SetRouteMap` right after
+    /// `StartAt`): every target it sends is canonical. A region already
+    /// running when the map was installed may send outputs from before it
+    /// applied the map ([`WorldManager::fold_target`] then folds without
+    /// asserting).
+    holds_map: bool,
 }
 
 /// Manager-thread work done since the last [`WorldManager::take_perf_counters`]
@@ -1718,22 +1724,31 @@ impl<S: RegionSpawner> WorldManager<S> {
         crate::canonical(self.map_extent(), rc)
     }
 
-    /// A target region a region output names, canonical. Regions send them
-    /// canonical (`halo.rs`), so a fold here is a bug upstream: counted
-    /// (`seam_fixed=`) and, in debug builds, an assertion — the second line
-    /// of defence, never a log line per message.
-    fn fold_target(&mut self, rc: RegionCoords) -> RegionCoords {
+    /// A target region that region `from`'s output names, canonical. Regions
+    /// send them canonical (`halo.rs`), so a fold here is a bug upstream:
+    /// counted (`seam_fixed=`) and, in debug builds, an assertion when `from`
+    /// is known to hold the map ([`RegionLink::holds_map`]) — the second
+    /// line of defence, never a log line per message.
+    fn fold_target(&mut self, from: RegionCoords, rc: RegionCoords) -> RegionCoords {
         let c = self.canonical(rc);
         if c != rc {
             self.seam_fixed += 1;
-            debug_assert!(false, "seam_fixed: a region sent the non-canonical target {rc:?} (canonical {c:?})");
+            debug_assert!(
+                !self.holds_map(from),
+                "seam_fixed: region {from:?} sent the non-canonical target {rc:?} (canonical {c:?})"
+            );
         }
         c
     }
 
+    /// Whether region `rc` (running here) got the map before its first tick.
+    fn holds_map(&self, rc: RegionCoords) -> bool {
+        self.regions.get(&rc).is_some_and(|l| l.holds_map)
+    }
+
     /// An intent or reply a region sent, with its target and cells canonical
     /// ([`Self::fold_target`]'s rule: counted, asserted in debug).
-    fn fold_intent_msg(&mut self, msg: crate::IntentMsg) -> crate::IntentMsg {
+    fn fold_intent_msg(&mut self, from: RegionCoords, msg: crate::IntentMsg) -> crate::IntentMsg {
         use crate::{IntentMsg, IntentReply};
         let map = self.map_extent();
         let folded = match msg {
@@ -1753,7 +1768,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         if folded != msg {
             self.seam_fixed += 1;
-            debug_assert!(false, "seam_fixed: a region sent the non-canonical {msg:?}");
+            debug_assert!(!self.holds_map(from), "seam_fixed: region {from:?} sent the non-canonical {msg:?}");
         }
         folded
     }
@@ -2354,7 +2369,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let view = self.in_cut_view(rc);
                 for (mut bundle, target) in list {
                     // Canonical (the region sends it so; folded again here).
-                    let target = self.fold_target(target);
+                    let target = self.fold_target(rc, target);
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
                     let off_map = crate::off_map(self.map_extent(), target);
                     // Bodies that would wake their target: a player, a person no
@@ -2428,7 +2443,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::HaloDeltas(list, stamp) => {
                 for (update, target) in list {
-                    let target = self.fold_target(target);
+                    let target = self.fold_target(rc, target);
                     if self.is_foreign(target) {
                         // Only to a region its owner runs (`foreign_running`).
                         self.halo_to_peer(target, crate::Volatile::HaloUpdate { to: target, update, stamp });
@@ -2461,7 +2476,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // predates them (`save_cut.rs`).
                 let view = self.in_cut_view(rc);
                 for msg in list {
-                    let msg = self.fold_intent_msg(msg);
+                    let msg = self.fold_intent_msg(rc, msg);
                     self.route_intent(msg, rc, view);
                 }
             }
@@ -2470,7 +2485,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // mirrors were ended (`halo_source_lost`); none comes back.
                 let list = if self.regions.contains_key(&rc) { list } else { Vec::new() };
                 for (mut msg, target) in list {
-                    let target = self.fold_target(target);
+                    let target = self.fold_target(rc, target);
                     let delta = crate::region_delta(self.map_extent(), rc, target);
                     if self.is_foreign(target) {
                         msg.rebase_by(delta);
@@ -4359,6 +4374,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 empty_since_ms: None,
                 stopping: false,
                 resubscribe_pending: Vec::new(),
+                holds_map: self.route_map.is_some(),
             },
         );
         // A new incarnation: no arrival stamp of an earlier one applies.

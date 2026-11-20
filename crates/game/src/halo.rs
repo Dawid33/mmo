@@ -582,15 +582,14 @@ impl Rollback {
             }
         }
         // Each target canonical (across a wrapped seam, the map's other
-        // end); one off the map gets nothing.
+        // end); one off the map goes out as before (the manager decides).
         let map = self.data.map();
         by_target
             .into_iter()
-            .filter_map(|((dx, dz), (mut deltas, piles, containers))| {
-                let to = crate::region_neighbour(map, from, dx, dz)?;
+            .map(|((dx, dz), (mut deltas, piles, containers))| {
                 deltas.sort_by_key(|d| d.chunk);
                 let update = HaloUpdate { from, replace: false, deltas, ground: Vec::new(), piles, containers };
-                Some((update, to))
+                (update, crate::canonical(map, RegionCoords::new(from.x + dx, from.z + dz)))
             })
             .collect()
     }

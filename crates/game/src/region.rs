@@ -399,14 +399,10 @@ impl Region {
     pub fn set_route_map(&mut self, route: Option<std::sync::Arc<crate::RouteMap>>) {
         self.map_extent = route.as_ref().map(|r| r.extent());
         self.route_map = route;
-        // The sim's seam conversions read it from the data (not state: its
-        // own forgotten transaction, like the id in `Region::new`).
-        if *self.data.map_extent != self.map_extent {
-            let extent = self.map_extent;
-            self.data.new_transaction();
-            self.data.map_extent.update(|m| *m = extent);
-            self.data.forget();
-        }
+        // The sim's seam conversions read it from the data. Configuration,
+        // not state: written raw, never logged, so no rollback of the
+        // predictions outstanding now (or later) can revert it.
+        *self.data.map_extent.raw_mut() = self.map_extent;
     }
 
     pub fn map_extent(&self) -> Option<crate::MapExtent> {

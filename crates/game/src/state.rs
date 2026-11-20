@@ -266,9 +266,10 @@ mod game_data {
         /// conversions read (`GameData::world_block` / `local_block`, the
         /// halo's keys). Set by whoever runs the region before its first
         /// tick, the same on server and client. Not state: never hashed,
-        /// serialized or undone — a region built from a snapshot gets it
-        /// again from its runner.
-        #[undo(cell)]
+        /// serialized or undone, and never in the undo log — configuration
+        /// written raw (`Region::set_route_map`), so setting it at any time,
+        /// predictions outstanding or not, is safe and no rollback reverts
+        /// it. A region built from a snapshot gets it again from its runner.
         #[serde(skip)]
         #[state_hash(skip)]
         map_extent: Option<crate::MapExtent>,

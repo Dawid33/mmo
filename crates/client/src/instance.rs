@@ -2511,9 +2511,22 @@ impl GameInstanceManager {
             }
             game::ServerPacket::WorldMap(map) => {
                 info!("[client] world map received: {}x{} tiles", map.width, map.height);
+                let had = self.route_map.as_ref().map(|r| r.extent());
                 self.route_map = Some(std::sync::Arc::new(game::RouteMap::from_world_map(&map)));
                 let route = self.route_map.clone();
                 self.host.broadcast(|| RegionCmd::SetRouteMap(route.clone()));
+                // Every packet travels on its own stream, so a region snapshot can
+                // overtake the map: a region built (and predicted) without a WRAPPING
+                // extent may have run a seam tick the server ran with it. Each held
+                // region is asked for again; the fresh snapshot replaces it (a
+                // non-wrapping extent changes nothing at a seam: no resync).
+                if map.extent().wraps() && had != Some(map.extent()) {
+                    let held: Vec<RegionCoords> =
+                        self.subscribed.iter().copied().filter(|rc| self.host.contains(rc)).collect();
+                    for rc in held {
+                        self.request_region(rc);
+                    }
+                }
                 let _ = self
                     .client_event_send
                     .send(ClientUpdateEvent::WorldMap(Box::new(map)));
