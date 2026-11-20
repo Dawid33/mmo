@@ -221,7 +221,7 @@ pub fn seam_dx(dx: f64, width: f64) -> f64 {
 /// Reaches between network nodes, with Strahler order. Returns (rivers, max order).
 fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &Knobs) -> (Vec<River>, u32) {
     let cells = w.cells();
-    // Outlets (sea, land-edge border) end a river: they have no receiver.
+    // Outlets (the sea) end a river: they have no receiver.
     let channel = |i: usize| !w.outlet[i] && q[i] >= k.river_min_discharge_m2;
     let mut donors = vec![0u8; cells];
     let (mut order, mut max_in, mut max_count) = (vec![0u32; cells], vec![0u32; cells], vec![0u8; cells]);
@@ -268,8 +268,8 @@ fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &
             last = cur;
             cur = routing.receiver[cur] as usize;
         }
-        // Close the reach on its downstream node: the confluence, the sea,
-        // or the land edge it leaves the map at.
+        // Close the reach on its downstream node: the confluence, or the sea
+        // (every outlet on the Planet).
         if channel(cur) {
             points.push(point(cur));
         } else if w.ocean[cur] {

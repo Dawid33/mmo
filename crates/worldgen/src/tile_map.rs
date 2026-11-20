@@ -163,8 +163,8 @@ fn reaches_by_tile(world: &ForgedWorld) -> std::collections::HashMap<(i32, i32),
 }
 
 /// One raster cell of the artifact lattice: inside the artifact, or a
-/// virtual cell beyond its edge (ocean past a sea edge, the border's ground
-/// past a land edge).
+/// virtual cell beyond its edge (ocean past the Planet's north and south sea
+/// edges; east–west the lattice wraps round).
 struct Cell {
     ix: i64,
     iz: i64,
@@ -177,7 +177,7 @@ struct Cell {
 /// The summary of region tile `rc`: statistics over the artifact cells whose
 /// centres fall in the tile (cells beyond the artifact count as the sampler
 /// extends the map, `ForgedWorld::extended_cell_height`: ocean at
-/// [`crate::forged::OUTSIDE_HEIGHT_M`] past a sea edge, the border cell past a land edge), rivers by any reach point inside the footprint, the
+/// [`crate::forged::OUTSIDE_HEIGHT_M`] past a sea edge, x wrapping round east–west), rivers by any reach point inside the footprint, the
 /// most common surface rock, and the landing column — the tile centre's
 /// column or else the in-artifact cell centre nearest it (ties by z, then x)
 /// whose block column [`is_landing`]. Biome and region are the modes of the

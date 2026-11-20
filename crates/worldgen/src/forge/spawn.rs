@@ -18,9 +18,9 @@ const FLAT_MAX_RELIEF_M: f64 = 4.0;
 const RIVER_DISCHARGE_M2: f64 = 1.5e6;
 /// "Mountain" for the view criterion: this share of the world's highest peak.
 const MOUNTAIN_SHARE_OF_PEAK: f64 = 0.55;
-/// A scored site keeps this far from the map edge (where a land edge ends the
-/// playable world), or `EDGE_CLEARANCE_MAX_SHARE` of a small world's size —
-/// on a wrapping world from the north and south edges only.
+/// A scored site keeps this far from the map's edges, or
+/// `EDGE_CLEARANCE_MAX_SHARE` of a small world's size — on the Planet from the
+/// north and south edges (the polar seas) only: east–west it wraps round.
 const EDGE_CLEARANCE_M: f64 = 1_000.0;
 const EDGE_CLEARANCE_MAX_SHARE: f64 = 0.125;
 
@@ -59,8 +59,8 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
     let clearance = EDGE_CLEARANCE_M.min(EDGE_CLEARANCE_MAX_SHARE * w.nx.min(w.nz) as f64 * w.dx);
     let mut best = (f64::MIN, 0usize);
     // Flattest dry patch (its relief, cell) for when no site qualifies.
-    // ... preferring one clear of the map edge (the plain along a land edge
-    // is flat because it is not uplifted, and it is where the world ends).
+    // ... preferring one clear of the map's edges (on the Planet the polar
+    // seas, north and south).
     let mut flattest = (f64::MAX, None);
     let mut flattest_clear = (f64::MAX, None);
     let (width, height) = (w.nx as f64 * w.dx, w.nz as f64 * w.dx);

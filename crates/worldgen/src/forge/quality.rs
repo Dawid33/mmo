@@ -179,8 +179,8 @@ pub const LAND_BAND: ((f64, f64), (f64, f64)) = ((0.20, 0.30), (0.60, 0.70));
 pub const WANTED_SNOW_PEAKS: u32 = 3;
 pub const WANTED_MOUNTAIN_REGIONS: u32 = 3;
 pub const WANTED_FOREST_REGIONS: u32 = 3;
-/// Strahler order a river must reach (it then runs to the sea or a land edge:
-/// every forged lake spills, so each river ends at a base level).
+/// Strahler order a river must reach (it then runs to the sea: every forged
+/// lake spills, so each river ends at sea level).
 pub const WANTED_RIVER_ORDER: f64 = 4.0;
 /// Distinct biomes a world should show.
 pub const WANTED_BIOMES: usize = 10;

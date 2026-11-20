@@ -43,8 +43,8 @@ use super::erosion::{Routing, StepScratch, NO_RECEIVER};
 use super::par;
 use super::world::World;
 
-/// Water surface at a sea outlet (sea level). A land-edge outlet's base level
-/// is its own height.
+/// Water surface at a sea outlet (sea level; on the Planet every outlet is
+/// sea).
 const OUTLET_LEVEL_M: f64 = 0.0;
 /// Basin of every outlet and of all land that descends straight to one.
 const SEA: u32 = 0;
@@ -102,7 +102,7 @@ struct Grid<'a> {
 
 impl<'a> Grid<'a> {
     fn new(w: &'a World) -> Self {
-        // Cells that drain off the map: the sea and the land edges' border.
+        // Cells where drainage ends: the sea (the Planet's only outlets).
         Grid { h: &w.h, ocean: &w.ocean, outlet: &w.outlet }
     }
 
@@ -111,8 +111,8 @@ impl<'a> Grid<'a> {
         self.outlet[i]
     }
 
-    /// Height as drainage sees it: the sea at sea level, not its floor; a
-    /// land-edge outlet (and any land) at its own height.
+    /// Height as drainage sees it: the sea at sea level, not its floor; land
+    /// at its own height.
     #[inline]
     fn surface(&self, i: usize) -> f64 {
         if self.ocean[i] { OUTLET_LEVEL_M } else { self.h[i] }
@@ -234,8 +234,8 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
             for x in 0..nx {
                 let i = z * nx + x;
                 if g.is_outlet(i) {
-                    // A shore outlet: land among its (on-map) neighbours. A
-                    // land-edge outlet stays at its own height.
+                    // A shore outlet: land among its (on-map) neighbours,
+                    // round the seam when the world wraps east–west.
                     let shore = if s.wrap_x {
                         land_near[(x + nx - 1) % nx] || land_near[x] || land_near[(x + 1) % nx]
                     } else {

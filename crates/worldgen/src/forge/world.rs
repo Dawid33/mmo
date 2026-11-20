@@ -191,7 +191,8 @@ pub fn volcano_sites(p: &ForgeParams) -> Vec<[f32; 2]> {
 }
 
 /// The ocean margin ramps from fully open to fully drowned over this share of
-/// the half-width past `Knobs::ocean_margin_start`.
+/// the half-height past `Knobs::ocean_margin_start` (the Planet's sea edges
+/// are north and south).
 const OCEAN_MARGIN_RAMP: f64 = 0.13;
 
 /// Lowest land height (m): erosion and diffusion clamp land to it too.

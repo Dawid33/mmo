@@ -69,8 +69,8 @@ fn polar_land_cells(w: &World) -> usize {
 }
 
 /// Share of land cells whose receiver chain (the analysis' routing) ends at
-/// an ocean cell — not at a land-edge outlet, nor in a cell with no receiver
-/// or a cycle. Each cell is walked once (memoised), so it is linear.
+/// an ocean cell — not in a cell with no receiver or a cycle. Each cell is
+/// walked once (memoised), so it is linear.
 fn drains_to_sea(f: &Forged) -> f64 {
     const UNKNOWN: u8 = 0;
     const WALKING: u8 = 1;
@@ -100,7 +100,7 @@ fn drains_to_sea(f: &Forged) -> f64 {
             path.push(c);
             let r = receiver[c];
             if r == worldgen::forge::erosion::NO_RECEIVER {
-                break NOT_SEA; // a land-edge outlet or an unrouted cell
+                break NOT_SEA; // an unrouted cell
             }
             c = r as usize;
         };

@@ -81,8 +81,9 @@ pub fn route(w: &World, epsilon: f64) -> Routing {
 
 /// `route` into reusable buffers (cleared and resized, not reallocated).
 ///
-/// Outlets (`World::outlet`) are where drainage ends: the sea at sea level,
-/// a land edge's border cells at their own height.
+/// Outlets (`World::outlet`) are where drainage ends: the sea, at sea level
+/// (on the Planet every outlet is sea: its north and south edges are polar
+/// seas and east–west it wraps round).
 pub fn route_into(w: &World, epsilon: f64, out: &mut Routing) {
     let cells = w.cells();
     let Routing { filled, receiver, receiver_dist, order, tree_starts, closed, heap } = out;
@@ -217,7 +218,7 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
         par::for_ranges(groups, |range| {
             for &i in routing.order[range].iter().rev() {
                 let rc = routing.receiver[i as usize] as usize;
-                // An outlet (sea or land edge) collects from many trees: it
+                // An outlet (the sea) collects from many trees: it
                 // must never be written here.
                 if !w.outlet[rc] {
                     // SAFETY: a cell and its non-outlet receiver are in one
@@ -252,8 +253,8 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
                         continue;
                     }
                     let rc = routing.receiver[i] as usize;
-                    // Sea level at the sea; a land-edge outlet's height (fixed during the step)
-                    // (never written); else already updated: downstream-first.
+                    // Sea level at the sea (an outlet: never written); else
+                    // already updated: downstream-first.
                     let base = if ocean[rc] { 0.0 } else { h.get(rc) };
                     let erodibility = k.erodibility * geo.erodibility_at(i, hi, before);
                     let f = dt * erodibility * q[i].max(k.hillslope_area_m2 * rain[i]).sqrt() / routing.receiver_dist[i];

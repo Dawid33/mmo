@@ -25,11 +25,10 @@
 //!   `land_depletion_deg` (rain-out balanced by evaporation from the land);
 //!   forced up a slope it rains out (`orographic_scale_m` of rise wrings out
 //!   about all of it) and arrives dry on the lee side; it recharges toward
-//!   saturation over any sea (inland seas included) and any lake. Air that
-//!   enters across a SEA edge is saturated; air that enters across a LAND
-//!   edge has crossed endless land and is at the equilibrium. On a world that
-//!   wraps east-west (the planet) no air enters: each row's sweep goes once
-//!   round from saturation, then records the lap after it.
+//!   saturation over any sea (inland seas included) and any lake. The wind
+//!   blows east or west, and the Planet wraps east–west, so no air enters
+//!   across an edge: each row's sweep goes once round from saturation, then
+//!   records the lap after it.
 //! - **Precipitation** (mm/yr) is the latitude's base (`LATITUDE_PRECIP_MM`:
 //!   wet equator, dry ~25° belts, wet ~50°, dry poles) times the air's
 //!   moisture relative to the equilibrium, raised on windward slopes
@@ -65,8 +64,7 @@ pub const LATITUDE_PRECIP_MM: [(f32, f32); 7] =
 
 /// Moisture (1 = saturated sea air) that air settles at over endless flat
 /// land: what it rains out is balanced by what the land gives back. Flat land
-/// under air at this moisture gets the latitude table's precipitation; air
-/// blowing in across a LAND edge arrives at it.
+/// under air at this moisture gets the latitude table's precipitation.
 pub const CONTINENTAL_MOISTURE: f64 = 0.65;
 /// Half-width (deg) of the latitude band over which the wind turns at a band
 /// edge (`trade_wind_edge_deg`, `polar_edge_deg`): rows inside it blend the

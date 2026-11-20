@@ -65,7 +65,7 @@ const MAGIC: &[u8; 4] = b"VXWF";
 /// (0, 0), where players are created (see `examples/seed_scan.rs`).
 const ENGINE_SPAWN_M: f64 = 8.5;
 /// Ground height past a SEA edge of the artifact (m relative to sea): open
-/// ocean. Past a LAND edge the edge's own ground continues instead
+/// ocean — on the Planet north and south; east–west it wraps round
 /// ([`ForgedWorld::sample`]).
 pub const OUTSIDE_HEIGHT_M: f64 = -90.0;
 
@@ -1451,11 +1451,11 @@ impl ForgedWorld {
         }
     }
 
-    /// Where artifact point `(ax, az)` lies: inside, past a land edge (the
-    /// point clamped onto the map's border, whose ground continues outward),
-    /// or past a sea edge. A point past two edges (a corner) is sea if
-    /// either is. On a world that wraps east–west no point is past the east
-    /// or west edge: x runs on round the world.
+    /// Where artifact point `(ax, az)` lies: inside, or past a sea edge (on
+    /// the Planet north or south). On a world that wraps east–west (the
+    /// Planet) no point is past the east or west edge: x runs on round the
+    /// world. `Place::Land` (the point clamped onto the border) is for land
+    /// edges, which no world that loads has.
     fn place(&self, ax: f64, az: f64) -> Place {
         let (width, height) = (self.globals.width_m, self.globals.height_m);
         let wrap = self.wrap.is_some();
@@ -1478,9 +1478,9 @@ impl ForgedWorld {
     }
 
     /// Height of raster cell `(ix, iz)` as the sampler extends the map: the
-    /// cell itself inside, the nearest border cell past a land edge, and
-    /// [`OUTSIDE_HEIGHT_M`] past a sea edge (`place`'s rules, by cell; x
-    /// wraps round on a world that wraps east–west).
+    /// cell itself inside and [`OUTSIDE_HEIGHT_M`] past a sea edge (north or
+    /// south on the Planet; `place`'s rules, by cell; x wraps round on a world
+    /// that wraps east–west).
     pub fn extended_cell_height(&self, ix: i64, iz: i64) -> f64 {
         let (nx, nz) = (i64::from(self.globals.nx), i64::from(self.globals.nz));
         let wrap = self.wrap.is_some();
@@ -1518,9 +1518,8 @@ impl ForgedWorld {
 
     /// Smooth ground before water features: interpolated raster + detail
     /// noise. Meters relative to sea; artifact coordinates. Past a sea edge
-    /// it is ocean at [`OUTSIDE_HEIGHT_M`]; past a land edge, the ground of
-    /// the border point it clamps to (constant outward: no cliff, and the
-    /// far view shows land continuing).
+    /// (north or south on the Planet) it is ocean at [`OUTSIDE_HEIGHT_M`];
+    /// east–west x runs on round the world.
     fn ground(&self, ax: f64, az: f64) -> f64 {
         let (ax, az) = match self.place(ax, az) {
             Place::Inside => (ax, az),
@@ -1645,8 +1644,8 @@ impl ForgedWorld {
     }
 
     /// Exact (un-latticed) sample at one engine-world point: map renderers, tests.
-    /// Outside the artifact there are no rivers or lakes: ocean past a sea
-    /// edge, the border's ground continued past a land edge.
+    /// Past the north and south sea edges there are no rivers or lakes, only
+    /// ocean; east–west the Planet wraps round.
     pub fn sample(&self, x: f64, z: f64) -> PointSample {
         let (ax, az) = self.to_artifact(x, z);
         if self.place(ax, az) != Place::Inside {
@@ -1744,6 +1743,7 @@ impl ForgedWorld {
 enum Place {
     Inside,
     /// Past land edges only: the point clamped onto the border (artifact m).
+    /// No world that loads has one (the Planet's edges are sea and wrap).
     Land(f64, f64),
     /// Past a sea edge.
     Sea,

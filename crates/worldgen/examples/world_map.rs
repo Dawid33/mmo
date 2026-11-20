@@ -1,6 +1,6 @@
 //! Top-down map of the generated world, written as PNGs, plus terrain stats.
 //! The way to SEE what the density pipeline produces without running the game:
-//! continent layout, coastlines, how much relief there is at a given scale.
+//! continents, coastlines, how much relief there is at a given scale.
 //!
 //! Run: just world-map            (defaults: 8192 m span around spawn, 1024 px)
 //!      just world-map --span 65536 --size 2048 --center 0,0 --out target/world-map/wide
