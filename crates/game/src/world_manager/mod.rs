@@ -758,6 +758,9 @@ pub struct ManagerDepths {
     /// Intent replies given up, since the manager started
     /// ([`WorldManager::intent_replies_lost`]).
     pub intent_replies_lost: u64,
+    /// Region outputs whose target region or position the manager had to fold
+    /// onto the wrapped map, since it started ([`WorldManager::seam_fixed`]).
+    pub seam_fixed: u64,
 }
 
 /// What a session is told when a new session of its player takes over
@@ -1195,6 +1198,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Replies given up (no running, parked or stopping destination, or past
     /// `MAX_INTENT_REPLY_HOPS`): each logged at warn.
     intent_replies_lost: u64,
+    /// Targets and positions of region outputs folded here that a region
+    /// should have sent canonical (`fold_target`): `seam_fixed=`.
+    seam_fixed: u64,
     /// The bodies of parked players, by `EntityId`: a reply carrying items
     /// to one of them goes into the player's parked record. Dropped when
     /// the player is restored (its new body has a new id).
@@ -1595,6 +1601,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             recently_despawned: std::collections::VecDeque::new(),
             despawn_warned: BTreeSet::new(),
             intent_replies_lost: 0,
+            seam_fixed: 0,
             incarnation: BTreeMap::new(),
             incarnation_seen: BTreeMap::new(),
             next_incarnation: 0,
@@ -1709,6 +1716,46 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// what every region coordinate a client sends becomes before use.
     fn canonical(&self, rc: RegionCoords) -> RegionCoords {
         crate::canonical(self.map_extent(), rc)
+    }
+
+    /// A target region a region output names, canonical. Regions send them
+    /// canonical (`halo.rs`), so a fold here is a bug upstream: counted
+    /// (`seam_fixed=`) and, in debug builds, an assertion — the second line
+    /// of defence, never a log line per message.
+    fn fold_target(&mut self, rc: RegionCoords) -> RegionCoords {
+        let c = self.canonical(rc);
+        if c != rc {
+            self.seam_fixed += 1;
+            debug_assert!(false, "seam_fixed: a region sent the non-canonical target {rc:?} (canonical {c:?})");
+        }
+        c
+    }
+
+    /// An intent or reply a region sent, with its target and cells canonical
+    /// ([`Self::fold_target`]'s rule: counted, asserted in debug).
+    fn fold_intent_msg(&mut self, msg: crate::IntentMsg) -> crate::IntentMsg {
+        use crate::{IntentMsg, IntentReply};
+        let map = self.map_extent();
+        let folded = match msg {
+            IntentMsg::Intent(s) => IntentMsg::Intent(crate::SentIntent {
+                target: s.target.canonical(map),
+                intent: s.intent.canonical(map),
+                from: crate::canonical(map, s.from),
+                ..s
+            }),
+            IntentMsg::Reply(s) => {
+                let reply = match s.reply {
+                    IntentReply::Granted(i) => IntentReply::Granted(i.canonical(map)),
+                    IntentReply::Refused(i, why) => IntentReply::Refused(i.canonical(map), why),
+                };
+                IntentMsg::Reply(crate::SentReply { reply, hint: crate::canonical(map, s.hint), ..s })
+            }
+        };
+        if folded != msg {
+            self.seam_fixed += 1;
+            debug_assert!(false, "seam_fixed: a region sent the non-canonical {msg:?}");
+        }
+        folded
     }
 
     /// [`crate::halo::neighbours`] of `rc`, canonical, the ones off the map
@@ -1914,10 +1961,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.refresh_keepalive(m.target, now_ms);
     }
 
-    /// Where a player lands in `rc` (canonical): the world map tile's dry landing, else the
+    /// Where a player lands in `rc` (folded onto the map): the world map tile's dry landing, else the
     /// society grid's, else the region's centre.
     fn landing_in(&self, rc: RegionCoords) -> [u32; 2] {
-        debug_assert_eq!(rc, self.canonical(rc), "landing_in takes a canonical region");
+        let rc = self.canonical(rc);
         let edge = crate::REGION_BLOCKS as u32;
         let on_map = self.world_map.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing);
         let on_grid = self.society_grid.as_ref().and_then(|g| g.landing(rc));
@@ -2249,7 +2296,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 for n in self.halo_neighbours(rc) {
                     if self.is_foreign(n) {
                         // Another host's: only when it runs it (`foreign_running`).
-                        if let Some(seed) = crate::halo::halo_seed_from_snapshot(rc, n, &far) {
+                        if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.map_extent(), rc, n, &far) {
                             self.halo_to_peer(n, crate::Volatile::HaloUpdate { to: n, update: seed, stamp });
                         }
                         continue;
@@ -2258,7 +2305,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if !running {
                         continue;
                     }
-                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(rc, n, &far) {
+                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.map_extent(), rc, n, &far) {
                         self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloUpdate(seed), stamp));
                     }
                 }
@@ -2307,7 +2354,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let view = self.in_cut_view(rc);
                 for (mut bundle, target) in list {
                     // Canonical (the region sends it so; folded again here).
-                    let target = self.canonical(target);
+                    let target = self.fold_target(target);
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
                     let off_map = crate::off_map(self.map_extent(), target);
                     // Bodies that would wake their target: a player, a person no
@@ -2381,6 +2428,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::HaloDeltas(list, stamp) => {
                 for (update, target) in list {
+                    let target = self.fold_target(target);
                     if self.is_foreign(target) {
                         // Only to a region its owner runs (`foreign_running`).
                         self.halo_to_peer(target, crate::Volatile::HaloUpdate { to: target, update, stamp });
@@ -2413,6 +2461,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // predates them (`save_cut.rs`).
                 let view = self.in_cut_view(rc);
                 for msg in list {
+                    let msg = self.fold_intent_msg(msg);
                     self.route_intent(msg, rc, view);
                 }
             }
@@ -2421,7 +2470,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // mirrors were ended (`halo_source_lost`); none comes back.
                 let list = if self.regions.contains_key(&rc) { list } else { Vec::new() };
                 for (mut msg, target) in list {
-                    let target = self.canonical(target);
+                    let target = self.fold_target(target);
                     let delta = crate::region_delta(self.map_extent(), rc, target);
                     if self.is_foreign(target) {
                         msg.rebase_by(delta);
@@ -4062,6 +4111,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             arrivals_despawned: self.arrivals_despawned(),
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),
+            seam_fixed: self.seam_fixed,
         }
     }
 
@@ -4356,7 +4406,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             let running = self.regions.get(&n).is_some_and(|l| !l.stopping);
             if let Some(snap) = self.terrain_cache.get(&n) {
-                if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, rc, &snap) {
+                if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.map_extent(), n, rc, &snap) {
                     let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
                 }
             } else if running {
@@ -4368,7 +4418,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             } else {
                 // Not cached: LOD keeps its own choice of pristine sources.
                 let snap = TerrainSnapshot::from_columns(self.generate_timed(n));
-                if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, rc, &snap) {
+                if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.map_extent(), n, rc, &snap) {
                     let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
                 }
             }
@@ -4698,6 +4748,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Replies given up so far (see [`Self::route_intent`]).
     pub fn intent_replies_lost(&self) -> u64 {
         self.intent_replies_lost
+    }
+
+    /// Region-output targets and positions folded onto the wrapped map since
+    /// start (`seam_fixed=`; 0 while every region sends canonical ones).
+    pub fn seam_fixed(&self) -> u64 {
+        self.seam_fixed
     }
 
     /// Test support: the replies waiting for a parked or stopping region.

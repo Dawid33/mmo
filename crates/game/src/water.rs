@@ -11,7 +11,7 @@ use rapier3d::math::Vector;
 
 use crate::movement::{Immersion, PLAYER_EYE_HEIGHT, PLAYER_HEIGHT};
 use crate::{
-    BlockId, BlockPos, ColumnCoords, ColumnGround, EntityKey, Rollback, WorldBlockPos, WorldChunkPos,
+    BlockId, BlockPos, ColumnCoords, ColumnGround, EntityKey, Rollback, WorldBlockPos,
     BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS,
 };
 
@@ -187,6 +187,9 @@ impl Rollback {
     /// region's own `ground` for its cells, the neighbour's (`halo_ground`)
     /// for halo cells.
     pub fn water_units_at(&self, p: WorldBlockPos) -> u16 {
+        // Canonical (an unwrapped cell of this region's frame folds), so the
+        // halo's ground key below is the neighbour's.
+        let p = self.data.canonical_block(p);
         let Some(block) = self.halo_block(p) else { return 0 };
         let cb = CHUNK_BLOCKS as i64;
         let (lx, lz) = (p.x.rem_euclid(cb) as usize, p.z.rem_euclid(cb) as usize);
@@ -197,14 +200,13 @@ impl Rollback {
     /// The ground recipe of world block `p`'s column: own (`ground`) inside
     /// the region, else the halo's (`halo_ground`).
     fn recipe_ground_at(&self, p: WorldBlockPos) -> Option<&ColumnGround> {
-        let rc = *self.data.region;
-        let n = REGION_BLOCKS as i64;
-        let cb = CHUNK_BLOCKS as i64;
-        let (x, z) = (p.x - rc.x as i64 * n, p.z - rc.z as i64 * n);
+        let n = REGION_BLOCKS as i32;
+        let cb = CHUNK_BLOCKS as i32;
+        let [x, _, z] = self.data.local_block(p);
         if (0..n).contains(&x) && (0..n).contains(&z) {
             return self.data.ground.get(&ColumnCoords::new((x / cb) as usize, (z / cb) as usize));
         }
-        self.data.halo_ground.get(&WorldChunkPos::new(p.x.div_euclid(cb), 0, p.z.div_euclid(cb)))
+        self.data.halo_ground.get(&self.data.world_chunk([x.div_euclid(cb), 0, z.div_euclid(cb)]))
     }
 
     /// The water body of region-local block `pos`'s column, when the cell

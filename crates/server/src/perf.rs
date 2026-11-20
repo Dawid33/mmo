@@ -171,7 +171,7 @@ impl ServerReport {
         let tiles = self.tiles_section();
         log::info!(
             "[server] window={:.1}s sessions={} regions={} parked={} transfers_inflight={} pending_arrivals={} peer_unreceived={} unowned_waiting={} land={} land_released={} journal_entries={} succession_seam_events={} peer_dropped_for_dead={} peer_state_to_forgotten={} login_ends_dropped={} arrivals_despawned={} \
-             items_destroyed={} intent_replies_lost={} \
+             items_destroyed={} intent_replies_lost={} seam_fixed={} \
              | gen n={} sum={:.1}ms max={:.1}ms \
              | lod hit={} sub={} built={} inflight={} wait_terrain={} cache={} \
              latency avg={:.1}ms max={:.1}ms build avg={:.1}ms max={:.1}ms \
@@ -196,6 +196,7 @@ impl ServerReport {
             d.arrivals_despawned,
             d.items_destroyed,
             d.intent_replies_lost,
+            d.seam_fixed,
             m.generated,
             game::perf::ms(m.generate_total),
             game::perf::ms(m.generate_max),

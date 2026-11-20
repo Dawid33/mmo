@@ -1742,7 +1742,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // Parked (or never run here): from its last terrain, as a starting
                     // region of this host would be seeded; none cached: dropped (the
                     // requester seeds from the store or worldgen).
-                    let seed = self.terrain_cache.get(&of).and_then(|snap| crate::halo::halo_seed_from_snapshot(of, to, &snap));
+                    let seed = self.terrain_cache.get(&of).and_then(|snap| crate::halo::halo_seed_from_snapshot(self.map_extent(), of, to, &snap));
                     if let Some(update) = seed {
                         let stamp = self.spawner.world_tick();
                         self.halo_to_peer(to, Volatile::HaloUpdate { to, update, stamp });

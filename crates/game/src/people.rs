@@ -213,7 +213,7 @@ impl Rollback {
             Some(w) if tick < w.next_tick => return,
             Some(w) => w.home,
             None => {
-                let w = crate::WorldBlockPos::from_local(here, crate::BlockPos::new(from[0], from[1], from[2]));
+                let w = self.data.world_block(from);
                 let home = [w.x, w.z];
                 self.data.ecs.wander.set_safe(e, Some(Wander { next_tick: tick + wait(tick), home }));
                 return;
@@ -238,7 +238,7 @@ impl Rollback {
         let rot0 = body.position().rotation;
         let motion0 = (*self.data.ecs.motion.try_get(e)).unwrap_or_default();
         let (keys, yaw) = match self.data.ecs.walker.try_get(e) {
-            Some(w) => steer(w, feet_of(t), motion0.grounded, *self.data.region),
+            Some(w) => steer(w, feet_of(t), motion0.grounded, *self.data.region, self.data.map()),
             None => (MoveKeys::default(), 0.0),
         };
         let walking = self.data.ecs.walker.try_get(e).is_some();

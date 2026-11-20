@@ -51,14 +51,21 @@
 //!
 //! A halo chunk is a whole neighbour chunk: with `CHUNK_BLOCKS` >= 8 the
 //! band is the one chunk row along each edge, plus the corner chunks.
+//!
+//! **Across a wrapped seam** (`MapExtent::wrap_x`) every key of the halo maps
+//! (`halo`, `halo_ground`, `halo_piles`, `halo_containers`) and every world
+//! position a region stores or sends is CANONICAL ([`crate::GameData::world_block`],
+//! [`crate::GameData::world_chunk`]); every conversion into the region's own
+//! frame takes the image nearest it ([`crate::GameData::local_block`],
+//! [`crate::GameData::local_chunk`]: `world_map.rs`'s one rule). With no map,
+//! or one that does not wrap, both are the plain arithmetic.
 
 use rapier3d::math::{Pose, Vector};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 
 use crate::{
-    Block, BlockId, BlockIndex, Chunk, ChunkCoords, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind,
-    RegionCoords, Rollback, WorldBlockPos, WorldChunkPos,
-    CHUNK_BLOCKS, CHUNK_UNITS, REGION_BLOCKS, REGION_CHUNKS,
+    Block, BlockId, BlockIndex, Chunk, ChunkCoords, GameData, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind,
+    MapExtent, RegionCoords, Rollback, WorldBlockPos, WorldChunkPos, CHUNK_BLOCKS, CHUNK_UNITS, REGION_CHUNKS,
 };
 
 /// Width of the halo past each edge, in blocks: at least every interaction
@@ -199,9 +206,10 @@ pub fn in_halo_band(cx: i32, cz: i32) -> bool {
     near(cx) && near(cz) && !(inside(cx) && inside(cz))
 }
 
-/// The neighbour offset from `from` to `to`, when they are neighbours.
-fn neighbour_offset(from: RegionCoords, to: RegionCoords) -> Option<(i32, i32)> {
-    let (dx, dz) = (to.x - from.x, to.z - from.z);
+/// The neighbour offset from `from` to `to`, when they are neighbours (the
+/// short way across a wrapped seam, `crate::region_delta`).
+fn neighbour_offset(map: Option<MapExtent>, from: RegionCoords, to: RegionCoords) -> Option<(i32, i32)> {
+    let (dx, dz) = crate::region_delta(map, from, to);
     ((dx, dz) != (0, 0) && dx.abs() <= 1 && dz.abs() <= 1).then_some((dx, dz))
 }
 
@@ -210,17 +218,24 @@ fn neighbour_offset(from: RegionCoords, to: RegionCoords) -> Option<(i32, i32)> 
 /// neighbours. Used for a running region's reply and for the manager's
 /// seeding from cached terrain or worldgen.
 pub fn halo_seed_from_chunks<'a>(
+    map: Option<MapExtent>,
     from: RegionCoords,
     to: RegionCoords,
     chunks: impl IntoIterator<Item = (ChunkCoords, &'a Chunk)>,
 ) -> Option<HaloUpdate> {
-    halo_seed(from, to, chunks, std::iter::empty())
+    halo_seed(map, from, to, chunks, std::iter::empty())
 }
 
 /// [`halo_seed_from_chunks`] from a terrain snapshot, its ground recipes
 /// included (what the receiver's halo reads below the band).
-pub fn halo_seed_from_snapshot(from: RegionCoords, to: RegionCoords, snap: &crate::TerrainSnapshot) -> Option<HaloUpdate> {
+pub fn halo_seed_from_snapshot(
+    map: Option<MapExtent>,
+    from: RegionCoords,
+    to: RegionCoords,
+    snap: &crate::TerrainSnapshot,
+) -> Option<HaloUpdate> {
     halo_seed(
+        map,
         from,
         to,
         snap.chunks.iter().map(|(c, k)| (*c, k)),
@@ -229,19 +244,20 @@ pub fn halo_seed_from_snapshot(from: RegionCoords, to: RegionCoords, snap: &crat
 }
 
 /// A seed of `from`'s `chunks` and column `ground` recipes (its own frame)
-/// that `to` mirrors.
+/// that `to` mirrors, keyed by canonical world chunk (`map`).
 pub fn halo_seed<'a>(
+    map: Option<MapExtent>,
     from: RegionCoords,
     to: RegionCoords,
     chunks: impl IntoIterator<Item = (ChunkCoords, &'a Chunk)>,
     ground: impl IntoIterator<Item = (crate::ColumnCoords, &'a crate::ColumnGround)>,
 ) -> Option<HaloUpdate> {
-    let offset = neighbour_offset(from, to)?;
+    let offset = neighbour_offset(map, from, to)?;
     let mut deltas: Vec<HaloDelta> = chunks
         .into_iter()
         .filter(|(c, _)| halo_targets(c.x as i32, c.z as i32).contains(&offset))
         .map(|(c, chunk)| HaloDelta {
-            chunk: WorldChunkPos::from_local(from, [c.x as i32, c.y, c.z as i32]),
+            chunk: crate::world_chunk(map, from, [c.x as i32, c.y, c.z as i32]),
             data: Some(chunk.clone()),
         })
         .collect();
@@ -252,7 +268,7 @@ pub fn halo_seed<'a>(
         // Bodies are per region: a halo recipe carries none, whichever
         // source (a running region's labelled ground, an unlabelled
         // snapshot) seeded it.
-        .map(|(c, g)| (WorldChunkPos::from_local(from, [c.x as i32, 0, c.z as i32]), g.without_bodies()))
+        .map(|(c, g)| (crate::world_chunk(map, from, [c.x as i32, 0, c.z as i32]), g.without_bodies()))
         .collect();
     ground.sort_by_key(|(k, _)| *k);
     Some(HaloUpdate { from, replace: true, deltas, ground, piles: Vec::new(), containers: Vec::new() })
@@ -261,7 +277,11 @@ pub fn halo_seed<'a>(
 /// The chunk columns `xs × zs` of `from` (its own frame) that neighbour `to`
 /// mirrors: the band along their shared edge, or the corner block for a
 /// diagonal neighbour. Empty ranges when they are not neighbours.
-pub fn facing_columns(from: RegionCoords, to: RegionCoords) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+pub fn facing_columns(
+    map: Option<MapExtent>,
+    from: RegionCoords,
+    to: RegionCoords,
+) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
     let n = REGION_CHUNKS;
     let h = (HALO_CHUNKS as usize).min(n);
     let span = |d: i32| match d {
@@ -269,7 +289,7 @@ pub fn facing_columns(from: RegionCoords, to: RegionCoords) -> (std::ops::Range<
         1 => n - h..n,
         _ => 0..n,
     };
-    match neighbour_offset(from, to) {
+    match neighbour_offset(map, from, to) {
         Some((dx, dz)) => (span(dx), span(dz)),
         None => (0..0, 0..0),
     }
@@ -278,8 +298,12 @@ pub fn facing_columns(from: RegionCoords, to: RegionCoords) -> (std::ops::Range<
 /// [`facing_columns`] cut into square windows at most `HALO_CHUNKS` on a
 /// side, in a fixed order: worldgen's patch is square on the longer side, so
 /// a whole edge strip in one window would cost a whole region's patch.
-pub fn facing_windows(from: RegionCoords, to: RegionCoords) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
-    let (xs, zs) = facing_columns(from, to);
+pub fn facing_windows(
+    map: Option<MapExtent>,
+    from: RegionCoords,
+    to: RegionCoords,
+) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let (xs, zs) = facing_columns(map, from, to);
     let h = (HALO_CHUNKS as usize).max(1);
     let cut = |r: std::ops::Range<usize>| -> Vec<std::ops::Range<usize>> {
         r.clone().step_by(h).map(|s| s..(s + h).min(r.end)).collect()
@@ -326,14 +350,48 @@ pub fn depenetration_lifts() -> u64 {
     LIFTS.with(|c| c.get())
 }
 
+/// The seam frame of a region's state (module docs): canonical world
+/// positions out, nearest-image local positions in.
+impl GameData {
+    /// The world map's extent (`None`: unbounded), as the region's runner set it.
+    pub fn map(&self) -> Option<MapExtent> {
+        *self.map_extent
+    }
+
+    /// The canonical world block of local block `local` (it may lie past the
+    /// region's edges).
+    pub fn world_block(&self, local: [i32; 3]) -> WorldBlockPos {
+        crate::world_block(self.map(), *self.region, local)
+    }
+
+    /// World block `p` (canonical, or unwrapped in this region's frame) in
+    /// this region's block frame: the nearest image.
+    pub fn local_block(&self, p: WorldBlockPos) -> [i32; 3] {
+        crate::local_block(self.map(), *self.region, p)
+    }
+
+    /// `p` canonical on the world map.
+    pub fn canonical_block(&self, p: WorldBlockPos) -> WorldBlockPos {
+        crate::canonical_block(self.map(), p)
+    }
+
+    /// The canonical world chunk of local chunk `local`.
+    pub fn world_chunk(&self, local: [i32; 3]) -> WorldChunkPos {
+        crate::world_chunk(self.map(), *self.region, local)
+    }
+
+    /// World chunk `c` in this region's chunk frame: the nearest image.
+    pub fn local_chunk(&self, c: WorldChunkPos) -> [i32; 3] {
+        crate::local_chunk(self.map(), *self.region, c)
+    }
+}
+
 impl Rollback {
     /// The block at world block `p` as this region sees it: its own (implied
     /// ground included), or its halo's (air where the neighbour has no
     /// chunk). `None` outside own ∪ halo.
     pub fn halo_block(&self, p: WorldBlockPos) -> Option<Block> {
-        let rc = *self.data.region;
-        let n = REGION_BLOCKS as i64;
-        let local = [(p.x - rc.x as i64 * n) as i32, p.y, (p.z - rc.z as i64 * n) as i32];
+        let local = self.data.local_block(p);
         if let Some((coords, l)) = crate::edit::locate(local) {
             return Some(self.current_block(coords, l).unwrap_or(Block::new(BlockId::AIR)));
         }
@@ -348,7 +406,7 @@ impl Rollback {
         if !in_halo_band(chunk[0], chunk[2]) {
             return None;
         }
-        let key = WorldChunkPos::from_local(*self.data.region, chunk);
+        let key = self.data.world_chunk(chunk);
         let l = [pos[0].rem_euclid(cb) as usize, pos[1].rem_euclid(cb) as usize, pos[2].rem_euclid(cb) as usize];
         let Some(c) = self.data.halo.get(&key).and_then(|h| h.chunk.as_ref()) else {
             // No chunk: the neighbour's implied ground below its band, else air.
@@ -364,6 +422,7 @@ impl Rollback {
     /// column it holds a ground recipe or a chunk of (seeded). An unseeded
     /// band column reads as air, but nothing there is known.
     pub(crate) fn halo_column_known(&self, p: WorldBlockPos) -> bool {
+        let p = self.data.canonical_block(p);
         let cb = CHUNK_BLOCKS as i64;
         let (cx, cz) = (p.x.div_euclid(cb), p.z.div_euclid(cb));
         if self.data.halo_ground.contains_key(&WorldChunkPos::new(cx, 0, cz)) {
@@ -389,7 +448,7 @@ impl Rollback {
             return None;
         }
         let cb = CHUNK_BLOCKS as i32;
-        let key = WorldChunkPos::from_local(*self.data.region, [pos[0].div_euclid(cb), 0, pos[2].div_euclid(cb)]);
+        let key = self.data.world_chunk([pos[0].div_euclid(cb), 0, pos[2].div_euclid(cb)]);
         let bedrock = self.halo_ground_of(key).is_some_and(|g| block.id == g.bedrock);
         (!bedrock).then_some(block)
     }
@@ -405,7 +464,7 @@ impl Rollback {
         let cb = CHUNK_BLOCKS as i32;
         let inside = |c: i32| (0..n).contains(&c);
         for &key in keys {
-            let [lx, ly, lz] = key.local_in(*self.data.region);
+            let [lx, ly, lz] = self.data.local_chunk(key);
             // The own chunk across the shared face, and the halo chunk's
             // face plane (axis, block index) touching it.
             let (own, axis, plane) = match (lx, lz) {
@@ -465,7 +524,7 @@ impl Rollback {
 
     /// The halo chunk at local chunk `[cx, cy, cz]` (outside the region).
     pub fn halo_chunk_at(&self, local: [i32; 3]) -> Option<&HaloChunk> {
-        self.data.halo.get(&WorldChunkPos::from_local(*self.data.region, local))
+        self.data.halo.get(&self.data.world_chunk(local))
     }
 
     /// This region's chunks (and piles) that neighbour `to` mirrors, as a
@@ -478,7 +537,7 @@ impl Rollback {
             .iter()
             .filter_map(|(&k, &e)| Some((crate::chunk_coords_of_index_key(k), self.data.ecs.chunk.try_get(e).as_ref()?)))
             .collect();
-        let mut seed = halo_seed(from, to, chunks, self.data.ground.iter().map(|(c, g)| (*c, g)))?;
+        let mut seed = halo_seed(self.data.map(), from, to, chunks, self.data.ground.iter().map(|(c, g)| (*c, g)))?;
         seed.piles = self.pile_seed_for(to);
         seed.containers = self.container_seed_for(to);
         Some(seed)
@@ -507,13 +566,13 @@ impl Rollback {
                 continue;
             }
             let data = self.chunk_key_at(c).and_then(|e| self.data.ecs.chunk.try_get(e).clone());
-            let chunk = WorldChunkPos::from_local(from, [c.x as i32, c.y, c.z as i32]);
+            let chunk = self.data.world_chunk([c.x as i32, c.y, c.z as i32]);
             for t in targets {
                 by_target.entry(t).or_default().0.push(HaloDelta { chunk, data: data.clone() });
             }
         }
         for &p in piles {
-            let l = crate::item_piles::local_cell(from, p);
+            let l = self.data.local_block(p);
             let pile = self.data.item_piles.get(&p).cloned();
             let chest = self.data.containers().get(&p).cloned();
             for t in crate::item_piles::pile_halo_targets(l[0], l[2]) {
@@ -522,12 +581,16 @@ impl Rollback {
                 e.2.push((p, chest.clone()));
             }
         }
+        // Each target canonical (across a wrapped seam, the map's other
+        // end); one off the map gets nothing.
+        let map = self.data.map();
         by_target
             .into_iter()
-            .map(|((dx, dz), (mut deltas, piles, containers))| {
+            .filter_map(|((dx, dz), (mut deltas, piles, containers))| {
+                let to = crate::region_neighbour(map, from, dx, dz)?;
                 deltas.sort_by_key(|d| d.chunk);
                 let update = HaloUpdate { from, replace: false, deltas, ground: Vec::new(), piles, containers };
-                (update, RegionCoords::new(from.x + dx, from.z + dz))
+                Some((update, to))
             })
             .collect()
     }
@@ -541,7 +604,7 @@ impl Rollback {
         for (k, g) in &u.ground {
             // Bodies are per region: the halo's copy carries none (see `halo_seed`).
             let g = &g.without_bodies();
-            let local = k.local_in(*self.data.region);
+            let local = self.data.local_chunk(*k);
             if k.to_local().0 != u.from || k.y != 0 || !in_halo_band(local[0], local[2]) {
                 log::warn!("halo update from {:?}: ground for {k:?} outside its band; ignored", u.from);
                 continue;
@@ -593,12 +656,11 @@ impl Rollback {
                 .collect();
             self.write_halo_containers_safe(stale);
         }
-        let region = *self.data.region;
         let piles: Vec<_> = u
             .piles
             .iter()
             .filter(|(p, _)| {
-                let l = crate::item_piles::local_cell(region, *p);
+                let l = self.data.local_block(*p);
                 let ok = p.to_local().0 == u.from && crate::item_piles::in_pile_halo_band(l[0], l[2]);
                 if !ok {
                     log::warn!("halo update from {:?}: pile {p:?} outside its band; ignored", u.from);
@@ -612,7 +674,7 @@ impl Rollback {
             .containers
             .iter()
             .filter(|(p, _)| {
-                let l = crate::item_piles::local_cell(region, *p);
+                let l = self.data.local_block(*p);
                 let ok = p.to_local().0 == u.from && crate::item_piles::in_pile_halo_band(l[0], l[2]);
                 if !ok {
                     log::warn!("halo update from {:?}: chest {p:?} outside its band; ignored", u.from);
@@ -638,7 +700,7 @@ impl Rollback {
     /// place after — see `rebuild_body_colliders_safe`). A chunk outside this
     /// region's band, or unchanged, is ignored.
     pub(crate) fn apply_halo_delta_safe(&mut self, d: &HaloDelta) {
-        let local = d.chunk.local_in(*self.data.region);
+        let local = self.data.local_chunk(d.chunk);
         if !in_halo_band(local[0], local[2]) {
             log::debug!("halo delta {:?} outside the band of {:?}; ignored", d.chunk, *self.data.region);
             return;

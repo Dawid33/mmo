@@ -5,6 +5,11 @@
 //! `intents::Effects`. No region key, region-local coordinate or mirror
 //! bookkeeping leaks through it.
 //!
+//! Across a wrapped seam the view answers a canonical position and an
+//! unwrapped one in its region's frame alike (the nearest image, `halo.rs`),
+//! and every block it returns is canonical. Its `f64` positions are in its
+//! region's own frame (transient, never stored).
+//!
 //! Units: positions are world sim units (`BLOCK_VOXELS` per block, the
 //! region's origin at `RegionCoords * REGION_SIZE`), as `f64` so any region
 //! of the `i32` grid keeps sub-voxel precision; blocks are
@@ -195,7 +200,7 @@ impl WorldView for RegionView<'_> {
         let hit = self.data.raycast_block_in(local, dir, max_blocks)?;
         let [x, y, z] = hit.block;
         Some(Hit {
-            block: WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(x, y, z)),
+            block: self.data.world_block([x, y, z]),
             normal: hit.normal,
         })
     }

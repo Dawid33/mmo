@@ -342,7 +342,7 @@ macro_rules! host_fields {
             lod_results, directive_stamps, in_flight, pending_cut, ready_cut, outstanding_cuts, uncommitted,
             uncommitted_seq, cut_lead, next_cut_id, cut_order, silent_stopping, last_cut_caught,
             stored_regions, locations, in_flight_intents, intent_mailbox, pending_arrivals, arrivals_despawned,
-            recently_despawned, despawn_warned, intent_replies_lost, parked_bodies, items_destroyed,
+            recently_despawned, despawn_warned, intent_replies_lost, seam_fixed, parked_bodies, items_destroyed,
             incarnation, incarnation_seen, next_incarnation, unowned_waiting, land_needed, land_needed_sent,
             assigned_rows, land_scanned_ms, land_idle_ms, land_idle_since, idle_scanned_ms, releasing,
             recently_released, land_released_total, parked_written, directory_wanted, journal_always,

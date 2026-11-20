@@ -240,13 +240,6 @@ impl WorldChunkPos {
         let rc = RegionCoords::new(self.x.div_euclid(n) as i32, self.z.div_euclid(n) as i32);
         (rc, ChunkCoords::new(self.x.rem_euclid(n) as usize, self.y, self.z.rem_euclid(n) as usize))
     }
-
-    /// This chunk in `rc`'s chunk frame, which may lie outside it (negative,
-    /// or `REGION_CHUNKS` and up).
-    pub fn local_in(self, rc: RegionCoords) -> [i32; 3] {
-        let n = crate::REGION_CHUNKS as i64;
-        [(self.x - rc.x as i64 * n) as i32, self.y, (self.z - rc.z as i64 * n) as i32]
-    }
 }
 
 /// Ownership flips only this far PAST the boundary; flipping back needs 2x

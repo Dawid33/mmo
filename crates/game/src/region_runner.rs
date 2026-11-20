@@ -659,7 +659,7 @@ impl RegionRunner {
             };
             match snap {
                 Some(snap) => {
-                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, self.id, &snap) {
+                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.region.map_extent(), n, self.id, &snap) {
                         self.apply(GameEventKind::HaloUpdate(seed));
                     }
                 }
@@ -684,12 +684,12 @@ impl RegionRunner {
             return;
         };
         for n in neighbours {
-            let columns = crate::halo::facing_windows(n, self.id)
+            let columns = crate::halo::facing_windows(self.region.map_extent(), n, self.id)
                 .into_iter()
                 .flat_map(|(xs, zs)| generate(n, xs, zs))
                 .collect();
             let snap = TerrainSnapshot::from_columns(columns);
-            if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, self.id, &snap) {
+            if let Some(seed) = crate::halo::halo_seed_from_snapshot(self.region.map_extent(), n, self.id, &snap) {
                 self.apply(GameEventKind::HaloUpdate(seed));
             }
         }

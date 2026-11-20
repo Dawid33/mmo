@@ -80,6 +80,17 @@ impl Target {
             Target::Block(p) | Target::Pile(p) | Target::Container(p) => Some(p.to_local().0),
         }
     }
+
+    /// This target with its position canonical on `map` (`crate::canonical_block`).
+    pub fn canonical(self, map: Option<crate::MapExtent>) -> Self {
+        let c = |p| crate::canonical_block(map, p);
+        match self {
+            Target::Entity(id) => Target::Entity(id),
+            Target::Block(p) => Target::Block(c(p)),
+            Target::Pile(p) => Target::Pile(c(p)),
+            Target::Container(p) => Target::Container(c(p)),
+        }
+    }
 }
 
 /// A write to something the sender does not own. `by` is the sending entity
@@ -143,6 +154,22 @@ impl Default for Intent {
 }
 
 impl Intent {
+    /// This intent with the cell it names canonical on `map`.
+    pub fn canonical(self, map: Option<crate::MapExtent>) -> Self {
+        let c = |p| crate::canonical_block(map, p);
+        match self {
+            Intent::DepositItems { cell, stack, expire, pickup, by } => {
+                Intent::DepositItems { cell: c(cell), stack, expire, pickup, by }
+            }
+            Intent::TakeFromPile { cell, item, count, by } => Intent::TakeFromPile { cell: c(cell), item, count, by },
+            Intent::PutInContainer { cell, stack, slot, by } => Intent::PutInContainer { cell: c(cell), stack, slot, by },
+            Intent::TakeFromContainer { cell, slot, item, count, to_cursor, by } => {
+                Intent::TakeFromContainer { cell: c(cell), slot, item, count, to_cursor, by }
+            }
+            other @ (Intent::BreakBlock { .. } | Intent::PlaceBlock { .. }) => other,
+        }
+    }
+
     /// The sending entity.
     pub fn by(&self) -> EntityId {
         match self {
@@ -308,8 +335,11 @@ impl Rollback {
     }
 
     /// Send `intent` at `target`, due at the next tick: queued here when this
-    /// region owns the target, else into `out`.
+    /// region owns the target, else into `out`. Its positions leave canonical
+    /// (a block past a wrapped seam is the map's other end).
     pub(crate) fn send_intent_safe(&mut self, target: Target, intent: Intent, out: &mut Vec<IntentMsg>) {
+        let map = self.data.map();
+        let (target, intent) = (target.canonical(map), intent.canonical(map));
         let from = *self.data.region;
         let sent = SentIntent { target, intent, from, due: *self.data.tick + 1 };
         let here = match target {

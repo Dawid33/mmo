@@ -105,9 +105,11 @@ pub fn container_view(data: &GameData, client: ClientId) -> Option<ContainerView
 }
 
 impl GameData {
-    /// The chest in world cell `p` as this region sees it: its own, or the
-    /// halo's read-only mirror of a neighbour's; `None` elsewhere.
+    /// The chest in world cell `p` (canonical, or unwrapped in this region's
+    /// frame) as this region sees it: its own, or the halo's read-only mirror
+    /// of a neighbour's; `None` elsewhere.
     pub fn container_seen(&self, p: WorldBlockPos) -> Option<&Container> {
+        let p = self.canonical_block(p);
         if p.to_local().0 == *self.region { self.containers.get(&p) } else { self.halo_containers.get(&p) }
     }
 }
@@ -189,8 +191,8 @@ impl Rollback {
         let Some(&e) = self.data.player_entites.get(&client) else { return false };
         let Some(feet) = self.body_feet(e) else { return false };
         let t = crate::feet_tile(feet);
-        let t = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(t[0], t[1], t[2]));
-        let d2 = (t.x - p.x).pow(2) + i64::from(t.y - p.y).pow(2) + (t.z - p.z).pow(2);
+        let p = self.data.local_block(p);
+        let d2 = (0..3).map(|a| i64::from(t[a] - p[a]).pow(2)).sum::<i64>();
         d2 <= i64::from(CONTAINER_REACH_BLOCKS).pow(2)
     }
 
@@ -198,6 +200,7 @@ impl Rollback {
     /// `client`, and its inventory screen with it. Refused (`false`) with no
     /// chest seen there, or out of reach.
     pub fn open_container_safe(&mut self, client: ClientId, p: WorldBlockPos) -> bool {
+        let p = self.data.canonical_block(p);
         if self.data.container_seen(p).is_none() || !self.in_container_reach(client, p) {
             return false;
         }
@@ -446,13 +449,12 @@ impl Rollback {
     /// This region's chests that neighbour `to` mirrors (`HaloUpdate::
     /// containers` of a seed), in cell order.
     pub(crate) fn container_seed_for(&self, to: crate::RegionCoords) -> Vec<(WorldBlockPos, Option<Container>)> {
-        let rc = *self.data.region;
-        let offset = (to.x - rc.x, to.z - rc.z);
+        let offset = crate::region_delta(self.data.map(), *self.data.region, to);
         self.data
             .containers
             .iter()
             .filter(|(p, _)| {
-                let l = crate::item_piles::local_cell(rc, **p);
+                let l = self.data.local_block(**p);
                 crate::item_piles::pile_halo_targets(l[0], l[2]).contains(&offset)
             })
             .map(|(p, c)| (*p, Some(c.clone())))
@@ -478,7 +480,7 @@ impl Rollback {
         for client in viewers {
             self.close_container_safe(client);
         }
-        let local = crate::item_piles::local_cell(*self.data.region, pos);
+        let local = self.data.local_block(pos);
         let mut destroyed = 0;
         for stack in container.slots.into_iter().flatten() {
             destroyed += self.deposit_items_safe(local, stack, tick, PICKUP_DELAY_TICKS);
@@ -491,7 +493,7 @@ impl Rollback {
     /// terrain write in `edit.rs`. Returns the items destroyed (already
     /// counted).
     pub(crate) fn containers_after_write_safe(&mut self, pos: BlockPos) -> u32 {
-        let w = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(pos[0], pos[1], pos[2]));
+        let w = self.data.world_block(pos);
         let has = self.data.containers.contains_key(&w);
         let chest = self.is_chest_at(pos);
         if chest && !has {

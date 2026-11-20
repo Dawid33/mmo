@@ -269,7 +269,7 @@ impl Rollback {
             let mut w = old.clone();
             let last = w.path.len().saturating_sub(1) as u32;
             let mut at_end = false;
-            while w.waypoint(w.next, here).is_some_and(|p| reached(p, feet)) {
+            while w.waypoint(w.next, here, self.data.map()).is_some_and(|p| reached(p, feet)) {
                 if w.next < last {
                     w.next += 1;
                 } else {
@@ -343,7 +343,8 @@ pub const WALK_UP_JUMP_AFTER_STALL_TICKS: u32 = STUCK_TICKS / 2;
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
 pub struct Walker {
     pub goal: Goal,
-    /// The planned tiles in world blocks, inclusive of the start and the end.
+    /// The planned tiles in world blocks, inclusive of the start and the end;
+    /// canonical on a wrapped map (read through [`Walker::waypoint`]).
     pub path: Vec<WorldBlockPos>,
     /// Per tile of `path`: the step onto it walks up a slope, no jump
     /// ([`crate::walk_ups`]).
@@ -385,17 +386,17 @@ impl Walker {
     }
 
     /// Path tile `i` in `here`'s block frame (outside the region for a tile
-    /// in its halo).
-    pub fn waypoint(&self, i: u32, here: RegionCoords) -> Option<TilePos> {
-        self.path.get(i as usize).map(|&p| local_tile(p, here))
+    /// in its halo; across a wrapped seam of `map`, the nearest image).
+    pub fn waypoint(&self, i: u32, here: RegionCoords, map: Option<crate::MapExtent>) -> Option<TilePos> {
+        self.path.get(i as usize).map(|&p| local_tile(p, here, map))
     }
 }
 
-/// World tile `p` in `here`'s block frame. Walk tiles lie within a region
-/// and its halo, so the offset fits an `i32`.
-pub fn local_tile(p: WorldBlockPos, here: RegionCoords) -> TilePos {
-    let n = REGION_BLOCKS as i64;
-    [(p.x - i64::from(here.x) * n) as i32, p.y, (p.z - i64::from(here.z) * n) as i32]
+/// World tile `p` (canonical) in `here`'s block frame: the image nearest
+/// `here` on a wrapped `map` (`crate::local_block`). Walk tiles lie within a
+/// region and its halo, so the offset fits an `i32`.
+pub fn local_tile(p: WorldBlockPos, here: RegionCoords, map: Option<crate::MapExtent>) -> TilePos {
+    crate::local_block(map, here, p)
 }
 
 /// Feet position of a player body whose centre is at `t` (voxel units).
@@ -453,9 +454,15 @@ fn clamp_tile(src: &impl TileSource, t: TilePos) -> Option<TilePos> {
 ///
 /// Jump is held, never pressed: `plan` toggles flight on a double tap, and
 /// a body re-jumping on landing could tap twice inside the window.
-pub fn steer(walker: &Walker, feet: Vector, grounded: bool, here: RegionCoords) -> (MoveKeys, f32) {
+pub fn steer(
+    walker: &Walker,
+    feet: Vector,
+    grounded: bool,
+    here: RegionCoords,
+    map: Option<crate::MapExtent>,
+) -> (MoveKeys, f32) {
     let bv = BLOCK_VOXELS as f32;
-    let Some(wp) = walker.waypoint(walker.next, here) else { return (MoveKeys::default(), 0.0) };
+    let Some(wp) = walker.waypoint(walker.next, here, map) else { return (MoveKeys::default(), 0.0) };
     let (cx, cz) = ((wp[0] as f32 + 0.5) * bv, (wp[2] as f32 + 0.5) * bv);
     let (dx, dz) = (cx - feet.x, cz - feet.z);
     let yaw = libm::atan2f(-dx, -dz);

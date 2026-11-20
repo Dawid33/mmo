@@ -3,7 +3,7 @@
 //! `ForgedWorld` rasters, the client builds the picture.
 
 use crate::biome::{Biome, RegionType};
-use crate::protocol::{RegionCoords, WorldBlockPos, REGION_BLOCKS};
+use crate::protocol::{RegionCoords, WorldBlockPos, WorldChunkPos, REGION_BLOCKS, REGION_CHUNKS};
 
 /// What one region looks like from above, summarised from the forged rasters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -107,7 +107,10 @@ impl WorldMap {
 /// the last column is the first column) and only z ends at an outer seam. A
 /// **canonical** region has its x folded into `[origin.x, origin.x + width)`;
 /// without `wrap_x` every region is its own canonical form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// A wrapped map is at least [`MIN_WRAP_REGIONS`] wide; a narrower one is held
+/// like an unwrapped one (its east and west neighbour would be one region).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
 pub struct MapExtent {
     /// Min-x, min-z region.
     pub origin: RegionCoords,
@@ -117,10 +120,23 @@ pub struct MapExtent {
     pub wrap_x: bool,
 }
 
+/// The narrowest map that wraps: below it the east and the west neighbour of
+/// a region are one and the same (at 2, `delta` is +1 both ways, so a
+/// hand-back is not the inverse of its departure).
+pub const MIN_WRAP_REGIONS: u32 = 3;
+
+/// `d` folded into `(-span/2, span/2]` (a tie is positive), `span > 0`: the
+/// one wrap rule behind [`MapExtent::delta`] and [`nearest_x`].
+fn fold_x(d: i64, span: i64) -> i64 {
+    let d = d.rem_euclid(span);
+    if d > span / 2 { d - span } else { d }
+}
+
 impl MapExtent {
-    /// Whether x wraps (a zero-width map never folds anything).
-    fn wraps(&self) -> bool {
-        self.wrap_x && self.width > 0
+    /// Whether x wraps (a map narrower than [`MIN_WRAP_REGIONS`] never folds
+    /// anything).
+    pub fn wraps(&self) -> bool {
+        self.wrap_x && self.width >= MIN_WRAP_REGIONS
     }
 
     /// `rc` with x folded onto the map's columns when it wraps; z untouched
@@ -154,11 +170,7 @@ impl MapExtent {
     pub fn delta(&self, from: RegionCoords, to: RegionCoords) -> (i32, i32) {
         let mut dx = i64::from(to.x) - i64::from(from.x);
         if self.wraps() {
-            let w = i64::from(self.width);
-            dx = dx.rem_euclid(w);
-            if dx > w / 2 {
-                dx -= w;
-            }
+            dx = fold_x(dx, i64::from(self.width));
         }
         (dx as i32, to.z.wrapping_sub(from.z))
     }
@@ -174,6 +186,17 @@ impl MapExtent {
         let lo = i64::from(self.origin.x) * n;
         let span = i64::from(self.width) * n;
         WorldBlockPos { x: lo + (pos.x - lo).rem_euclid(span), ..pos }
+    }
+
+    /// `pos` with x folded into the map's chunks, as [`Self::canonical_block`].
+    pub fn canonical_chunk(&self, pos: WorldChunkPos) -> WorldChunkPos {
+        if !self.wraps() {
+            return pos;
+        }
+        let n = REGION_CHUNKS as i64;
+        let lo = i64::from(self.origin.x) * n;
+        let span = i64::from(self.width) * n;
+        WorldChunkPos { x: lo + (pos.x - lo).rem_euclid(span), ..pos }
     }
 }
 
@@ -207,6 +230,50 @@ pub fn region_delta(map: Option<MapExtent>, from: RegionCoords, to: RegionCoords
 /// [`MapExtent::canonical_block`]; with no map `pos` itself.
 pub fn canonical_block(map: Option<MapExtent>, pos: WorldBlockPos) -> WorldBlockPos {
     map.map_or(pos, |m| m.canonical_block(pos))
+}
+
+/// [`MapExtent::canonical_chunk`]; with no map `pos` itself.
+pub fn canonical_chunk(map: Option<MapExtent>, pos: WorldChunkPos) -> WorldChunkPos {
+    map.map_or(pos, |m| m.canonical_chunk(pos))
+}
+
+/// THE nearest-image rule of a wrapped map, in units of `per_region` per
+/// region (blocks, chunks): the x difference `dx` folded into
+/// `(-W·per_region/2, W·per_region/2]` (a tie is positive, east — the rule of
+/// [`MapExtent::delta`]); `dx` itself with no map or one that does not wrap.
+/// Every conversion of a world position into a region's local frame goes
+/// through it ([`local_block`], [`local_chunk`]), so a canonical position and
+/// an unwrapped one in the region's own frame land on the same local cell.
+pub fn nearest_x(map: Option<MapExtent>, dx: i64, per_region: i64) -> i64 {
+    match map {
+        Some(m) if m.wraps() => fold_x(dx, i64::from(m.width) * per_region),
+        _ => dx,
+    }
+}
+
+/// World block `p` in `rc`'s block frame, the image nearest `rc` on a wrapped
+/// map (outside `0..REGION_BLOCKS` for another region's block); the plain
+/// difference otherwise.
+pub fn local_block(map: Option<MapExtent>, rc: RegionCoords, p: WorldBlockPos) -> [i32; 3] {
+    let n = REGION_BLOCKS as i64;
+    [nearest_x(map, p.x - i64::from(rc.x) * n, n) as i32, p.y, (p.z - i64::from(rc.z) * n) as i32]
+}
+
+/// World chunk `c` in `rc`'s chunk frame, as [`local_block`].
+pub fn local_chunk(map: Option<MapExtent>, rc: RegionCoords, c: WorldChunkPos) -> [i32; 3] {
+    let n = REGION_CHUNKS as i64;
+    [nearest_x(map, c.x - i64::from(rc.x) * n, n) as i32, c.y, (c.z - i64::from(rc.z) * n) as i32]
+}
+
+/// The canonical world block of local block `local` of `rc` (which may lie
+/// past `rc`'s edges).
+pub fn world_block(map: Option<MapExtent>, rc: RegionCoords, local: [i32; 3]) -> WorldBlockPos {
+    canonical_block(map, WorldBlockPos::from_local(rc, crate::BlockPos::new(local[0], local[1], local[2])))
+}
+
+/// The canonical world chunk of local chunk `local` of `rc`.
+pub fn world_chunk(map: Option<MapExtent>, rc: RegionCoords, local: [i32; 3]) -> WorldChunkPos {
+    canonical_chunk(map, WorldChunkPos::from_local(rc, local))
 }
 
 /// Why the server refused a `ClientPacket::PlayRegion`.

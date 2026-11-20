@@ -262,6 +262,16 @@ mod game_data {
         /// `birth_region` of every `EntityId` it allocates.
         #[undo(cell)]
         region: crate::RegionCoords,
+        /// The world map's extent (`Region::set_route_map`): what the seam
+        /// conversions read (`GameData::world_block` / `local_block`, the
+        /// halo's keys). Set by whoever runs the region before its first
+        /// tick, the same on server and client. Not state: never hashed,
+        /// serialized or undone — a region built from a snapshot gets it
+        /// again from its runner.
+        #[undo(cell)]
+        #[serde(skip)]
+        #[state_hash(skip)]
+        map_extent: Option<crate::MapExtent>,
         /// Next `EntityId` serial of this region (`alloc_entity_id_safe`).
         #[undo(cell)]
         next_entity_serial: u64,

@@ -265,6 +265,9 @@ pub fn classify(d: &GameData) {
         // Derive on load: the region id the store keys the row by
         // (`Region::new`).
         region: _,
+        // Drop: not state; the runner sets it at every start
+        // (`Region::set_route_map`).
+        map_extent: _,
         // Players: `PortableRegion::players` → the players table.
         player_entites: _,
         clients: _,
