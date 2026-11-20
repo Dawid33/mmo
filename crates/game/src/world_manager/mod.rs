@@ -4893,7 +4893,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// `client` no longer holds `key`: the key leaves `lod_subscribers` (and
-    /// `lod_wrap_images`) with its last subscriber.
+    /// `lod_wrap_images`) with its last subscriber. A key that reaches a wrap
+    /// image (`k ≠ 0`) also leaves `lod_cache` then: `invalidate_region_lod`
+    /// visits only images some key is subscribed over, so a cached image key
+    /// nobody holds would survive an edit and be served stale on its next
+    /// subscribe. Canonical-frame keys stay cached as before.
     fn lod_drop_subscriber(&mut self, client: ClientId, key: LodKey) {
         if let Some(set) = self.lod_subscribers.get_mut(&key) {
             set.remove(&client);
@@ -4903,6 +4907,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     keys.remove(&key);
                     !keys.is_empty()
                 });
+                if self.lod_key_images(key).is_some_and(|images| !images.is_empty()) {
+                    self.lod_cache.remove(&key);
+                }
             }
         }
     }
@@ -5061,8 +5068,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.perf.lod_latency_max = self.perf.lod_latency_max.max(took);
         }
         self.lod_access_counter += 1;
-        self.lod_cache.insert(key, (payload.clone(), water.clone(), self.lod_access_counter));
-        self.evict_lod_cache();
+        // A wrap-image key whose subscribers all left while it was built is
+        // not cached (as `lod_drop_subscriber` drops one): no edit would reach it.
+        let unheld_image = !self.lod_subscribers.contains_key(&key)
+            && self.lod_key_images(key).is_some_and(|images| !images.is_empty());
+        if !unheld_image {
+            self.lod_cache.insert(key, (payload.clone(), water.clone(), self.lod_access_counter));
+            self.evict_lod_cache();
+        }
         if let Some(subs) = self.lod_subscribers.get(&key) {
             for client in subs {
                 let _ = self
