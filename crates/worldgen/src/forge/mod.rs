@@ -1,5 +1,6 @@
-//! The world forge: a whole finite world (default a 16 km continent at 32 m
-//! cells; island layouts keep the sea all round) generated OFFLINE by
+//! The world forge: a whole finite world — the Planet, a 2:1 map that wraps
+//! east–west with polar seas north and south (default the 16 × 8 km dev
+//! size at 32 m cells) — generated OFFLINE by
 //! simulating landscape evolution instead of evaluating
 //! noise per point. `forge` runs the pipeline and `Forged::artifact` turns it
 //! into the stored world file the engine serves (`crate::forged`). The CLI,
@@ -7,14 +8,10 @@
 //! `examples/forge_proto` (`just forge-proto`, `just forge-ui`).
 //!
 //! Pipeline:
-//!   1. world      the layout's landmass — islands inside a guaranteed ocean
-//!                 margin, or a continent with sea on some edges and land
-//!                 running off the others (land-edge border cells are
-//!                 drainage outlets that follow the land behind them down)
-//!                 — low initial relief, an
-//!                 UPLIFT map with mountain belts (inland noise belts on the
-//!                 islands; convergent plate boundaries, `plates`, on the
-//!                 continental layouts);
+//!   1. world      the continents, cut by seas and held off the polar edges
+//!                 by an ocean margin — low initial relief, an UPLIFT map
+//!                 with mountain belts along convergent plate boundaries
+//!                 (`plates`), interior ranges and volcano cones;
 //!   2. geology    rock column in a stratigraphic coordinate -> erodibility of
 //!                 whatever rock the surface currently cuts;
 //!   3. climate    latitude, temperature and banded-wind precipitation (mm/yr)
@@ -264,8 +261,8 @@ pub fn forge(p: &ForgeParams) -> Forged {
 }
 
 /// Coarse erosion levels stop before a grid this many cells across: coarser,
-/// the island and the ocean margin no longer resolve (`World::new` needs an
-/// ocean ring at the edge).
+/// the land and the ocean margin no longer resolve (`World::new` needs sea
+/// along the polar edges).
 pub const MIN_LEVEL_CELLS: usize = 32;
 
 /// Levels between the coarsest and the final one run this share of
@@ -309,16 +306,12 @@ pub fn schedule(p: &ForgeParams) -> Vec<(f64, usize)> {
         .collect()
 }
 
-/// Whether `p` may be forged as far as its east–west wrap goes: a world that
-/// wraps is at least `play::MIN_WRAP_WIDTH_M` wide, a whole number of its
-/// coarsest erosion cells (`upsample_onto` samples x round the circle: a
+/// Whether `p` may be forged as far as its east–west wrap goes: every world
+/// wraps, so it is at least `play::MIN_WRAP_WIDTH_M` wide, a whole number of
+/// its coarsest erosion cells (`upsample_onto` samples x round the circle: a
 /// width between two coarse cells would put the mismatch on the seam) and of
-/// `play::WRAP_WIDTH_STEP_M` (its regions tile the circle). Always `Ok` for
-/// a world that does not wrap.
+/// `play::WRAP_WIDTH_STEP_M` (its regions tile the circle).
 pub fn check_wrap(p: &ForgeParams) -> Result<(), String> {
-    if periodic::PeriodicX::for_world(p).is_none() {
-        return Ok(());
-    }
     if let Some(why) = play::too_narrow_to_wrap(p.width_m) {
         return Err(why);
     }
@@ -431,8 +424,6 @@ pub fn forge_with(
     let rain = climate::discharge_weight(&climate::compute(&w, p), &w);
     post::carve_floodplains(&mut w, &rain, k);
     let basins = post::carve_lake_basins(&mut w, &rain, p.seed, k);
-    // The shaping may have lowered the land inside a land edge.
-    w.follow_land_edges(world::EdgeFollow::Lower);
     if !p.quiet {
         println!("planed valley floors; excavated {basins} lake basins");
     }

@@ -4,7 +4,6 @@
 
 use game::Biome;
 use worldgen::forge::climate;
-use worldgen::forge::knobs::CHOICES;
 use worldgen::forge::world::EDGE_NAMES;
 use worldgen::forge::{forge, ForgeParams, Forged, World};
 use worldgen::forged::{ForgedWorld, WorldArtifact};
@@ -318,9 +317,6 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> = Vec::new();
     let mut row = |key: &str, value: String| rows.push((key.to_string(), value));
     row("size", format!("{} × {} m at {} m, {} × {}", p.width_m, p.height_m, p.cell_m, w.nx, w.nz));
-    let layouts = CHOICES.iter().find(|(key, _)| *key == "layout").map(|(_, names)| *names).unwrap_or(&[]);
-    let layout = p.knobs.layout();
-    row("layout", format!("{layout} ({})", layouts.get(layout as usize).copied().unwrap_or("?")));
     let edges: Vec<String> = EDGE_NAMES.iter().zip(w.edges).map(|(name, e)| format!("{name} {e:?}")).collect();
     row("edges", edges.join(", "));
     let bytes: Vec<u8> = w.h.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -341,7 +337,7 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
         let land = shares.iter().find(|(s, _, _)| *s == b).and_then(|(_, _, land)| *land).unwrap_or(0.0);
         row(&format!("biome_share.{}", b.name().replace(' ', "_")), format!("{land:.6}"));
     }
-    // Task 10 (the planet layout): polar seas, climate rows, drainage and the
+    // Task 10 (the Planet): polar seas, climate rows, drainage and the
     // seam.
     let polar = polar_land_cells(w);
     row("polar_rows_all_sea", format!("{} ({polar} land cells)", if polar == 0 { "yes" } else { "no" }));

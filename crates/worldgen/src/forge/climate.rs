@@ -1,12 +1,9 @@
 //! The world's climate on the CURRENT heightfield: latitude per row,
 //! temperature from latitude and height, and precipitation in mm/yr.
 //!
-//! - **Latitude** runs along z (rows): `pole` puts a pole on the north
-//!   (z = 0) edge, the south edge, both, or none (the whole map at
-//!   `latitude_center_deg`); `latitude_span_deg` is how far the map reaches
-//!   from its pole(s). A planet has both poles and the full span: 90° N at
-//!   the north edge, the equator in the middle row, 90° S at the south edge. Southern latitudes are negative; everything below uses
-//!   the absolute value.
+//! - **Latitude** runs along z (rows): 90° N at the north edge (z = 0), the
+//!   equator in the middle row, 90° S at the south edge. Southern latitudes
+//!   are negative; everything below uses the absolute value.
 //! - **Meander**: everything that depends on latitude below (temperature, the
 //!   rain table, the wind bands) reads an EFFECTIVE latitude per cell — the
 //!   row's latitude plus a slow, seed-derived displacement
@@ -49,12 +46,6 @@ use crate::forge::hydrology::LAKE_MIN_DEPTH_M;
 use crate::forge::par;
 use crate::forge::periodic::PeriodicX;
 use crate::forge::world::{hash01, smoothstep, EdgeKind, ForgeParams, World};
-
-/// `Knobs::pole` values.
-pub const POLE_NONE: u32 = 0;
-pub const POLE_NORTH: u32 = 1;
-pub const POLE_SOUTH: u32 = 2;
-pub const POLE_BOTH: u32 = 3;
 
 /// Annual precipitation (mm/yr) by absolute latitude (deg), interpolated
 /// linearly: the climatological base before rain shadows. The 25° entry is
@@ -122,29 +113,25 @@ pub enum Wind {
     FromEast,
 }
 
-/// Latitude (deg) of each of `nz` rows.
-pub fn latitudes(nz: usize, p: &ForgeParams) -> Vec<f32> {
-    let k = &p.knobs;
-    let span = k.latitude_span();
+/// Latitude (deg) of each of `nz` rows: 90° at row 0's edge falling
+/// linearly to −90° at the last row's (each half written from its own pole,
+/// as the forge has always computed it).
+pub fn latitudes(nz: usize) -> Vec<f32> {
+    /// Degrees from a pole to the equator.
+    const SPAN: f64 = 90.0;
     (0..nz)
         .map(|z| {
             let t = (z as f64 + 0.5) / nz as f64; // 0 at the north edge, 1 at the south
-            let lat = match k.pole_choice() {
-                POLE_NONE => k.latitude_center_deg,
-                POLE_NORTH => 90.0 - span * t,
-                POLE_SOUTH => -90.0 + span * (1.0 - t),
-                _ if t < 0.5 => 90.0 - span * 2.0 * t,
-                _ => -90.0 + span * 2.0 * (1.0 - t),
-            };
+            let lat = if t < 0.5 { 90.0 - SPAN * 2.0 * t } else { -90.0 + SPAN * 2.0 * (1.0 - t) };
             lat.clamp(-90.0, 90.0) as f32
         })
         .collect()
 }
 
 /// Latitude displacement (deg, northward positive) of the meander at artifact
-/// metres `(x_m, z_m)`: a function of position, seed and knobs only. On a
-/// planet each wave's x-frequency is rounded to a whole number of cycles
-/// round the width (at least 1), so the meander meets itself at the seam.
+/// metres `(x_m, z_m)`: a function of position, seed and knobs only. Each
+/// wave's x-frequency is rounded to a whole number of cycles round the width
+/// (at least 1), so the meander meets itself at the seam.
 pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
     let k = &p.knobs;
     if k.meander_amplitude_deg <= 0.0 {
@@ -156,18 +143,10 @@ pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
     for (wave, &(share, weight, spread)) in MEANDER_WAVES.iter().enumerate() {
         let angle = (hash01(p.seed, MEANDER_SALT, 2 * wave as u64) - 0.5) * 2.0 * spread;
         let phase = hash01(p.seed, MEANDER_SALT, 2 * wave as u64 + 1) * std::f64::consts::TAU;
-        match &wrap {
-            Some(wrap) => {
-                // |angle| < π/2, so the wave always travels east (cos > 0).
-                let cycles = (wrap.period_m * angle.cos() / (wavelength * share)).round().max(1.0);
-                let turns = cycles * x_m / wrap.period_m + z_m * angle.sin() / (wavelength * share);
-                d += weight * (std::f64::consts::TAU * turns + phase).sin();
-            }
-            None => {
-                let along = x_m * angle.cos() + z_m * angle.sin();
-                d += weight * (std::f64::consts::TAU * along / (wavelength * share) + phase).sin();
-            }
-        }
+        // |angle| < π/2, so the wave always travels east (cos > 0).
+        let cycles = (wrap.period_m * angle.cos() / (wavelength * share)).round().max(1.0);
+        let turns = cycles * x_m / wrap.period_m + z_m * angle.sin() / (wavelength * share);
+        d += weight * (std::f64::consts::TAU * turns + phase).sin();
     }
     k.meander_amplitude_deg * d
 }
@@ -181,7 +160,7 @@ pub fn meander_field(nx: usize, nz: usize, dx: f64, p: &ForgeParams) -> Vec<f32>
 
 /// Effective latitude of every cell: its row's latitude plus the meander.
 pub fn effective_latitudes(nx: usize, nz: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
-    let rows = latitudes(nz, p);
+    let rows = latitudes(nz);
     let meander = meander_field(nx, nz, dx, p);
     (0..nx * nz).map(|i| (rows[i / nx] + meander[i]).clamp(-90.0, 90.0)).collect()
 }
@@ -280,7 +259,7 @@ pub fn compute(w: &World, p: &ForgeParams) -> Climate {
 /// not depend on the thread count.
 pub fn compute_with_lakes(w: &World, p: &ForgeParams, lakes: &[bool]) -> Climate {
     let (cells, k) = (w.cells(), &p.knobs);
-    let latitude_deg = latitudes(w.nz, p);
+    let latitude_deg = latitudes(w.nz);
     let lat = effective_latitudes(w.nx, w.nz, w.dx, p);
     let lapse_c_per_m = k.lapse_c_per_km / 1000.0;
     let temperature_c = (0..cells)

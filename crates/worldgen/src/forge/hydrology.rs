@@ -79,8 +79,6 @@ pub struct Stats {
     /// Separate landmasses of at least MIN_ISLAND_KM2, and the largest (km^2).
     pub islands: usize,
     pub largest_island_km2: f64,
-    /// `Knobs::layout()` the world was forged with (the score depends on it).
-    pub layout: u32,
 }
 
 pub struct Analysis {
@@ -389,7 +387,6 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
     let stats = Stats {
         islands,
         largest_island_km2,
-        layout: k.layout(),
         land_share: land.len() as f64 / w.cells() as f64,
         land_km2: land.len() as f64 * cell_km2,
         heights: [0.1, 0.5, 0.9, 0.99, 1.0].map(|p| percentile(&heights, p)),

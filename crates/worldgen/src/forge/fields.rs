@@ -19,8 +19,7 @@
 //! - **Volcanism** (`volcanism`): a continental-scale noise base that never
 //!   reaches the top on its own, plus hot spots on the flanks of convergent
 //!   plate boundaries. Volcano sites are cells at 100, `VOLCANO_SPACING_M`
-//!   apart. Only the continental layouts have plates: island layouts get the
-//!   base noise and no volcanoes, so their terrain is untouched.
+//!   apart.
 //! - **Salinity** (`salinity`): 100 at sea and on closed (endorheic) lakes,
 //!   0 on open lakes, falling from 100 to 0 over `SALT_REACH_M` inland of
 //!   either. Every forged lake has a spill path (the Priority-Flood fills each
@@ -122,11 +121,7 @@ pub struct Fields {
 /// All fields for the final world.
 pub fn compute(p: &ForgeParams, w: &World, a: &Analysis, geo: &Geology) -> Fields {
     let k = &p.knobs;
-    let plates = if k.is_continental() {
-        plates::plate_field(p.seed, p.width_m, p.height_m, w.nx, w.nz, k)
-    } else {
-        PlateField { plate: vec![0; w.cells()], convergence: vec![0.0; w.cells()] }
-    };
+    let plates = plates::plate_field(p.seed, p.width_m, p.height_m, w.nx, w.nz, k);
     Fields {
         drainage: drainage(w, a, geo),
         volcanism: volcanism(p.seed, w, &plates, k),
@@ -392,8 +387,8 @@ pub fn volcanism_grid(
 }
 
 /// Volcanism 0..100 per cell of `w`: continental-scale noise plus hot spots
-/// along the convergent boundaries of `plates` (all-zero convergence for the
-/// island layouts: base only, never 100).
+/// along the convergent boundaries of `plates`; periodic in x when `w`'s
+/// edges wrap (every forged world; a hand-built grid may not).
 pub fn volcanism(seed: u64, w: &World, plates: &PlateField, k: &Knobs) -> Vec<u8> {
     let width_m = w.nx as f64 * w.dx;
     let wrap = PeriodicX::for_edges(&w.edges, width_m);
@@ -403,8 +398,8 @@ pub fn volcanism(seed: u64, w: &World, plates: &PlateField, k: &Knobs) -> Vec<u8
 /// Volcano sites: cells of `volcanism` (an `nx` x `nz` grid of `cell_x` x
 /// `cell_z` m cells) at 100 that are `eligible`, taken in a seeded random
 /// order, each kept only if `VOLCANO_SPACING_M` from every earlier one, at
-/// most `Knobs::volcano_count_max`. Cell centres, world metres. With `wrap`
-/// (a planet) the spacing is measured the shorter way round.
+/// most `Knobs::volcano_count_max`. Cell centres, world metres. The spacing
+/// is measured the shorter way round `wrap`.
 pub fn volcanoes(
     seed: u64,
     volcanism: &[u8],
@@ -412,7 +407,7 @@ pub fn volcanoes(
     (nx, nz): (usize, usize),
     (cell_x, cell_z): (f64, f64),
     k: &Knobs,
-    wrap: Option<PeriodicX>,
+    wrap: PeriodicX,
 ) -> Vec<[f32; 2]> {
     assert_eq!(volcanism.len(), nx * nz, "volcanism raster vs its {nx} x {nz} grid");
     let max = k.volcano_count_max.round().max(0.0) as usize;
@@ -424,10 +419,7 @@ pub fn volcanoes(
             break;
         }
         let p = [((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z];
-        let gap = |s: &[f64; 2]| match &wrap {
-            Some(wrap) => wrap.dx(s[0], p[0]).hypot(s[1] - p[1]),
-            None => (s[0] - p[0]).hypot(s[1] - p[1]),
-        };
+        let gap = |s: &[f64; 2]| wrap.dx(s[0], p[0]).hypot(s[1] - p[1]);
         if sites.iter().all(|s| gap(s) >= VOLCANO_SPACING_M) {
             sites.push(p);
         }
@@ -435,10 +427,9 @@ pub fn volcanoes(
     sites.into_iter().map(|[x, z]| [x as f32, z as f32]).collect()
 }
 
-/// The volcano sites of a continental world from its seed and knobs only, on
-/// the `VOLCANO_GRID_M` reference grid; `eligible(mx, mz)` says whether a
-/// site may stand at a point (inland, clear of land edges: `World::new`
-/// decides). Empty when `volcano_count_max` is 0.
+/// The volcano sites of a world from its seed and knobs only, on the
+/// `VOLCANO_GRID_M` reference grid; `eligible(mx, mz)` says whether a site
+/// may stand at a point (inland: `World::new` decides). Empty when `volcano_count_max` is 0.
 pub fn volcano_sites_on(p: &ForgeParams, eligible: &dyn Fn(f64, f64) -> bool) -> Vec<[f32; 2]> {
     let k = &p.knobs;
     if k.volcano_count_max.round() < 1.0 {
@@ -449,7 +440,7 @@ pub fn volcano_sites_on(p: &ForgeParams, eligible: &dyn Fn(f64, f64) -> bool) ->
     let (cell_x, cell_z) = (p.width_m / nx as f64, p.height_m / nz as f64);
     let field = plates::plate_field(p.seed, p.width_m, p.height_m, nx, nz, k);
     let wrap = PeriodicX::for_world(p);
-    let v = volcanism_grid(p.seed, (p.width_m, p.height_m), (nx, nz), &field, k, wrap);
+    let v = volcanism_grid(p.seed, (p.width_m, p.height_m), (nx, nz), &field, k, Some(wrap));
     let ok: Vec<bool> = (0..nx * nz)
         .map(|i| eligible(((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z))
         .collect();
@@ -457,7 +448,7 @@ pub fn volcano_sites_on(p: &ForgeParams, eligible: &dyn Fn(f64, f64) -> bool) ->
 }
 
 /// Cone of uplift at (mx, mz): 1 on a site, falling linearly to 0 at
-/// `VOLCANO_CONE_RADIUS_M`; the largest of all sites. On a planet `sites`
+/// `VOLCANO_CONE_RADIUS_M`; the largest of all sites. `sites`
 /// carries each site's images east and west (`PeriodicX::with_images`).
 pub fn cone(sites: &[[f32; 2]], mx: f64, mz: f64) -> f64 {
     sites

@@ -49,9 +49,9 @@ user := ""
 
 # World the server serves. Empty (default) = the default forged world,
 # worlds/default.world, forged on first start if missing (ForgeParams::default():
-# a 16 km / 32 m continent, ~5-10 s).
+# the 16 × 8 km dev Planet at 32 m, ~5-10 s).
 # `procedural` = the noise world. Any other value = that world file (e.g. one
-# from `just forge-proto`, one finite world — by default a 16 km continent):
+# from `just forge-proto`, one finite world — by default the dev Planet):
 #   just forge-proto --seed D5C0DE021A --out target/world-forge/best
 #   just world_file=target/world-forge/best.world server   # then `just client`
 # Defaults to $VOXEL_WORLD_FILE. Relative paths resolve from the repo root.
@@ -199,7 +199,7 @@ client:
 
 # Debug launch: straight into a small generated world, adventuring at the first populated site
 # (`client debug world`, crates/client/src/debug_launch.rs; `--site N` picks the site). The world is
-# worlds/debug-world/ (16 km / 32 m, forged on first run) and is REUSED, with its player,
+# worlds/debug-world/ (the 16 × 8 km dev Planet at 32 m, forged on first run) and is REUSED, with its player,
 # on every later run; `just run --reset` (or deleting the directory) re-forges it and starts
 # afresh. `just run --reset --prefab dev-hut`
 # stamps a prefab beside the landing of the adventure site's region only (needs it never saved, so `--reset`; more
@@ -289,7 +289,7 @@ run-two *args:
 # region/chunk dials) and run only the client. `just adapter=6700 play`.
 # New world's generator defaults to a 100 km / 16 m world: its Play forge runs
 # in-process for minutes and several GB (the estimate shows beside Play);
-# pick 16 km or a 32 m World cell for a quick one.
+# pick Tiny or a 32 m World cell for a quick one.
 play:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -660,7 +660,7 @@ clean-old-worlds *args:
 #                       [--cell <m>] [--seed <hex>] [--set <knob>=<value>]…
 #     forges a world in process and stores it as tiles (a store that already
 #     holds a world is refused); flags as `just forge-proto` takes them (no size:
-#     16 × 16 km; a bare number after --size is refused);
+#     the 16 × 8 km dev Planet; a bare number after --size is refused);
 #   just worldctl retile --db <url>
 #     rebuilds the tiles from the archived forge file (after a tile-format change);
 #   just worldctl export --db <url> <out.world>
@@ -726,17 +726,17 @@ tree-view *args:
 model-census *paths="target/test-models":
     scripts/bbmodel_census.py {{paths}}
 
-# World forge prototype (F1): simulate a whole finite world offline (default: a
-# 16 km continent at 32 m cells, ~5 s; `--set layout=0` for the one island) —
+# World forge prototype (F1): simulate a whole finite world offline — the Planet,
+# the one kind of world (default: the 16 × 8 km dev size at 32 m cells, ~5 s) —
 # geology-controlled stream-power erosion, orographic rain, depression filling,
 # planed valley floors, spill-level lakes — and write relief / rivers / geology
 # / rain maps, a 16-bit heightmap, river+lake objects (JSON), drainage
 # statistics and the WORLD FILE `<stem>.world` into target/world-forge/ (serve it
 # with `just world_file=<path> server` + `just client`). Never changes procedural output. Flags:
 # --cell <m> --iters <n> --seed <hex> --out <stem>, --size <tiny|small|medium|large|dev>
-# or --width <m> --height <m> (default 16 × 16 km), --dt --uplift --k
+# or --width <m> --height <m> (default dev: 16,384 × 8,192 m), --dt --uplift --k
 # --diffusivity --no-geology --no-climate, --preset <name> (a map-generator preset
-# from forge/presets.rs, e.g. "Frozen north"; give it before any --set),
+# from forge/presets.rs, e.g. "Highlands"; give it before any --set),
 # --set <knob>=<value>, and --search <n>
 # to forge n seeds at 32 m cells and rank them (generate-and-test). e.g.
 # `just forge-proto --cell 16` for the full-detail world, `just forge-proto
@@ -774,12 +774,11 @@ forge-bench width="16384" height="8192" cell="32":
 
 # The forge's numbers: `forge_proto --report` forges in process (no PNGs; a world
 # file only with `--out <stem>`) and prints one `key: value` line per number —
-# size, layout, edges, height_crc (the layout crcs of the planet-frame plan), land
+# size, edges, height_crc (a crc of the forged height raster), land
 # share, land components over 1 % / 3 % of the map, lakes, river mouths, highest
 # peak, each land biome's share of land — per seed, then min / median / max over
 # them. Takes forge_proto's flags plus `--seeds <n>` (seed, seed + 1, …; default 1),
-# forged one after another. e.g. `just forge-report --size dev --cell 64 --seeds 4`,
-# `just forge-report --width 4096 --height 4096 --cell 64 --set layout=0`.
+# forged one after another. e.g. `just forge-report --size dev --cell 64 --seeds 8`.
 forge-report *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- --report {{args}}
 
@@ -2014,7 +2013,7 @@ world_ctx := "orion"
 world_ns := "world-errantry"
 
 # worldctl inside the toolbox pod, where $VOXEL_WORLD_DB is. The URL is expanded in the pod and never
-# printed. e.g. `just world-ctl forge --preset default`, `just world-ctl rollback --yes`. forge, retile
+# printed. e.g. `just world-ctl forge --preset earth-like`, `just world-ctl rollback --yes`. forge, retile
 # and export take `--db <url>`; clock-reset, super-region, hosts, desired, drain, retire-host and rollback take the URL first
 # (the forms of worldctl's usage text). `export` writes its file inside the toolbox pod, where it is
 # lost with the pod: copy it out with `kubectl cp` (a hint is printed).

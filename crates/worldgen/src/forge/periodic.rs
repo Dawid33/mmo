@@ -1,4 +1,4 @@
-//! Periodicity in x for a world that wraps east–west (the Planet layout):
+//! Periodicity in x for a world that wraps east–west (every forged world):
 //! every field that is a FUNCTION OF POSITION — the noises, the plate sites
 //! and boundaries, continent centres, volcano and lake sites, the meander —
 //! must meet itself at the seam (x = 0 is x = width), so the seam is an
@@ -14,11 +14,10 @@
 //!   (`with_images`) before any nearest-site or distance query, and queries
 //!   use folded x.
 //!
-//! `PeriodicX::for_world` is `None` for every layout but the Planet; with
-//! `None` every call site keeps its old code path and floating-point
-//! expression order exactly.
+//! The forge always wraps (`PeriodicX::for_world`). Only paths fed a grid or
+//! an artifact read its own edges (`for_edges`, `from_globals`) and keep a
+//! `None` (no wrap): the runtime sampler and hand-built grids.
 
-use crate::forge::knobs::Knobs;
 use crate::forge::world::{smoothstep, EdgeKind, ForgeParams};
 use crate::forged::WorldGlobals;
 
@@ -31,16 +30,15 @@ pub struct PeriodicX {
 }
 
 impl PeriodicX {
-    /// `Some` for a Planet (period = its width, band a quarter of it until a
-    /// noise narrows it with `for_noise`), `None` for every other layout.
-    pub fn for_world(p: &ForgeParams) -> Option<PeriodicX> {
-        PeriodicX::for_knobs(&p.knobs, p.width_m)
+    /// The forge's periodicity: period = the world's width, band a quarter
+    /// of it until a noise narrows it with `for_noise`.
+    pub fn for_world(p: &ForgeParams) -> PeriodicX {
+        PeriodicX::for_width(p.width_m)
     }
 
-    /// `for_world` from the knobs and the width alone (callers that hold no
-    /// `ForgeParams`).
-    pub fn for_knobs(k: &Knobs, width_m: f64) -> Option<PeriodicX> {
-        k.is_planet().then(|| PeriodicX::new(width_m))
+    /// `for_world` from the width alone (callers that hold no `ForgeParams`).
+    pub fn for_width(width_m: f64) -> PeriodicX {
+        PeriodicX::new(width_m)
     }
 
     /// For the runtime, which has no `ForgeParams`: `Some` when the east edge

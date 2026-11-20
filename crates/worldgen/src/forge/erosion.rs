@@ -181,8 +181,6 @@ pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch
         scratch.routed_once = true;
     }
     let drowned = evolve(w, p, geo, rain, &routing, scratch);
-    // Land-edge outlets follow the land behind them (no-op without land edges).
-    w.follow_land_edges(crate::forge::world::EdgeFollow::Lower);
     scratch.routing = routing;
     drowned
 }

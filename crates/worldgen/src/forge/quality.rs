@@ -170,21 +170,10 @@ pub fn within(a: &Quality, baseline: &Quality, tol: &QualityTolerance) -> Result
 // Seed-search score (spec section 10): what a Dwarf-Fortress-style world needs.
 // ---------------------------------------------------------------------------
 
-/// Land share window (of all cells) that scores full marks, and the margin
-/// over which it falls to zero on each side.
-/// Land share bands per layout: `(rise, fall)`, each a `(0, 1)` smoothstep
-/// edge pair; the term is 1 between `rise.1` and `fall.0`. Continental
-/// layouts want 30-60% land; islands and archipelagos share the sea.
-pub fn land_band(layout: u32) -> ((f64, f64), (f64, f64)) {
-    use super::knobs::{LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_ONE_ISLAND, LAYOUT_PLANET};
-    if [LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_PLANET].contains(&layout) {
-        ((0.20, 0.30), (0.60, 0.70))
-    } else if layout == LAYOUT_ONE_ISLAND {
-        ((0.22, 0.32), (0.48, 0.58))
-    } else {
-        ((0.10, 0.18), (0.48, 0.58))
-    }
-}
+/// The land share band that scores full marks: `(rise, fall)`, each a
+/// `(0, 1)` smoothstep edge pair; the term is 1 between `rise.1` and
+/// `fall.0` (30-60% land).
+pub const LAND_BAND: ((f64, f64), (f64, f64)) = ((0.20, 0.30), (0.60, 0.70));
 /// Peaks above the snow line, mountain regions bordering other land, and
 /// forest regions a world should have (each scores full at this count).
 pub const WANTED_SNOW_PEAKS: u32 = 3;
@@ -215,10 +204,6 @@ pub struct BiomeSummary {
     pub peaks_above_snow: u32,
     /// Mountain regions that touch land of another type (a dwarf start).
     pub mountain_regions_bordering_land: u32,
-    /// A pole is on the map, so a glacier is expected.
-    pub polar: bool,
-    /// `Knobs::layout()` (picks the land share band).
-    pub layout: u32,
 }
 
 impl BiomeSummary {
@@ -227,8 +212,8 @@ impl BiomeSummary {
     }
 }
 
-/// Biome and region numbers of `a`; `polar` = the forge had a pole on, `layout` = `Knobs::layout()`.
-pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> BiomeSummary {
+/// Biome and region numbers of `a`.
+pub fn summarise(a: &crate::forged::WorldArtifact) -> BiomeSummary {
     use super::regions::{biome_shares, region_counts};
     let (nx, nz) = (a.nx as usize, a.nz as usize);
     // Columns 0 and nx - 1 are neighbours on a world that wraps east-west.
@@ -298,8 +283,6 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> 
         regions_by_type: region_counts(&a.regions).into_iter().map(|(t, c)| (t, c as u32)).collect(),
         peaks_above_snow,
         mountain_regions_bordering_land: bordering.iter().filter(|&&b| b).count() as u32,
-        polar,
-        layout,
     }
 }
 
@@ -347,7 +330,7 @@ pub fn world_score(q: &Quality, biomes: &BiomeSummary) -> (f64, Vec<(&'static st
     let glacier = biomes.shares.iter().any(|(b, s)| *b == Biome::Glacier && *s > 0.0);
     let terms = vec![
         ("land share", {
-            let (rise, fall) = land_band(biomes.layout);
+            let (rise, fall) = LAND_BAND;
             smoothstep(rise.0, rise.1, q.land_share) * (1.0 - smoothstep(fall.0, fall.1, q.land_share))
         }),
         ("snow peaks", count(biomes.peaks_above_snow, WANTED_SNOW_PEAKS)),
@@ -355,7 +338,8 @@ pub fn world_score(q: &Quality, biomes: &BiomeSummary) -> (f64, Vec<(&'static st
         ("forests", count(biomes.regions(RegionType::Forest), WANTED_FOREST_REGIONS)),
         ("big river", (q.max_strahler / WANTED_RIVER_ORDER).min(1.0)),
         ("biome variety", (present as f64 / WANTED_BIOMES as f64).min(1.0)),
-        ("glacier", if !biomes.polar || glacier { 1.0 } else { 0.0 }),
+        // Both poles are on the map: a glacier is expected.
+        ("glacier", if glacier { 1.0 } else { 0.0 }),
         ("region cap", 1.0 - smoothstep(f64::from(REGION_CAP), 2.0 * f64::from(REGION_CAP), f64::from(regions))),
     ];
     let score = terms.iter().map(|(_, v)| TERM_FLOOR + (1.0 - TERM_FLOOR) * v).product();

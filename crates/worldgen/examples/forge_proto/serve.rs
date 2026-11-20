@@ -261,7 +261,7 @@ fn stats_json(f: &Forged, p: &Params) -> String {
     let cells = f.world.cells();
     let list = |values: &[f64]| values.iter().map(|&v| num(v)).collect::<Vec<_>>().join(", ");
     let artifact = f.artifact(&p.forge);
-    let (score, terms) = search::score(f, &artifact, &p.forge);
+    let (score, terms) = search::score(f, &artifact);
     let criteria = terms
         .iter()
         .map(|(name, value)| format!("{{\"name\": {}, \"value\": {}}}", quote(name), num(*value)))

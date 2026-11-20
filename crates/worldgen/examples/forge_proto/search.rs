@@ -21,9 +21,8 @@ const THUMBNAILS: usize = 3;
 
 /// `quality::world_score` of a forged world and its world file: the DF-style
 /// criteria (spec section 10), in the terms' own order.
-pub fn score(f: &Forged, artifact: &WorldArtifact, p: &ForgeParams) -> (f64, Vec<(&'static str, f64)>) {
-    let polar = p.knobs.pole_choice() != worldgen::forge::climate::POLE_NONE;
-    world_score(&quality(f), &summarise(artifact, polar, p.knobs.layout()))
+pub fn score(f: &Forged, artifact: &WorldArtifact) -> (f64, Vec<(&'static str, f64)>) {
+    world_score(&quality(f), &summarise(artifact))
 }
 
 pub fn run(base: &Params) {
@@ -47,7 +46,7 @@ pub fn run(base: &Params) {
                         let p = ForgeParams { seed, cell_m: SEARCH_CELL_M, quiet: true, ..base.forge.clone() };
                         let forged = forge(&p);
                         let artifact = forged.artifact(&p);
-                        let (sc, terms) = score(&forged, &artifact, &p);
+                        let (sc, terms) = score(&forged, &artifact);
                         out.push((sc, seed, forged.analysis.stats, terms));
                     }
                     out

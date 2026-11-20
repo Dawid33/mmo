@@ -5,10 +5,10 @@
 //! (a running server) is refused at once with the lock message, never waited
 //! for. `export` only reads: it opens read-only, beside a running server.
 //!
-//! - `forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] [--seed <hex>]
-//!   [--set <knob>=<value>]…`: forges a world in process
-//!   (`worldgen::forge`, defaults = `ForgeParams::default()`, the flags as
-//!   `just forge-proto` takes them) and stores it as tiles
+//! - `forge --db <url> [--preset <name>] [--size <name>] [--cell <m>] [--seed <hex>]
+//!   [--set <knob>=<value>]…`: forges a Planet in process
+//!   (`worldgen::forge`, defaults = `ForgeParams::default()`: the dev size at
+//!   32 m; the flags as `just forge-proto` takes them) and stores it as tiles
 //!   ([`crate::write_tiled`]). Refused when the store already holds a world.
 //! - `retile --db <url>`: rebuilds the stored tiles from the archive row after
 //!   the tile format changed (one transaction, [`crate::write_tiled`]). A
@@ -76,8 +76,9 @@ use worldgen::forge::{self, play, ForgeParams};
 use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
-pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] \
-[--size <tiny|small|medium|large|dev> | --width <m> --height <m>] [--cell <m>] \
+pub const USAGE: &str = "usage: worldctl forge --db <url> \
+[--preset <earth-like|great ranges|highlands|lowlands|dry|wet>] \
+[--size <tiny|small|medium|large|dev> (default dev) | --width <m> --height <m>] [--cell <m>] \
 [--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl hosts <url>\n       worldctl desired <url>\n       worldctl drain <url> <host id> [--in <secs>]\n       worldctl retire-host <url> <host id>\n       worldctl rollback <url> --yes";
 
 /// Runs one `worldctl` command (`args` without the program name); `Ok` is what it

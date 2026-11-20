@@ -1,5 +1,5 @@
 //! World forge prototype (F1): a whole finite world — one "super region",
-//! by default a 16 km continent at 32 m cells — generated OFFLINE by simulating landscape
+//! by default the 16 × 8 km dev Planet at 32 m cells — generated OFFLINE by simulating landscape
 //! evolution instead of evaluating noise per point. Touches no engine code and
 //! no world output: it writes PNGs, a river/lake object file and statistics,
 //! to find out what the real forge should be.
@@ -17,10 +17,9 @@
 //!                                                 slider, live map preview)
 //!
 //! Pipeline:
-//!   1. world.rs    the layout's landmass (islands in a guaranteed ocean margin,
-//!                  or a continent with sea and land edges), low initial
-//!                  relief, an UPLIFT map with mountain belts (plates.rs on
-//!                  the continental layouts);
+//!   1. world.rs    the Planet's continents (polar seas north and south, east
+//!                  and west wrap), low initial relief, an UPLIFT map with
+//!                  mountain belts (plates.rs);
 //!   2. geology.rs  rock column in a stratigraphic coordinate (tilt + folds,
 //!                  domed by the uplift) -> erodibility of whatever rock the
 //!                  surface currently cuts: geology BEFORE erosion;
@@ -228,7 +227,7 @@ fn main() {
     if let Some(spawn) = p.spawn {
         artifact.spawn = spawn;
     }
-    let (score, terms) = search::score(&forged, &artifact, &p.forge);
+    let (score, terms) = search::score(&forged, &artifact);
     println!("world score {score:.3}:");
     for (name, value) in terms {
         println!("  {name:<15} {value:.2}");
@@ -253,7 +252,7 @@ fn main() {
     println!("wrote {objects} ({} lakes, {} river reaches)", a.lakes.len(), a.rivers.len());
 
     print_biomes(&artifact);
-    print_rivers_and_peaks(&forged, &artifact, &p.forge);
+    print_rivers_and_peaks(&forged, &artifact);
     render::biomes(&artifact, &format!("{stem}-biome.png"));
     let world_file = format!("{stem}.world");
     artifact.save(std::path::Path::new(&world_file)).expect("write world file");
@@ -303,7 +302,7 @@ fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgePar
 
 /// Rivers by Strahler order (count, km), the land temperature and
 /// precipitation ranges of the world file, and the peaks above the snow line.
-fn print_rivers_and_peaks(forged: &worldgen::forge::Forged, a: &worldgen::forged::WorldArtifact, p: &worldgen::forge::ForgeParams) {
+fn print_rivers_and_peaks(forged: &worldgen::forge::Forged, a: &worldgen::forged::WorldArtifact) {
     use worldgen::forged::SNOW_LINE_C;
     let top = forged.analysis.rivers.iter().map(|r| r.order).max().unwrap_or(0);
     let by_order: Vec<String> = (1..=top)
@@ -321,8 +320,7 @@ fn print_rivers_and_peaks(forged: &worldgen::forge::Forged, a: &worldgen::forged
     };
     let (t, r) = (range(&a.temperature_c), range(&a.precip_mm));
     println!("world file land: temperature {:.1}..{:.1} C, precipitation {:.0}..{:.0} mm/yr", t.0, t.1, r.0, r.1);
-    let polar = p.knobs.pole_choice() != worldgen::forge::climate::POLE_NONE;
-    let s = worldgen::forge::quality::summarise(a, polar, p.knobs.layout());
+    let s = worldgen::forge::quality::summarise(a);
     println!(
         "peaks above the snow line (temperature < {SNOW_LINE_C} C): {}; mountain regions bordering other land: {}",
         s.peaks_above_snow, s.mountain_regions_bordering_land

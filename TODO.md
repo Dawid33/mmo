@@ -9,6 +9,20 @@ everything (fast / with the slow-tagged). Next:
   as a `Gate:` if `just creatures` should keep linting every model through the real parser.
 - `crates/world-store/tests/fixtures/world_map.bin` carries an uncommitted change and no test reads it any more.
 
+Planet frame, Phase 1a (plans/2026-11-14-planet-frame-1a.md; ledger `.superpowers/sdd/2026-11-14-planet-frame-1a/`) —
+IN PROGRESS: the forge makes one kind of world, the Planet (2:1, wraps east–west, polar seas north and south); the six
+old layouts, their presets and their knobs are deleted (artifact v9). Open:
+- Re-forge every world (Dawid): a world file older than v9, a stored world that is not a Planet, or one whose width is
+  not a whole number of 512 m is refused with "re-forge this world". Local `worlds/` (`just run --reset`, the menu's
+  worlds), the dev Postgres worlds (`just pg-reset`, before `dev-r2` / `dev-r3`; `go-nogo-r3` re-forges its own), the
+  public web world (move its store aside BEFORE `just deploy`, as for migration `0011` below), the twin (`twin-check`
+  forges into a fresh database) and any orion world (a new empty database, as the runbooks above).
+- The east–west wrap works in ONE process only (`VOXEL_ROLE=all`). Under split roles (`dev-r2`, `dev-r3`,
+  `go-nogo-r3`, the twin, orion) the seam is closed (`roles::seam_for_role`): east and west end like a map edge
+  (nothing there, no crossing) until the host-to-host seam (the program's Phase 7).
+- North and south are polar sea: no world edge is reachable on foot in role `all`; the closed seam above is the only
+  one, and only under split roles.
+
 Direction (2026-10-20): Dwarf Fortress–style game on the multi-region engine, MVP = fortress
 mode. No phased plan (rejected 2026-10-20): implement features piece by piece, roughly
 modelling DF; reference research in docs/superpowers/specs/2026-10-20-dwarf-fortress-research/

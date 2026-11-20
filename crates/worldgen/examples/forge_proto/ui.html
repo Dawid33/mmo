@@ -242,7 +242,7 @@
       <div class="row">
         <label for="seed">Seed</label>
         <input id="seed" type="text" spellcheck="false" autocomplete="off">
-        <button class="btn" id="reroll" title="Try another island">New seed</button>
+        <button class="btn" id="reroll" title="Try another world">New seed</button>
       </div>
       <div class="row">
         <label for="detail">Preview</label>
@@ -252,7 +252,7 @@
           <option value="16">Full, 16 m cells (about 30 s)</option>
         </select>
       </div>
-      <p class="hint">Coarse previews show the island's shape and drainage, but under-count lakes and flatten peaks. Check at 16 m before saving.</p>
+      <p class="hint">Coarse previews show the land's shape and drainage, but under-count lakes and flatten peaks. Check at 16 m before saving.</p>
       <div class="row">
         <label class="check"><input type="checkbox" id="auto" checked> Forge as I change things</label>
         <button class="btn primary" id="forge" style="margin-left:auto">Forge</button>
@@ -452,7 +452,7 @@
     add("Buildable land", f(w.buildable_km2) + " km²", "gentle, low, dry");
     add("Slope", f(w.slopes[0], 3), `1 % steeper than ${f(w.slopes[2], 2)}, max ${f(w.slopes[3], 2)}`);
     add("Drainage", "θ " + f(w.theta, 2), "Hack " + f(w.hack, 2) + " (nature 0.5 to 0.6)");
-    add("World score", f(w.score, 2), w.margin_share > 0.002 ? "the island is pressing on the ocean margin" : "");
+    add("World score", f(w.score, 2), w.margin_share > 0.002 ? "land is pressing on the polar ocean margin" : "");
 
     const rocks = document.createElement("div"); rocks.className = "note rocks";
     const dt = document.createElement("dt"); dt.textContent = "Rock at the surface";

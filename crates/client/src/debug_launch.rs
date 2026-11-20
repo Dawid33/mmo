@@ -2,8 +2,8 @@
 //! a prepared scenario. A plain `client` opens on the main menu.
 //!
 //! Presets:
-//! - `world` — a small generated world (`ForgeParams::default()`: the 16 km /
-//!   32 m continent) in `worlds/debug-world/`, played as an adventure at the
+//! - `world` — a small generated world (`ForgeParams::default()`: the
+//!   16 × 8 km dev Planet at 32 m) in `worlds/debug-world/`, played as an adventure at the
 //!   first populated site ([`choose_adventure_site`]; a world with no history
 //!   plays where the player spawned). The world is REUSED between runs: an
 //!   existing world is loaded (not re-forged) and a player the server restored

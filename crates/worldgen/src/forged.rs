@@ -41,8 +41,10 @@ pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
 /// 0..100 rasters, `forge::fields`) and the volcano sites. v7: `biome`
 /// (`game::Biome` per cell), `region` ids + `regions`, `savagery`
 /// (`forge::regions`). v8: width x height (`width_m`, `height_m`, `nx`,
-/// `nz` replace `size_m`, `n`) and the forge's `knobs`.
-pub const ARTIFACT_VERSION: u32 = 8;
+/// `nz` replace `size_m`, `n`) and the forge's `knobs`. v9: no byte change —
+/// the Planet is the only world (`forge::world::PLANET_EDGES`); a world of a
+/// deleted layout is refused (`validate_wrap`).
+pub const ARTIFACT_VERSION: u32 = 9;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const ZSTD_LEVEL: i32 = 19;
@@ -563,13 +565,29 @@ fn validate_grid(nx: u32, nz: u32, cell_m: f64, width_m: f64, height_m: f64) -> 
     Ok(())
 }
 
-/// A world that wraps east–west is wide enough to walk round
-/// (`forge::play::MIN_WRAP_WIDTH_M`).
+/// The world is a Planet (`forge::world::PLANET_EDGES`: a world of a
+/// deleted layout is refused, whatever its version says — a store checks only
+/// its tile and map versions), wide enough to walk round
+/// (`forge::play::MIN_WRAP_WIDTH_M`) and a whole number of
+/// `forge::play::WRAP_WIDTH_STEP_M` wide (else its regions do not tile the
+/// circle and `wrap_shift_blocks` silently stops folding them).
 fn validate_wrap(edges: &[EdgeKind; 4], width_m: f64) -> Result<(), ArtifactError> {
-    match PeriodicX::for_edges(edges, width_m).and_then(|_| crate::forge::play::too_narrow_to_wrap(width_m)) {
-        Some(why) => Err(ArtifactError::Format(why)),
-        None => Ok(()),
+    use crate::forge::play::{too_narrow_to_wrap, WRAP_WIDTH_STEP_M};
+    if *edges != crate::forge::world::PLANET_EDGES {
+        return Err(ArtifactError::Format(format!(
+            "this world was forged with a layout this build no longer has (edges {edges:?}, not a Planet's): \
+             re-forge this world"
+        )));
     }
+    if let Some(why) = too_narrow_to_wrap(width_m) {
+        return Err(ArtifactError::Format(why));
+    }
+    if (width_m / WRAP_WIDTH_STEP_M).fract() != 0.0 {
+        return Err(ArtifactError::Format(format!(
+            "this world is {width_m:.0} m wide, not a whole number of {WRAP_WIDTH_STEP_M:.0} m: re-forge this world"
+        )));
+    }
+    Ok(())
 }
 
 /// The checks on a world's global tables that every reader relies on (whole

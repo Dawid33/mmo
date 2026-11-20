@@ -47,7 +47,7 @@ changed build/run/test command updates its recipe in the same change.
 - **GPU**: `just adapter=6700 …` / `$VOXEL_ADAPTER` pins wgpu; unpinned, `client::adapter_pick` picks the
   best adapter (never the slow NVK T600 if anything better exists). Check the `AdapterInfo` log line.
 - **Debug launches** (`crates/client/src/debug_launch.rs`): `client debug world [--reset] [--site N]` forges
-  `worlds/debug-world/` once and reuses it, then starts an adventure at the first populated site (or site N); add presets there. Worlds live in `worlds/<slug>/`
+  `worlds/debug-world/` (the dev Planet, `ForgeParams::default()`) once and reuses it, then starts an adventure at the first populated site (or site N); add presets there. Worlds live in `worlds/<slug>/`
   (git-ignored; `terrain.sqlite` store, `world.json`, `server.log`). Menu worlds spawn their own
   single-player server (`VOXEL_SINGLE_PLAYER=1`, free port). `VOXEL_SKIP_MENU=1` connects to the dev server.
 
@@ -948,9 +948,21 @@ component's ROOT (forces inlining, bloats codegen). Every root component calls `
 `generate_region_forged` for an explicit forged world) is a pure function of coordinates (+ the installed
 forged world) yielding the region's chunk columns; that is what makes "park, or regenerate" safe. The fused
 `pipeline` `column()` must mirror the `#[cfg(test)]` `DensityFn` graph bit-for-bit.
+The forge makes ONE kind of world, the **Planet** (since 2026-11-20; plan
+`docs/superpowers/plans/2026-11-14-planet-frame-1a.md`): 2:1, x wraps east–west (`EdgeKind::Wrap`), polar seas
+north and south (`forge::world::PLANET_EDGES`), 90° N at row 0 to 90° S. Sizes (`forge::play`): Tiny 25,088 ×
+12,544 m, Small 50,176 × 25,088, Medium (default) 100,352 × 50,176, Large 200,704 × 100,352, and Dev 16,384 ×
+8,192 (not in the menu; `ForgeParams::default()` at 32 m) — every width a whole number of 512 m, so regions tile the
+circle at every region size. Any other world — an older artifact version (< 9), another layout's edges, a width off
+512 m — is refused with "re-forge this world" (file, tiles and store alike: `forged.rs` `validate_wrap`).
+**Canonical coordinates**: everything stored, simulated, hashed or sent is canonical (x folded into the map's width,
+`canonical_region` in `worldgen/src/lib.rs`, one nearest-image helper into a region's frame); LOD keys and the client's render frame
+are the only unwrapped coordinates. **The wrap is for one process** (`VOXEL_ROLE=all`): under any other role the seam
+is CLOSED (`roles::seam_for_role` installs the map with `wrap_x = false`), until the host-to-host seam is built.
 Forge tunables all live in `forge/knobs.rs` (`just forge-ui` to tune; check at 16 m cells before keeping a
-value; the `forge_quality` gate must pass). Water is recipe data (`ColumnGround::water_top`), never
-blocks. Look at the world with `just world-map` after tuning changes.
+value; the `forge_quality` gate must pass). `just forge-report --size dev --cell 64 --seeds 8` prints each seed's
+numbers (`height_crc`, land share, land components, biome shares, the seam checks) and min / median / max. Water is
+recipe data (`ColumnGround::water_top`), never blocks. Look at the world with `just world-map` after tuning changes.
 
 **Assets**
 - Blockbench `.bbmodel` loads natively (`crates/bbmodel`, `renderer/model.rs`); `just model-view`,

@@ -1,7 +1,7 @@
 //! Named starting points for the map generator: a preset is a list of knob
 //! overrides on top of `Knobs::default()`. The UI shows [`CUSTOM`] when the
-//! knobs match none of them. The first is the defaults (Continent);
-//! Highlands / Lowlands / Dry / Wet apply on top of it.
+//! knobs match none of them. The first is the defaults (Earth-like); the
+//! others apply on top of it.
 
 use super::knobs::{Knobs, SPECS};
 
@@ -16,34 +16,9 @@ pub const CUSTOM: &str = "Custom";
 
 pub const PRESETS: &[Preset] = &[
     Preset {
-        name: "Continent",
-        description: "One continent with sea on some edges and land running off the others, a pole to the north, ranges along plate boundaries.",
+        name: "Earth-like",
+        description: "A whole planet: continents round a world that wraps east to west, polar seas and ice at both poles, ranges along plate boundaries.",
         overrides: &[],
-    },
-    Preset {
-        name: "Continents",
-        description: "Several landmasses with seas between them, ranges where their plates meet.",
-        overrides: &[("layout", 4.0)],
-    },
-    Preset {
-        name: "Inland",
-        description: "Land on every edge around an inland sea; drier, with closed basins whose lakes turn salty.",
-        overrides: &[("layout", 5.0), ("rain_max", 2.0), ("land_depletion_m", 5_000.0), ("lake_basins", 14.0)],
-    },
-    Preset {
-        name: "Temperate band",
-        description: "No pole: the whole map lies in the mid-latitude westerlies, mostly forest and grassland.",
-        overrides: &[("pole", 0.0), ("latitude_center_deg", 48.0)],
-    },
-    Preset {
-        name: "Frozen north",
-        description: "The far north from the pole down to 60 degrees: tundra, taiga and glaciers.",
-        overrides: &[("latitude_span_deg", 30.0), ("pole_temp_c", -30.0)],
-    },
-    Preset {
-        name: "Tropical",
-        description: "No pole, near the equator: jungle, savanna and wetlands.",
-        overrides: &[("pole", 0.0), ("latitude_center_deg", 16.0)],
     },
     Preset {
         name: "Great ranges",
@@ -58,48 +33,11 @@ pub const PRESETS: &[Preset] = &[
         ],
     },
     Preset {
-        name: "Island",
-        description: "A single island in open sea at one latitude, ranges inland, rivers to the sea (the pre-continent look).",
-        overrides: &[
-            ("layout", 0.0),
-            ("pole", 0.0),
-            ("latitude_center_deg", 45.0),
-            ("sea_edges", 4.0),
-            ("max_peak_m", 236.0),
-            ("meander_amplitude_deg", 0.0),
-        ],
-    },
-    Preset {
-        name: "Archipelago",
-        description: "Several islands scattered across the sea, each with its own short rivers.",
-        overrides: &[
-            ("layout", 1.0),
-            ("pole", 0.0),
-            ("latitude_center_deg", 45.0),
-            ("sea_edges", 4.0),
-            ("max_peak_m", 236.0),
-            ("meander_amplitude_deg", 0.0),
-        ],
-    },
-    Preset {
-        name: "Island arc",
-        description: "A chain of islands strung along a curve, the largest in the middle.",
-        overrides: &[
-            ("layout", 2.0),
-            ("pole", 0.0),
-            ("latitude_center_deg", 45.0),
-            ("sea_edges", 4.0),
-            ("max_peak_m", 236.0),
-            ("meander_amplitude_deg", 0.0),
-        ],
-    },
-    Preset {
         name: "Highlands",
         description: "Fast uplift and hard rock raise broad, steep ranges cut by deep valleys.",
         overrides: &[
             ("uplift", 6.0e-3),
             ("erodibility", 1.6e-5),
-            ("belt_width", 0.40),
             ("plate_belt_width", 0.22),
             ("lowland_uplift_share", 0.10),
         ],

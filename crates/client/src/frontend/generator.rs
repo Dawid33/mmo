@@ -41,7 +41,7 @@ use crate::session::{AppState, PendingWorld};
 
 /// The tabs, each with the knob GROUPS it shows (`Spec::group`).
 pub const TABS: [(&str, &[&str]); 6] = [
-    ("Land", &["Island", "Continent"]),
+    ("Land", &["Land"]),
     ("Mountains", &["Uplift", "Plates"]),
     ("Climate", &["Climate", "Regions"]),
     ("Water", &["Rivers"]),

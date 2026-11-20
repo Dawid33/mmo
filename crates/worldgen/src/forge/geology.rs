@@ -51,7 +51,7 @@ const SILL_THICKNESS_M: (f64, f64) = (6.0, 12.0);
 /// The fold noise's first octave (2^11 = 2 km). Dip, fold amplitude,
 /// formation thickness and basement depth are knobs: a dip of 0.04 over a
 /// 16 km world walks the outcrop through ~640 m of column — broad provinces.
-/// On a planet (x wraps) the bedding has no x dip — a tilt along x cannot
+/// x wraps, so the bedding has no x dip — a tilt along x cannot
 /// meet itself round the circle — only the dip's z part, and the folds are
 /// periodic in x.
 const FOLD_FIRST_OCTAVE: i32 = -11;
@@ -72,19 +72,14 @@ impl Geology {
         // Dip direction from the seed.
         let angle = hash01(p.seed, 0x6E0, 1) * std::f64::consts::TAU;
         let k = &p.knobs;
-        let (dip_x, dip_z) = (k.regional_dip * angle.cos(), k.regional_dip * angle.sin());
+        let dip_z = k.regional_dip * angle.sin();
         let basement_top = k.basement_top_s;
         let (thin, thick) = (k.formation_min_m, k.formation_max_m.max(k.formation_min_m));
-        let (half_x, half_z) = (p.width_m * 0.5, p.height_m * 0.5);
-        let wrap = PeriodicX::for_world(p).map(|w| w.for_noise(FOLD_WAVELENGTH_M));
+        let half_z = p.height_m * 0.5;
+        let wrap = PeriodicX::for_world(p).for_noise(FOLD_WAVELENGTH_M);
         let bedding = par::map_range(w.cells(), |i| {
             let (x, z) = w.center(i);
-            match &wrap {
-                Some(wrap) => {
-                    dip_z * (z - half_z) + k.fold_amplitude_m * 2.0 * wrap.sample(x, z, |x, z| folds.sample2(x, z))
-                }
-                None => dip_x * (x - half_x) + dip_z * (z - half_z) + k.fold_amplitude_m * 2.0 * folds.sample2(x, z),
-            }
+            dip_z * (z - half_z) + k.fold_amplitude_m * 2.0 * wrap.sample(x, z, |x, z| folds.sample2(x, z))
         });
 
         let mut column = Vec::new();
