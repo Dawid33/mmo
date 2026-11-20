@@ -69,9 +69,10 @@ pub fn apply_terrain_debug(
             v.set_if_neq(want(state.hide_lod));
         }
     }
-    for &e in near.0.values() {
+    for (&region, &e) in &near.0 {
         if let Ok(mut v) = vis.get_mut(e) {
-            v.set_if_neq(want(state.hide_near));
+            // A tree the frame moved away from stays hidden (`RegionRoots::drawn`).
+            v.set_if_neq(want(state.hide_near || !near.drawn(region)));
         }
     }
 }
@@ -208,7 +209,7 @@ pub fn draw_grid_debug(
     }
 
     // Near regions where their trees are drawn; LOD keys are already in the frame.
-    let regions = near.0.keys().map(|c| (near.alias(*c), REGION_NEAR_COLOR)).chain(
+    let regions = near.0.keys().filter(|c| near.drawn(**c)).filter_map(|c| Some((near.alias(*c)?, REGION_NEAR_COLOR))).chain(
         lod.roots
             .keys()
             .filter(|k| k.region_span() == 1)

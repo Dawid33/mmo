@@ -418,7 +418,8 @@ fn schedule_water_meshes(
             continue;
         };
         // Its chunks are keyed where its tree is drawn.
-        let input = tile_input(roots.alias(*region), *tile, ground, chunk_at);
+        let Some(alias) = roots.alias(*region) else { continue };
+        let input = tile_input(alias, *tile, ground, chunk_at);
         state.task = Some(super::compute::spawn(WaterMeshJob(input), tile_mesh));
         state.dirty = false;
         built += 1;

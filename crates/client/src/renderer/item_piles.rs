@@ -323,6 +323,7 @@ fn hide_cut_piles(
     level: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
     pile_roots: Res<ItemPileRoots>,
+    regions: Option<Res<super::bridge::RegionRoots>>,
     mut roots: Query<(&ItemPileRoot, &mut Visibility, Option<&super::item_flights::LandingHold>)>,
 ) {
     let cut = camera_cut(&level, &tiles);
@@ -331,7 +332,10 @@ fn hide_cut_piles(
     let shown = shown_mirrors(&pile_roots, frame.extent);
     for (root, mut vis, hold) in &mut roots {
         let duplicate = root.mirror && !shown.contains(&(root.region, root.cell));
+        // A region whose tree the frame moved away from shows none of its piles.
+        let stale = regions.as_ref().is_some_and(|r| r.0.contains_key(&root.region) && !r.drawn(root.region));
         let hide = duplicate
+            || stale
             || hold.is_some()
             || hidden_by_cut(pile_world_position(&frame, root.region, root.cell), cut, home);
         vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited });

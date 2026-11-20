@@ -547,8 +547,9 @@ fn near_regions_meshed(
             continue;
         }
         streak.1 = streak.1.saturating_add(1);
-        if streak.1 >= NEAR_HANDOFF_HOLD_FRAMES {
-            ready.insert(near.alias(rc));
+        // A hidden tree (the frame moved away from it) replaces nothing.
+        if streak.1 >= NEAR_HANDOFF_HOLD_FRAMES && near.drawn(rc) {
+            ready.extend(near.alias(rc));
         }
     }
     ready

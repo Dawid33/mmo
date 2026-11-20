@@ -239,6 +239,7 @@ pub fn sync_first_person_camera(
     mirror: Res<TileMirror>,
     bodies: Query<(&SimEntity, &SimTarget), (With<LocalBody>, Without<Eyes>)>,
     mut eyes: Query<(Entity, &mut SimTarget), With<Eyes>>,
+    roots: Res<crate::renderer::bridge::RegionRoots>,
 ) {
     if !fp.on || crate::session::frontend_has_screen(state.as_deref(), in_play.as_deref()) {
         for (e, _) in &eyes {
@@ -248,7 +249,8 @@ pub fn sync_first_person_camera(
         }
         return;
     }
-    let Some((sim, body)) = eyes_body(mirror.region(), bodies.iter()) else { return };
+    // Bodies of a tree the frame moved away from do not count (`RegionRoots::drawn`).
+    let Some((sim, body)) = eyes_body(mirror.region(), bodies.iter().filter(|(s, _)| roots.drawn(s.region))) else { return };
     let (pos, rot) = (world_pos(&mirror.frame(), sim.region, body.pos), body.rot);
     if let Ok((_, mut target)) = eyes.single_mut() {
         if target.pos != pos || target.rot != rot {

@@ -1824,6 +1824,8 @@ struct MapParams<'w, 's> {
     inspected: crate::session::SessionLocal<'w, 's, Inspected>,
     /// The arrival tabs as last pushed.
     tabs: crate::session::SessionLocal<'w, 's, Option<arrival_tabs::TabsView>>,
+    /// Where the camera's home bounds are (`CommanderCamera::placed_in`).
+    frame: Option<Res<'w, crate::wrap_frame::WrapFrame>>,
 }
 
 /// The person last requested for the inspector, and when (secs).
@@ -1877,7 +1879,9 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     if let Some(target) = p.pending.0 {
         let refused = p.world_map.refused.is_some_and(|(rc, _)| rc == target);
         let cam = p.cam.as_deref();
-        let arrived_in = |rc| cam.map_or(home == Some(rc), |cam| cam.placed_in(rc));
+        // The camera's bounds are the home's copy in the frame; `rc` is canonical.
+        let frame = p.frame.as_deref().copied().unwrap_or_default();
+        let arrived_in = |rc| cam.map_or(home == Some(rc), |cam| cam.placed_in(frame.alias(rc)));
         if play_settled(target, arrived_in, refused) {
             p.pending.0 = None;
             // The first Play landed: in play (the arrival map closes).

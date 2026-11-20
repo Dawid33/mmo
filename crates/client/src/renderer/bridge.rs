@@ -30,10 +30,11 @@ pub struct Regions(pub BTreeMap<RegionId, Receiver<GameDataUpdate>>);
 #[derive(Resource, Default)]
 pub struct RegionRoots(pub BTreeMap<RegionId, Entity>, BodyRoots);
 
-/// The bodies roots behind [`RegionRoots::bodies`], and the frame copy each
-/// region's tree was placed at ([`RegionRoots::alias`]).
+/// The bodies roots behind [`RegionRoots::bodies`], the frame copy each
+/// region's tree was placed at ([`RegionRoots::alias`]) and the trees the
+/// frame has moved away from ([`RegionRoots::drawn`]).
 #[derive(Default)]
-pub struct BodyRoots(BTreeMap<RegionId, Entity>, BTreeMap<RegionId, RegionId>);
+pub struct BodyRoots(BTreeMap<RegionId, Entity>, BTreeMap<RegionId, RegionId>, std::collections::BTreeSet<RegionId>);
 
 impl RegionRoots {
     /// The parent of `region`'s non-terrain entities: its bodies root, or
@@ -47,20 +48,53 @@ impl RegionRoots {
     /// placed at, at its spawn: everything keyed by world position under it
     /// (brick and chunk grids, the height grid, water) is keyed there. It
     /// never moves (`crate::wrap_frame`'s module docs); `region` itself for
-    /// one mapped without it (tests that insert into `.0`).
-    pub fn alias(&self, region: RegionId) -> RegionId {
-        self.1 .1.get(&region).copied().unwrap_or(region)
+    /// one mapped without it (tests that insert into `.0`); `None` unmapped.
+    pub fn alias(&self, region: RegionId) -> Option<RegionId> {
+        self.0.contains_key(&region).then(|| self.1 .1.get(&region).copied().unwrap_or(region))
+    }
+
+    /// Whether `region` is mapped and drawn where the current `WrapFrame`
+    /// puts it. A tree the frame moved away from (a home jump across the
+    /// world: [`RegionRoots::follow_frame`]) is hidden until it is released or
+    /// replaced, and what places things by the current frame treats it as
+    /// not loaded.
+    pub fn drawn(&self, region: RegionId) -> bool {
+        self.0.contains_key(&region) && !self.1 .2.contains(&region)
+    }
+
+    /// The frame is `frame` now: hide every tree placed at another copy than
+    /// `frame` gives it (show it again once the frame gives that copy back).
+    /// Trees are never moved (see [`RegionRoots::alias`]).
+    fn follow_frame(&mut self, frame: &crate::wrap_frame::WrapFrame, commands: &mut Commands) {
+        for (&region, &root) in &self.0 {
+            let placed = self.1 .1.get(&region).copied().unwrap_or(region);
+            let stale = placed != frame.alias(region);
+            if stale == self.1 .2.contains(&region) {
+                continue;
+            }
+            let vis = if stale { Visibility::Hidden } else { Visibility::Inherited };
+            for e in std::iter::once(root).chain(self.1 .0.get(&region).copied()) {
+                commands.entity(e).insert(vis);
+            }
+            if stale {
+                self.1 .2.insert(region);
+            } else {
+                self.1 .2.remove(&region);
+            }
+        }
     }
 
     fn insert(&mut self, region: RegionId, root: Entity, bodies: Entity, alias: RegionId) {
         self.0.insert(region, root);
         self.1 .0.insert(region, bodies);
         self.1 .1.insert(region, alias);
+        self.1 .2.remove(&region);
     }
 
     /// Unmaps `region`: its root and the alias it was placed at.
     fn remove(&mut self, region: &RegionId) -> Option<(Entity, RegionId)> {
         self.1 .0.remove(region);
+        self.1 .2.remove(region);
         let alias = self.1 .1.remove(region).unwrap_or(*region);
         self.0.remove(region).map(|root| (root, alias))
     }
@@ -1087,6 +1121,7 @@ pub fn drain_client_updates(
             ClientUpdateEvent::WrapFrame { extent, anchor } => {
                 if let Some(frame) = wrap_frame.as_mut() {
                     **frame = crate::wrap_frame::WrapFrame { extent, anchor };
+                    roots.follow_frame(frame, &mut commands);
                 }
             }
             ClientUpdateEvent::PersonInfo(p) => history_out.write(HistoryMsg::PersonInfo(p)),
@@ -1548,7 +1583,7 @@ pub fn drain_region_updates(
         if !new_terrain.is_empty() {
             // Region-local centroid -> world (where its tree is placed),
             // chunk origin -> centre.
-            let offset = Vec3::from_array(roots.alias(region).world_offset());
+            let offset = Vec3::from_array(roots.alias(region).unwrap_or(region).world_offset());
             for batch in new_terrain.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
                 let center = batch.iter().map(|(_, _, p)| *p).sum::<Vec3>() / batch.len() as f32;
                 voxel_queue.batches.push_back(PendingVoxelBatch {

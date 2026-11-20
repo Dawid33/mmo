@@ -248,6 +248,7 @@ pub fn update_path_preview(
     xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     world_map: Option<Res<crate::renderer::world_map::WorldMapState>>,
     frame: Option<Res<WrapFrame>>,
+    roots: Res<crate::renderer::bridge::RegionRoots>,
     mut preview: ResMut<PathPreview>,
     mut sent: ResMut<SentPath>,
 ) {
@@ -257,7 +258,10 @@ pub fn update_path_preview(
     let map = route.as_deref();
     let frame = frame.as_deref().copied().unwrap_or_default();
     let origin = |home: RegionId| Vec3::from_array(frame.offset(home));
-    let body = home.and_then(|home| body_tile(&bodies, &tiles, home, origin(home)).map(|b| (home, b)));
+    // A home whose tree the frame moved away from has no body here yet.
+    let body = home
+        .filter(|home| roots.drawn(*home))
+        .and_then(|home| body_tile(&bodies, &tiles, home, origin(home)).map(|b| (home, b)));
     // The sent path is done once the body stands on its end, or left with it.
     if !sent.path.is_empty() {
         let arrived = body.is_some_and(|(_, (tile, _))| sent.beyond.is_none() && sent.path.last() == Some(&tile));

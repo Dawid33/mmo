@@ -64,12 +64,17 @@ pub fn hide_cut_entities(
     mut commands: Commands,
     level: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
+    roots: Res<crate::renderer::bridge::RegionRoots>,
     mut entities: Query<(Entity, &SimEntity, &SimKind, &Transform, &mut Visibility, Option<&mut CutHidden>)>,
 ) {
     let cut = camera_cut(&level, &tiles);
     let frame = tiles.frame();
     let home = tiles.region().map(|home| home_rect(&frame, home));
     for (e, sim, kind, tf, mut vis, held) in &mut entities {
+        // Not where the frame puts it (hidden with its tree): left alone.
+        if !roots.drawn(sim.region) {
+            continue;
+        }
         let o = frame.offset(sim.region);
         let feet = tf.translation + Vec3::new(o[0], o[1] - feet_offset(kind.0), o[2]);
         let hide = hidden_by_cut(feet, cut, home);

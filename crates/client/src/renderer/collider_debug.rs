@@ -27,6 +27,7 @@ pub fn draw_collider_wireframes(
     flags: Res<DebugFlagsRes>,
     mut lines: ResMut<DebugColliderLines>,
     frame: Option<Res<crate::wrap_frame::WrapFrame>>,
+    roots: Option<Res<super::bridge::RegionRoots>>,
     mut gizmos: Gizmos,
 ) {
     if !flags.0.collider_wireframes() {
@@ -37,6 +38,10 @@ pub fn draw_collider_wireframes(
     }
     let frame = frame.as_deref().copied().unwrap_or_default();
     for (id, buf) in &lines.0 {
+        // Not for a tree the frame moved away from (`RegionRoots::drawn`).
+        if roots.as_ref().is_some_and(|r| !r.drawn(*id)) {
+            continue;
+        }
         let off = frame.offset(*id);
         let off = Vec3::new(off[0], off[1], off[2]);
         for l in buf {

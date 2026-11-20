@@ -289,14 +289,19 @@ pub fn update_height_grid(
 ) {
     for msg in msgs.read() {
         if let super::tiles::TileMirrorMsg::Reset { region, ground, .. } = msg {
-            grid.set_recipe_water(roots.alias(*region), ground);
+            // A region already released again has nothing to key.
+            if let Some(alias) = roots.alias(*region) {
+                grid.set_recipe_water(alias, ground);
+            }
         }
     }
     for entity in removed.read() {
         grid.remove_entity(entity);
     }
     for (entity, chunk, tf, sim) in &changed {
-        grid.insert_chunk(entity, world_chunk_key(tf, roots.alias(sim.region)), chunk_tops(&chunk.0));
+        if let Some(alias) = roots.alias(sim.region) {
+            grid.insert_chunk(entity, world_chunk_key(tf, alias), chunk_tops(&chunk.0));
+        }
     }
 }
 

@@ -341,7 +341,7 @@ fn drive_autopilot(
             if let Some(t) = camera {
                 // Where each region is drawn (the camera's frame), with its host.
                 let loaded: Vec<(RegionCoords, Option<HostId>)> =
-                    roots.0.keys().map(|rc| (roots.alias(*rc), region_hosts.0.get(rc).copied().flatten())).collect();
+                    roots.0.keys().filter(|rc| roots.drawn(**rc)).filter_map(|rc| Some((roots.alias(*rc)?, region_hosts.0.get(rc).copied().flatten()))).collect();
                 seam_shuttle(&mut pilot, now, &t, &loaded, kind, overshoot, &key, &send);
             }
         }

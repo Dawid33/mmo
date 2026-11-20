@@ -137,7 +137,7 @@ pub fn track_join_timeline(
             // In the frame the instance asks LOD keys in: the viewer's copy
             // and the near regions where they are drawn.
             let frame = frame.as_deref().copied().unwrap_or_default();
-            let near: BTreeSet<game::RegionCoords> = roots.0.keys().map(|rc| roots.alias(*rc)).collect();
+            let near: BTreeSet<game::RegionCoords> = roots.0.keys().filter_map(|rc| roots.alias(*rc)).collect();
             let (_, keys) = crate::instance::desired_lod(
                 frame.alias(viewer),
                 &near,

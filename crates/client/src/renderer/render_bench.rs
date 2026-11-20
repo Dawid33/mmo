@@ -723,7 +723,7 @@ fn run_benchmark(
     {
         // In the frame the LOD keys are asked in (`WrapFrame`).
         let frame = scene.frame.as_deref().copied().unwrap_or_default();
-        let near_regions = scene.roots.0.keys().map(|rc| scene.roots.alias(*rc)).collect::<BTreeSet<_>>();
+        let near_regions = scene.roots.0.keys().filter_map(|rc| scene.roots.alias(*rc)).collect::<BTreeSet<_>>();
         if snapshot_has_all_lod_keys(
             scene.hud_status.viewer_region.map(|v| frame.alias(v)),
             &near_regions,
