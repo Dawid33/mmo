@@ -77,36 +77,34 @@ pub fn chunk_tops(chunk: &Chunk) -> ChunkTops {
     if chunk.is_all_air() {
         return tops;
     }
+    // The surface is the map's chunk top (slopes as full blocks there too).
+    let surface = game::map_tile::chunk_top(chunk);
     let centre = BLOCK_VOXELS / 2;
     for bz in 0..CHUNK_BLOCKS {
         for bx in 0..CHUNK_BLOCKS {
             let (vx, vz) = (bx * BLOCK_VOXELS + centre, bz * BLOCK_VOXELS + centre);
             let column = bx + CHUNK_BLOCKS * bz;
-            let surface = chunk.column_top(vx as u32, vz as u32);
-            tops.surface[column] = surface.map_or(0, |(y, _)| (y + 1) as u16);
-            tops.ground[column] = match surface {
+            tops.surface[column] = surface.0[column].map_or(0, |(y, _)| y);
+            tops.ground[column] = match chunk.column_top(vx as u32, vz as u32) {
                 Some((y, id)) if !game::block_props().is_liquid(id) => (y + 1) as u16,
                 Some(_) => top_not(chunk, vx, vz).map_or(0, |y| (y + 1) as u16),
                 None => 0,
             };
         }
     }
-    // Slopes count as full blocks (the centre-column sample is half height on some facings).
+    // Slopes count as full blocks for the ground too (the centre-column sample is half height on some facings).
     for (bi, chisel) in &chunk.chisel {
         if game::slope::classify(chisel).is_none() {
             continue;
         }
         let id = chunk.blocks.get(*bi).id;
-        if id == BlockId::AIR {
+        if id == BlockId::AIR || game::block_props().is_liquid(id) {
             continue;
         }
         let (bx, by, bz) = bi.xyz();
         let column = bx + CHUNK_BLOCKS * bz;
         let top = ((by + 1) * BLOCK_VOXELS) as u16;
-        tops.surface[column] = tops.surface[column].max(top);
-        if !game::block_props().is_liquid(id) {
-            tops.ground[column] = tops.ground[column].max(top);
-        }
+        tops.ground[column] = tops.ground[column].max(top);
     }
     tops
 }
