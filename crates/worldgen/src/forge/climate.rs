@@ -35,15 +35,16 @@
 //!   moisture relative to the equilibrium, raised on windward slopes
 //!   (`OROGRAPHIC_RUN_M`), clamped to `rain_min`..`rain_max` of the base:
 //!   flat land far inland gets exactly the table, coasts downwind of the sea
-//!   more, lee sides less. Every smoothing length is in metres, so the field
-//!   does not depend on the cell size.
+//!   more, lee sides less. Every smoothing length is a length (metres or
+//!   degrees), never cells, so the field does not depend on the cell size.
 //! - **Planetary lengths are in degrees of latitude**: every world size is a
 //!   whole planet, so the lengths the air travels over seas and continents
-//!   (`land_depletion_deg`, `sea_recharge_deg`) and the meander's wavelength
-//!   (`meander_wavelength_deg`) scale with the world (`metres_per_degree`):
-//!   a small planet is the same planet as a large one. The lengths that
-//!   describe hills (`OROGRAPHIC_RUN_M`, the blurs, `orographic_scale_m`)
-//!   stay in metres.
+//!   (`land_depletion_deg`, `sea_recharge_deg`), the air's sideways and
+//!   along-wind mixing (`RAIN_CROSS_BLUR_DEG`, `RAIN_ALONG_BLUR_DEG`) and the
+//!   meander's wavelength (`meander_wavelength_deg`) scale with the world
+//!   (`metres_per_degree`): a small planet is the same planet as a large one.
+//!   The lengths that describe hills (`OROGRAPHIC_RUN_M`, `TERRAIN_BLUR_M`,
+//!   `orographic_scale_m`) stay in metres.
 //!
 //! Precipitation weights discharge (`discharge_weight`), so wet flanks grow
 //! bigger rivers and erode faster — Dwarf Fortress computes rain shadows AFTER
@@ -95,11 +96,13 @@ pub const OROGRAPHIC_RUN_M: f64 = 6_000.0;
 /// Heights are blurred over this radius (m) before taking windward slopes,
 /// so rain follows ranges, not individual gullies.
 const TERRAIN_BLUR_M: f64 = 400.0;
-/// Cross-wind blur radius of the rain field (m; the box is twice as wide):
-/// air mixes sideways.
-const RAIN_CROSS_BLUR_M: f64 = 1_500.0;
-/// Along-wind blur radius of the rain field (m).
-const RAIN_ALONG_BLUR_M: f64 = 500.0;
+/// Cross-wind blur radius of the rain field (deg of latitude; the box is
+/// twice as wide): air mixes sideways. 1,500 m on a Large world (557.5 m per
+/// degree).
+const RAIN_CROSS_BLUR_DEG: f64 = 2.69;
+/// Along-wind blur radius of the rain field (deg of latitude): 500 m on a
+/// Large world.
+const RAIN_ALONG_BLUR_DEG: f64 = 0.897;
 
 /// The climate fields of one grid, row-major like `World::h`.
 #[derive(Clone, Debug, PartialEq)]
@@ -289,9 +292,12 @@ pub fn compute_with_lakes(w: &World, p: &ForgeParams, lakes: &[bool]) -> Climate
     Climate { temperature_c, precip_mm, latitude_deg }
 }
 
-/// Blur radius (cells) of `metres` on a `dx` grid.
+/// Blur radius (cells) of `metres` on a `dx` grid: the nearest whole number
+/// of cells, but none (no blur) under one cell — a radius of a fraction of a
+/// cell must not become a whole cell's box.
 fn radius_cells(metres: f64, dx: f64) -> usize {
-    (metres / dx).round() as usize
+    let cells = metres / dx;
+    if cells < 1.0 { 0 } else { cells.round() as usize }
 }
 
 /// Precipitation per cell relative to the latitude base, clamped and scaled
@@ -361,7 +367,8 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
     // Blur over the land only (the sea's zero would dry the coasts).
     let rain: Vec<f64> = rows.concat();
     let land: Vec<f64> = w.ocean.iter().map(|&o| if o { 0.0 } else { 1.0 }).collect();
-    let (cross, along) = (radius_cells(RAIN_CROSS_BLUR_M, dx), radius_cells(RAIN_ALONG_BLUR_M, dx));
+    let (cross, along) =
+        (radius_cells(RAIN_CROSS_BLUR_DEG * per_degree, dx), radius_cells(RAIN_ALONG_BLUR_DEG * per_degree, dx));
     let blur =
         |v: &[f64]| box_blur_rows(&box_blur_rows(v, nx, nz, cross, false, wrap_x), nx, nz, along, true, wrap_x);
     let (rain_sum, land_share) = (blur(&rain), blur(&land));

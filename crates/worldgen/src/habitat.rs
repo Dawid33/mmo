@@ -157,6 +157,11 @@ pub fn coast_distance_m<T: Copy + Into<f64>>(height: &[T], nx: usize, nz: usize,
 /// before it was relaxed.
 pub const CHAMFER_WRAP_EXTRA_PASSES: usize = 2;
 
+/// A wrapping [`coast_distance_by`] whose pass-pair cap ran out counts as
+/// settled (debug check) when one more pair lowers no distance by more than
+/// this share of itself: about 80 f32 roundings, far below a block.
+const CHAMFER_SETTLED_SHARE: f32 = 1e-5;
+
 /// [`coast_distance_m`] with the sea test as a closure over the raster index
 /// (`ForgedWorld` reads its quantised height without decoding a copy).
 pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, wrap_x: bool, is_sea: impl Fn(usize) -> bool) -> Vec<f32> {
@@ -206,12 +211,20 @@ pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, wrap_x: bool, is_sea
                 break;
             }
         }
-        // The cap is a bound, not a proof: a debug build checks that one
-        // more pass pair would change nothing. That pair runs on the real
-        // state, which is safe: it only gets to run when the cap ran out, and
-        // then either it changes nothing (the assert holds, the state is the
-        // release build's) or the assert fails.
-        debug_assert!(settled || !pair(&mut d), "chamfer distance not settled after the capped pass pairs");
+        // The cap is a bound, not a proof: when it ran out a debug build
+        // checks that one more pass pair (on a copy, so a debug build's
+        // distances stay the release build's) lowers no distance by more than
+        // rounding: equal chamfer paths summed in another order differ in the
+        // last bits (seen in the forge's `nearest_water`, the same pattern).
+        if cfg!(debug_assertions) && !settled {
+            let mut more = d.clone();
+            pair(&mut more);
+            let moved = d.iter().zip(&more).map(|(a, b)| (a - b) / a.max(axis)).fold(0.0, f32::max);
+            assert!(
+                moved <= CHAMFER_SETTLED_SHARE,
+                "chamfer distance not settled after the capped pass pairs: one more lowers it by {moved} of itself"
+            );
+        }
     }
     d
 }
