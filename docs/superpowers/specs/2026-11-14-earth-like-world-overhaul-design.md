@@ -161,7 +161,9 @@ Claude's calls (each is a proposal until this document is approved):
    not capped; the menu shows the estimate and lets the player go. Memory is a physical limit, not a
    budget: the existing check against the machine's RAM stays (Large at 16 m is about 14 GB by the
    forge's model). Which size and cell is the default is confirmed from the Phase 0 numbers. Exact sizes
-   are snapped as the wrap plan's D3 requires.
+   are snapped as the wrap plan's D3 requires. (As built 2026-11-20: no snapping — every named size is already
+   a whole number of 512 m, and an explicit width that is not, or that is under 8,192 m, is REFUSED at forge time
+   and at load.)
 
    What a smaller world means: every size is a whole planet, pole to pole, so climate bands, continents
    and mountain belts shrink with it (they are map fractions), while rivers, valleys and lakes stay true

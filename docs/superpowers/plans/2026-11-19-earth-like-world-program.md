@@ -129,9 +129,9 @@ The Phase 1a plan and the design were written against the tree and the rules of 
 | # | Phase | Status | Plan | Evidence |
 |---|---|---|---|---|
 | 0 | Resume: review Task 2; re-base the 1a plan; amend the design | DONE 2026-11-19 | `2026-11-14-planet-frame-1a.md` (re-based, Tasks 3–19) | Evidence § Phase 0 |
-| 1a | Planet frame: 2:1 sizes, east–west wrap (role `all`; closed seam elsewhere), polar seas, one layout, old options deleted | IN PROGRESS (2 of 19 tasks) | `2026-11-14-planet-frame-1a.md` (re-based 2026-11-19) | — |
-| 1b | The stored monthly-climate family, filled by a placeholder seasonal curve | TODO | — | — |
-| 2 | Plates and aged relief | TODO | — | — |
+| 1a | Planet frame: 2:1 sizes, east–west wrap (role `all`; closed seam elsewhere), polar seas, one layout, old options deleted | DONE 2026-11-20 | `2026-11-14-planet-frame-1a.md` (19 tasks; "As built"); commits `804d85c0` … `4176aacd` (Tasks 1–2: `8d6b29a2`, `77f8e8a3`) | Evidence § Phase 1a |
+| 1b | The stored monthly-climate family, filled by a placeholder seasonal curve | PLANNED 2026-11-20 (builder check settled) | `2026-11-20-monthly-climate-container-1b.md` | — |
+| 2 | Plates and aged relief | PLANNED 2026-11-20 (builder check settled; re-check Phase 1b's symbols at dispatch) | `2026-11-20-plates-and-aged-relief-2.md` | — |
 | 3 | Monthly climate | TODO | — | — |
 | 4 | Water and ice | TODO | — | — |
 | 5 | Biomes | TODO | — | — |
@@ -490,3 +490,16 @@ which changes no forged byte.
   `scene_hash_golden::` / `tree_fall::` are `#[ignore]`d in `just test` (not run). Workspace clippy is not a stage
   of `just test` (its known failures in `block-mesh`, `bbmodel`, `macros` are in crates Phase 1a did not touch).
 - Status: the controller sets the Status row after the whole-plan review.
+
+**The close (2026-11-20).** Whole-plan review by three area reviewers on the most capable model (sim and server;
+client; worldgen and tools): no Critical finding; one Important (a `justfile` `forge-bench` example the forge
+refused). One fix wave of twelve small items (commits `a058d0cf` … `4176aacd`), re-reviewed: all addressed, no new
+breakage, no test added; the 8-seed dev report is identical before and after the wave and the gate passes
+untouched. The committed tree alone — an export of `4176aacd` without the owner's uncommitted work — type-checks
+(`cargo check -p game -p worldgen -p world-store -p server -p client --lib --bins --examples`: 0 errors). What the
+review established for the phases that follow: the runtime path is exact arithmetic (no transcendental reaches
+`forged.rs`, generation or trees); the quality gate guards land share, hypsometry and rivers ONLY — the seam, the
+wrap, the polar seas, biomes, tiles and the sampler rest on `forge_proto --report`; under a closed seam the region
+one past the edge can still be subscribed and is generated as a copy of the far edge (a Known limit, Phase 7's);
+`SocietyGrid::world_id` was made independent of `wrap_x` so a world's history id does not depend on the role that
+opens it. Rulings and accepted leftovers: the plan's "As built".
