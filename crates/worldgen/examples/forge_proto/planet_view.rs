@@ -127,19 +127,32 @@ fn lines(start: &PlateState, end: &PlateState, stage_ms: f64) -> Vec<(String, St
     ]
 }
 
-/// crc32 of the final `plate`, `crust` and the little-endian bytes of
-/// `born_my`, `strength` and `kind`, in that order: equal crcs = the same planet.
+/// crc32 of every per-cell field of the final state that persists across
+/// steps, in order: `plate`, `crust`, then the little-endian bytes of
+/// `born_my`, `base_m`, `strength`, `orogeny_my`, `kind`, `fold`, `mark_ttl`,
+/// and per cell with a live mark (`mark_ttl > 0`, row-major) its `contact`,
+/// `over`, `under`, `speed`, `relief`, `dir` (a dead mark's fields are never
+/// read): equal crcs = the same planet.
 fn state_crc(s: &PlateState) -> String {
     let mut h = crc32fast::Hasher::new();
     h.update(&s.plate);
     h.update(&s.crust);
-    for v in &s.born_my {
-        h.update(&v.to_le_bytes());
-    }
-    for v in &s.strength {
-        h.update(&v.to_le_bytes());
+    for field in [&s.born_my, &s.base_m, &s.strength, &s.orogeny_my] {
+        for v in field.iter() {
+            h.update(&v.to_le_bytes());
+        }
     }
     h.update(&s.kind);
+    for v in s.fold.iter().flatten() {
+        h.update(&v.to_le_bytes());
+    }
+    h.update(&s.mark_ttl);
+    for c in (0..PLANET_CELLS).filter(|&c| s.mark_ttl[c] > 0) {
+        h.update(&[s.mark_contact[c] as u8, s.mark_over[c], s.mark_under[c]]);
+        for v in [s.mark_speed[c], s.mark_relief[c], s.mark_dir[c][0], s.mark_dir[c][1]] {
+            h.update(&v.to_le_bytes());
+        }
+    }
     format!("{:08x}", h.finalize())
 }
 

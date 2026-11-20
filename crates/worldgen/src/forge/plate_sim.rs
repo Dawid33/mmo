@@ -123,6 +123,24 @@ pub struct PlateState {
     pub kind: Vec<u8>,
     /// Unit direction of convergence (east, south); `[0, 0]` = none.
     pub fold: Vec<[f32; 2]>,
+    /// The cell's mark (a subduction front or a collision contact): steps
+    /// left, 0 = no mark. The other `mark_*` fields of a cell are read only
+    /// while its `mark_ttl > 0` (they are not cleared when it falls to 0).
+    /// A mark moves with its cell's record and is dropped with it.
+    pub mark_ttl: Vec<u8>,
+    /// A collision contact (`true`) or a subduction front.
+    pub mark_contact: Vec<bool>,
+    /// The overriding plate (the winner's) and the plate going under.
+    pub mark_over: Vec<u8>,
+    pub mark_under: Vec<u8>,
+    /// `min(1, |vel_under − vel_over| / 2)`: a RELATIVE speed as a share of
+    /// the largest possible (two plates each capped at 1 cell per step), not
+    /// Ruling 1's per-plate cap.
+    pub mark_speed: Vec<f32>,
+    /// Cortial's `h(z̃) = z̃²` of the cell that went under (Ruling 12).
+    pub mark_relief: Vec<f32>,
+    /// `unit(vel_under − vel_over)` (east, south); `[0, 0]` for equal velocities.
+    pub mark_dir: Vec<[f32; 2]>,
     /// Per plate: cells per step (east, south), each component in −1 … 1.
     pub vel: Vec<[f64; 2]>,
     /// Per plate: the fractional remainder of its motion.
@@ -146,6 +164,13 @@ struct Next {
     orogeny_my: Vec<f32>,
     kind: Vec<u8>,
     fold: Vec<[f32; 2]>,
+    mark_ttl: Vec<u8>,
+    mark_contact: Vec<bool>,
+    mark_over: Vec<u8>,
+    mark_under: Vec<u8>,
+    mark_speed: Vec<f32>,
+    mark_relief: Vec<f32>,
+    mark_dir: Vec<[f32; 2]>,
     /// Per destination: the best source cell seen (`NO_SOURCE` = none).
     winner: Vec<u32>,
     /// Per SOURCE cell: its destination this step (`NO_DEST` = past a pole).
@@ -351,6 +376,13 @@ impl PlateState {
             orogeny_my,
             kind,
             fold,
+            mark_ttl: vec![0; PLANET_CELLS],
+            mark_contact: vec![false; PLANET_CELLS],
+            mark_over: vec![0; PLANET_CELLS],
+            mark_under: vec![0; PLANET_CELLS],
+            mark_speed: vec![0.0; PLANET_CELLS],
+            mark_relief: vec![0.0; PLANET_CELLS],
+            mark_dir: vec![[0.0; 2]; PLANET_CELLS],
             vel,
             acc: vec![[0.0; 2]; PLATES_MAX],
             alive,
@@ -399,6 +431,13 @@ impl PlateState {
             v.resize(PLANET_CELLS, 0.0);
         }
         next.fold.resize(PLANET_CELLS, [0.0; 2]);
+        for v in [&mut next.mark_ttl, &mut next.mark_over, &mut next.mark_under] {
+            v.resize(PLANET_CELLS, 0);
+        }
+        next.mark_contact.resize(PLANET_CELLS, false);
+        next.mark_speed.resize(PLANET_CELLS, 0.0);
+        next.mark_relief.resize(PLANET_CELLS, 0.0);
+        next.mark_dir.resize(PLANET_CELLS, [0.0; 2]);
         // Pass A, first loop (row-major): each source's destination, once
         // (`NO_DEST` past a pole; the row wrap by a compare), and the per-plate
         // snapshot the contest reads. Every pass below works on local slices
@@ -412,6 +451,13 @@ impl PlateState {
             orogeny_my: n_orogeny,
             kind: n_kind,
             fold: n_fold,
+            mark_ttl: n_ttl,
+            mark_contact: n_contact,
+            mark_over: n_over,
+            mark_under: n_under,
+            mark_speed: n_speed,
+            mark_relief: n_relief,
+            mark_dir: n_dir,
             winner,
             dest,
         } = &mut self.next;
@@ -496,6 +542,24 @@ impl PlateState {
             &mut n_kind[..PLANET_CELLS],
             &mut n_fold[..PLANET_CELLS],
         );
+        let (ttl, contact, over, under, speed, relief, dir) = (
+            &self.mark_ttl[..PLANET_CELLS],
+            &self.mark_contact[..PLANET_CELLS],
+            &self.mark_over[..PLANET_CELLS],
+            &self.mark_under[..PLANET_CELLS],
+            &self.mark_speed[..PLANET_CELLS],
+            &self.mark_relief[..PLANET_CELLS],
+            &self.mark_dir[..PLANET_CELLS],
+        );
+        let (n_ttl, n_contact, n_over, n_under, n_speed, n_relief, n_dir) = (
+            &mut n_ttl[..PLANET_CELLS],
+            &mut n_contact[..PLANET_CELLS],
+            &mut n_over[..PLANET_CELLS],
+            &mut n_under[..PLANET_CELLS],
+            &mut n_speed[..PLANET_CELLS],
+            &mut n_relief[..PLANET_CELLS],
+            &mut n_dir[..PLANET_CELLS],
+        );
         let mut counters = self.counters.clone();
         counters.polar_lost_oceanic += lost[0];
         counters.polar_lost_continental += lost[1];
@@ -515,6 +579,19 @@ impl PlateState {
                 n_orogeny[d] = orogeny_my[c];
                 n_kind[d] = kind[c];
                 n_fold[d] = fold[c];
+                // The step's ttl fall (step list item 5) is taken here: every
+                // mark that moves loses one step; one written by this step's
+                // consumptions (below) is written after, at the full ttl.
+                let t = ttl[c];
+                n_ttl[d] = t.saturating_sub(1);
+                if t > 1 {
+                    n_contact[d] = contact[c];
+                    n_over[d] = over[c];
+                    n_under[d] = under[c];
+                    n_speed[d] = speed[c];
+                    n_relief[d] = relief[c];
+                    n_dir[d] = dir[c];
+                }
             } else if crust[c] == CrustKind::Continental as u8 {
                 counters.collided += 1;
             } else {
@@ -537,6 +614,7 @@ impl PlateState {
             n_orogeny[d] = f32::NEG_INFINITY;
             n_kind[d] = OrogenyKind::None as u8;
             n_fold[d] = [0.0; 2];
+            n_ttl[d] = 0;
             counters.created += 1;
         }
         self.counters = counters;
@@ -550,6 +628,13 @@ impl PlateState {
         std::mem::swap(&mut self.orogeny_my, &mut next.orogeny_my);
         std::mem::swap(&mut self.kind, &mut next.kind);
         std::mem::swap(&mut self.fold, &mut next.fold);
+        std::mem::swap(&mut self.mark_ttl, &mut next.mark_ttl);
+        std::mem::swap(&mut self.mark_contact, &mut next.mark_contact);
+        std::mem::swap(&mut self.mark_over, &mut next.mark_over);
+        std::mem::swap(&mut self.mark_under, &mut next.mark_under);
+        std::mem::swap(&mut self.mark_speed, &mut next.mark_speed);
+        std::mem::swap(&mut self.mark_relief, &mut next.mark_relief);
+        std::mem::swap(&mut self.mark_dir, &mut next.mark_dir);
         self.step += 1;
     }
 
@@ -560,9 +645,9 @@ impl PlateState {
 }
 
 /// A plate's mean `born_my` over its oceanic cells (`sum` over `count`);
-/// `NEG_INFINITY` for a plate with none (never NaN). The sum is exact in
-/// `f64` (at most 131,072 `f32` values below 2^12 in magnitude), so it does
-/// not depend on the order it was added in.
+/// `NEG_INFINITY` for a plate with none (never NaN). The `f64` sum is NOT
+/// exact (rounding depends on the order of the additions); it is the same on
+/// every run because pass A adds the cells in a pinned order, row-major.
 fn ocean_mean_born(sum: f64, count: u32) -> f64 {
     if count == 0 { f64::NEG_INFINITY } else { sum / f64::from(count) }
 }
