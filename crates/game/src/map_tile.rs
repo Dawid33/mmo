@@ -65,14 +65,16 @@ impl MapTileKey {
     }
 }
 
-/// The level at which the world's whole extent lies inside one tile.
+/// The top level of the world's pyramid: the first whose tile edge covers the world's longer side (the
+/// tile grid is aligned at 0, so the whole world then lies within at most 2 × 2 tiles of it).
 pub fn top_level(map: &WorldMap) -> u8 {
-    let rb = REGION_BLOCKS as i64;
-    let (x0, z0) = (map.origin.x as i64 * rb, map.origin.z as i64 * rb);
-    let (x1, z1) = (x0 + map.width.max(1) as i64 * rb - 1, z0 + map.height.max(1) as i64 * rb - 1);
-    (0..MAP_LEVEL_LIMIT)
-        .find(|&level| MapTileKey::containing(level, x0, z0) == MapTileKey::containing(level, x1, z1))
-        .unwrap_or(MAP_LEVEL_LIMIT)
+    top_level_of(map.extent())
+}
+
+/// [`top_level`] of an extent.
+pub fn top_level_of(e: crate::MapExtent) -> u8 {
+    let side = e.width.max(e.height).max(1) as i64 * REGION_BLOCKS as i64;
+    (0..MAP_LEVEL_LIMIT).find(|&level| (MAP_TILE_SAMPLES as i64) << level >= side).unwrap_or(MAP_LEVEL_LIMIT)
 }
 
 /// Bits of [`MapSample::flags`].

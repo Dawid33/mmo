@@ -131,7 +131,6 @@ pub struct MapTiles {
     stamp: u64,
     /// This frame's wanted keys, in the order asked (each view asks nearest its centre first).
     wanted: Vec<MapTileKey>,
-    in_flight: HashMap<MapTileKey, Task<Answer>>,
     retry_at: HashMap<MapTileKey, f64>,
     /// The source being opened (local), or the time to try again.
     #[cfg(not(target_arch = "wasm32"))]
@@ -143,8 +142,12 @@ pub struct MapTiles {
     fetches: u64,
     failures: u64,
     logged_at: f64,
-    /// The HTTP source's fetcher, and the keys it has been asked for and not answered yet.
+    /// The HTTP source's fetcher, and the keys it (or the local one) has been asked for and not
+    /// answered yet.
     http: Option<super::http::HttpFetcher>,
+    /// The local source's own worker threads (native).
+    #[cfg(not(target_arch = "wasm32"))]
+    local: Option<super::local::LocalFetcher>,
     http_waiting: std::collections::HashSet<MapTileKey>,
     /// Tiles a served answer replaced (levels a local painting covers): painted again in full.
     replaced: Vec<MapTileKey>,
@@ -270,7 +273,6 @@ fn pause_map_tiles(world: &mut World) {
     if let Some(mut tiles) = world.get_resource_mut::<MapTiles>() {
         tiles.active = false;
         tiles.wanted.clear();
-        tiles.in_flight.clear();
         tiles.http_waiting.clear();
         tiles.refresh = None;
     }
@@ -306,6 +308,7 @@ fn follow_map_world(world: Option<Res<MapWorld>>, mut tiles: ResMut<MapTiles>, i
                 match opened {
                     Ok(source) => {
                         info!("[map] local source open: {}", store.display());
+                        tiles.local = Some(super::local::LocalFetcher::start(source.clone()));
                         tiles.source = MapSource::Local(source);
                     }
                     Err(e) => {
@@ -347,40 +350,6 @@ fn open_local(store: &std::path::Path) -> Result<Arc<map_tiles::TileSource>, Str
     Ok(Arc::new(map_tiles::TileSource::forged(handle, Arc::new(world), mats, map_tiles::TileSourceConfig::CLIENT)))
 }
 
-/// One fetch on a worker: the source's answer, decoded.
-#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-fn spawn_fetch(source: &MapSource, key: MapTileKey, have: Option<u64>) -> Option<Task<Answer>> {
-    match source {
-        #[cfg(not(target_arch = "wasm32"))]
-        MapSource::Local(src) => {
-            let src = src.clone();
-            Some(AsyncComputeTaskPool::get().spawn(async move {
-                match src.tile(key, have) {
-                    Ok(map_tiles::Fetched::Unchanged) => Answer::Unchanged,
-                    Ok(map_tiles::Fetched::Tile { etag, bytes }) => match MapTile::decode(&bytes) {
-                        Ok(tile) => Answer::Tile { etag, tile },
-                        Err(e) => Answer::Failed(e.to_string()),
-                    },
-                    Err(e) => Answer::Failed(e.to_string()),
-                }
-            }))
-        }
-        // The HTTP source asks through its fetcher (`http.rs`).
-        MapSource::Http { .. } | MapSource::None => None,
-    }
-}
-
-fn spawn_refresh(source: &MapSource) -> Option<Task<Result<(), String>>> {
-    match source {
-        #[cfg(not(target_arch = "wasm32"))]
-        MapSource::Local(src) => {
-            let src = src.clone();
-            Some(AsyncComputeTaskPool::get().spawn(async move { src.refresh_versions().map_err(|e| e.to_string()) }))
-        }
-        MapSource::Http { .. } | MapSource::None => None,
-    }
-}
-
 /// The three textures of `tile`.
 fn upload(images: &mut Assets<Image>, tile: &MapTile) -> GpuTile {
     let n = MAP_TILE_SAMPLES;
@@ -418,17 +387,15 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
     let now = time.elapsed_secs_f64();
     let tiles = &mut *tiles;
     // Answers.
-    let mut done = Vec::new();
-    for (key, task) in tiles.in_flight.iter_mut() {
-        if let Some(answer) = block_on(future::poll_once(task)) {
-            done.push((*key, answer));
-        }
-    }
+    let mut done: Vec<(MapTileKey, Answer)> = Vec::new();
     if let Some(http) = tiles.http.as_ref() {
         done.extend(http.answers());
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(local) = tiles.local.as_ref() {
+        done.extend(local.answers());
+    }
     for (key, answer) in done {
-        tiles.in_flight.remove(&key);
         tiles.http_waiting.remove(&key);
         match answer {
             Answer::Unchanged => {
@@ -479,7 +446,10 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
     }
     if tiles.refresh.is_none() && now - tiles.refreshed_at >= MAP_REVALIDATE_MS as f64 / 1000.0 {
         tiles.refreshed_at = now;
-        tiles.refresh = spawn_refresh(&tiles.source);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(local) = tiles.local.as_ref() {
+            local.refresh();
+        }
     }
     // Requests, in the order wanted.
     let wanted = std::mem::take(&mut tiles.wanted);
@@ -489,7 +459,10 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
         let have = match tiles.entries.get_mut(&key) {
             Some(e) => {
                 e.used = stamp;
-                let stale = e.real && now - e.fetched_at >= MAP_REVALIDATE_MS as f64 / 1000.0;
+                // Every tile stored terrain may cover is re-asked, a pristine one too: another
+                // player's build (or a save of a region first loaded pristine) shows within this.
+                let revalidated = e.real || key.level <= super::paint::MAP_PAINT_MAX_LEVEL;
+                let stale = revalidated && now - e.fetched_at >= MAP_REVALIDATE_MS as f64 / 1000.0;
                 if !stale {
                     continue;
                 }
@@ -497,8 +470,7 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
             }
             None => None,
         };
-        let busy = tiles.in_flight.len() + tiles.http_waiting.len();
-        if busy >= MAP_FETCH_IN_FLIGHT || tiles.in_flight.contains_key(&key) || tiles.http_waiting.contains(&key) {
+        if tiles.http_waiting.len() >= MAP_FETCH_IN_FLIGHT || tiles.http_waiting.contains(&key) {
             continue;
         }
         if tiles.retry_at.get(&key).is_some_and(|&t| now < t) {
@@ -510,9 +482,12 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
             tiles.http_waiting.insert(key);
             continue;
         }
-        if let Some(task) = spawn_fetch(&tiles.source, key, have) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (MapSource::Local(_), Some(local)) = (&tiles.source, tiles.local.as_ref()) {
+            local.request(key, have);
             tiles.fetches += 1;
-            tiles.in_flight.insert(key, task);
+            tiles.http_waiting.insert(key);
+            continue;
         }
     }
     tiles.wanted = wanted;

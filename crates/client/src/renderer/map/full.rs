@@ -55,6 +55,11 @@ pub fn layer_kind(index: i32) -> MapLayerKind {
 #[derive(Component)]
 pub struct FullMapView;
 
+/// Whether the full map is open: it is drawn beneath every Slint layer, so the HUD hides meanwhile
+/// (`slint_overlay::FrontendHide::Always`).
+#[derive(Resource, Default)]
+pub struct FullMapOpen(pub bool);
+
 enum Input {
     Drag(f32, f32),
     Wheel(f32, f32, f32),
@@ -78,7 +83,8 @@ pub fn connect(ui: &GameUi, world: &mut World) {
 }
 
 pub(super) fn build(app: &mut App) {
-    app.add_systems(Update, drive_full_map);
+    use crate::session::SessionResetExt as _;
+    app.add_session_reset::<FullMapOpen>().add_systems(Update, drive_full_map);
 }
 
 /// The player in world blocks (x, z; the render frame's unwrapped copy): the body, else the commander
@@ -126,6 +132,7 @@ fn drive_full_map(
     cam: Option<Res<crate::renderer::commander::CommanderCamera>>,
     mut pushed: SessionLocal<Pushed>,
     time: Res<Time>,
+    mut full_open: ResMut<FullMapOpen>,
 ) {
     let (Some(slint), Some(inputs)) = (slint, inputs) else { return };
     let Ok(mut view) = views.single_mut() else {
@@ -142,6 +149,9 @@ fn drive_full_map(
     view.rect = Rect::from_corners(origin * scale, (origin + size) * scale);
     view.layer = layer_kind(ui.get_map_layer());
     view.visible = open;
+    if full_open.0 != open {
+        full_open.0 = open;
+    }
     let max_m = state.map.as_ref().map_or(1.0, |m| (1u64 << top_level_of(m)) as f32);
     if open && !pushed.open {
         // Opening: centred on the player at the minimap's zoom.

@@ -410,12 +410,12 @@ Nothing was run in a window, on the twin or on orion: every hand check is owed (
 
 | Part | Where | What differs from §5 |
 |---|---|---|
-| Tile types | `game::map_tile` | `MapTileKey::regions()` (not a free `tile_regions`: the root glob has one); `MapTileDecodeError`. |
+| Tile types | `game::map_tile` | `MapTileKey::regions()` (not a free `tile_regions`: the root glob has one); `MapTileDecodeError`; `top_level` = the first level whose tile edge covers the world's longer side (the grid is aligned at 0: a world across it never fits one tile). |
 | Store | `chunks.top`, migration `0021_chunk_tops`; `StoreHandle::region_tops` | Plan departure 1: a chunk's own top beside the chunk, not a `region_surface` row. |
 | Worldgen | `worldgen::surface` | Levels 0–2 read one lattice patch (level 0 is generation's top); levels ≥ 3 read each sample exactly (`forged::PointPatch`): a level-9 patch would hold ~10⁹ corners. |
 | Reader | `crates/map-tiles` | Region tops cached per (region, version); the overlay re-takes water depth over the new top. |
 | Client | `renderer/map/` (`store`, `palette`, `views`, `pass`, `full`, `paint`, `disk`, `http`), `map_tile.wgsl` | The full map's view is a transparent hole BESIDE a side-panel `FrameFace` (its base is opaque); the hole is `#00000001` (pointer ownership needs alpha > 0). Levels 1–3 are painted from the height grid directly, not downsampled. Site markers stand on their region's landing derived on the client (`SiteMarker` unchanged: no wire change). |
-| Server | `server/src/map_api.rs` | Unauthenticated (owner). Also on a plain HTTP/1.1 port (`VOXEL_MAP_BIND`, 6470 in the pod): nginx cannot proxy to the API's HTTP/2. `immutable` only above level 3. |
+| Server | `server/src/map_api.rs` | Unauthenticated (owner). Also on a plain HTTP/1.1 port (`VOXEL_MAP_BIND`, 6470 in the pod): nginx cannot proxy to the API's HTTP/2. Every answer `no-cache`: the etag carries the forge's identity (a re-forge keeps the world id and URL). Keys refused above the top level + 1 and beyond one world period in x; server caches 32 MiB of tiles and 64 region tops (a 512Mi pod). |
 | Deploy | `deploy/images/web/nginx.conf`, `deploy/modules/world/{coordinator,web,main}.tf`, `scripts/twin_check.sh` 8b | `limit_req` 60 r/s, burst 240, per client address; only GET tiles forwarded. |
 | Login | `worlds.map_url` (migration 0005), `world add --map-url` | Also in the join ticket. |
 | Removed | `tile_map::{rasterize, MAP_TILE_PX, MAP_GRID_PX, play_blocker}`, `rebuild_minimap_base`, `minimap-base`, `map-image`, `play_region`, `PlayRefusal` | `PlayRegion` / `PlayRefused` stay as unsent variants (`PlayRefused(RegionCoords)`). |

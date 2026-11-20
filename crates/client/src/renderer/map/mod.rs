@@ -8,6 +8,8 @@
 pub mod disk;
 pub mod full;
 mod http;
+#[cfg(not(target_arch = "wasm32"))]
+mod local;
 pub mod paint;
 pub mod palette;
 pub mod pass;

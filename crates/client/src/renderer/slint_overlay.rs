@@ -122,7 +122,8 @@ pub enum FrontendHide {
     /// Always drawn (the frontend itself).
     #[default]
     Never,
-    /// Hidden while the frontend owns the screen (the HUD).
+    /// Hidden while the frontend owns the screen (the HUD), and under the open full world map, which is
+    /// drawn beneath every layer (`renderer/map`): the HUD would show through its view.
     Always,
     /// Hidden while the frontend owns the screen, except over the arrival map
     /// ([`arrival_map_shown`]): the game UI, whose world map is the start screen.
@@ -137,7 +138,11 @@ fn frontend_hides(
     state: Option<&State<AppState>>,
     in_play: Option<&InPlay>,
     world_map: Option<&WorldMapState>,
+    full_map_open: bool,
 ) -> bool {
+    if mode == FrontendHide::Always && full_map_open {
+        return true;
+    }
     let Some(state) = state.map(|s| *s.get()) else { return false };
     let in_play = in_play.is_some_and(|e| e.0);
     let map_arrived = world_map.is_some_and(|m| m.map.is_some());
@@ -924,6 +929,7 @@ fn slint_input<C: ComponentHandle + 'static>(
     in_play: Option<Res<InPlay>>,
     world_map: Option<Res<WorldMapState>>,
     wish: Option<Res<OverlayScale>>,
+    full_map: Option<Res<super::map::full::FullMapOpen>>,
 ) {
     let pointer = pointer.get();
     let Some(mut slint) = slint else { return };
@@ -935,7 +941,8 @@ fn slint_input<C: ComponentHandle + 'static>(
     );
     let scale = window.scale_factor() * slint.ui_scale;
     slint.overlay.resize(window.physical_width(), window.physical_height(), scale);
-    if frontend_hides(slint.hidden_by_frontend, state.as_deref(), in_play.as_deref(), world_map.as_deref()) {
+    let full_map_open = full_map.is_some_and(|m| m.0);
+    if frontend_hides(slint.hidden_by_frontend, state.as_deref(), in_play.as_deref(), world_map.as_deref(), full_map_open) {
         // The frontend has the screen: nothing of ours is under the pointer.
         buttons.clear();
         wheel.clear();
@@ -1843,9 +1850,11 @@ pub(crate) fn render_slint_layer<C: ComponentHandle + 'static>(
     state: Option<Res<State<AppState>>>,
     in_play: Option<Res<InPlay>>,
     world_map: Option<Res<WorldMapState>>,
+    full_map: Option<Res<super::map::full::FullMapOpen>>,
 ) {
     let Some(mut slint) = slint else { return };
-    let hidden = frontend_hides(slint.hidden_by_frontend, state.as_deref(), in_play.as_deref(), world_map.as_deref());
+    let full_map_open = full_map.is_some_and(|m| m.0);
+    let hidden = frontend_hides(slint.hidden_by_frontend, state.as_deref(), in_play.as_deref(), world_map.as_deref(), full_map_open);
     if hidden {
         if !slint.blanked {
             if let Some(mut image) = images.get_mut(&slint.target) {

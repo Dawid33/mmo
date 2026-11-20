@@ -18,12 +18,15 @@ use worldgen::material::Materials;
 /// Stored chunk tops are overlaid on levels up to this one (8 m per sample); above it a tile is
 /// worldgen's alone (spec §9, decision 3).
 pub const MAP_EDIT_MAX_LEVEL: u8 = 3;
-/// The tile cache of a serving process (bytes of encoded tiles).
-pub const MAP_TILE_CACHE_BYTES_SERVER: usize = 256 << 20;
+/// The tile cache of a serving process (bytes of encoded tiles): it shares a coordinator pod (512Mi) with
+/// the forged world and the coordinator's own state.
+pub const MAP_TILE_CACHE_BYTES_SERVER: usize = 32 << 20;
 /// The tile cache of a client's local source.
 pub const MAP_TILE_CACHE_BYTES_CLIENT: usize = 128 << 20;
-/// Regions whose combined tops are kept.
+/// Regions whose combined tops are kept by a client (each ~6 B per block column).
 pub const MAP_REGION_TOPS_CACHE: usize = 512;
+/// … and by a serving process.
+pub const MAP_REGION_TOPS_CACHE_SERVER: usize = 64;
 
 const EDGE: usize = MAP_TILE_SAMPLES as usize;
 const RB: usize = REGION_BLOCKS;
@@ -36,7 +39,7 @@ pub struct TileSourceConfig {
 
 impl TileSourceConfig {
     pub const SERVER: TileSourceConfig =
-        TileSourceConfig { cache_bytes: MAP_TILE_CACHE_BYTES_SERVER, region_tops_cache: MAP_REGION_TOPS_CACHE };
+        TileSourceConfig { cache_bytes: MAP_TILE_CACHE_BYTES_SERVER, region_tops_cache: MAP_REGION_TOPS_CACHE_SERVER };
     pub const CLIENT: TileSourceConfig =
         TileSourceConfig { cache_bytes: MAP_TILE_CACHE_BYTES_CLIENT, region_tops_cache: MAP_REGION_TOPS_CACHE };
 }
@@ -80,6 +83,9 @@ type RegionTop = Vec<Option<(i16, BlockId)>>;
 pub struct TileSource {
     store: StoreHandle,
     terrain: Terrain,
+    /// The world's identity in every etag (the forged world's content crc, the procedural seed): a
+    /// re-forge under the same id and URL changes every tile's etag, so no cache serves the old world.
+    tag: u64,
     mats: Materials,
     /// Every stored region's `terrain_version` (`None` until the first read).
     versions: RwLock<Option<Arc<BTreeMap<RegionCoords, u64>>>>,
@@ -100,11 +106,6 @@ impl TileSource {
         TileSource::new(store, Terrain::Forged { world: WorldRef::Installed(world), extent }, mats, cfg)
     }
 
-    /// Whether `key`'s tile can never change for the world's life: above [`MAP_EDIT_MAX_LEVEL`] no stored
-    /// terrain is overlaid. (A pristine tile at or below it changes once a region under it is saved.)
-    pub fn immutable(key: MapTileKey) -> bool {
-        key.level > MAP_EDIT_MAX_LEVEL
-    }
 
     /// Over the procedural world of `seed`.
     pub fn procedural(store: StoreHandle, seed: u64, mats: Materials, cfg: TileSourceConfig) -> TileSource {
@@ -112,9 +113,14 @@ impl TileSource {
     }
 
     fn new(store: StoreHandle, terrain: Terrain, mats: Materials, cfg: TileSourceConfig) -> TileSource {
+        let tag = match &terrain {
+            Terrain::Forged { world, .. } => u64::from(world.content_crc()),
+            Terrain::Procedural(seed) => *seed,
+        };
         TileSource {
             store,
             terrain,
+            tag,
             mats,
             versions: RwLock::new(None),
             tiles: Mutex::new(Lru::new(cfg.cache_bytes)),
@@ -130,22 +136,35 @@ impl TileSource {
         }
     }
 
-    /// Whether any sample of `key` lies inside the world (always, procedurally).
+    /// Whether `key` is one a client may ask for: any sample inside the world, at most one level above
+    /// its top, and on a world that wraps within one period of its columns either side (a wrapping world
+    /// would otherwise accept every x: a public route's unbounded key space). Procedurally: any key up to
+    /// `MAP_LEVEL_LIMIT`. Never overflows (i128).
     pub fn in_world(&self, key: MapTileKey) -> bool {
+        if key.level > game::map_tile::MAP_LEVEL_LIMIT {
+            return false;
+        }
         let Some(e) = self.extent() else { return true };
-        let rb = RB as i64;
-        let (ox, oz) = key.origin_block();
-        let span = key.span_blocks();
-        let (z0, z1) = (e.origin.z as i64 * rb, (e.origin.z as i64 + e.height as i64) * rb);
-        let (x0, x1) = (e.origin.x as i64 * rb, (e.origin.x as i64 + e.width as i64) * rb);
-        oz < z1 && oz + span > z0 && (e.wraps() || (ox < x1 && ox + span > x0))
+        if key.level > game::map_tile::top_level_of(e).saturating_add(1) {
+            return false;
+        }
+        let rb = RB as i128;
+        let span = MAP_TILE_SAMPLES as i128 * (1i128 << key.level);
+        let (ox, oz) = (key.x as i128 * span, key.z as i128 * span);
+        let (z0, z1) = (e.origin.z as i128 * rb, (e.origin.z as i128 + e.height as i128) * rb);
+        let (mut x0, mut x1) = (e.origin.x as i128 * rb, (e.origin.x as i128 + e.width as i128) * rb);
+        if e.wraps() {
+            let period = x1 - x0;
+            (x0, x1) = (x0 - period, x1 + period);
+        }
+        oz < z1 && oz + span > z0 && ox < x1 && ox + span > x0
     }
 
     /// The tile of `key`, or [`Fetched::Unchanged`] when `have` is its current etag. Blocking.
     pub fn tile(&self, key: MapTileKey, have: Option<u64>) -> Result<Fetched, StoreError> {
         let versions = self.versions()?;
         let stored = self.stored_regions_of(key, &versions);
-        let etag = etag_of(key, &stored);
+        let etag = etag_of(self.tag, key, &stored);
         if have == Some(etag) {
             return Ok(Fetched::Unchanged);
         }
@@ -250,9 +269,11 @@ impl TileSource {
     }
 }
 
-/// crc32 over the key and, down to [`MAP_EDIT_MAX_LEVEL`], every stored region under it with its version.
-fn etag_of(key: MapTileKey, stored: &[(RegionCoords, RegionCoords, u64)]) -> u64 {
+/// crc32 over the world's tag, the key and, down to [`MAP_EDIT_MAX_LEVEL`], every stored region under it
+/// with its version.
+fn etag_of(tag: u64, key: MapTileKey, stored: &[(RegionCoords, RegionCoords, u64)]) -> u64 {
     let mut h = crc32fast::Hasher::new();
+    h.update(&tag.to_le_bytes());
     h.update(&[key.level]);
     h.update(&key.x.to_le_bytes());
     h.update(&key.z.to_le_bytes());

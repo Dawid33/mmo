@@ -1338,7 +1338,10 @@ macro_rules! engine_rows {
                     return Ok(None);
                 };
                 let version: i64 = row.try_get(0)?;
-                let rows = sqlx::query("SELECT cx, cy, cz, top, data FROM chunks WHERE rx = $1 AND rz = $2")
+                // `data` only where there is no top (a row saved before 0021): never the blob otherwise.
+                let rows = sqlx::query(
+                    "SELECT cx, cy, cz, top, CASE WHEN top IS NULL THEN data END FROM chunks WHERE rx = $1 AND rz = $2",
+                )
                     .bind(rc.x as i64)
                     .bind(rc.z as i64)
                     .fetch_all(&mut *tx)
@@ -1351,7 +1354,8 @@ macro_rules! engine_rows {
                     let top = match top {
                         Some(bytes) => decode(FORMAT_CHUNK_TOP, &bytes),
                         None => {
-                            let data: Vec<u8> = r.try_get(4)?;
+                            let data: Option<Vec<u8>> = r.try_get(4)?;
+                            let data = data.ok_or_else(|| StoreError::Corrupt(format!("region {rc:?} chunk {coords:?}: no data")))?;
                             decode::<Chunk>(FORMAT_CHUNK, &data).map(|c| game::map_tile::chunk_top(&c))
                         }
                     }

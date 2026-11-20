@@ -8,8 +8,8 @@
 //! Unauthenticated on purpose (owner, 2026-11-20): the surface is what LOD already shows every player;
 //! abuse is bounded by the proxy's per-IP rate, by the build queue ([`MAP_BUILDS_QUEUED_MAX`]: then
 //! 503 + `Retry-After: 1`) and by caching. Builds run on [`MAP_BUILD_WORKERS`] threads of their own,
-//! never on a request's runtime. A tile that can never change (above `MAP_EDIT_MAX_LEVEL`) is
-//! `immutable`; every other answer is `no-cache` (revalidated with its `ETag`).
+//! never on a request's runtime. Every answer is `no-cache`: revalidated with its `ETag`, which carries
+//! the forge's identity (a re-forge under the same world id changes every etag).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -138,7 +138,9 @@ async fn answer(b: &Builds, level: u8, x: i32, z: i32, headers: &HeaderMap) -> R
         b.queued.fetch_sub(1, Ordering::SeqCst);
         return (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "1")], "no builder").into_response();
     }
-    let cache = if TileSource::immutable(key) { "public, max-age=31536000, immutable" } else { "no-cache" };
+    // Always revalidated: the URL names the world id, not the forge, so only the etag (which carries
+    // the forge's identity) tells a re-forged world's tile from the old one.
+    let cache = "no-cache";
     match rx.await {
         Ok(Ok(Fetched::Unchanged)) => {
             let etag = have.map(etag_header).unwrap_or_default();
