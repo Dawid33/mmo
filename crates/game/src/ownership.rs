@@ -35,11 +35,38 @@ pub const HOST_HEARTBEAT_MS: u64 = 2_000;
 /// What a host reports in its heartbeat (Elastic 3): sessions it holds, regions it runs, and its
 /// worst tick compute time since the previous beat over the tick period, x1000 (capped at 10000).
 /// All zero for a fresh row.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostLoad {
     pub players: u32,
     pub regions: u32,
     pub tick_permille: u32,
+    /// Elastic 5: the same per super-region the host owns with a running region or a home
+    /// session (`hosts.land_load`, migration `0022`), the most loaded first, at most
+    /// [`LAND_LOAD_MAX`]: what the coordinator names a move's land by.
+    pub land: Vec<SrLoad>,
+}
+
+/// Elastic 5: one super-region's load in a host's beat row ([`HostLoad::land`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SrLoad {
+    pub sr: SuperRegion,
+    /// Home sessions whose body is in it.
+    pub players: u32,
+    /// Regions of it running.
+    pub regions: u32,
+    /// The worst tick of its regions since the last beat, as [`HostLoad::tick_permille`].
+    pub tick_permille: u32,
+}
+
+/// Elastic 5: the most [`SrLoad`]s a beat writes (the most loaded first).
+pub const LAND_LOAD_MAX: usize = 256;
+
+impl SrLoad {
+    /// The order a beat keeps: most players, then the worst tick, then most regions, then the
+    /// super-region (a total order: a beat's list is deterministic).
+    pub fn busiest_first(a: &SrLoad, b: &SrLoad) -> std::cmp::Ordering {
+        (b.players, b.tick_permille, b.regions, a.sr).cmp(&(a.players, a.tick_permille, a.regions, b.sr))
+    }
 }
 /// Elastic 5: one move of occupied land in place, numbered by the coordinator's move runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]

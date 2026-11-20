@@ -177,8 +177,8 @@ pub(crate) enum CutEnd {
 /// seen_ms`, NULL when not draining). No row returned: not that live boot.
 pub(crate) fn heartbeat_sql(now_ms: &str) -> String {
     format!(
-        "UPDATE hosts SET seen_ms = {now_ms}, load_players = $3, load_regions = $4, load_tick_permille = $5 \
-         WHERE id = $1 AND boot = $2 AND state = {} RETURNING drain_at_ms - seen_ms",
+        "UPDATE hosts SET seen_ms = {now_ms}, load_players = $3, load_regions = $4, load_tick_permille = $5, \
+         land_load = $6 WHERE id = $1 AND boot = $2 AND state = {} RETURNING drain_at_ms - seen_ms",
         crate::HOST_LIVE
     )
 }
@@ -188,15 +188,47 @@ pub(crate) fn load_of(v: i64) -> u32 {
     u32::try_from(v.max(0)).unwrap_or(u32::MAX)
 }
 
-/// `heartbeat_sql`'s `$3..$5`: the load, in the order of [`game::HostLoad`]'s fields.
+/// `heartbeat_sql`'s `$3..$6`: the load, in the order of [`game::HostLoad`]'s fields; `land`
+/// encoded ([`land_load_bytes`]).
 pub(crate) fn bind_load<'q, DB: sqlx::Database>(
     q: sqlx::query::Query<'q, DB, <DB as sqlx::Database>::Arguments<'q>>,
     load: game::HostLoad,
 ) -> sqlx::query::Query<'q, DB, <DB as sqlx::Database>::Arguments<'q>>
 where
     i64: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
+    Option<Vec<u8>>: sqlx::Encode<'q, DB> + sqlx::Type<DB>,
 {
-    q.bind(i64::from(load.players)).bind(i64::from(load.regions)).bind(i64::from(load.tick_permille))
+    let land = land_load_bytes(&load.land);
+    q.bind(i64::from(load.players)).bind(i64::from(load.regions)).bind(i64::from(load.tick_permille)).bind(land)
+}
+
+/// Elastic 5: `hosts.land_load` as written — `None` (NULL) for an empty list, else
+/// `game::encode_packet` of at most [`game::LAND_LOAD_MAX`] entries, as given (the most loaded
+/// first).
+pub(crate) fn land_load_bytes(land: &[game::SrLoad]) -> Option<Vec<u8>> {
+    if land.is_empty() {
+        return None;
+    }
+    let land = &land[..land.len().min(game::LAND_LOAD_MAX)];
+    match game::encode_packet(&land.to_vec()) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            log::warn!("[world-store] a beat's land load could not be encoded ({e}); written as none");
+            None
+        }
+    }
+}
+
+/// Elastic 5: `hosts.land_load` as read — NULL, or a value this build cannot decode (logged),
+/// reads as empty.
+pub(crate) fn land_load_of(bytes: Option<Vec<u8>>) -> Vec<game::SrLoad> {
+    match bytes {
+        None => Vec::new(),
+        Some(b) => game::decode_packet(&b).unwrap_or_else(|e| {
+            log::warn!("[world-store] a hosts row's land load could not be decoded ({e:?}); read as none");
+            Vec::new()
+        }),
+    }
 }
 
 /// A [`heartbeat_sql`] answer as a [`crate::Beat`]: `None` = no row (replaced); `Some(d)` = the
@@ -781,7 +813,7 @@ macro_rules! engine_rows {
                     .unwrap_or(0);
                 let sql = format!(
                     "SELECT id, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, state, \
-                     seen_ms, name, drain_at_ms - {NOW_MS}, load_players, load_regions, load_tick_permille, \
+                     seen_ms, name, drain_at_ms - {NOW_MS}, load_players, load_regions, load_tick_permille, land_load, \
                      (EXISTS (SELECT 1 FROM super_regions WHERE owner = hosts.id) \
                       OR EXISTS (SELECT 1 FROM in_flight WHERE host = hosts.id)), \
                      EXISTS (SELECT 1 FROM successions WHERE predecessor = hosts.id \
@@ -810,9 +842,10 @@ macro_rules! engine_rows {
                                 players: load_of(r.try_get(13)?),
                                 regions: load_of(r.try_get(14)?),
                                 tick_permille: load_of(r.try_get(15)?),
+                                land: land_load_of(r.try_get(16)?),
                             },
-                            owns_land: r.try_get(16)?,
-                            succeeding: r.try_get(17)?,
+                            owns_land: r.try_get(17)?,
+                            succeeding: r.try_get(18)?,
                         })
                     })
                     .collect::<Result<Vec<HostRow>, StoreError>>()?;

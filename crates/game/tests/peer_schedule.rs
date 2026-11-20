@@ -215,7 +215,7 @@ fn least_loaded(rig: &MultiRig, sr: game::SuperRegion) -> HostId {
     let candidates: Vec<HostId> =
         host_ids(rig.hosts.len() as u32).filter(|h| !rig.dead.contains(h) && !rig.draining.contains(h)).collect();
     let key = |h: &HostId| {
-        let l = rig.loads.get(h).copied().unwrap_or_default();
+        let l = rig.loads.get(h).cloned().unwrap_or_default();
         (l.players, l.regions)
     };
     let least = candidates.iter().map(key).min().expect("a candidate");
@@ -223,7 +223,7 @@ fn least_loaded(rig: &MultiRig, sr: game::SuperRegion) -> HostId {
 }
 
 /// A load that makes a host the busiest of the rig's.
-const BUSY: game::HostLoad = game::HostLoad { players: 5, regions: 5, tick_permille: 0 };
+const BUSY: game::HostLoad = game::HostLoad { players: 5, regions: 5, tick_permille: 0, land: Vec::new() };
 
 /// A rig whose free land is assigned by a coordinator: the directory `rows`, the rig's
 /// `super_regions` table behind it, the coordinator over a quiet history.

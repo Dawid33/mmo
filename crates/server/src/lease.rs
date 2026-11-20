@@ -128,7 +128,7 @@ impl Heartbeat {
         if self.next_at.is_none_or(|at| now >= at) {
             self.next_at = Some(now + self.period);
             let load = load();
-            crate::health::Health::global().host_load(load);
+            crate::health::Health::global().host_load(&load);
             self.pending = Some(self.store.heartbeat_later(self.id, self.boot, load));
         }
         LeaseState::Held

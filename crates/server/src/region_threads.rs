@@ -295,6 +295,7 @@ pub fn region_thread_loop(
     started: Instant,
     tick_load: crate::load::TickLoad,
 ) {
+    let tick_load = tick_load.slot(id);
     let now_ms = || started.elapsed().as_millis() as u64;
     let mut metrics = TickMetrics::new();
     let mut first_tick = true;

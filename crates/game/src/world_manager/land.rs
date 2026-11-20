@@ -67,10 +67,10 @@
 //! land's next owner ([`WorldManager::reroute_held_for_landless_leavers`]); their `departed` /
 //! `redirected` pointers at it are dropped there too (the store places those players).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::peers::reliable_target;
-use super::{RegionSpawner, WorldManager};
+use super::{RegionSpawner, SessionKind, WorldManager};
 use crate::{CutId, HostId, HostMsg, Owner, RegionCoords, SuperRegion};
 
 /// Most often a host asks the coordinator for one super-region ([`HostMsg::LandNeeded`]): once
@@ -87,6 +87,32 @@ pub const LAND_IDLE_MS: u64 = 300_000;
 pub const LAND_IDLE_SCAN_MS: u64 = 1_000;
 
 impl<S: RegionSpawner> WorldManager<S> {
+    /// Elastic 5: this host's load per super-region it owns that has a running region or a home
+    /// session (`hosts.land_load`, the beat): home sessions whose body is in it, regions of it
+    /// running, and the worst of `ticks` (each region's worst tick since the last beat, ‰) over
+    /// its regions — the most loaded first, at most [`crate::LAND_LOAD_MAX`].
+    pub fn land_load(&self, ticks: &BTreeMap<RegionCoords, u32>) -> Vec<crate::SrLoad> {
+        let side = self.ownership.1;
+        let mut by: BTreeMap<crate::SuperRegion, crate::SrLoad> = BTreeMap::new();
+        for rc in self.regions.keys() {
+            let sr = crate::super_region_of(*rc, side);
+            let l = by.entry(sr).or_insert(crate::SrLoad { sr, players: 0, regions: 0, tick_permille: 0 });
+            l.regions += 1;
+            l.tick_permille = l.tick_permille.max(ticks.get(rc).copied().unwrap_or(0));
+        }
+        for (client, rc) in &self.homes {
+            if self.sessions.get(client).is_some_and(|s| matches!(s.kind, SessionKind::Home)) {
+                let sr = crate::super_region_of(*rc, side);
+                by.entry(sr).or_insert(crate::SrLoad { sr, players: 0, regions: 0, tick_permille: 0 }).players += 1;
+            }
+        }
+        let mut out: Vec<crate::SrLoad> =
+            by.into_values().filter(|l| matches!(self.owner_of_sr(l.sr), crate::Owner::Me)).collect();
+        out.sort_by(crate::SrLoad::busiest_first);
+        out.truncate(crate::LAND_LOAD_MAX);
+        out
+    }
+
     /// One pass of the ask (the module docs): every super-region needed here with no reachable
     /// owner known is asked of the coordinator, each at most once per [`LAND_NEEDED_EVERY_MS`],
     /// while its link is attached. What is held for departed hosts is looked through at most

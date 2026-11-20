@@ -1717,7 +1717,7 @@ impl CoordinatorRuntime {
                             state: r.state,
                             seen_ms: r.seen_ms,
                             draining: r.drain_in_ms.is_some(),
-                            load: r.load,
+                            load: r.load.clone(),
                             landed: r.owns_land,
                         })
                         .collect();

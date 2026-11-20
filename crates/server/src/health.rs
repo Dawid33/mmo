@@ -323,7 +323,7 @@ impl Health {
     }
 
     /// What the last heartbeat sent as this host's load (Elastic 3).
-    pub fn host_load(&self, load: game::HostLoad) {
+    pub fn host_load(&self, load: &game::HostLoad) {
         self.load_players.store(u64::from(load.players), Ordering::Relaxed);
         self.load_regions.store(u64::from(load.regions), Ordering::Relaxed);
         self.load_tick_permille.store(u64::from(load.tick_permille), Ordering::Relaxed);

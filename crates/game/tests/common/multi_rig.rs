@@ -1226,7 +1226,7 @@ impl MultiRig {
                     state,
                     seen_ms: now + 1,
                     draining: self.draining.contains(&h),
-                    load: self.loads.get(&h).copied().unwrap_or_default(),
+                    load: self.loads.get(&h).cloned().unwrap_or_default(),
                     landed: self.landed(h),
                 }
             })
