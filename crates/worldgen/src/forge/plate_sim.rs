@@ -4,9 +4,10 @@
 //! fractional position accumulates its velocity and it moves by a whole
 //! `(dx, dz)`, each in {−1, 0, 1}, so crust is never resampled or lost to
 //! rounding. Where several cells land on one, ONE total order picks the
-//! survivor (continental over oceanic, the bigger continent, the younger
-//! ocean floor) and the rest are consumed; where none lands, new oceanic
-//! crust is made; rows moved past a pole are destroyed.
+//! survivor (continental over oceanic, the bigger continent, the plate whose
+//! ocean floor is younger on average) and the rest are consumed; where none
+//! lands, new oceanic crust is made, owned by the plate that held the cell;
+//! rows moved past a pole are destroyed.
 //!
 //! Pinned so two builders make the same planet: every loop over cells is
 //! row-major, every loop over plates ascending id; random draws are
@@ -417,8 +418,10 @@ impl PlateState {
             (&self.plate[..PLANET_CELLS], &self.crust[..PLANET_CELLS], &self.born_my[..PLANET_CELLS]);
         let (n_plate, winner, dest) =
             (&mut n_plate[..PLANET_CELLS], &mut winner[..PLANET_CELLS], &mut dest[..PLANET_CELLS]);
-        let mut cells = [0u32; PLATES_MAX];
         let mut cont = [0u32; PLATES_MAX];
+        // Per plate: `born_my` summed over its oceanic cells, and their count.
+        let mut ocean_sum = [0.0f64; PLATES_MAX];
+        let mut ocean_cells = [0u32; PLATES_MAX];
         // Sources past a pole, by crust (`[oceanic, continental]`).
         let mut lost = [0u64; 2];
         let nx = PLANET_NX as i32;
@@ -436,7 +439,11 @@ impl PlateState {
                 let mut run_cont = 0u32;
                 while cx < nx && plate[row + cx as usize] as usize == p {
                     let c = row + cx as usize;
-                    run_cont += u32::from(crust[c] == CrustKind::Continental as u8);
+                    if crust[c] == CrustKind::Continental as u8 {
+                        run_cont += 1;
+                    } else {
+                        ocean_sum[p] += f64::from(born_my[c]);
+                    }
                     dest[c] = if polar {
                         NO_DEST
                     } else {
@@ -451,21 +458,22 @@ impl PlateState {
                     cx += 1;
                 }
                 let run = (cx - start) as u32;
-                cells[p] += run;
                 cont[p] += run_cont;
+                ocean_cells[p] += run - run_cont;
                 if polar {
                     lost[1] += u64::from(run_cont);
                     lost[0] += u64::from(run - run_cont);
                 }
             }
         }
+        let ocean: [f64; PLATES_MAX] = std::array::from_fn(|p| ocean_mean_born(ocean_sum[p], ocean_cells[p]));
         // Pass A, the contest: the winner of each destination under one
         // total order (the result does not depend on `order`).
         for c in order {
             let d = dest[c] as usize;
             if d < PLANET_CELLS {
                 let w = winner[d];
-                if w == NO_SOURCE || beats(plate, crust, born_my, &cont, c, w as usize) {
+                if w == NO_SOURCE || beats(plate, crust, &cont, &ocean, c, w as usize) {
                     winner[d] = c as u32;
                 }
             }
@@ -512,24 +520,15 @@ impl PlateState {
                 counters.subducted += 1;
             }
         }
-        // 3. Gaps: new oceanic crust, born at the step's end.
+        // 3. Gaps: new oceanic crust, born at the step's end, owned by the
+        // plate that held the cell before the step (two plates moving apart
+        // each fill their own wake: the ridge is where their boundary stood).
         let time = (self.step + 1) as f64 * PLATE_DT_MY;
-        let lowest_live = (0..PLATES_MAX).find(|&p| self.alive[p]).unwrap_or(0) as u8;
         for d in 0..PLANET_CELLS {
             if n_plate[d] != NO_PLATE {
                 continue;
             }
-            let before = plate[d];
-            let owner = if before != NO_PLATE && cells[before as usize] > 0 {
-                before
-            } else {
-                let (row, cx) = (d - d % PLANET_NX, d % PLANET_NX);
-                (1..PLANET_NX)
-                    .map(|k| n_plate[row + (cx + k) % PLANET_NX])
-                    .find(|&p| p != NO_PLATE)
-                    .unwrap_or(lowest_live)
-            };
-            n_plate[d] = owner;
+            n_plate[d] = plate[d];
             n_crust[d] = CrustKind::Oceanic as u8;
             n_born[d] = time as f32;
             n_base[d] = 0.0;
@@ -559,11 +558,22 @@ impl PlateState {
     }
 }
 
+/// A plate's mean `born_my` over its oceanic cells (`sum` over `count`);
+/// `NEG_INFINITY` for a plate with none (never NaN). The sum is exact in
+/// `f64` (at most 131,072 `f32` values below 2^12 in magnitude), so it does
+/// not depend on the order it was added in.
+fn ocean_mean_born(sum: f64, count: u32) -> f64 {
+    if count == 0 { f64::NEG_INFINITY } else { sum / f64::from(count) }
+}
+
 /// Source `a` beats source `b` for one destination: continental beats
 /// oceanic; between continental cells the plate with more continental cells
-/// in the snapshot `cont`, between oceanic cells the younger (larger
-/// `born_my`); ties the lower plate id.
-fn beats(plate: &[u8], crust: &[u8], born_my: &[f32], cont: &[u32; PLATES_MAX], a: usize, b: usize) -> bool {
+/// in the snapshot `cont`; between oceanic cells the plate whose sea floor is
+/// younger on average (larger `ocean`, its `ocean_mean_born` — one answer per
+/// pair of plates per step, so a boundary is consumed as a line); ties the
+/// lower plate id. Two sources of one destination are always of different
+/// plates, so this is a total order on them.
+fn beats(plate: &[u8], crust: &[u8], cont: &[u32; PLATES_MAX], ocean: &[f64; PLATES_MAX], a: usize, b: usize) -> bool {
     let continental = CrustKind::Continental as u8;
     let (ca, cb) = (crust[a] == continental, crust[b] == continental);
     if ca != cb {
@@ -575,8 +585,11 @@ fn beats(plate: &[u8], crust: &[u8], born_my: &[f32], cont: &[u32; PLATES_MAX], 
         if na != nb {
             return na > nb;
         }
-    } else if born_my[a] != born_my[b] {
-        return born_my[a] > born_my[b];
+    } else {
+        let (ma, mb) = (ocean[pa as usize], ocean[pb as usize]);
+        if ma != mb {
+            return ma > mb;
+        }
     }
     pa < pb
 }
