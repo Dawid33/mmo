@@ -48,7 +48,14 @@
 # known) and a later --rollback refuses. `--rollback` reads previous-server / previous-web and
 # runs this same path to them; it refuses (exit 2, nothing changed) when no previous release
 # is recorded or a recorded ref is not a digest. A rollback is a release too: it records what
-# it replaced, so a second --rollback goes forward again.
+# it replaced, so a second --rollback goes forward again. When CONTENT_SERVER /
+# CONTENT_WEB are set (by `just deploy --game`), the same record carries their
+# mmo.content-sha256 values as released-content-server / released-content-web,
+# so the next --game can skip a release whose content did not change; a rollback
+# clears those keys.
+# The ConfigMap `release-in-progress` is created just before the first
+# scale-down and deleted once every host is Ready. If this script is interrupted,
+# the marker stays: `just deploy --infra` refuses to apply `world` while it exists.
 #
 # Leave outcome: each host pod's log is followed from before the scale-down until the
 # pod ends; once they are gone the script prints each host's leave line, and WARNS (it
@@ -68,7 +75,8 @@
 # Env: WORLD_UPDATE_STOP_TIMEOUT (seconds to wait for the reconciler's, the host and the
 # coordinator pods to go, default 150 — a leave cut is bounded by ~90 s),
 # WORLD_UPDATE_READY_TIMEOUT (seconds to wait for every coordinator replica, the reconciler
-# and every host Ready, default 300).
+# and every host Ready, default 300), CONTENT_SERVER / CONTENT_WEB (content hashes recorded
+# in release-history), WORLD_UPDATE_ALLOW_TAG=1 (the k3d twin uses local tags, not ECR digests).
 # Exit: 0 done, 1 a step failed or timed out, 2 bad arguments or a refused start.
 set -euo pipefail
 
@@ -98,6 +106,10 @@ esac
 stop_timeout="${WORLD_UPDATE_STOP_TIMEOUT:-150}"
 ready_timeout="${WORLD_UPDATE_READY_TIMEOUT:-300}"
 history=release-history
+marker=release-in-progress
+content_server="${CONTENT_SERVER:-}"
+content_web="${CONTENT_WEB:-}"
+allow_tag="${WORLD_UPDATE_ALLOW_TAG:-0}"
 hostsel='app.kubernetes.io/component=host'
 
 k() { kubectl --context "$ctx" -n "$ns" "$@"; }
@@ -107,7 +119,11 @@ run() {
     echo "  + kubectl --context $ctx -n $ns $*"
     [ "$dry" -eq 1 ] || k "$@"
 }
-is_digest() { case "$1" in *@sha256:*) return 0 ;; *) return 1 ;; esac; }
+# The twin's images are local tags (`mmo/<name>:twin`), not ECR digests.
+is_digest() {
+    [ "$allow_tag" = 1 ] && return 0
+    case "$1" in *@sha256:*) return 0 ;; *) return 1 ;; esac
+}
 # record_field <key>: one key of the release history ('' when there is none); a failed
 # read fails (nothing changed yet).
 record_field() {
@@ -310,7 +326,7 @@ if [ "$dry" -eq 1 ]; then
     echo "  + refuse when there are host Deployments, every one at 0, and this is not a re-run of the release recorded in ConfigMap $history"
     echo "  + read the images (coordinator, toolbox, fleet, each host Deployment, web); a re-run of the recorded release that finished (every workload on these refs, the coordinator up, fleet at 1, every host Deployment at 1) stops here, changing nothing"
     echo "  + unless this re-runs the recorded release, record them in ConfigMap $history:"
-    echo "  + kubectl --context $ctx -n $ns create configmap $history --from-literal=previous-server=<coordinator's image> --from-literal=previous-web=<web's image> --from-literal=released-server=$server_ref --from-literal=released-web=$web_ref --from-literal=recorded-at=<now> --dry-run=client -o yaml | kubectl --context $ctx -n $ns apply -f -"
+    echo "  + kubectl --context $ctx -n $ns create configmap $history --from-literal=previous-server=<coordinator's image> --from-literal=previous-web=<web's image> --from-literal=released-server=$server_ref --from-literal=released-web=$web_ref --from-literal=released-content-server=$content_server --from-literal=released-content-web=$content_web --from-literal=recorded-at=<now> --dry-run=client -o yaml | kubectl --context $ctx -n $ns apply -f -"
 else
     # running: host Deployments above 0; all_up: every one at exactly 1.
     running=0 all_up=1
@@ -398,15 +414,26 @@ else
                 echo "world_update: ConfigMap $history is written without one; --rollback will refuse until the next release."
             } >&2
         fi
+        # The orchestrator's content hashes ride along in the same record.
+        content_args=()
+        [ -z "$content_server" ] || content_args+=(--from-literal=released-content-server="$content_server")
+        [ -z "$content_web" ] || content_args+=(--from-literal=released-content-web="$content_web")
         if ! k create configmap "$history" \
             --from-literal=previous-server="$prev_server" --from-literal=previous-web="$prev_web" \
             --from-literal=released-server="$server_ref" --from-literal=released-web="$web_ref" \
+            "${content_args[@]}" \
             --from-literal=recorded-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --dry-run=client -o yaml | k apply -f - > /dev/null; then
             echo "world_update: could not write ConfigMap $history; nothing changed" >&2
             exit 2
         fi
-        echo "  recorded in ConfigMap $history"
+        echo "  recorded in ConfigMap $history (content: server ${content_server:-none}, web ${content_web:-none})"
+    fi
+    if [ "$rollback" -eq 1 ] && [ "$dry" -eq 0 ]; then
+        # A rollback rewrites the released refs but does not re-hash the build it
+        # puts back: clear the keys so the next --game releases it again.
+        k patch configmap "$history" --type=merge \
+            -p '{"data":{"released-content-server":null,"released-content-web":null}}' > /dev/null
     fi
 fi
 
@@ -432,6 +459,17 @@ wait_no_pods() {
 }
 # The reconciler first, and gone: from here nothing creates a host Deployment (one created now
 # would start at 1 replica on the old image beside the stop). Nothing recorded: its count is 1.
+# Marker for --infra's world guard: created before the first scale-down, deleted
+# only after every host is Ready. An interrupted run leaves it in place.
+echo "  + kubectl --context $ctx -n $ns create configmap $marker --from-literal=started=<now> --dry-run=client -o yaml | kubectl --context $ctx -n $ns apply -f -"
+if [ "$dry" -eq 0 ]; then
+    if ! k create configmap "$marker" --from-literal=started="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --dry-run=client -o yaml | k apply -f - > /dev/null; then
+        echo "world_update: could not create ConfigMap $marker; nothing changed" >&2
+        exit 2
+    fi
+fi
+
 where='step 2 (fleet reconciler to 0)'
 fleet_down=1
 run scale deploy/fleet --replicas=0
@@ -675,6 +713,10 @@ else
     done
     [ -z "$drained" ] || echo "  drained (the coordinator removes them):$drained"
     [ -z "$deleted" ] || echo "  deleted by the fleet reconciler while starting (their desired rows removed):$deleted"
+fi
+echo "  + kubectl --context $ctx -n $ns delete configmap $marker --ignore-not-found"
+if [ "$dry" -eq 0 ]; then
+    k delete configmap "$marker" --ignore-not-found > /dev/null
 fi
 finished=1
 echo "world_update: done (server $server_ref, web $web_ref)"

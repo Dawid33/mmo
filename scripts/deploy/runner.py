@@ -34,8 +34,9 @@ class DeployError(RuntimeError):
 class Runner:
     """Runs commands from the repository root, printing each one."""
 
-    def __init__(self, cwd: Path | str | None = None) -> None:
+    def __init__(self, cwd: Path | str | None = None, *, quiet: bool = False) -> None:
         self.cwd = Path(cwd) if cwd is not None else Path(__file__).resolve().parents[2]
+        self.quiet = quiet
 
     def run(
         self,
@@ -48,7 +49,8 @@ class Runner:
         cwd: Path | str | None = None,
     ) -> Completed:
         words = [str(word) for word in argv]
-        print("+ " + shlex.join(words), flush=True)
+        if not self.quiet:
+            print("+ " + shlex.join(words), flush=True)
         child_env = None
         if env:
             child_env = os.environ.copy()
