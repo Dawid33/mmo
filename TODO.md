@@ -10,10 +10,17 @@ everything (fast / with the slow-tagged). Next:
 - `crates/world-store/tests/fixtures/world_map.bin` carries an uncommitted change and no test reads it any more.
 
 Planet frame, Phase 1a (plans/2026-11-14-planet-frame-1a.md; ledger `.superpowers/sdd/2026-11-14-planet-frame-1a/`) —
-IN PROGRESS: the forge makes one kind of world, the Planet (2:1, wraps east–west, polar seas north and south); the six
-old layouts, their presets and their knobs are deleted (artifact v9). Open:
+BUILT 2026-11-20 (19 tasks, each reviewed; the whole-plan review's one fix wave is in, its scoped re-review pending),
+NOT accepted: pending the owner's hand checks (plans/2026-11-19-earth-like-world-program.md, "Owner hand checks", after
+Phase 1a: a new dev world, the world map, the walk east across the seam, the far LOD rings across it, the
+working-tree-only edits in the owner's files, the re-forge below). The forge makes one kind of world, the Planet (2:1,
+wraps east–west, polar seas north and south); the six old layouts, their presets and their knobs are deleted (artifact
+v9). Open:
 - Re-forge every world (Dawid): a world file older than v9, a stored world that is not a Planet, or one whose width is
-  not a whole number of 512 m is refused with "re-forge this world". Local `worlds/` (`just run --reset`, the menu's
+  not a whole number of 512 m is refused with "re-forge this world". EVERY dev store is wiped and re-forged, Planet or
+  not: a version-8 Planet stored as tiles still loads, but only one forged after `ec81d1b1` has the seam's rivers and a
+  wrapping world map (one forged between `4d1d014b` and `ec81d1b1` loads with rivers cut at the seam and a map that does
+  not wrap), and none has this phase's tuning. Local `worlds/` (`just run --reset`, the menu's
   worlds), the dev Postgres worlds (`just pg-reset`, before `dev-r2` / `dev-r3`; `go-nogo-r3` re-forges its own), the
   public web world (move its store aside BEFORE `just deploy`, as for migration `0011` below), the twin (`twin-check`
   forges into a fresh database) and any orion world (a new empty database, as the runbooks above).
