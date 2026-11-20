@@ -59,11 +59,17 @@ pub struct MonthlyClimate {
     pub nz: u32,
     pub cell_m: f64,
     pub wrap_x: bool,
+    /// Mean temperature at SEA LEVEL, centi-°C (`CLIMATE_TEMP_PER_C`).
     pub temp_sea_centi_c: Vec<i16>,
+    /// Mean diurnal range (daily max − min), deci-°C (`CLIMATE_DIURNAL_PER_C`).
     pub diurnal_deci_c: Vec<u8>,
+    /// Precipitation of the month, deci-mm (`CLIMATE_PRECIP_PER_MM`).
     pub precip_deci_mm: Vec<u16>,
+    /// Share of the month's days that are wet, 255ths (`CLIMATE_WET_DAY_PER_ONE`).
     pub wet_day_255: Vec<u8>,
+    /// Wind component toward +x (east; positive = blowing eastward), quarter m/s (`CLIMATE_WIND_PER_MS`).
     pub wind_east_q: Vec<i8>,
+    /// Wind component toward +z (south; positive = blowing southward), quarter m/s (`CLIMATE_WIND_PER_MS`).
     pub wind_south_q: Vec<i8>,
 }
 
@@ -86,7 +92,9 @@ impl MonthlyClimate {
     }
 
     /// The plane index of `month` at cell `(cx, cz)`: x by `rem_euclid(nx)`
-    /// when `wrap_x`, else clamped to the grid; z always clamped.
+    /// when `wrap_x`, else clamped to the grid; z always clamped. Any `cx`,
+    /// `cz` is safe. Call `validate` first (an empty grid panics);
+    /// `month < CLIMATE_MONTHS`.
     pub fn index(&self, month: usize, cx: i64, cz: i64) -> usize {
         let nx = i64::from(self.nx);
         let x = if self.wrap_x { cx.rem_euclid(nx) } else { cx.clamp(0, nx - 1) };
@@ -131,7 +139,12 @@ impl MonthlyClimate {
     /// The normals at map metres `(ax_m, az_m)`, bilinear between cell
     /// centres (`ForgedWorld::bilinear_cells`'s arithmetic on the climate
     /// grid), each value cast to `f32` last. At a cell centre it is that
-    /// cell's `cell_normals` bit for bit.
+    /// cell's `cell_normals` bit for bit. Call `validate` first.
+    ///
+    /// Total and the same in every build: a coordinate beyond `i64` cells
+    /// saturates to the edge cell (`as i64`, `saturating_add`); an infinite
+    /// coordinate makes the fraction NaN and every value NaN; a NaN
+    /// coordinate reads index 0 and returns every value NaN. No panic.
     pub fn normals_at(&self, ax_m: f64, az_m: f64) -> MonthlyNormals {
         let (u, v) = (ax_m / self.cell_m - 0.5, az_m / self.cell_m - 0.5);
         let (iu, iv) = (u.floor(), v.floor());
@@ -139,8 +152,8 @@ impl MonthlyClimate {
         let (iu, iv) = (iu as i64, iv as i64);
         self.read(|m, plane| {
             let at = |ix: i64, iz: i64| plane(self.index(m, ix, iz));
-            let row = |iz: i64| at(iu, iz) + tu * (at(iu + 1, iz) - at(iu, iz));
-            row(iv) + tv * (row(iv + 1) - row(iv))
+            let row = |iz: i64| at(iu, iz) + tu * (at(iu.saturating_add(1), iz) - at(iu, iz));
+            row(iv) + tv * (row(iv.saturating_add(1)) - row(iv))
         })
     }
 
