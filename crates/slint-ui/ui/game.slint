@@ -1,16 +1,16 @@
 import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, RadialItem, RadialMenu, Styles, VerticalFlow } from "@widgets";
 import { GameMenu } from "menu.slint";
-import { SiteMark, WorldMap, WorldMapConfig } from "world-map.slint";
+import { MapMarker, WorldMap, WorldMapConfig } from "world-map.slint";
 import { ArrivalLayout, ArrivalPanel, LegendsFilterRow, LegendsLayout } from "arrival.slint";
 import { GameTheme } from "theme.slint";
-import { FortressLayout, FortressPanel } from "fortress-panel.slint";
-import { DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
+import { DebugPane, DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
 import { MenuColumn, MenuLayout } from "menu-column.slint";
 import { StubWindow } from "stub-window.slint";
+import { SettingsWindow } from "settings.slint";
 import { InventoryScreen, ItemSlot } from "inventory.slint";
 import { ChatBox, ChatConfig, ChatRow } from "chat.slint";
 
-export { ChatRow, ItemSlot, LegendsFilterRow, RadialItem, SiteMark, WorldMapConfig }
+export { ChatRow, ItemSlot, LegendsFilterRow, MapMarker, RadialItem, WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
@@ -22,23 +22,10 @@ export component GameUi inherits Window {
     }
     background: transparent;
 
-    // The fortress panel, top left (fortress-panel.slint): key figures on the
-    // tab row
-    // (placeholders reading "0"), the open tab (-1 = collapsed) and the
-    // tabs' contents.
-    in property <string> fortress-value: "0";
-    in property <string> fortress-happiness: "0";
-    in property <string> fortress-food: "0";
-    in-out property <int> fortress-tab: -1;
-    in property <[string]> governance-lines;
-    in property <[string]> people-names;
-    in property <[string]> designation-lines;
-    // A People row clicked (index into `people-names`).
-    callback person-picked(int);
-    // The fortress panel's Debug tab (index 4; `dev_ui` builds only, F3
-    // opens it): stats, the debug toggles and "Complete all orders"
-    // (crates/client/src/renderer/dev_ui.rs).
-    in property <bool> debug-available;
+    // The F3 debug pane (debug-tab.slint; `dev_ui` builds only): stats, the
+    // debug toggles and "Complete all orders"
+    // (crates/client/src/renderer/dev_ui.rs). Top left, over everything else.
+    in property <bool> debug-open;
     in property <[DevStat]> dev-stats;
     in property <[DevToggle]> dev-toggles;
     // Each live predicted region's tick times (dev_ui::tick_rows).
@@ -47,28 +34,14 @@ export component GameUi inherits Window {
     callback dev-toggle(int, bool);
     callback dev-complete-orders();
     callback dev-drop-body();
-    out property <length> dev-toggles-x: fortress.dev-toggles-x;
-    out property <length> dev-toggles-y: fortress.dev-toggles-y;
-    out property <length> dev-toggle-row-height: fortress.dev-toggle-row-height;
-    out property <length> dev-complete-x: fortress.dev-complete-x;
-    out property <length> dev-complete-y: fortress.dev-complete-y;
-    out property <length> dev-drop-x: fortress.dev-drop-x;
-    out property <length> dev-drop-y: fortress.dev-drop-y;
-    out property <length> dev-ticks-x: fortress.dev-ticks-x;
-    out property <length> fortress-tabs-x: fortress.tabs-x;
-    out property <length> fortress-tabs-y: fortress.tabs-y;
-    out property <length> people-first-item-y: fortress.people-first-item-y;
-    out property <length> people-row-height: fortress.people-row-height;
-    out property <length> fortress-values-left: fortress.values-left;
-    out property <length> fortress-values-top: fortress.values-top;
-    out property <length> fortress-values-bottom: fortress.values-bottom;
-    out property <length> fortress-tabs-top: fortress.tabs-top;
-    out property <length> fortress-tabs-end: fortress.tabs-end;
-    out property <length> fortress-tab-row-height: fortress.tab-row-height;
-    out property <length> fortress-widest-label: fortress.widest-label;
-    out property <length> fortress-tab-label-room: fortress.tab-label-room;
-    // The fortress panel's right edge (window logical pixels).
-    out property <length> fortress-panel-right: fortress.absolute-position.x + fortress.width;
+    out property <length> dev-toggles-x: debug.toggles-x;
+    out property <length> dev-toggles-y: debug.toggles-y;
+    out property <length> dev-toggle-row-height: debug.toggle-row-height;
+    out property <length> dev-complete-x: debug.complete-button-x;
+    out property <length> dev-complete-y: debug.complete-button-y;
+    out property <length> dev-drop-x: debug.drop-button-x;
+    out property <length> dev-drop-y: debug.drop-button-y;
+    out property <length> dev-ticks-x: debug.ticks-x;
 
     in property <int> selected-count;
     // One line per selected entity kind, e.g. "Slime (size 2) ×3".
@@ -81,12 +54,42 @@ export component GameUi inherits Window {
     // are off meanwhile (`tools-available`). No UI switches it for now.
     in property <bool> adventure: true;
 
-    // The top-right column (menu-column.slint): Settings and Encyclopedia,
-    // each a stub window for now (modal screens, like the map), and the
+    // The Settings window (settings.slint) and the Encyclopedia stub, modal
+    // screens like the map; the top-right column (menu-column.slint) is the
     // context box: the active tool (`tool-name`, "" = none) and the
     // selection.
     in-out property <bool> settings-open;
     in-out property <bool> encyclopedia-open;
+    // The settings window (settings.slint), forwarded with a `settings-`
+    // prefix; the client fills it (graphics_settings.rs).
+    in-out property <float> settings-view-distance <=> settings.view-distance;
+    in property <float> settings-view-distance-min <=> settings.view-distance-min;
+    in property <float> settings-view-distance-max <=> settings.view-distance-max;
+    in property <float> settings-view-distance-step <=> settings.view-distance-step;
+    callback settings-view-distance-edited <=> settings.view-distance-edited;
+    in-out property <float> settings-detail-distance <=> settings.detail-distance;
+    in property <float> settings-detail-distance-min <=> settings.detail-distance-min;
+    in property <float> settings-detail-distance-max <=> settings.detail-distance-max;
+    in property <float> settings-detail-distance-step <=> settings.detail-distance-step;
+    callback settings-detail-distance-edited <=> settings.detail-distance-edited;
+    in-out property <bool> settings-vsync <=> settings.vsync;
+    callback settings-vsync-edited <=> settings.vsync-edited;
+    in-out property <float> settings-fov <=> settings.fov;
+    in property <float> settings-fov-min <=> settings.fov-min;
+    in property <float> settings-fov-max <=> settings.fov-max;
+    in property <float> settings-fov-step <=> settings.fov-step;
+    callback settings-fov-edited <=> settings.fov-edited;
+    in-out property <bool> settings-view-bobbing <=> settings.view-bobbing;
+    callback settings-view-bobbing-edited <=> settings.view-bobbing-edited;
+    in-out property <bool> settings-sprint-fov <=> settings.sprint-fov;
+    callback settings-sprint-fov-edited <=> settings.sprint-fov-edited;
+    in-out property <float> settings-ui-scale <=> settings.ui-scale;
+    in property <float> settings-ui-scale-min <=> settings.ui-scale-min;
+    in property <float> settings-ui-scale-max <=> settings.ui-scale-max;
+    in property <float> settings-ui-scale-step <=> settings.ui-scale-step;
+    callback settings-ui-scale-edited <=> settings.ui-scale-edited;
+    // Settings opens from the Esc menu; nothing opens the Encyclopedia stub
+    // since the menu column lost its buttons (2026-11-19).
     callback open-settings();
     callback open-encyclopedia();
     // Close on either stub window.
@@ -109,7 +112,6 @@ export component GameUi inherits Window {
     // slot presses as (in-container, index, right button).
     in-out property <bool> inventory-open;
     in property <[ItemSlot]> inventory-hotbar;
-    in property <[ItemSlot]> inventory-main;
     // Empty = no chest open.
     in property <[ItemSlot]> inventory-container;
     in property <ItemSlot> inventory-cursor;
@@ -120,7 +122,14 @@ export component GameUi inherits Window {
     callback inventory-slot-pressed(bool, int, bool);
     out property <length> inventory-grid-left: inventory.grid-left;
     out property <length> inventory-container-top: inventory.container-top;
-    out property <length> inventory-main-top: inventory.main-top;
+    // Where the client draws the player's model, and whether it should
+    // (`character_preview.rs`): the inventory's character frame, uncovered.
+    out property <bool> inventory-character-shown: root.inventory-open && inventory.character-shown
+        && !root.menu-open && !root.settings-open && !root.encyclopedia-open && !root.map-open;
+    out property <length> inventory-character-x: inventory.character-x;
+    out property <length> inventory-character-y: inventory.character-y;
+    out property <length> inventory-character-width: inventory.character-width;
+    out property <length> inventory-character-height: inventory.character-height;
     out property <length> inventory-hotbar-top: inventory.hotbar-top;
     out property <length> inventory-slot-pitch: inventory.slot-pitch;
     out property <length> inventory-slot-size: inventory.slot-size;
@@ -155,33 +164,30 @@ export component GameUi inherits Window {
     // client keeps them exclusive (opening the map closes the menu).
     in-out property <bool> menu-open;
     in-out property <bool> map-open;
-    // The whole tile grid, `WorldMapConfig.tile-px` pixels per tile.
-    in property <image> map-image;
-    // The map's layer buttons (captions) and the picked one, which
-    // `map-image` shows.
+    // The map's layer buttons (captions) and the picked one (the client
+    // draws the map itself, under this layer: `renderer/map/`).
     in property <[string]> map-layer-names;
     in-out property <int> map-layer;
-    in property <int> map-cols;
-    in property <int> map-rows;
     // False without a forged world: the map says so instead.
     in property <bool> map-available;
-    // Tile coordinates on the map (column right, row down); -1 = none.
-    in property <int> home-col: -1;
-    in property <int> home-row: -1;
+    // The selected region's tile on the world map (column right, row down); -1 = none.
     in-out property <int> selected-col: -1;
     in-out property <int> selected-row: -1;
     // The selected tile's info, one line each.
     in property <[string]> tile-lines;
-    in property <bool> play-enabled;
-    // Why Play is disabled; "" when it is not.
-    in property <string> play-reason;
-    // "Loading region…", a refusal; "" for none.
+    // An adventure refusal; "" for none.
     in property <string> map-status;
-    in property <[SiteMark]> map-sites;
-    in property <bool> show-play: true;
-    // The tile under the map pointer.
-    out property <int> map-hover-col: map.hover-col;
-    out property <int> map-hover-row: map.hover-row;
+    // Home, selection, hover and sites, placed by the client in the map view's logical pixels.
+    in property <[MapMarker]> map-markers;
+    // Block, region and height under the map pointer.
+    in property <string> map-pointer-line;
+    // The pointer over the map view (view logical pixels).
+    out property <bool> map-pointer-in: map.pointer-in;
+    out property <length> map-pointer-x: map.pointer-x;
+    out property <length> map-pointer-y: map.pointer-y;
+    callback map-drag(length, length);
+    callback map-wheel(length, length, float);
+    callback map-click(length, length);
     // The arrival panel (beside the map while it is visible).
     in property <bool> arrival-visible;
     // The panel's open tab: 0 Adventure, 1 Legends.
@@ -221,28 +227,15 @@ export component GameUi inherits Window {
     out property <length> legends-filter-x: arrival.legends-filter-x;
     out property <length> legends-filter-first-y: arrival.legends-filter-first-y;
     out property <length> legends-filter-row-height: arrival.legends-filter-row-height;
-    in-out property <float> map-zoom: 1;
-    in-out property <length> map-pan-x;
-    in-out property <length> map-pan-y;
     // Hit-test positions for headless tests (window logical pixels): the
-    // map view's top-left and the Play button's centre.
+    // map view's top-left.
     out property <length> map-view-x: map.view-x;
     out property <length> map-view-y: map.view-y;
     out property <length> map-view-width: map.view-width;
     out property <length> map-view-height: map.view-height;
-    out property <length> play-button-x: map.play-button-x;
-    out property <length> play-button-y: map.play-button-y;
     out property <length> layer-button-x: map.layer-button-x;
     out property <length> layer-buttons-top: map.layer-buttons-top;
     out property <length> layer-button-pitch: map.layer-button-pitch;
-    // The whole map in view (the client calls it when a map arrives).
-    public function fit-map() {
-        map.fit-map();
-    }
-    // Tile (`col`, `row`) of the map into view (the home tile, on opening).
-    public function show-map-tile(col: int, row: int) {
-        map.show-tile(col, row);
-    }
 
     callback open-map();
     callback close-menu();
@@ -255,8 +248,8 @@ export component GameUi inherits Window {
     // Whether the menu offers Main menu (false on wasm, which has no menu).
     in property <bool> can-leave: true;
     // Not in play yet: the world map is the start screen. Its Close is gone,
-    // the Esc menu offers only Main menu, and neither the fortress panel, the
-    // menu column nor the status line is drawn.
+    // the Esc menu offers only Main menu, and neither the menu column nor the
+    // status line is drawn.
     in property <bool> map-modal;
     out property <length> close-button-x: map.close-button-x;
     out property <length> close-button-y: map.close-button-y;
@@ -265,10 +258,7 @@ export component GameUi inherits Window {
     out property <length> end-adventure-button-y: menu.end-adventure-button-y;
     out property <length> main-menu-button-y: menu.main-menu-button-y;
     callback close-map();
-    // A tile clicked on the map (it is now `selected-col/row`).
-    callback select-tile(int, int);
-    callback play();
-    // The game-level status line ("Loading region…", a Play refusal);
+    // The game-level status line (an adventure refusal, a history notice);
     // "" draws nothing. Hidden under the open map, which shows `map-status`.
     in property <string> game-status;
     // The home server's drain countdown, shown above the status line; "" draws nothing.
@@ -276,45 +266,17 @@ export component GameUi inherits Window {
     // The status line's centre (window logical pixels), for headless tests.
     out property <length> status-x: root.width / 2;
     out property <length> status-y: root.status-top + 12px;
-    // Under the fortress panel's tab row, which spans the top centre.
-    property <length> status-top: fortress.bar-bottom + 8px;
+    // A gap below the window's top edge.
+    property <length> status-top: 8px;
 
     // The drag readout's distance right of and below the cursor; it flips
     // to the other side at the window edge rather than slide under it.
     property <length> drag-offset: 16px;
 
-    // Top left; not over the arrival map. `visible` on a plain Rectangle
-    // (not `if`), so the test probes above stay readable.
-    Rectangle {
-        visible: !root.map-modal;
-        fortress := FortressPanel {
-            x: FortressLayout.margin;
-            y: FortressLayout.margin;
-            height-limit: root.height - FortressLayout.margin - FortressLayout.bottom-gap;
-            value: root.fortress-value;
-            happiness: root.fortress-happiness;
-            food: root.fortress-food;
-            tab <=> root.fortress-tab;
-            governance-lines: root.governance-lines;
-            people: root.people-names;
-            designations: root.designation-lines;
-            person-picked(i) => { root.person-picked(i); }
-            debug-available: root.debug-available;
-            dev-stats: root.dev-stats;
-            dev-toggles: root.dev-toggles;
-            dev-tick-rows: root.dev-tick-rows;
-            dev-toggle(i, on) => { root.dev-toggle(i, on); }
-            dev-complete-orders => { root.dev-complete-orders(); }
-            dev-drop-body => { root.dev-drop-body(); }
-        }
-    }
-
     // Top right; not over the arrival map.
     if !root.map-modal: MenuColumn {
         x: root.width - self.width - MenuLayout.margin;
         y: MenuLayout.margin;
-        open-settings => { root.open-settings(); }
-        open-encyclopedia => { root.open-encyclopedia(); }
         tool-name: root.tool-name;
         priority: root.priority;
         level-text: root.level-text;
@@ -345,11 +307,10 @@ export component GameUi inherits Window {
         }
     }
 
-    // Top centre, between the fortress panel and the menu column, apart from
-    // the map window; only while
+    // Top centre, left of the menu column, apart from the map window; only while
     // there is something to say, so it takes no pixels or clicks otherwise.
     // The drain countdown, above the status line, which sits below it by this box's real
-    // height plus the gap the file uses under the fortress panel. The box is always
+    // height plus a gap. The box is always
     // instantiated (its height is the one source of the status line's offset) and shown
     // only with a line. A `Text` rather than a `LabelFace`: the label is single-line and
     // elides, and this line must wrap in a narrow window (the box is at most the window's
@@ -423,7 +384,6 @@ export component GameUi inherits Window {
         width: 100%;
         height: 100%;
         hotbar-slots: root.inventory-hotbar;
-        main-slots: root.inventory-main;
         container-slots: root.inventory-container;
         cursor-slot: root.inventory-cursor;
         selected: root.inventory-selected;
@@ -447,11 +407,10 @@ export component GameUi inherits Window {
 
     // The stub windows: `visible` rather than `if`, so their Close probes
     // stay readable.
-    settings := StubWindow {
+    settings := SettingsWindow {
         visible: root.settings-open;
         width: 100%;
         height: 100%;
-        title: "Settings";
         close => { root.close-window(); }
     }
     encyclopedia := StubWindow {
@@ -472,6 +431,7 @@ export component GameUi inherits Window {
         open-map => { root.open-map(); }
         close-menu => { root.close-menu(); }
         main-menu => { root.main-menu(); }
+        open-settings => { root.open-settings(); }
         can-end-adventure: root.can-end-adventure;
         end-adventure => { root.end-adventure(); }
     }
@@ -482,30 +442,23 @@ export component GameUi inherits Window {
         visible: root.map-open;
         width: 100%;
         height: 100%;
-        map-image: root.map-image;
         layer-names: root.map-layer-names;
         map-layer <=> root.map-layer;
-        map-cols: root.map-cols;
-        map-rows: root.map-rows;
         map-available: root.map-available;
-        home-col: root.home-col;
-        home-row: root.home-row;
         selected-col <=> root.selected-col;
         selected-row <=> root.selected-row;
         tile-lines: root.tile-lines;
-        play-enabled: root.play-enabled;
-        play-reason: root.play-reason;
         map-status: root.map-status;
-        sites: root.map-sites;
-        show-play: root.show-play;
-        reserve-left: root.arrival-visible ? root.arrival-width + WorldMapConfig.gap : 0px;
-        map-zoom <=> root.map-zoom;
-        map-pan-x <=> root.map-pan-x;
-        map-pan-y <=> root.map-pan-y;
+        markers: root.map-markers;
+        pointer-line: root.map-pointer-line;
+        reserve-left: root.arrival-visible ? root.arrival-width : 0px;
         map-modal: root.map-modal;
-        select-tile(col, row) => { root.select-tile(col, row); }
-        play => { root.play(); }
+        map-drag(dx, dy) => { root.map-drag(dx, dy); }
+        map-wheel(x, y, notches) => { root.map-wheel(x, y, notches); }
+        map-click(x, y) => { root.map-click(x, y); }
         close-map => { root.close-map(); }
+        can-leave: root.can-leave;
+        main-menu => { root.main-menu(); }
     }
 
     // The Legends tab widens the panel; the map keeps the rest.
@@ -514,10 +467,10 @@ export component GameUi inherits Window {
     // readable.
     arrival := ArrivalPanel {
         visible: root.map-open && root.arrival-visible;
-        x: WorldMapConfig.margin;
-        y: WorldMapConfig.margin;
+        x: map.margin;
+        y: map.margin;
         width: root.arrival-width;
-        height: root.height - 2 * WorldMapConfig.margin;
+        height: root.height - 2 * map.margin;
         tab <=> root.arrival-tab;
         tab-changed(i) => { root.arrival-tab-changed(i); }
         adventure-civs: root.adventure-civs;
@@ -537,5 +490,21 @@ export component GameUi inherits Window {
         legends-pick-filter(i) => { root.legends-pick-filter(i); }
         legends-load-more => { root.legends-load-more(); }
         legends-line-clicked(i) => { root.legends-line-clicked(i); }
+    }
+
+    // The F3 debug pane, last so it draws over every other element (the map
+    // and the arrival panel included). `visible` rather than `if`, so its
+    // hit-test positions above stay readable.
+    debug := DebugPane {
+        visible: root.debug-open;
+        x: 0;
+        y: 0;
+        height-limit: root.height;
+        stats: root.dev-stats;
+        toggles: root.dev-toggles;
+        tick-rows: root.dev-tick-rows;
+        toggle(i, on) => { root.dev-toggle(i, on); }
+        complete-orders => { root.dev-complete-orders(); }
+        drop-body => { root.dev-drop-body(); }
     }
 }

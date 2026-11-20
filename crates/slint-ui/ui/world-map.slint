@@ -1,103 +1,98 @@
-import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+import { Button, FrameFace, LabelFace, Styles, VerticalFlow } from "@widgets";
 
-// One site on the map: a small square on its tile, `hollow` once abandoned.
-export struct SiteMark {
-    col: int,
-    row: int,
+// One marker on the map, placed by the client in the view's own logical pixels (the client owns
+// the map's transform: Slint never scales a map picture). A frame (`border` > 0, no `fill`) or a
+// filled square.
+export struct MapMarker {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
     color: color,
-    hollow: bool,
+    fill: bool,
+    border: length,
     label: string,
 }
 
 // The map window's tunables. Exported to Rust (`WorldMapConfig`) so the
 // client and the tests share them.
 export global WorldMapConfig {
-    // Logical pixels per tile at zoom 1: the map image has this many pixels
-    // per tile. Must match `worldgen::tile_map::MAP_TILE_PX`.
-    out property <int> tile-px: 8;
-    // Grid-line width in map pixels, drawn on each tile's right and bottom
-    // edge. Must match `worldgen::tile_map::MAP_GRID_PX`.
-    out property <int> grid-px: 1;
-    // Zoom doubles / halves per wheel notch: ⅛, ¼, ½, 1, 2, 4, 8 (⅛ shows a
-    // 100 km world's 196 tiles a pixel each). Powers of two
-    // only: the software renderer steps through a scaled image in fixed
-    // point, so any other factor (×1.25, even ×3) drifts the image off the
-    // markers by up to a few pixels across the map; whole factors also keep
-    // the grid lines even.
-    out property <float> zoom-min: 0.125;
-    out property <float> zoom-max: 8;
-    // A pan keeps at least this share of the view (or all of a smaller map)
-    // covered by the map: the map can never be dragged out of sight.
-    out property <float> pan-keep: 0.5;
     // Matches the client's `WHEEL_LINE_PX`.
     out property <length> wheel-notch: 40px;
     // A press that moves further than this is a drag (pan), not a click.
     out property <length> drag-slop: 4px;
-    // Between the window edge and the map window.
+    // Between the window edge and the map window, in play (`WorldMap.margin`).
     out property <length> margin: 24px;
     out property <length> side-width: 260px;
+    // The side panel's frame around its content.
+    out property <length> side-frame: 28px;
     // Between the map and the side panel.
     out property <length> gap: 8px;
     out property <color> hover-color: #ffffffa0;
     out property <color> selected-color: #ffd23c;
     out property <color> home-color: #3cc8ff;
     out property <color> view-background: #1a1a1a;
+    out property <color> view-border: #000000;
+    // The map view's fill: the map is drawn UNDER this layer (`renderer/map/pass.rs`), so the view
+    // must show it through — but a pixel with alpha 0 does not take the pointer
+    // (`Overlay::opaque_at`), so it is alpha 1 of 255: invisible, and still the layer's.
+    out property <color> hole: #00000001;
 }
 
-// The world map (M, or the menu's World Map button): one tile per region,
-// zoomable about the cursor (wheel) and pannable (drag), never out of sight
-// (`pan-keep`); click selects a tile; the layer buttons pick what the
-// picture shows (the client redraws `map-image` for `map-layer`). The side panel shows what is known about the selected tile and the
-// Play button. The client builds `map-image` (`tile-px` pixels per tile) and
-// owns every property but the ones this window edits (selection, zoom, pan).
+// The world map (M, the start screen): the client draws the map itself under this layer, into the
+// view's rect (the "hole"), at any zoom; this window reports drag (pan), wheel (zoom about the
+// pointer) and click (select the region under it) and draws the client's markers over it. The layer
+// buttons pick what the map shows; the side panel shows what is known about the selected tile, and
+// Close (Main menu while the map is the start screen).
 export component WorldMap {
-    in property <image> map-image;
     // The layer buttons' captions; `map-layer` indexes them (0 = default).
     in property <[string]> layer-names;
     in-out property <int> map-layer;
-    in property <int> map-cols;
-    in property <int> map-rows;
     in property <bool> map-available;
-    in property <int> home-col: -1;
-    in property <int> home-row: -1;
+    // The selected region's tile (column, row on the world map); -1 = none.
     in-out property <int> selected-col: -1;
     in-out property <int> selected-row: -1;
     in property <[string]> tile-lines;
-    in property <bool> play-enabled;
-    in property <string> play-reason;
+    // Block, region and height under the pointer ("" off the map).
+    in property <string> pointer-line;
     in property <string> map-status;
-    // Sites, drawn over the picture (a model, so they update without a redraw).
-    in property <[SiteMark]> sites;
+    // Over the map, in the view's logical pixels (the client's transform).
+    in property <[MapMarker]> markers;
     // Room kept free at the window's left for the arrival panel.
     in property <length> reserve-left: 0px;
-    // Play is a dev action once the arrival panel is the way in.
-    in property <bool> show-play: true;
-    // The tile under the pointer, -1 when off the map.
-    out property <int> hover-col: touch.has-hover ? root.tile-at(touch.mouse-x - root.map-pan-x, root.map-cols) : -1;
-    out property <int> hover-row: touch.has-hover ? root.tile-at(touch.mouse-y - root.map-pan-y, root.map-rows) : -1;
-    in-out property <float> map-zoom: 1;
-    // Where the map's top-left corner sits in the view.
-    in-out property <length> map-pan-x;
-    in-out property <length> map-pan-y;
-    // The arrival map (not in play yet): Play is the only way out, so there
-    // is no Close button. (Esc / M are the client's, which honours it too.)
+    // The pointer over the view (view logical pixels), for the client's readout.
+    out property <bool> pointer-in: touch.has-hover;
+    out property <length> pointer-x: touch.mouse-x;
+    out property <length> pointer-y: touch.mouse-y;
+    // The arrival map (not in play yet): the start screen, so there is no
+    // Close button but Main menu in its place. (Esc / M are the client's,
+    // which honours it too.)
     in property <bool> map-modal;
+    // The start screen (`map-modal`) fills the window; the map opened in play
+    // is a window over the world.
+    out property <length> margin: root.map-modal ? 0px : WorldMapConfig.margin;
+    // Whether the start screen offers Main menu (not on wasm).
+    in property <bool> can-leave: true;
 
-    callback select-tile(int, int);
-    callback play();
+    // A drag moved by (dx, dy) view logical pixels since its last report.
+    callback map-drag(length, length);
+    // A wheel notch (+1 in, -1 out) at (x, y) in the view.
+    callback map-wheel(length, length, float);
+    // A click (not a drag) at (x, y) in the view.
+    callback map-click(length, length);
     callback close-map();
+    // Leave the world for the main menu (the start screen's way back).
+    callback main-menu();
 
-    // The map view's top-left and the Play button's centre, in window
-    // logical pixels: hit-test positions for headless tests.
+    // The map view's top-left, in window logical pixels: hit-test positions
+    // for headless tests.
     out property <length> view-x: view.absolute-position.x;
     out property <length> view-y: view.absolute-position.y;
     // The view's size: the client centres the pan on the home tile with it.
     out property <length> view-width: view.width;
     out property <length> view-height: view.height;
-    out property <length> play-button-x: play-button.absolute-position.x + play-button.width / 2;
-    out property <length> play-button-y: play-button.absolute-position.y + play-button.height / 2;
-    // Close sits under Play, in a slot that is empty while `map-modal`.
-    out property <length> close-button-x: root.play-button-x;
+    // Close (Main menu while `map-modal`) sits under the tile lines.
+    out property <length> close-button-x: close-slot.absolute-position.x + close-slot.width / 2;
     out property <length> close-button-y: close-slot.absolute-position.y + close-slot.height / 2;
     // The layer buttons: a column, button `i`'s centre at
     // (`layer-button-x`, `layer-buttons-top + (i + 0.5) * layer-button-pitch`).
@@ -105,223 +100,110 @@ export component WorldMap {
     out property <length> layer-buttons-top: layers.absolute-position.y;
     out property <length> layer-button-pitch: layers.height / max(1, root.layer-names.length);
 
-    // The whole map at the largest zoom step that fits the view, centred.
-    public function fit-map() {
-        let w = root.map-cols * WorldMapConfig.tile-px * 1px;
-        let h = root.map-rows * WorldMapConfig.tile-px * 1px;
-        if w <= 0px || h <= 0px || view.width <= 0px || view.height <= 0px {
-            return;
-        }
-        let fit = min(view.width / w, view.height / h);
-        // A hair over the exact ratio, so a power of two that fits exactly
-        // is not lost to log rounding.
-        let zoom = clamp(pow(2, floor(log(fit * 1.0001, 2))), WorldMapConfig.zoom-min, WorldMapConfig.zoom-max);
-        root.map-zoom = zoom;
-        root.map-pan-x = root.snap((view.width - w * zoom) / 2);
-        root.map-pan-y = root.snap((view.height - h * zoom) / 2);
-    }
-
-    // Bring tile (`col`, `row`) into view: centred (as far as the clamp
-    // allows) unless it is already wholly visible.
-    public function show-tile(col: int, row: int) {
-        let x = root.map-pan-x + col * root.tile-len;
-        let y = root.map-pan-y + row * root.tile-len;
-        if x >= 0 && y >= 0 && x + root.tile-len <= view.width && y + root.tile-len <= view.height {
-            return;
-        }
-        root.map-pan-x = root.clamp-pan-x(root.snap(view.width / 2 - (col + 0.5) * root.tile-len));
-        root.map-pan-y = root.clamp-pan-y(root.snap(view.height / 2 - (row + 0.5) * root.tile-len));
-    }
-
-    property <length> tile-len: WorldMapConfig.tile-px * 1px * root.map-zoom;
-    // A tile's visible cell: the tile minus its grid line (right and bottom),
-    // which is what the markers frame.
-    property <length> cell-len: (WorldMapConfig.tile-px - WorldMapConfig.grid-px) * 1px * root.map-zoom;
-    // Pan at the press, and whether the press became a drag.
-    property <length> drag-start-x;
-    property <length> drag-start-y;
+    // Pointer position at the press / last report, and whether the press became a drag.
+    property <length> last-x;
+    property <length> last-y;
     property <bool> dragged;
-
     // Scroll not yet worth a notch (touchpads scroll in small steps).
     property <length> wheel-acc;
-    // The map point (zoom-1 pixels) a wheel gesture zooms about, kept while
-    // the cursor and the pan stay where that gesture left them, so pan
-    // rounding never adds up over notches.
-    property <length> anchor-x;
-    property <length> anchor-y;
-    property <length> anchor-mouse-x: -1px;
-    property <length> anchor-mouse-y: -1px;
-    property <length> anchor-pan-x;
-    property <length> anchor-pan-y;
+    // The side panel's frame width.
+    property <length> side-frame-width: WorldMapConfig.side-width + WorldMapConfig.side-frame;
 
-    pure function zoom-in(z: float) -> float {
-        min(z * 2, WorldMapConfig.zoom-max)
-    }
-    pure function zoom-out(z: float) -> float {
-        max(z / 2, WorldMapConfig.zoom-min)
-    }
-    // Pans stay on whole pixels, so the image's pixels land on the screen's.
-    pure function snap(v: length) -> length {
-        round(v / 1px) * 1px
-    }
+    view := Rectangle {
+        x: root.margin + root.reserve-left;
+        y: root.margin;
+        width: max(0px, root.width - 2 * root.margin - root.reserve-left - root.side-frame-width - WorldMapConfig.gap);
+        height: max(0px, root.height - 2 * root.margin);
+        clip: true;
+        background: root.map-available ? WorldMapConfig.hole : WorldMapConfig.view-background;
 
-    // Pans keep `pan-keep` of the view (or all of a smaller map) on the map.
-    pure function clamp-pan(pan: length, view-len: length, map-len: length) -> length {
-        let keep = min(map-len, view-len * WorldMapConfig.pan-keep);
-        clamp(pan, keep - map-len, max(keep - map-len, view-len - keep))
-    }
-    pure function clamp-pan-x(pan: length) -> length {
-        root.clamp-pan(pan, view.width, root.map-cols * root.tile-len)
-    }
-    pure function clamp-pan-y(pan: length) -> length {
-        root.clamp-pan(pan, view.height, root.map-rows * root.tile-len)
-    }
+        for m in root.markers: Rectangle {
+            x: m.x;
+            y: m.y;
+            width: m.w;
+            height: m.h;
+            background: m.fill ? m.color : transparent;
+            border-width: m.border;
+            border-color: m.color;
+        }
+        if !root.map-available: LabelFace {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            text: "No world map (procedural world)";
+        }
 
-    pure function tile-at(offset: length, count: int) -> int {
-        offset < 0 || offset >= count * root.tile-len ? -1 : floor(offset / root.tile-len)
+        touch := TouchArea {
+            enabled: root.map-available;
+            pointer-event(event) => {
+                if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                    root.last-x = self.mouse-x;
+                    root.last-y = self.mouse-y;
+                    root.dragged = false;
+                }
+                // A drag released (or cancelled) outside the view gets
+                // no `clicked`: end it here. `clicked` runs before `up`,
+                // so it still sees the drag.
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up)
+                    || event.kind == PointerEventKind.cancel {
+                    root.dragged = false;
+                }
+            }
+            moved => {
+                if self.pressed {
+                    if !root.dragged && (abs(self.mouse-x - self.pressed-x) > WorldMapConfig.drag-slop
+                        || abs(self.mouse-y - self.pressed-y) > WorldMapConfig.drag-slop) {
+                        root.dragged = true;
+                    }
+                    if root.dragged {
+                        root.map-drag(self.mouse-x - root.last-x, self.mouse-y - root.last-y);
+                        root.last-x = self.mouse-x;
+                        root.last-y = self.mouse-y;
+                    }
+                }
+            }
+            clicked => {
+                if !root.dragged {
+                    root.map-click(self.pressed-x, self.pressed-y);
+                }
+                root.dragged = false;
+            }
+            scroll-event(event) => {
+                if event.delta-y == 0 {
+                    return reject;
+                }
+                root.wheel-acc += event.delta-y;
+                if abs(root.wheel-acc) < WorldMapConfig.wheel-notch {
+                    return accept;
+                }
+                root.map-wheel(self.mouse-x, self.mouse-y, root.wheel-acc > 0 ? 1 : -1);
+                root.wheel-acc = 0;
+                accept
+            }
+        }
+    }
+    // The view's edge, over the map and the markers.
+    Rectangle {
+        x: view.x;
+        y: view.y;
+        width: view.width;
+        height: view.height;
+        border-width: 2px;
+        border-color: WorldMapConfig.view-border;
     }
 
     window := FrameFace {
         title: "World Map";
-        x: WorldMapConfig.margin + root.reserve-left;
-        y: WorldMapConfig.margin;
-        width: root.width - 2 * WorldMapConfig.margin - root.reserve-left;
-        height: root.height - 2 * WorldMapConfig.margin;
-
-        property <length> content-bottom: self.height - Styles.frame.box.padding.bottom
-            - GraphicalSets.inset(Styles.frame.graphics).bottom;
-
-        view := Rectangle {
-            x: window.content-x;
-            y: window.content-y;
-            width: max(0px, window.content-right - window.content-x - WorldMapConfig.side-width - WorldMapConfig.gap);
-            height: max(0px, window.content-bottom - window.content-y);
-            clip: true;
-            background: WorldMapConfig.view-background;
-
-            if root.map-available: Image {
-                x: root.map-pan-x;
-                y: root.map-pan-y;
-                width: root.map-cols * root.tile-len;
-                height: root.map-rows * root.tile-len;
-                source: root.map-image;
-                image-fit: fill;
-                image-rendering: pixelated;
-            }
-            if root.map-available && root.home-col >= 0 && root.home-row >= 0: Rectangle {
-                x: root.map-pan-x + root.home-col * root.tile-len;
-                y: root.map-pan-y + root.home-row * root.tile-len;
-                width: root.cell-len;
-                height: root.cell-len;
-                border-width: 2px;
-                border-color: WorldMapConfig.home-color;
-            }
-            for site in root.sites: Rectangle {
-                x: root.map-pan-x + site.col * root.tile-len + 2px;
-                y: root.map-pan-y + site.row * root.tile-len + 2px;
-                width: max(4px, root.cell-len / 3);
-                height: max(4px, root.cell-len / 3);
-                background: site.hollow ? transparent : site.color;
-                border-width: site.hollow ? 1px : 0px;
-                border-color: site.color;
-            }
-            if root.map-available && root.selected-col >= 0 && root.selected-row >= 0: Rectangle {
-                // Inside the home marker when both are on one tile.
-                x: root.map-pan-x + root.selected-col * root.tile-len + 2px;
-                y: root.map-pan-y + root.selected-row * root.tile-len + 2px;
-                width: max(0px, root.cell-len - 4px);
-                height: max(0px, root.cell-len - 4px);
-                border-width: 2px;
-                border-color: WorldMapConfig.selected-color;
-            }
-            if root.map-available && !root.dragged && root.hover-col >= 0 && root.hover-row >= 0: Rectangle {
-                x: root.map-pan-x + root.hover-col * root.tile-len;
-                y: root.map-pan-y + root.hover-row * root.tile-len;
-                width: root.cell-len;
-                height: root.cell-len;
-                border-width: 1px;
-                border-color: WorldMapConfig.hover-color;
-            }
-            if !root.map-available: LabelFace {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: self.preferred-width;
-                height: self.preferred-height;
-                text: "No world map (procedural world)";
-            }
-
-            touch := TouchArea {
-                enabled: root.map-available;
-                pointer-event(event) => {
-                    if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
-                        root.drag-start-x = root.map-pan-x;
-                        root.drag-start-y = root.map-pan-y;
-                        root.dragged = false;
-                    }
-                    // A drag released (or cancelled) outside the view gets
-                    // no `clicked`: end it here, or hover stays hidden.
-                    // `clicked` runs before `up`, so it still sees the drag.
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up)
-                        || event.kind == PointerEventKind.cancel {
-                        root.dragged = false;
-                    }
-                }
-                moved => {
-                    if self.pressed {
-                        if !root.dragged && (abs(self.mouse-x - self.pressed-x) > WorldMapConfig.drag-slop
-                            || abs(self.mouse-y - self.pressed-y) > WorldMapConfig.drag-slop) {
-                            root.dragged = true;
-                        }
-                        if root.dragged {
-                            root.map-pan-x = root.clamp-pan-x(root.snap(root.drag-start-x + self.mouse-x - self.pressed-x));
-                            root.map-pan-y = root.clamp-pan-y(root.snap(root.drag-start-y + self.mouse-y - self.pressed-y));
-                        }
-                    }
-                }
-                clicked => {
-                    if !root.dragged {
-                        let col = root.tile-at(self.pressed-x - root.map-pan-x, root.map-cols);
-                        let row = root.tile-at(self.pressed-y - root.map-pan-y, root.map-rows);
-                        if col >= 0 && row >= 0 {
-                            root.selected-col = col;
-                            root.selected-row = row;
-                            root.select-tile(col, row);
-                        }
-                    }
-                    root.dragged = false;
-                }
-                // Zoom about the cursor: the map point under it stays put.
-                scroll-event(event) => {
-                    if event.delta-y == 0 {
-                        return reject;
-                    }
-                    root.wheel-acc += event.delta-y;
-                    if abs(root.wheel-acc) < WorldMapConfig.wheel-notch {
-                        return accept;
-                    }
-                    let zoom = root.wheel-acc > 0 ? root.zoom-in(root.map-zoom) : root.zoom-out(root.map-zoom);
-                    root.wheel-acc = 0;
-                    if self.mouse-x != root.anchor-mouse-x || self.mouse-y != root.anchor-mouse-y
-                        || root.map-pan-x != root.anchor-pan-x || root.map-pan-y != root.anchor-pan-y {
-                        root.anchor-x = (self.mouse-x - root.map-pan-x) / root.map-zoom;
-                        root.anchor-y = (self.mouse-y - root.map-pan-y) / root.map-zoom;
-                    }
-                    root.map-zoom = zoom;
-                    root.map-pan-x = root.clamp-pan-x(root.snap(self.mouse-x - root.anchor-x * zoom));
-                    root.map-pan-y = root.clamp-pan-y(root.snap(self.mouse-y - root.anchor-y * zoom));
-                    root.anchor-mouse-x = self.mouse-x;
-                    root.anchor-mouse-y = self.mouse-y;
-                    root.anchor-pan-x = root.map-pan-x;
-                    root.anchor-pan-y = root.map-pan-y;
-                    accept
-                }
-            }
-        }
+        x: view.x + view.width + WorldMapConfig.gap;
+        y: root.margin;
+        width: root.side-frame-width;
+        height: root.height - 2 * root.margin;
 
         side := VerticalFlow {
-            x: view.x + view.width + WorldMapConfig.gap;
+            x: window.content-x;
             y: window.content-y;
-            width: WorldMapConfig.side-width;
+            width: window.content-right - window.content-x;
 
             layers := VerticalLayout {
                 for name[i] in root.layer-names: Button {
@@ -336,20 +218,18 @@ export component WorldMap {
                 text: "Select a tile";
             }
             for line in root.tile-lines: LabelFace { text: line; }
-            if root.play-reason != "": LabelFace {
+            if root.pointer-line != "": LabelFace {
                 style: Styles.caption-label;
-                text: root.play-reason;
-            }
-            play-button := Button {
-                visible: root.show-play;
-                text: "Play";
-                enabled: root.play-enabled;
-                clicked => { root.play(); }
+                text: root.pointer-line;
             }
             close-slot := VerticalLayout {
                 if !root.map-modal: Button {
                     text: "Close";
                     clicked => { root.close-map(); }
+                }
+                if root.map-modal && root.can-leave: Button {
+                    text: "Main menu";
+                    clicked => { root.main-menu(); }
                 }
             }
             if root.map-status != "": LabelFace {

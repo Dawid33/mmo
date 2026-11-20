@@ -6,4 +6,4 @@
 //! change process-global state (hash mode, the installed world, a logger)
 //! from one — give such a file its own `[[test]]` in Cargo.toml instead.
 
-mod world_map;
+mod tabs;

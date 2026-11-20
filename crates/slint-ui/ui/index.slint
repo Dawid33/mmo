@@ -1,9 +1,9 @@
-// The components THIS crate generates Rust for: the in-game UI (its F3
-// debug page is a fortress-panel tab) and the pass-through HUD. The frontend
+// The components THIS crate generates Rust for: the in-game UI (with its F3
+// debug pane) and the pass-through HUD. The frontend
 // (main menu, generator, load world) is compiled by crates/slint-ui-frontend from `frontend.slint`,
 // and the asset viewer + controls test harness by crates/slint-ui-tools —
 // separate crates, so editing one screen doesn't recompile them all.
-export { ChatRow, GameUi, ItemSlot, LegendsFilterRow, SiteMark, WorldMapConfig } from "game.slint";
+export { ChatRow, GameUi, ItemSlot, LegendsFilterRow, MapMarker, WorldMapConfig } from "game.slint";
 export { HudConfig, HudUi } from "hud.slint";
 export { InventoryConfig } from "inventory.slint";
 export { DevStat, DevTickRow, DevToggle } from "debug-tab.slint";

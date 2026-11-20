@@ -31,8 +31,8 @@
 //! (greyscale ramp over the layer's fixed range, `worldgen::habitat`).
 //!
 //! `--world <file> --tiles` instead writes the in-game world map: every
-//! `tile_map::MapLayer` as `<out>-tiles-<layer>.png` (the map window's
-//! picture, `MAP_TILE_PX` per tile) and prints the size of the `WorldMap`
+//! `tile_map::MapLayer` as `<out>-tiles-<layer>.png` (one pixel per region, the raster the
+//! game's map draws its thematic layers from) and prints the size of the `WorldMap`
 //! packet the server sends on connect.
 //!
 //! Heights come straight from `TerrainPipeline::column` (the exact field, not
@@ -353,7 +353,7 @@ fn percentile(sorted: &[f32], q: f64) -> f32 {
 
 /// `--tiles`: the world map as the game shows it, one PNG per layer.
 fn write_tiles(a: &Args) {
-    use worldgen::tile_map::{build_world_map, rasterize, MapLayer};
+    use worldgen::tile_map::{build_world_map, rasterize_layer, MapLayer};
     let path = a.world.as_ref().expect("--tiles needs --world <file>");
     let world = worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let started = std::time::Instant::now();
@@ -381,7 +381,7 @@ fn write_tiles(a: &Args) {
         std::fs::create_dir_all(dir).expect("create output directory");
     }
     for layer in MapLayer::ALL {
-        let (w, h, px) = rasterize(&map, layer);
+        let (w, h, px) = rasterize_layer(&map, layer);
         let img = image::RgbaImage::from_raw(w, h, px.into_iter().flatten().collect()).expect("buffer size");
         let out = format!("{}-tiles-{}.png", a.out.display(), layer.label().to_lowercase());
         img.save(&out).expect("write tiles png");

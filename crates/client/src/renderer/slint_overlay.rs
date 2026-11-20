@@ -31,16 +31,15 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use game::history::PersonId;
-use game::{EntityKey, PlayRefusal, RegionCoords, RegionId, WorldMap};
+use game::{RegionCoords, WorldMap};
 use slint_ui::slint::platform::{Key as SlintKey, PointerEventButton, WindowEvent};
 use slint_ui::slint::{
     ComponentHandle, Image as SlintImage, LogicalPosition, ModelRc, Rgba8Pixel, SharedPixelBuffer,
     SharedString, VecModel,
 };
 use slint_ui::wheel::{self, WheelInput, WheelPhase};
-use slint_ui::{GameUi, HudConfig, HudUi, Overlay, SiteMark, WorldMapConfig};
-use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines, MapLayer};
+use slint_ui::{GameUi, HudConfig, HudUi, Overlay};
+use worldgen::tile_map::tile_info_lines;
 
 use super::bridge::{LocalBody, SimEntity, SimKind};
 use super::commander::designate::{DesignateState, DragReadout, Tool, TOOL_KEYS};
@@ -55,7 +54,6 @@ use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
 use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
 use super::hud::{crosshair_visible, HudStatus};
-use super::fortress_panel;
 use super::arrival_tabs;
 use super::history_view::{self, ArrivalTab, HistoryView};
 use super::world_map::WorldMapState;
@@ -70,12 +68,44 @@ pub const MENU_KEY: KeyCode = KeyCode::Escape;
 pub const MAP_KEY: KeyCode = KeyCode::KeyM;
 /// Held, opens the tool wheel at the pointer ([`tool_wheel`]).
 pub const WHEEL_KEY: KeyCode = KeyCode::KeyQ;
-/// The map's status line from Play until the new region has loaded.
-pub const LOADING_TEXT: &str = "Loading region\u{2026}";
-/// UI pixels per window logical pixel. The widgets are pixel-exact at a
-/// total scale (this × the window's scale factor) of 1 and 2. Overridden by
-/// `VOXEL_UI_SCALE`.
-pub const UI_SCALE: f32 = 1.0;
+/// UI pixels per window logical pixel, before the player's setting
+/// ([`OverlayScale`]). The widgets are pixel-exact at a total scale (the UI
+/// scale × the window's scale factor) of 1 and 2: their sprite sheets are
+/// drawn texel for pixel there and resampled in between (layout still lands
+/// on whole physical pixels at any scale). 1.5 is the default, and what the
+/// Settings window calls 100 % (owner, 2026-11-19).
+pub const UI_SCALE: f32 = 1.5;
+/// The interface-scale setting's range and step (`graphics_settings`), in
+/// this unit: a quarter at a time, so the two sharp scales, 1 and 2, are
+/// stops (shown as 67 % and 133 %).
+pub const UI_SCALE_MIN: f32 = 0.75;
+pub const UI_SCALE_MAX: f32 = 3.0;
+pub const UI_SCALE_STEP: f32 = 0.25;
+/// The least room (UI pixels) a scale above 100 % must leave the interface:
+/// the Settings window with its margin, so a scale too large for the window
+/// can always be turned down again ([`fitted_ui_scale`]).
+pub const UI_FIT_WIDTH_PX: f32 = 640.0;
+pub const UI_FIT_HEIGHT_PX: f32 = 400.0;
+
+/// The UI scale asked for: UI pixels per window logical pixel, every layer's.
+/// Starts as `VOXEL_UI_SCALE` (else [`UI_SCALE`]); the Settings window's
+/// "Interface scale" writes it (`graphics_settings::apply_ui_scale`). What a
+/// layer draws with is this fitted to the window ([`fitted_ui_scale`]).
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct OverlayScale(pub f32);
+
+/// `wish` lowered, a step at a time and never below 1, until the window
+/// (`physical` pixels at `window_scale` physical per logical) leaves the UI
+/// [`UI_FIT_WIDTH_PX`] × [`UI_FIT_HEIGHT_PX`] of its own pixels.
+pub fn fitted_ui_scale(wish: f32, physical: (u32, u32), window_scale: f32) -> f32 {
+    if wish <= 1.0 || window_scale <= 0.0 {
+        return wish;
+    }
+    let fit = (physical.0 as f32 / (UI_FIT_WIDTH_PX * window_scale))
+        .min(physical.1 as f32 / (UI_FIT_HEIGHT_PX * window_scale));
+    let cap = ((fit / UI_SCALE_STEP).floor() * UI_SCALE_STEP).max(1.0);
+    wish.min(cap)
+}
 /// Logical pixels one wheel notch scrolls.
 pub const WHEEL_LINE_PX: f32 = 40.0;
 /// Draw order of the Slint layers (higher on top). The interactive game UI
@@ -120,12 +150,10 @@ fn frontend_hides(
     }
 }
 
-fn ui_scale() -> f32 {
-    std::env::var("VOXEL_UI_SCALE")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .filter(|s| *s > 0.0)
-        .unwrap_or(UI_SCALE)
+/// `VOXEL_UI_SCALE`, if set to a positive number: the UI scale at start,
+/// whatever the saved setting says (a slider moved afterwards still applies).
+pub fn ui_scale_pinned_by_env() -> Option<f32> {
+    std::env::var("VOXEL_UI_SCALE").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|s| *s > 0.0)
 }
 
 /// What a Slint callback asked the client to do.
@@ -140,8 +168,6 @@ pub enum UiAction {
     MainMenu,
     /// A map tile clicked (column, row); Slint has already selected it.
     SelectTile(i32, i32),
-    /// The map's Play button: ask the server for the selected tile.
-    Play,
     /// Follow the selected entity, or stop following.
     ToggleFollow,
     /// The context box's "3D view" button: leave the top-down view.
@@ -151,9 +177,6 @@ pub enum UiAction {
     OpenSettings,
     OpenEncyclopedia,
     CloseWindow,
-    /// A People row clicked in the fortress panel (index into
-    /// [`PeopleRows`]): select that person.
-    PickPerson(i32),
     /// The arrival panel's tab row (0 Adventure, 1 Legends).
     ArrivalTab(i32),
     /// The Adventure tab's civ button (index into `AdventureSelection::civs`).
@@ -172,11 +195,6 @@ pub enum UiAction {
     LegendsLine(i32),
 }
 
-/// The region a Play request was sent for, until we are there with its region
-/// loaded ([`play_settled`]) or the server refuses it.
-#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlayPending(pub Option<RegionCoords>);
-
 /// Which modal game screens are open. The client keeps them exclusive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Screens {
@@ -185,7 +203,8 @@ pub struct Screens {
     /// The tool wheel ([`tool_wheel`]): modal while open, so the commander
     /// leaves the right button and the world alone.
     pub wheel: bool,
-    /// The menu column's stub windows (`ui/stub-window.slint`).
+    /// The Settings window (`ui/settings.slint`: the menu column's and the
+    /// Esc menu's Settings) and the Encyclopedia stub (`ui/stub-window.slint`).
     pub settings: bool,
     pub encyclopedia: bool,
     /// The inventory / chest screen: opened and closed by the sim
@@ -236,7 +255,7 @@ impl Screens {
         Self { map: true, ..Self::default() }
     }
 
-    /// The menu column's Settings button.
+    /// The menu column's and the Esc menu's Settings button.
     pub fn open_settings() -> Self {
         Self { settings: true, ..Self::default() }
     }
@@ -267,7 +286,7 @@ impl Screens {
     }
 
     /// The arrival map stays up while `modal` unless the Esc menu is over it:
-    /// Close, Play (until it lands) and the rest leave it open.
+    /// Close and the rest leave it open.
     pub fn held(self, modal: bool) -> Self {
         if modal && !self.menu {
             Self { map: true, wheel: false, ..self }
@@ -275,34 +294,6 @@ impl Screens {
             self
         }
     }
-}
-
-/// What the map's Play does with the selected tile `rc`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayAction {
-    /// Not in play and `rc` is where we already are (the spawn region loads
-    /// behind the arrival map): play here, no packet.
-    PlayHere,
-    /// Ask the server to move us (`ClientRequest::PlayRegion`).
-    SendPlay,
-    /// InPlay and already here.
-    Refuse,
-}
-
-/// The Play decision, before `play_blocker`'s map checks (which, while not
-/// in play, run without a home so the home tile is playable).
-pub fn play_action(in_play: bool, home: Option<RegionCoords>, rc: RegionCoords) -> PlayAction {
-    match (in_play, home == Some(rc)) {
-        (false, true) => PlayAction::PlayHere,
-        (true, true) => PlayAction::Refuse,
-        (_, false) => PlayAction::SendPlay,
-    }
-}
-
-/// The home `play_blocker` checks against: none before play starts, so the
-/// spawn tile is not refused as "You are here".
-fn blocker_home(in_play: bool, home: Option<RegionCoords>) -> Option<RegionCoords> {
-    if in_play { home } else { None }
 }
 
 /// Whether the arrival map is modal now (not in play, the map received).
@@ -323,7 +314,7 @@ pub fn slot_ref(container: bool, index: i32) -> Option<game::SlotRef> {
 
 /// Filled by the game UI's callbacks during event dispatch (`!Send`, a
 /// non-send resource on the main thread).
-struct GameUiActions(Rc<RefCell<Vec<UiAction>>>);
+pub(crate) struct GameUiActions(pub(crate) Rc<RefCell<Vec<UiAction>>>);
 
 /// Queues `action` as if its button in the game UI had been pressed (chat
 /// commands); `apply_ui_actions` takes it with the same checks. `false`
@@ -349,7 +340,6 @@ pub struct SlintLayerPlugin<C> {
     init: fn(&C, &mut World),
     order: i32,
     passthrough: bool,
-    follows_ui_scale: bool,
     hidden_by_frontend: FrontendHide,
     session_scoped: bool,
 }
@@ -357,7 +347,7 @@ pub struct SlintLayerPlugin<C> {
 impl<C> SlintLayerPlugin<C> {
     /// `make` is the component's generated `new` (e.g. `GameUi::new`).
     pub fn new(make: fn() -> Result<C, slint_ui::slint::PlatformError>) -> Self {
-        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, follows_ui_scale: true, hidden_by_frontend: FrontendHide::Never, session_scoped: false }
+        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, hidden_by_frontend: FrontendHide::Never, session_scoped: false }
     }
 
     /// Draw order among the layers (higher on top); [`GAME_LAYER_ORDER`] by default.
@@ -370,13 +360,6 @@ impl<C> SlintLayerPlugin<C> {
     /// even over its pixels.
     pub fn passthrough(mut self) -> Self {
         self.passthrough = true;
-        self
-    }
-
-    /// Ignore `VOXEL_UI_SCALE` (window scale factor only): for a layer whose
-    /// sizes Bevy-side code shares in window pixels (the HUD's minimap).
-    pub fn window_scale_only(mut self) -> Self {
-        self.follows_ui_scale = false;
         self
     }
 
@@ -413,7 +396,9 @@ impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
     fn build(&self, app: &mut App) {
         let (make, init, order, passthrough, hidden) =
             (self.make, self.init, self.order, self.passthrough, self.hidden_by_frontend);
-        let ui_scale = if self.follows_ui_scale { ui_scale() } else { 1.0 };
+        if !app.world().contains_resource::<OverlayScale>() {
+            app.insert_resource(OverlayScale(ui_scale_pinned_by_env().unwrap_or(UI_SCALE)));
+        }
         if !app.is_plugin_added::<SlintCompositePlugin>() {
             app.add_plugins(SlintCompositePlugin);
         }
@@ -421,7 +406,7 @@ impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
             // PreStartup: an app's Startup systems may use the layer and
             // whatever `init` inserted.
             .add_systems(PreStartup, move |world: &mut World| {
-                setup_slint_layer(world, make, init, order, passthrough, hidden, ui_scale)
+                setup_slint_layer(world, make, init, order, passthrough, hidden)
             })
             .add_systems(PreUpdate, slint_input::<C>.after(bevy::input::InputSystems))
             .add_systems(PostUpdate, render_slint_layer::<C>);
@@ -461,6 +446,8 @@ pub struct SlintLayer<C: 'static> {
     /// How the component was made, to make it again ([`rebuild_slint_layer`]).
     make: fn() -> Result<C, slint_ui::slint::PlatformError>,
     init: fn(&C, &mut World),
+    /// UI pixels per window logical pixel in effect: [`OverlayScale`] fitted
+    /// to the window, set each frame by [`slint_input`].
     ui_scale: f32,
     /// The texture the overlay is drawn into.
     target: Handle<Image>,
@@ -475,6 +462,12 @@ pub struct SlintLayer<C: 'static> {
 }
 
 impl<C: 'static> SlintLayer<C> {
+    /// UI pixels per window logical pixel in effect this frame.
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
+
     /// The texture the layer is drawn into.
     pub fn target(&self) -> &Handle<Image> {
         &self.target
@@ -526,8 +519,6 @@ impl Plugin for SlintOverlayPlugin {
         app.add_plugins(
             SlintLayerPlugin::new(GameUi::new).shown_on_arrival_map().session_scoped().with_init(connect_game_ui),
         )
-            .add_session_reset::<PlayPending>()
-            .add_session_reset::<PeopleRows>()
             .add_systems(
                 Update,
                 (
@@ -604,7 +595,6 @@ impl Plugin for HudLayerPlugin {
                 .hidden_by_frontend()
                 .session_scoped()
                 .passthrough()
-                .window_scale_only()
                 .with_init(check_hud_config),
         )
         .add_systems(Update, push_hud_state.run_if(world_systems_enabled()));
@@ -685,6 +675,10 @@ fn push_hud_state(
         ui.set_crosshair_visible(crosshair);
     }
 
+    // The minimap keeps its window-pixel rectangle (`minimap::screen_rect`).
+    if ui.get_ui_scale() != hud.ui_scale {
+        ui.set_ui_scale(hud.ui_scale);
+    }
     // Window logical → UI logical pixels.
     match band.and_then(|b| b.0) {
         Some(r) => {
@@ -732,6 +726,7 @@ pub fn item_slot(slot: &Option<game::SlotView>) -> slint_ui::ItemSlot {
             filled: true,
             count: if s.count > 1 { s.count.to_string().into() } else { SharedString::default() },
             icon: super::item_icons::icon(game::ItemId(s.icon.0 as u16)),
+            name: super::look_target::display_name(game::item_name(game::ItemId(s.icon.0 as u16))).into(),
         },
         None => slint_ui::ItemSlot::default(),
     }
@@ -743,27 +738,40 @@ fn item_model(slots: &[Option<game::SlotView>]) -> ModelRc<slint_ui::ItemSlot> {
 
 /// The sim's inventory screen → the game UI: open state, slot models (only
 /// when the projection changed), the held stack and the pointer it follows.
+/// Each opening puts the pointer in the middle of the window, once the grab
+/// that mouse look held is actually released (a warp while the pointer is
+/// still locked would be undone by the unlock).
 fn sync_inventory_screen(
     slint: Option<NonSend<SlintLayer<GameUi>>>,
     items: Res<HudItems>,
-    window: Query<&Window, With<PrimaryWindow>>,
+    mut window: Query<(&mut Window, &bevy::window::CursorOptions), With<PrimaryWindow>>,
     mut shown: crate::session::SessionLocal<Option<game::InventoryView>>,
+    mut center_pending: crate::session::SessionLocal<bool>,
 ) {
     let Some(slint) = slint else { return };
     let ui = slint.overlay.ui();
     let view = &items.inventory;
     if ui.get_inventory_open() != view.open {
         ui.set_inventory_open(view.open);
+        *center_pending.get() = view.open;
     }
     if !view.open {
         *shown.get() = None;
         return;
     }
+    if *center_pending.get() {
+        if let Ok((mut window, cursor)) = window.single_mut() {
+            if window.focused && cursor.grab_mode == bevy::window::CursorGrabMode::None {
+                let center = Vec2::new(window.width(), window.height()) / 2.0;
+                window.set_cursor_position(Some(center));
+                *center_pending.get() = false;
+            }
+        }
+    }
     let shown = shown.get();
     if shown.as_ref() != Some(view) {
         let part = |range: std::ops::Range<usize>| view.slots.get(range).unwrap_or(&[]);
         ui.set_inventory_hotbar(item_model(part(0..game::HOTBAR_SLOTS)));
-        ui.set_inventory_main(item_model(part(game::HOTBAR_SLOTS..game::INVENTORY_SLOTS)));
         ui.set_inventory_container(item_model(view.container.as_deref().unwrap_or(&[])));
         ui.set_inventory_cursor(item_slot(&view.cursor));
         *shown = Some(view.clone());
@@ -771,7 +779,7 @@ fn sync_inventory_screen(
     if ui.get_inventory_selected() != items.hotbar.selected as i32 {
         ui.set_inventory_selected(items.hotbar.selected as i32);
     }
-    if let Some(cursor) = window.single().ok().and_then(|w| w.cursor_position()) {
+    if let Some(cursor) = window.single().ok().and_then(|(w, _)| w.cursor_position()) {
         let at = cursor / slint.ui_scale;
         if ui.get_inventory_pointer_x() != at.x || ui.get_inventory_pointer_y() != at.y {
             ui.set_inventory_pointer_x(at.x);
@@ -792,7 +800,6 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_close_map(push(UiAction::CloseMap));
     ui.on_close_menu(push(UiAction::CloseMenu));
     ui.on_main_menu(push(UiAction::MainMenu));
-    ui.on_play(push(UiAction::Play));
     let queue = actions.clone();
     ui.on_arrival_tab_changed(move |i| queue.borrow_mut().push(UiAction::ArrivalTab(i)));
     let queue = actions.clone();
@@ -809,24 +816,12 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_follow_clicked(push(UiAction::ToggleFollow));
     ui.on_top_down_clicked(push(UiAction::ToggleTopDown));
     ui.on_open_settings(push(UiAction::OpenSettings));
+    // The Settings window's sliders (graphics_settings.rs).
+    crate::graphics_settings::connect_settings!(ui, world);
     ui.on_open_encyclopedia(push(UiAction::OpenEncyclopedia));
     ui.on_close_window(push(UiAction::CloseWindow));
-    let queue = actions.clone();
-    ui.on_person_picked(move |i| queue.borrow_mut().push(UiAction::PickPerson(i)));
-    let layers: Vec<SharedString> = MapLayer::ALL.iter().map(|l| l.label().into()).collect();
-    ui.set_map_layer_names(ModelRc::new(VecModel::from(layers)));
-    let queue = actions.clone();
-    ui.on_select_tile(move |col, row| queue.borrow_mut().push(UiAction::SelectTile(col, row)));
-    debug_assert_eq!(
-        ui.global::<WorldMapConfig>().get_tile_px(),
-        worldgen::tile_map::MAP_TILE_PX as i32,
-        "the map image's pixels per tile and the map window's must agree"
-    );
-    debug_assert_eq!(
-        ui.global::<WorldMapConfig>().get_grid_px(),
-        worldgen::tile_map::MAP_GRID_PX as i32,
-        "the map image's grid line and the map window's must agree"
-    );
+    // The map window: its layer buttons, pan, zoom and click (`renderer/map/full.rs`).
+    super::map::full::connect(ui, world);
     let clicks = Rc::new(RefCell::new(Vec::new()));
     let queue = clicks.clone();
     ui.on_inventory_slot_pressed(move |container, index, right| queue.borrow_mut().push((container, index, right)));
@@ -834,7 +829,7 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     world.insert_non_send(GameUiActions(actions));
     super::chat::ui::connect(ui, world);
     #[cfg(feature = "dev_ui")]
-    super::dev_ui::connect_debug_tab(ui, world);
+    super::dev_ui::connect_debug_pane(ui, world);
 }
 
 fn setup_slint_layer<C: ComponentHandle + 'static>(
@@ -844,7 +839,6 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     order: i32,
     passthrough: bool,
     hidden_by_frontend: FrontendHide,
-    ui_scale: f32,
 ) {
     let overlay = match Overlay::with(make) {
         Ok(overlay) => overlay,
@@ -869,7 +863,7 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
         overlay,
         make,
         init,
-        ui_scale,
+        ui_scale: UI_SCALE,
         target,
         owns_pointer: false,
         order,
@@ -933,10 +927,16 @@ fn slint_input<C: ComponentHandle + 'static>(
     state: Option<Res<State<AppState>>>,
     in_play: Option<Res<InPlay>>,
     world_map: Option<Res<WorldMapState>>,
+    wish: Option<Res<OverlayScale>>,
 ) {
     let pointer = pointer.get();
     let Some(mut slint) = slint else { return };
     let Ok((window, cursor_options)) = window.single() else { return };
+    slint.ui_scale = fitted_ui_scale(
+        wish.map_or(UI_SCALE, |w| w.0),
+        (window.physical_width(), window.physical_height()),
+        window.scale_factor(),
+    );
     let scale = window.scale_factor() * slint.ui_scale;
     slint.overlay.resize(window.physical_width(), window.physical_height(), scale);
     if frontend_hides(slint.hidden_by_frontend, state.as_deref(), in_play.as_deref(), world_map.as_deref()) {
@@ -1065,12 +1065,6 @@ pub fn map_tile(map: &WorldMap, rc: RegionCoords) -> Option<(i32, i32)> {
     Some((rc.x - map.origin.x, rc.z - map.origin.z))
 }
 
-/// The map layer of the UI's layer button `index` (the buttons are
-/// [`MapLayer::ALL`] in order); the first for an unknown index.
-pub fn map_layer(index: i32) -> MapLayer {
-    usize::try_from(index).ok().and_then(|i| MapLayer::ALL.get(i)).copied().unwrap_or(MapLayer::ALL[0])
-}
-
 /// The (canonical) region of map tile (`col`, `row`), `None` off the map.
 pub fn tile_region(map: &WorldMap, col: i32, row: i32) -> Option<RegionCoords> {
     let rc = RegionCoords::new(map.origin.x + col, map.origin.z + row);
@@ -1095,55 +1089,13 @@ pub fn site_color(civ: game::history::CivId) -> slint_ui::slint::Color {
     slint_ui::slint::Color::from_rgb_u8(r, g, b)
 }
 
-/// The sites on the map: a filled square in the civ's colour, hollow once abandoned.
-/// Sites off the map are dropped.
-pub fn site_marks(view: &HistoryView, map: &WorldMap) -> Vec<SiteMark> {
-    view.sites
-        .iter()
-        .filter_map(|s| {
-            let (col, row) = map_tile(map, s.region)?;
-            Some(SiteMark { col, row, color: site_color(s.civ), hollow: s.abandoned, label: s.name.as_str().into() })
-        })
-        .collect()
-}
-
 /// "Site: Name (civ), 12 dwarves" for the selected tile.
 pub fn site_line(site: &game::SiteMarker, civ_name: &str) -> String {
     let abandoned = if site.abandoned { ", abandoned" } else { "" };
     format!("Site: {} ({civ_name}), {} dwarves{abandoned}", site.name, site.population)
 }
 
-/// What the player reads when the server refuses Play.
-pub fn refusal_text(why: PlayRefusal) -> &'static str {
-    match why {
-        PlayRefusal::NoWorldMap => "No world map",
-        PlayRefusal::OffMap => "Not on the map",
-        PlayRefusal::NoDryLand => "No dry land there",
-        PlayRefusal::AlreadyHere => "You are already here",
-        PlayRefusal::RegionUnavailable => "That region could not be loaded; try again shortly",
-    }
-}
-
-/// Whether a Play pending for `target` is over: refused, or we are there —
-/// home in `target` with the camera put over the body inside it, i.e. its
-/// region snapshot has loaded (`HudStatus` names the new home as soon as
-/// `PlayerRegion` arrives, long before that).
-pub fn play_settled(target: RegionCoords, arrived_in: impl Fn(RegionCoords) -> bool, refused: bool) -> bool {
-    refused || arrived_in(target)
-}
-
-/// The map's status line: loading while a Play is pending, else the last
-/// refusal, else nothing.
-pub fn map_status_text(pending: Option<RegionCoords>, refused: Option<PlayRefusal>) -> &'static str {
-    match (pending, refused) {
-        (Some(_), _) => LOADING_TEXT,
-        (None, Some(why)) => refusal_text(why),
-        (None, None) => "",
-    }
-}
-
-/// Show `to`; on opening the map, drop a stale refusal and bring the home
-/// tile into view (centred unless it is in view already). Keeps `CursorPolicy::ui_modal` in step (its only writer):
+/// Show `to`. Keeps `CursorPolicy::ui_modal` in step (its only writer):
 /// any screen open, or not in play.
 /// Takes the `ResMut`s themselves and writes through them only on a real
 /// change, so an idle frame does not mark either resource changed (that
@@ -1151,21 +1103,14 @@ pub fn map_status_text(pending: Option<RegionCoords>, refused: Option<PlayRefusa
 fn set_screens(
     ui: &GameUi,
     to: Screens,
-    world_map: &mut ResMut<WorldMapState>,
-    home: Option<RegionCoords>,
+    // Unused since the map centres itself on opening (`renderer/map/full.rs`); kept so the five
+    // callers keep their shape.
+    _world_map: &mut ResMut<WorldMapState>,
+    _home: Option<RegionCoords>,
     policy: Option<&mut ResMut<CursorPolicy>>,
     in_play: bool,
 ) {
     let from = Screens::of(ui);
-    if to.map && !from.map {
-        if world_map.refused.is_some() {
-            world_map.refused = None;
-        }
-        let home_tile = world_map.map.as_ref().zip(home).and_then(|(map, home)| map_tile(map, home));
-        if let Some((col, row)) = home_tile {
-            ui.invoke_show_map_tile(col, row);
-        }
-    }
     if from.menu != to.menu {
         ui.set_menu_open(to.menu);
     }
@@ -1217,7 +1162,7 @@ fn menu_keys(
         keys.clear_just_pressed(MENU_KEY);
         return;
     }
-    // The Debug tab, open over a grabbed cursor (`dev_ui`), holds the keyboard.
+    // A client-local overlay holding the pointer holds the keyboard too.
     if policy.as_ref().is_some_and(|p| p.overlay_open) {
         return;
     }
@@ -1280,12 +1225,9 @@ fn apply_ui_actions(
     slint: Option<NonSend<SlintLayer<GameUi>>>,
     mut selection: Option<ResMut<Selection>>,
     mut world_map: ResMut<WorldMapState>,
-    mut pending: ResMut<PlayPending>,
-    mut pending_play: ResMut<super::world_map::PendingPlay>,
     mut policy: Option<ResMut<CursorPolicy>>,
     requests: Option<Res<ClientRequests>>,
     status: Res<HudStatus>,
-    people: Res<PeopleRows>,
     (mut follow, mut top_down_requests): (
         Option<ResMut<Follow>>,
         Option<ResMut<Messages<super::commander::top_down::ToggleTopDownRequest>>>,
@@ -1293,7 +1235,6 @@ fn apply_ui_actions(
     local_body: Query<&SimEntity, With<LocalBody>>,
     mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
     mut in_play: Option<ResMut<InPlay>>,
-    mut cam: Option<ResMut<CommanderCamera>>,
     mut history: ResMut<HistoryView>,
 ) {
     let (Some(actions), Some(slint)) = (actions, slint) else { return };
@@ -1312,13 +1253,6 @@ fn apply_ui_actions(
             UiAction::CloseWindow => {
                 to.settings = false;
                 to.encyclopedia = false;
-            }
-            UiAction::PickPerson(i) => {
-                let row = usize::try_from(i).ok().and_then(|i| people.0.get(i));
-                if let (Some(&(region, key, _)), Some(selection)) = (row, selection.as_mut()) {
-                    selection.0.clear();
-                    selection.0.insert((region, key));
-                }
             }
             UiAction::ToggleTopDown => {
                 if let Some(requests) = top_down_requests.as_mut() {
@@ -1440,45 +1374,6 @@ fn apply_ui_actions(
                     history.adventure.pick_civ(civ);
                     history.adventure.pick_site(site);
                 }
-            }
-            UiAction::Play => {
-                // One request at a time: Play is disabled while one is pending.
-                if pending.0.is_some() {
-                    continue;
-                }
-                let home = status.home_region;
-                let target = world_map.map.as_ref().and_then(|map| {
-                    let rc = tile_region(map, ui.get_selected_col(), ui.get_selected_row())?;
-                    play_blocker(map, rc, blocker_home(is_in_play, home)).is_none().then_some(rc)
-                });
-                let Some(rc) = target else { continue };
-                match play_action(is_in_play, home, rc) {
-                    PlayAction::Refuse => continue,
-                    PlayAction::PlayHere => {
-                        if let Some(in_play) = in_play.as_mut() {
-                            in_play.0 = true;
-                        }
-                        // Put the camera over the body again, as a Play's
-                        // home change would (`commander::place_on_body`).
-                        if let Some(cam) = cam.as_mut() {
-                            cam.placed = false;
-                        }
-                        world_map.refused = None;
-                        to.map = false;
-                        set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), true);
-                        continue;
-                    }
-                    PlayAction::SendPlay => {}
-                }
-                let sent = requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::PlayRegion(rc)).is_ok());
-                if !sent {
-                    warn!("[world-map] Play request for ({}, {}) not sent: no game thread", rc.x, rc.z);
-                    continue;
-                }
-                pending.0 = Some(rc);
-                pending_play.0 = true;
-                world_map.refused = None;
-                to.map = false;
             }
         }
         let modal = !is_in_play && world_map.map.is_some();
@@ -1800,13 +1695,9 @@ struct MapShown {
     map: Option<WorldMap>,
     /// Bumped whenever `map` is replaced.
     generation: u64,
-    /// (generation, layer index) the map picture was last drawn for.
-    image_for: Option<(u64, i32)>,
-    /// (generation, selected column, selected row, home, Play pending,
-    /// in play) the tile info was last computed for.
-    info_for: Option<(u64, i32, i32, Option<RegionCoords>, bool, bool)>,
-    /// The site markers last pushed.
-    sites: Vec<SiteMark>,
+    /// (generation, selected column, selected row) the tile info was last
+    /// computed for.
+    info_for: Option<(u64, i32, i32)>,
 }
 
 /// What the world map window reads.
@@ -1814,9 +1705,7 @@ struct MapShown {
 struct MapParams<'w, 's> {
     world_map: Res<'w, WorldMapState>,
     time: Res<'w, Time>,
-    pending: ResMut<'w, PlayPending>,
-    cam: Option<Res<'w, CommanderCamera>>,
-    in_play: Option<ResMut<'w, InPlay>>,
+    in_play: Option<Res<'w, InPlay>>,
     shown: crate::session::SessionLocal<'w, 's, MapShown>,
     history: ResMut<'w, HistoryView>,
     drain: Option<Res<'w, super::drain_notice::DrainNotice>>,
@@ -1824,8 +1713,6 @@ struct MapParams<'w, 's> {
     inspected: crate::session::SessionLocal<'w, 's, Inspected>,
     /// The arrival tabs as last pushed.
     tabs: crate::session::SessionLocal<'w, 's, Option<arrival_tabs::TabsView>>,
-    /// Where the camera's home bounds are (`CommanderCamera::placed_in`).
-    frame: Option<Res<'w, crate::wrap_frame::WrapFrame>>,
 }
 
 /// The person last requested for the inspector, and when (secs).
@@ -1834,100 +1721,37 @@ struct Inspected {
     asked: Option<(game::history::PersonId, f32)>,
 }
 
-/// The map picture, home and selected tile, tile info, Play state and
-/// status line → the UI, each only when changed.
-fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
+/// The map picture, home and selected tile, tile info and status line → the
+/// UI, each only when changed.
+fn sync_world_map(ui: &GameUi, p: &mut MapParams) {
     let shown = p.shown.get();
     if p.world_map.is_changed() && shown.map.as_ref() != p.world_map.map.as_ref() {
-        if let Some(map) = &p.world_map.map {
-            ui.set_map_cols(map.width as i32);
-            ui.set_map_rows(map.height as i32);
-        }
         ui.set_map_available(p.world_map.map.is_some());
         shown.map = p.world_map.map.clone();
         shown.generation += 1;
-        // A new map opens whole (a 100 km world is 196 tiles a side).
-        if p.world_map.map.is_some() {
-            ui.invoke_fit_map();
-        }
     }
     let map = p.world_map.map.as_ref();
+    // The map itself, its markers and its view are `renderer/map/full.rs`'s.
 
-    // The picture of the picked layer, redrawn when the map or layer changes.
-    let layer = ui.get_map_layer();
-    if shown.image_for != Some((shown.generation, layer)) {
-        shown.image_for = Some((shown.generation, layer));
-        match map {
-            Some(map) => {
-                let layer = map_layer(layer);
-                let (width, height, pixels) = rasterize(map, layer);
-                let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixels.as_flattened(), width, height);
-                ui.set_map_image(SlintImage::from_rgba8(buffer));
-            }
-            None => ui.set_map_image(SlintImage::default()),
-        }
-    }
-
-    let (home_col, home_row) = map.zip(home).and_then(|(map, home)| map_tile(map, home)).unwrap_or((-1, -1));
-    if ui.get_home_col() != home_col || ui.get_home_row() != home_row {
-        ui.set_home_col(home_col);
-        ui.set_home_row(home_row);
-    }
-
-    // Pending until we are in the target with its region loaded, or the
-    // server refused it. Without a commander camera, being home has to do.
-    if let Some(target) = p.pending.0 {
-        let refused = p.world_map.refused.is_some_and(|(rc, _)| rc == target);
-        let cam = p.cam.as_deref();
-        // The camera's bounds are the home's copy in the frame; `rc` is canonical.
-        let frame = p.frame.as_deref().copied().unwrap_or_default();
-        let arrived_in = |rc| cam.map_or(home == Some(rc), |cam| cam.placed_in(frame.alias(rc)));
-        if play_settled(target, arrived_in, refused) {
-            p.pending.0 = None;
-            // The first Play landed: in play (the arrival map closes).
-            if let Some(in_play) = p.in_play.as_mut().filter(|e| !refused && !e.0) {
-                in_play.0 = true;
-            }
-        }
-    }
     let in_play = p.in_play.as_ref().is_none_or(|e| e.0);
 
     let (col, row) = (ui.get_selected_col(), ui.get_selected_row());
-    let pending = p.pending.0.is_some();
     // History changes (sites, the adventure choice and result) redo everything below.
     let history_changed = p.history.is_changed();
     if history_changed {
         shown.info_for = None;
     }
 
-    // The start screen's panel stands beside the map while not in play. A world
-    // with no populated site has nothing to pick: the dev Play button is its way in.
+    // The start screen's panel stands beside the map while not in play, unless
+    // the world has no populated site to pick.
     let panel = map.is_some() && !in_play;
     let no_site = no_site_to_pick(in_play, p.history.sites_received, &p.history.sites);
     let arrival_ui = panel && !no_site;
-    let show_play = cfg!(feature = "dev_ui") || no_site;
-    if ui.get_show_play() != show_play {
-        ui.set_show_play(show_play);
-    }
     if ui.get_arrival_visible() != arrival_ui {
         ui.set_arrival_visible(arrival_ui);
     }
 
-    // Site markers, a model that follows the history without a redraw.
-    if let Some(map) = map {
-        if history_changed || shown.sites.is_empty() != p.history.sites.is_empty() || shown.info_for.is_none() {
-            let marks = site_marks(&p.history, map);
-            if marks != shown.sites {
-                ui.set_map_sites(ModelRc::new(VecModel::from(marks.clone())));
-                shown.sites = marks;
-            }
-        }
-    } else if !shown.sites.is_empty() {
-        shown.sites.clear();
-        ui.set_map_sites(ModelRc::default());
-    }
-
-    let info_for = Some((shown.generation, col, row, home, pending, in_play));
+    let info_for = Some((shown.generation, col, row));
     if shown.info_for != info_for {
         shown.info_for = info_for;
         let picked = map.and_then(|map| Some((map, tile_region(map, col, row)?)));
@@ -1939,19 +1763,11 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
         }
         let lines: Vec<SharedString> = lines.into_iter().map(Into::into).collect();
         ui.set_tile_lines(ModelRc::new(VecModel::from(lines)));
-        let blocker = picked.map(|(map, rc)| play_blocker(map, rc, blocker_home(in_play, home)));
-        ui.set_play_enabled(!pending && matches!(blocker, Some(None)));
-        ui.set_play_reason(blocker.flatten().unwrap_or("").into());
     }
 
-    // In the map window and, with the map closed (Play closes it), on the
-    // game-level status line.
+    // In the map window and, with the map closed, on the game-level status line.
     let now = p.time.elapsed_secs();
-    let refusal = p.history.visible_adventure_refusal(now).map(|why| why.describe());
-    let status = match refusal {
-        Some(text) if p.pending.0.is_none() => text,
-        _ => map_status_text(p.pending.0, p.world_map.visible_refusal(now)),
-    };
+    let status = p.history.visible_adventure_refusal(now).map(|why| why.describe()).unwrap_or("");
     if ui.get_map_status() != status {
         ui.set_map_status(status.into());
     }
@@ -1976,123 +1792,19 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     }
 }
 
-/// The People tab's rows as last pushed (region, entity, person), for
-/// [`UiAction::PickPerson`].
-#[derive(Resource, Default)]
-pub struct PeopleRows(pub Vec<(RegionId, EntityKey, PersonId)>);
-
-/// What the fortress panel was last given, and the People tab's name
-/// requests.
-#[derive(Default)]
-struct FortressShown {
-    governance: Option<Vec<String>>,
-    designations: Option<Vec<String>>,
-    names: Option<Vec<String>>,
-    /// When each person's info was last asked for by the People tab (secs).
-    asked: BTreeMap<PersonId, f32>,
-    /// The current one-second request window: (start secs, requests sent).
-    window: (f32, u32),
-}
-
-#[derive(SystemParam)]
-struct FortressParams<'w, 's> {
-    people: ResMut<'w, PeopleRows>,
-    shown: crate::session::SessionLocal<'w, 's, FortressShown>,
-}
-
-/// The fortress panel's tabs (`fortress_panel` shapes the lines), each
-/// pushed only when its source changed. While the People tab is open, rows
-/// with no name yet are asked for, at most
-/// [`fortress_panel::PERSON_NAME_REQUESTS_PER_SEC`] a second.
-fn sync_fortress_panel(
-    ui: &GameUi,
-    home: Option<RegionCoords>,
-    entities: &Query<(&SimEntity, &SimKind)>,
-    mirror: Option<&Res<TileMirror>>,
-    map: &MapParams,
-    p: &mut FortressParams,
-) {
-    let shown = p.shown.get();
-    let history = &map.history;
-    if history.is_changed() || shown.governance.is_none() {
-        let site = history.adventuring.and_then(|a| history.sites.iter().find(|s| s.site == a));
-        let lines = fortress_panel::governance_lines(history.calendar, site);
-        if shown.governance.as_ref() != Some(&lines) {
-            ui.set_governance_lines(string_model(&lines));
-            shown.governance = Some(lines);
-        }
-    }
-    if let Some(mirror) = mirror {
-        if mirror.is_changed() || shown.designations.is_none() {
-            let lines = fortress_panel::designation_lines(mirror.designations());
-            if shown.designations.as_ref() != Some(&lines) {
-                ui.set_designation_lines(string_model(&lines));
-                shown.designations = Some(lines);
-            }
-        }
-    }
-
-    let mut rows: Vec<(RegionId, EntityKey, PersonId)> = entities
-        .iter()
-        .filter(|(e, _)| Some(e.region) == home)
-        .filter_map(|(e, kind)| match kind.0 {
-            game::EntityKind::Person { person } => Some((e.region, e.key, person)),
-            _ => None,
-        })
-        .collect();
-    rows.sort_by_key(|&(_, _, person)| person);
-    let names: Vec<String> =
-        rows.iter().map(|&(_, _, person)| fortress_panel::person_name(person, history.people.get(&person).map(|(i, _)| i))).collect();
-    if shown.names.as_ref() != Some(&names) {
-        ui.set_people_names(string_model(&names));
-        shown.names = Some(names);
-    }
-
-    if ui.get_fortress_tab() == 1 {
-        let now = map.time.elapsed_secs();
-        if now - shown.window.0 >= 1.0 {
-            shown.window = (now, 0);
-        }
-        for &(_, _, person) in &rows {
-            if shown.window.1 >= fortress_panel::PERSON_NAME_REQUESTS_PER_SEC {
-                break;
-            }
-            let asked_recently = shown.asked.get(&person).is_some_and(|&at| !history_view::person_info_refresh_due(Some(at), now));
-            if history.people.contains_key(&person) || asked_recently {
-                continue;
-            }
-            if map.requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::RequestPersonInfo(person)).is_ok()) {
-                shown.asked.insert(person, now);
-                shown.window.1 += 1;
-            }
-        }
-    }
-    if p.people.0 != rows {
-        p.people.0 = rows;
-    }
-}
-
-fn string_model(lines: &[String]) -> ModelRc<SharedString> {
-    let lines: Vec<SharedString> = lines.iter().map(|l| l.as_str().into()).collect();
-    ModelRc::new(VecModel::from(lines))
-}
-
 /// Client state → panel properties, only when it changed (every set marks
 /// the UI dirty and costs a repaint).
 fn push_ui_state(
     slint: Option<NonSend<SlintLayer<GameUi>>>,
-    status: Res<HudStatus>,
     selection: Option<Res<Selection>>,
     entities: Query<(&SimEntity, &SimKind)>,
     mut toolbar: ToolbarParams,
     mut map: MapParams,
-    mut fortress: FortressParams,
 ) {
     let Some(slint) = slint else { return };
     let ui = slint.overlay.ui();
     sync_toolbar(ui, slint.ui_scale, &mut toolbar);
-    sync_world_map(ui, status.home_region, &mut map);
-    sync_fortress_panel(ui, status.home_region, &entities, toolbar.mirror.as_ref(), &map, &mut fortress);
+    sync_world_map(ui, &mut map);
     let Some(selection) = selection else { return };
     let kinds: Vec<game::EntityKind> = entities
         .iter()
@@ -2184,8 +1896,8 @@ fn unpremultiply(p: slint_ui::slint::platform::software_renderer::PremultipliedR
 }
 
 /// Whether the start screen has no site to pick (out of play, the sites told, none of
-/// them populated): the Play button is then the way in, dev build or not. Before the
-/// sites arrive nothing is known yet, so there is no Play.
+/// them populated): the arrival panel is then not shown. Before the sites arrive
+/// nothing is known yet.
 fn no_site_to_pick(in_play: bool, sites_received: bool, sites: &[game::SiteMarker]) -> bool {
     !in_play && sites_received && !sites.iter().any(history_view::populated)
 }

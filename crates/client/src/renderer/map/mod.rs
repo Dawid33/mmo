@@ -4,6 +4,7 @@
 //! ([`MapSource::Local`], `map-tiles` against `terrain.sqlite` opened read-only), else HTTP — into
 //! [`MapTiles`], which belongs to the WORLD: a session end keeps it, another world clears it.
 
+pub mod full;
 pub mod palette;
 pub mod pass;
 pub mod store;
@@ -21,6 +22,7 @@ impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
         store::build(app);
         pass::build(app);
+        full::build(app);
         app.add_systems(PostUpdate, views::collect_map_draws);
     }
 

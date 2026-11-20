@@ -13,6 +13,9 @@ use worldgen::tile_map::MapLayer;
 use super::store::MapTiles;
 use crate::renderer::world_map::WorldMapState;
 
+/// The minimap's zoom (metres per window pixel) — and the full map's on opening.
+pub const MINIMAP_M_PER_PX: f32 = 1.0;
+
 /// What a view shows: the block surface, or one of the world map's thematic layers (its 1 px per region
 /// raster, sampled by world position).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

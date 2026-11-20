@@ -515,16 +515,6 @@ fn hillshade(slope: [f64; 2]) -> f64 {
 
 /// Lake blue a tile blends toward by its `lake_fraction`.
 pub const LAKE_RGB: [f64; 3] = [60.0, 130.0, 205.0];
-/// River mark colour on the map.
-pub const RIVER_RGB: [u8; 3] = [70, 140, 230];
-/// Multiplier for the grid-line pixels of a tile.
-pub const GRID_DARKEN: f64 = 0.75;
-/// Map pixels per tile edge.
-pub const MAP_TILE_PX: u32 = 8;
-/// Grid-line width in map pixels: the last rows/columns of each tile. The map
-/// window frames the cell inside them (Slint `WorldMapConfig.grid-px`).
-pub const MAP_GRID_PX: u32 = 1;
-
 /// The colour of a tile on the map: sea by depth for ocean, else land by mean
 /// height, blended toward lake blue by lake share, shaded by slope (sea is flat).
 pub fn tile_color(t: &TileSummary) -> [u8; 3] {
@@ -682,36 +672,6 @@ pub fn rasterize_layer(map: &WorldMap, layer: MapLayer) -> (u32, u32, Vec<[u8; 4
         })
         .collect();
     (map.width, map.height, px)
-}
-
-/// The map window's picture of `layer`: [`rasterize_layer`] with each tile
-/// [`MAP_TILE_PX`] square, the last [`MAP_GRID_PX`] rows/columns
-/// grid-darkened, and on the relief layer a 2x2 river mark at the centre of
-/// tiles with rivers. `(width_px, height_px, row-major pixels)`, opaque.
-pub fn rasterize(map: &WorldMap, layer: MapLayer) -> (u32, u32, Vec<[u8; 4]>) {
-    let (_, _, colours) = rasterize_layer(map, layer);
-    let (w, h) = (map.width * MAP_TILE_PX, map.height * MAP_TILE_PX);
-    let mut out = vec![[0, 0, 0, 255]; (w * h) as usize];
-    let edge = MAP_TILE_PX - MAP_GRID_PX;
-    let mid = MAP_TILE_PX / 2;
-    let rivers = layer == MapLayer::Relief;
-    for (i, t) in map.tiles.iter().enumerate() {
-        let (tx, tz) = (i as u32 % map.width * MAP_TILE_PX, i as u32 / map.width * MAP_TILE_PX);
-        let [r, g, b, _] = colours[i];
-        for dz in 0..MAP_TILE_PX {
-            for dx in 0..MAP_TILE_PX {
-                let mut rgb = [r, g, b];
-                if dx >= edge || dz >= edge {
-                    rgb = rgb.map(|v| (f64::from(v) * GRID_DARKEN) as u8);
-                }
-                if rivers && t.rivers > 0 && (mid - 1..=mid).contains(&dx) && (mid - 1..=mid).contains(&dz) {
-                    rgb = RIVER_RGB;
-                }
-                out[((tz + dz) * w + tx + dx) as usize] = [rgb[0], rgb[1], rgb[2], 255];
-            }
-        }
-    }
-    (w, h, out)
 }
 
 /// The side-panel facts of tile `rc` (empty off the map), absent facts omitted.

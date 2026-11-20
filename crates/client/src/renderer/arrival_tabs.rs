@@ -120,7 +120,7 @@ pub fn select_map_tile(ui: &GameUi, (col, row): (i32, i32)) {
         ui.set_selected_col(col);
         ui.set_selected_row(row);
     }
-    ui.invoke_show_map_tile(col, row);
+    // The full map brings a selection made here into view (`renderer/map/full.rs`).
 }
 
 /// What the two tabs show, as last pushed.
