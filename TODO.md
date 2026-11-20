@@ -9,6 +9,32 @@ everything (fast / with the slow-tagged). Next:
   as a `Gate:` if `just creatures` should keep linting every model through the real parser.
 - `crates/world-store/tests/fixtures/world_map.bin` carries an uncommitted change and no test reads it any more.
 
+One zoomable block-level world map (plans/2026-11-20-block-level-world-map.md, spec
+specs/2026-11-19-block-level-world-map-design.md "As built"; ledger `.superpowers/sdd/2026-11-20-block-level-world-map/`)
+— BUILT 2026-11-20 (Tasks 0–12, executed inline; the whole-branch review: the ledger), NOT accepted: every window and twin
+check is owed to the owner, none was run:
+- Task 0's draw spike was skipped (owner's choice): the pass under the Slint layers is first seen at (a).
+- (a) `just pull-smoke`, then `just run` on the Iris Xe and `just web`: M from 512 to 0.25 m/px and pan, no hole while
+  tiles load (an ancestor or the background), 60 fps with `VOXEL_VSYNC=off` (`just fps-steady`); every layer button;
+  pan past the world edge.
+- (b) `just run`: the `[map] tiles=… paints=…` line every 10 s; leave and re-enter the same world (tiles stay), enter
+  another (cleared).
+- (c) `just play` → Adventure tab: markers on the towns at 1–2 m/px, pick from the list and the map (the view eases
+  there), Start, End adventure; Main menu still works.
+- (d) `just run`: dig 3×3 → on the minimap within 0.25 s; walk 2 regions away and back (still there); M shows it at
+  1 m/px; the mayor's view: click-to-move on the minimap; wheel over the minimap zooms 0.5–8 m/px.
+- (e) `just run-two`: a home hop and a rejoin keep the tiles.
+- (f) `just coordinators=2 dev-r3 2` (+ `just server`/`client` for the loopback route): the world at block level, kill
+  one replica (tiles keep loading through the other), dig and wait one save (shows at level 2).
+- (g) `just twin-check` (phase 8b: a tile through the web proxy, 200 then 304) — needs `twin-images`; on orion an
+  `orion-apply world` (new Service port `map`, web env MAP_UPSTREAM / MAP_WORLD) and `world-register` again (prints
+  `--map-url`); the login service needs its migration 0005 (a release) before `world add --map-url`.
+- Pristine tree canopies are not drawn (departure 4): trees show only where a region was saved. Proposed (owner
+  asked 2026-11-20): stamp crowns on demand at levels 0–1 (~+33 ms per fresh level-0 tile, cached), a per-biome
+  canopy tint above; NOT saving every region at forge (est. tens–hundreds of GB for Medium).
+- Open: the client decodes tiles on the browser's main thread (a compute JobKind if it hitches); the map route
+  revalidates terrain versions on a 30 s timer, not the per-cut NOTIFY.
+
 Planet frame, Phase 1a (plans/2026-11-14-planet-frame-1a.md; ledger `.superpowers/sdd/2026-11-14-planet-frame-1a/`) —
 BUILT 2026-11-20 (19 tasks, each reviewed; the whole-plan review's one fix wave is in, its scoped re-review pending),
 NOT accepted: pending the owner's hand checks (plans/2026-11-19-earth-like-world-program.md, "Owner hand checks", after

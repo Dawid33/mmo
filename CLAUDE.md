@@ -337,6 +337,8 @@ Verify with:
   Postgres migrations run under a lock timeout (`MIGRATE_LOCK_TIMEOUT_MS`) that names any
   `pg_prepared_xacts` they wait behind.
 - Bump `worldgen::tile_map::WORLD_MAP_VERSION` on ANY change to what `build_world_map` returns.
+- `chunks.top` (migration `0021_chunk_tops`, `game::map_tile::chunk_top`, `FORMAT_CHUNK_TOP`) is written in the
+  chunk's own `INSERT … ON CONFLICT` of the cut part — never a separate row; a NULL top is derived from `data`.
 - Terrain refusal (`world-store/src/open.rs` `refuse_unreturned_world`): a store with saved regions that has
   not applied migration `0011_voxel_terrain_returns` is refused before any migration runs and left untouched
   (a stud world, or a voxel world saved before the stud switch — `0005` would drop its chunks): re-forge it.
@@ -929,6 +931,19 @@ Verify with:
   (the web image proxies it); otherwise no "Play online".
 - **Session lifecycle** (`session.rs`): any new per-world resource, system `Local` or entity root must be
   registered (`add_session_reset`, `SessionLocal`) or tagged `SessionScoped`, or it leaks into the next world.
+- **The world map** (`renderer/map/`, plan `docs/superpowers/plans/2026-11-20-block-level-world-map.md`): one tile
+  pyramid (`game::map_tile`: 256² samples, level k = 2^k m per sample) behind the minimap, the full map (M) and the
+  site choice. A [`MapView`] (centre, m per PHYSICAL px, rect) per surface; `map/pass.rs` draws them in `Core3d`
+  right before `SlintCompositeSystems` (`assets/shaders/map_tile.wgsl`, compiled in), so the Slint layers draw over
+  it: the map's rect in a layer is a hole — `#00000001`, not transparent, where the layer must keep the pointer
+  (`opaque_at` needs alpha > 0), and never inside a `FrameFace` (its base is opaque). Tiles come from
+  `MapSource::Local` (native single-player: `map-tiles` over the world's `terrain.sqlite` opened read-only) or
+  `MapSource::Http` (`{base}/v1/map/tiles/…`: the join ticket's `map_url`, the browser's `{origin}/map/<world>`,
+  `VOXEL_MAP_URL` for `just client`; native disk cache `map/disk.rs`). `MapTiles` belongs to the WORLD: a session
+  end pauses it, another world clears it. Loaded chunks are painted into levels 0–3 at once (`map/paint.rs`; a
+  painted tile is kept until a served one with a newer etag). The server side is `server/src/map_api.rs`:
+  unauthenticated, on the coordinator's HTTPS API (merged after the token guard) and on a plain `VOXEL_MAP_BIND`
+  (the pod's 6470 for the web image's rate-limited `/map/<world>/` proxy; role `all` loopback only).
 - UI is **Slint only** (no `bevy_ui`, no egui). `CursorPolicy` is the only cursor-grab writer. `dev_ui`
   (F3 Debug tab) is dev tooling only, never player-facing.
 - wasm: no shared-memory threads; work runs in Web Workers by bincode messages. New compute work goes in

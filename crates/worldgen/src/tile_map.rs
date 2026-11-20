@@ -707,14 +707,3 @@ pub fn tile_info_lines(map: &WorldMap, rc: RegionCoords) -> Vec<String> {
     }
     lines
 }
-
-/// Why Play is unavailable for tile `rc` (the rule the manager enforces too).
-pub fn play_blocker(map: &WorldMap, rc: RegionCoords, home: Option<RegionCoords>) -> Option<&'static str> {
-    if home == Some(rc) {
-        Some("You are here")
-    } else if map.tile(rc).is_none_or(|t| t.landing.is_none()) {
-        Some("No dry land")
-    } else {
-        None
-    }
-}

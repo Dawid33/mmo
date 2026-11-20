@@ -401,3 +401,24 @@ layers on the Iris Xe and in the browser) was NOT run — it is first seen at Ta
   is NOT a cheap follow-up (the plan's 25 % bar); a per-biome canopy tint stays the fallback.
 - **Store cost:** a chunk's top adds ~25 µs and ~115 B per written chunk to a cut part.
 - **Constants:** none is off by 2×; `MAP_BUILD_WORKERS` = 2 builds ~45–90 level-0…3 tiles a second.
+
+## As built (2026-11-20)
+
+Plan `docs/superpowers/plans/2026-11-20-block-level-world-map.md`, executed inline on `develop` (commits
+`1fd885c7` … this docs commit; the ledger with every ruling: `.superpowers/sdd/2026-11-20-block-level-world-map/`).
+Nothing was run in a window, on the twin or on orion: every hand check is owed (`TODO.md`).
+
+| Part | Where | What differs from §5 |
+|---|---|---|
+| Tile types | `game::map_tile` | `MapTileKey::regions()` (not a free `tile_regions`: the root glob has one); `MapTileDecodeError`. |
+| Store | `chunks.top`, migration `0021_chunk_tops`; `StoreHandle::region_tops` | Plan departure 1: a chunk's own top beside the chunk, not a `region_surface` row. |
+| Worldgen | `worldgen::surface` | Levels 0–2 read one lattice patch (level 0 is generation's top); levels ≥ 3 read each sample exactly (`forged::PointPatch`): a level-9 patch would hold ~10⁹ corners. |
+| Reader | `crates/map-tiles` | Region tops cached per (region, version); the overlay re-takes water depth over the new top. |
+| Client | `renderer/map/` (`store`, `palette`, `views`, `pass`, `full`, `paint`, `disk`, `http`), `map_tile.wgsl` | The full map's view is a transparent hole BESIDE a side-panel `FrameFace` (its base is opaque); the hole is `#00000001` (pointer ownership needs alpha > 0). Levels 1–3 are painted from the height grid directly, not downsampled. Site markers stand on their region's landing derived on the client (`SiteMarker` unchanged: no wire change). |
+| Server | `server/src/map_api.rs` | Unauthenticated (owner). Also on a plain HTTP/1.1 port (`VOXEL_MAP_BIND`, 6470 in the pod): nginx cannot proxy to the API's HTTP/2. `immutable` only above level 3. |
+| Deploy | `deploy/images/web/nginx.conf`, `deploy/modules/world/{coordinator,web,main}.tf`, `scripts/twin_check.sh` 8b | `limit_req` 60 r/s, burst 240, per client address; only GET tiles forwarded. |
+| Login | `worlds.map_url` (migration 0005), `world add --map-url` | Also in the join ticket. |
+| Removed | `tile_map::{rasterize, MAP_TILE_PX, MAP_GRID_PX, play_blocker}`, `rebuild_minimap_base`, `minimap-base`, `map-image`, `play_region`, `PlayRefusal` | `PlayRegion` / `PlayRefused` stay as unsent variants (`PlayRefused(RegionCoords)`). |
+
+Pristine tree canopies are not drawn (plan departure 4; §10: stamping costs more than a level-0 tile); proposed
+next: stamping on demand at levels 0–1 (TODO.md).

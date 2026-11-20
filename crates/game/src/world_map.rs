@@ -276,14 +276,3 @@ pub fn world_chunk(map: Option<MapExtent>, rc: RegionCoords, local: [i32; 3]) ->
     canonical_chunk(map, WorldChunkPos::from_local(rc, local))
 }
 
-/// Why the server refused a `ClientPacket::PlayRegion`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PlayRefusal {
-    NoWorldMap,
-    OffMap,
-    NoDryLand,
-    AlreadyHere,
-    /// The region's stored state could not be read from the world store; it
-    /// is retried after `STORE_LOAD_RETRY_SECS`.
-    RegionUnavailable,
-}

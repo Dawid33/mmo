@@ -2652,12 +2652,8 @@ impl GameInstanceManager {
                 error!("[client] the server refused the connection: {why}");
                 return Err(GameError::Disconnected(format!("{REFUSED_PREFIX}{why}")));
             }
-            game::ServerPacket::PlayRefused(rc, why) => {
-                warn!("[client] Play in region {rc:?} refused: {why:?}");
-                let _ = self
-                    .client_event_send
-                    .send(ClientUpdateEvent::PlayRefused(rc, why));
-            }
+            // Unsent (the region spawn is gone).
+            game::ServerPacket::PlayRefused(_) => {}
             game::ServerPacket::LodData(key, payload, water) => {
                 if !self.lod_subscribed.contains(&key) {
                     // Raced a release: tell the server we really don't want it.

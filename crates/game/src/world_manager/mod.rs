@@ -17,7 +17,7 @@ use crate::history::{AdventureRefusal, CalendarTick, PersonId, SiteId, SocietyGr
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, LodWater, PortableRegion, Region, RegionCoords, RegionInput,
-    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap,
+    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, WorldMap,
     Order, PlayMode, PlayerId, PlayerRecord,
 };
 use crate::save_cut::{
@@ -1826,45 +1826,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Play: move the client's player to the landing spot of `target`
-    /// (canonical: the dispatch folds what the client sent). Refusals change
-    /// no state.
-    fn play_region(&mut self, id: ClientId, target: RegionCoords, now_ms: u64) {
-        debug_assert_eq!(target, self.canonical(target), "play_region takes a canonical region");
-        let refuse = |this: &Self, r: PlayRefusal| {
-            let _ = this.out.send((Some(id), ServerPacket::PlayRefused(target, r)));
-        };
-        let Some(map) = &self.world_map else {
-            return refuse(self, PlayRefusal::NoWorldMap);
-        };
-        let Some(tile) = map.tile(target) else {
-            return refuse(self, PlayRefusal::OffMap);
-        };
-        if self.is_unavailable(target) {
-            return refuse(self, PlayRefusal::RegionUnavailable);
-        }
-        let home = self.homes.get(&id).copied();
-        if home == Some(target) {
-            return refuse(self, PlayRefusal::AlreadyHere);
-        }
-        let edge = crate::REGION_BLOCKS as u32;
-        let landing = match tile.landing {
-            Some(l) if l[0] < edge && l[1] < edge => l,
-            _ => return refuse(self, PlayRefusal::NoDryLand),
-        };
-        if !self.can_move(id, target) {
-            return refuse(self, PlayRefusal::RegionUnavailable);
-        }
-        self.move_client(id, target, landing, now_ms);
-        let from = home.map_or("none".to_string(), |h| format!("{},{}", h.x, h.z));
-        crate::perf_event!(
-            "play_region",
-            "client={id} from={from} to={},{}",
-            target.x,
-            target.z
-        );
-    }
-
     /// Move the client's player from its home (if any) to `landing` in `target`,
     /// keeping its `Client` (inventory, cursor, mode): it is parked out of the old
     /// home (`ParkPlayer`) and, once that answers with its record
@@ -2096,7 +2057,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, self.canonical(rc), now_ms),
                 ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
-                ClientPacket::PlayRegion(rc) => self.play_region(id, self.canonical(rc), now_ms),
+                // Unsent since the region spawn went (the world map's site choice replaced it).
+                ClientPacket::PlayRegion(_) => {}
                 ClientPacket::Leave => self.client_disconnected(id, now_ms),
                 ClientPacket::StartAdventure(site) => self.start_adventure(id, site, now_ms),
                 ClientPacket::EndAdventure => self.end_adventure(id, now_ms),

@@ -770,8 +770,7 @@ pub enum ClientPacket {
     RequestLod(LodKey),
     /// Unsubscribe; removal is client-driven, there is no "gone" packet.
     ReleaseLod(LodKey),
-    /// Start playing this region (picked on the world map): the server moves
-    /// the player's home there or answers `ServerPacket::PlayRefused`.
+    /// UNSENT (append-only enum): the removed region spawn's "play this region". A server ignores it.
     PlayRegion(RegionCoords),
     /// The client is leaving this world; treat as disconnected now.
     Leave,
@@ -849,8 +848,8 @@ pub enum ServerPacket {
     LodData(LodKey, LodPayload, crate::lod::LodWater),
     /// The world map: per-region tile summaries of the forged world.
     WorldMap(crate::world_map::WorldMap),
-    /// A `ClientPacket::PlayRegion` for this region was refused.
-    PlayRefused(RegionCoords, crate::world_map::PlayRefusal),
+    /// UNSENT (append-only enum): the removed region spawn's refusal (its reason enum is gone).
+    PlayRefused(RegionCoords),
     /// Every site of the history: on connect, and when the set or a population bucket
     /// changes (at most once per calendar day).
     Sites(Vec<SiteMarker>),
