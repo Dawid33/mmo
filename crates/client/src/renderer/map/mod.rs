@@ -4,6 +4,8 @@
 //! ([`MapSource::Local`], `map-tiles` against `terrain.sqlite` opened read-only), else HTTP — into
 //! [`MapTiles`], which belongs to the WORLD: a session end keeps it, another world clears it.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod disk;
 pub mod full;
 pub mod paint;
 pub mod palette;
