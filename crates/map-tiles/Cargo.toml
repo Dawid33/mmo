@@ -1,0 +1,13 @@
+[package]
+name = "map-tiles"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The world map's one tile reader: worldgen's surface with the stored chunk tops over it (plan 2026-11-20-block-level-world-map). No Bevy, no axum."
+
+[dependencies]
+game = { workspace = true }
+worldgen = { workspace = true }
+world-store = { path = "../world-store" }
+crc32fast = { workspace = true }
+log = { workspace = true }

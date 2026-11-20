@@ -5241,6 +5241,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "map-tiles"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "game",
+ "log",
+ "world-store",
+ "worldgen",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

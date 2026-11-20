@@ -16,6 +16,12 @@ use crate::material::Materials;
 use crate::pipeline::{TerrainPipeline, PROFILE_LATTICE_BLOCKS};
 use crate::{column_material, patch_margin, point_sample, wrap_frame, wrap_shift_blocks, ColSample, Patch, ProceduralPatch};
 
+/// The regions `world` covers (canonical; x wraps when the world does), as the world map's extent.
+pub fn map_extent(world: &ForgedWorld) -> game::MapExtent {
+    let (origin, width, height) = crate::tile_map::map_extent(world);
+    game::MapExtent { origin, width, height, wrap_x: world.globals().edges[1] == crate::forged::EdgeKind::Wrap }
+}
+
 /// The highest level read through one lattice patch per tile (1024 m at 4 m: 257² corners).
 pub const SURFACE_PATCH_MAX_LEVEL: u8 = 2;
 
