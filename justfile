@@ -178,7 +178,7 @@ check:
 
 # Run the QUIC server (listens on 127.0.0.1:6466, WebTransport ingress on :6467).
 server:
-    VOXEL_REGION_BLOCKS={{play_blocks}} RUST_BACKTRACE=1 {{cargo}} run --bin server
+    VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_MAP_BIND=127.0.0.1:6470 RUST_BACKTRACE=1 {{cargo}} run --bin server
 
 # Wipe the dev worldgen disk cache (target/worldgen-cache). The cache
 # self-invalidates when crates/worldgen or the block manifest change; use this
@@ -193,6 +193,8 @@ client:
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     export VOXEL_SKIP_MENU=1
+    # The dev server's world map tiles (`just server` serves them there).
+    export VOXEL_MAP_URL="${VOXEL_MAP_URL:-http://127.0.0.1:6470}"
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client
@@ -317,7 +319,7 @@ play-release:
 
 # Run the QUIC server in release mode.
 server-release:
-    VOXEL_REGION_BLOCKS={{play_blocks}} RUST_BACKTRACE=1 {{cargo}} run --release --bin server
+    VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_MAP_BIND=127.0.0.1:6470 RUST_BACKTRACE=1 {{cargo}} run --release --bin server
 
 # Run the Bevy client in release mode.
 client-release:
@@ -325,6 +327,7 @@ client-release:
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     export VOXEL_SKIP_MENU=1
+    export VOXEL_MAP_URL="${VOXEL_MAP_URL:-http://127.0.0.1:6470}"
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --release --bin client
@@ -2521,7 +2524,8 @@ world-start:
 # The login service calls the coordinator's HTTPS API (https://coordinator.<ns>.svc.cluster.local:6480),
 # pinned by the SHA-256 of the public certificate in Secret coordinator-identity (the one hosts pin).
 # No --quic / --wt: each spawn answer names the endpoint of the host that places the player. A name
-# with a single quote is refused.
+# with a single quote is refused. --map-url is the world map's tiles behind the web Ingress's host
+# (https://<host>/map/<id>; omitted when the namespace has no web Ingress).
 world-register $name="Errantry":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2540,6 +2544,8 @@ world-register $name="Errantry":
     echo "Run this (it replaces the row of world '$id'; nothing was changed by this recipe):"
     echo
     args="world add $id --name '$name' --link https://coordinator.$ns.svc.cluster.local:6480 --link-cert $pin"
+    web_host=$(k get ingress -o jsonpath='{.items[0].spec.rules[0].host}' 2>/dev/null || true)
+    if [ -n "$web_host" ]; then args="$args --map-url https://$web_host/map/$id"; fi
     if [ "{{world_ctx}}" = "{{orion_context}}" ]; then
         echo "just orion-login $args"
     else

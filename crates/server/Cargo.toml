@@ -27,6 +27,8 @@ dashmap = { workspace = true }
 wtransport = { workspace = true }
 # The world store (regions, players, history, world tick): SQLite or Postgres.
 world-store = { path = "../world-store" }
+# The world map's tile reader, served by `map_api.rs`.
+map-tiles = { path = "../map-tiles" }
 # The service link to the world coordinator (`VOXEL_ROLE=host|coordinator`).
 svc-link = { path = "../svc-link" }
 # Login JWTs at the edge (`VOXEL_AUTH=jwt`): the verifier and the JWKS fetch.

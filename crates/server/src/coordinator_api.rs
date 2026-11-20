@@ -271,14 +271,20 @@ pub(crate) fn serve_tls(
 }
 
 fn router(shared: Arc<Shared>) -> Router {
-    Router::new()
+    let api = Router::new()
         .route(PATH_HOST_MESSAGES, post(host_messages))
         .route(PATH_HOST_MAILBOX, get(host_mailbox))
         .route(login_api::PATH_COORD_LOGIN_ORDERS, post(login_orders))
         .route(login_api::PATH_COORD_LOGIN_ANSWERS, get(login_answers))
         .layer(axum::extract::DefaultBodyLimit::max(API_BODY_MAX_BYTES))
         .layer(middleware::from_fn_with_state(shared.clone(), guard))
-        .with_state(shared)
+        .with_state(shared);
+    // The world map's tiles: a route group of its own, merged AFTER the guard layer so it is not
+    // behind the service token (players reach it through the `web` proxy; `map_api.rs`).
+    match crate::map_api::installed_router() {
+        Some(map) => api.merge(map),
+        None => api,
+    }
 }
 
 pub(crate) fn text(status: StatusCode, body: &'static str) -> Response {
@@ -477,4 +483,3 @@ async fn login_answers(State(s): State<Arc<Shared>>, Query(q): Query<AnswersQuer
         Err(e) => store_failed("login answers read", e),
     }
 }
-

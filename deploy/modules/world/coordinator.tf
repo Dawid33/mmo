@@ -95,6 +95,8 @@ resource "kubernetes_deployment_v1" "coordinator" {
             for_each = merge(local.server_env, {
               VOXEL_ROLE             = "coordinator"
               VOXEL_COORDINATOR_BIND = "0.0.0.0:6480"
+              # The world map's tile route, plain HTTP for the web proxy (crates/server/src/map_api.rs).
+              VOXEL_MAP_BIND = "0.0.0.0:${local.map_port}"
               }, local.fleet_env, {
               VOXEL_FLEET_MAX = tostring(var.fleet.max)
             })
@@ -115,6 +117,11 @@ resource "kubernetes_deployment_v1" "coordinator" {
           port {
             name           = "api"
             container_port = 6480
+            protocol       = "TCP"
+          }
+          port {
+            name           = "map"
+            container_port = local.map_port
             protocol       = "TCP"
           }
           port {
@@ -215,6 +222,13 @@ resource "kubernetes_service_v1" "coordinator" {
       name        = "api"
       port        = 6480
       target_port = "api"
+      protocol    = "TCP"
+    }
+    # The world map's tiles (unauthenticated, plain HTTP): only the web proxy reaches it from outside.
+    port {
+      name        = "map"
+      port        = local.map_port
+      target_port = "map"
       protocol    = "TCP"
     }
     port {

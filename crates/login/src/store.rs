@@ -86,6 +86,8 @@ pub struct WorldRow {
     pub host_link: Option<String>,
     /// The SHA-256 pin of the coordinator's certificate (64 hex digits).
     pub host_link_cert: Option<String>,
+    /// The world map tile route's base URL (migration 0005); `None` = none served.
+    pub map_url: Option<String>,
 }
 
 /// A kick the world host has not acknowledged yet (`pending_kicks`).
@@ -204,13 +206,14 @@ macro_rules! world_row {
             created_at: $r.get(6),
             host_link: $r.get(7),
             host_link_cert: $r.get(8),
+            map_url: $r.get(9),
         }
     };
 }
 
 const ACCOUNT_COLS: &str = "account_id, email, password_hash, email_verified_at, created_at, subject, display_name";
 const WORLD_COLS: &str =
-    "world_id, name, status, quic, webtransport, cert_hash, created_at, host_link, host_link_cert";
+"world_id, name, status, quic, webtransport, cert_hash, created_at, host_link, host_link_cert, map_url";
 
 impl LoginStore {
     /// Open and migrate: a `postgres://` URL, `sqlite::memory:`, `sqlite:<path>` or a bare path.
@@ -499,15 +502,15 @@ impl LoginStore {
     /// Insert or replace a world of the registry (`created_at` of an existing one is kept).
     pub async fn put_world(&self, w: &WorldRow) -> Result<(), LoginError> {
         const SQL: &str = "INSERT INTO worlds (world_id, name, status, quic, webtransport, cert_hash, created_at, \
-             host_link, host_link_cert) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (world_id) DO UPDATE SET \
+             host_link, host_link_cert, map_url) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (world_id) DO UPDATE SET \
              name = excluded.name, status = excluded.status, quic = excluded.quic, \
              webtransport = excluded.webtransport, cert_hash = excluded.cert_hash, \
-             host_link = excluded.host_link, host_link_cert = excluded.host_link_cert";
+             host_link = excluded.host_link, host_link_cert = excluded.host_link_cert, map_url = excluded.map_url";
         exec!(self, p => sqlx::query(SQL)
             .bind(&w.world_id).bind(&w.name).bind(status_int(w.status))
             .bind(&w.quic).bind(&w.webtransport).bind(&w.cert_hash).bind(w.created_at)
-            .bind(&w.host_link).bind(&w.host_link_cert)
+            .bind(&w.host_link).bind(&w.host_link_cert).bind(&w.map_url)
             .execute(p).await?);
         Ok(())
     }

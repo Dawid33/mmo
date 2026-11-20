@@ -688,12 +688,20 @@ mod flow {
     pub(super) fn launch_when_ready(world: &mut World) {
         if let Some(JoinServer(addr)) = world.remove_resource::<JoinServer>() {
             info!("[session] joining the server on {addr}");
+            // A dev server's map, if the environment names it (`renderer::map`).
+            if let Some(base) = std::env::var(crate::renderer::map::store::MAP_URL_ENV).ok().filter(|b| !b.is_empty()) {
+                world.insert_resource(crate::renderer::map::MapWorld::http(&addr.to_string(), &base));
+            }
             connect_session(world, addr, None, None);
             return;
         }
         if let Some(join) = world.remove_resource::<PendingJoin>() {
             // The world id and address only: never the JWT.
             info!("[session] joining online world {:?} on {}", join.ticket.world, join.addr);
+            // The world's map, where the login service says it is served (`renderer::map`).
+            if let Some(base) = join.ticket.map_url.as_deref().filter(|b| !b.is_empty()) {
+                world.insert_resource(crate::renderer::map::MapWorld::http(&join.ticket.world, base));
+            }
             let host = crate::netcode::HostTarget {
                 quic: join
                     .ticket
@@ -952,6 +960,12 @@ mod web_flow {
             return; // the rejoin's ticket comes later (`join_when_ticketed`)
         }
         let (address, server, credential) = if let Some(join) = world.remove_resource::<PendingJoin>() {
+            // The world's map: same-origin under the page's own proxy (`/map/<world id>`).
+            let origin = web_sys::window().and_then(|w| w.location().origin().ok());
+            if let Some(origin) = origin {
+                let base = format!("{origin}/map/{}", join.ticket.world);
+                world.insert_resource(crate::renderer::map::MapWorld::http(&join.ticket.world, &base));
+            }
             let url = join.ticket.webtransport.clone().unwrap_or_default();
             match crate::web_endpoint::web_server_for_ticket(&url, join.ticket.cert_hash.as_deref()) {
                 Ok(server) => (url, server, Some(join.credential())),

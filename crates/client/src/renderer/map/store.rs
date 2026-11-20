@@ -24,6 +24,10 @@ use crate::session::SessionResetExt;
 
 /// Tile fetches in flight at once.
 pub const MAP_FETCH_IN_FLIGHT: usize = 6;
+/// A native client joining a server by address (`just client`, Join server) reads the map from this
+/// base URL (the dev server's `VOXEL_MAP_BIND`); unset = no map for such a session.
+pub const MAP_URL_ENV: &str = "VOXEL_MAP_URL";
+
 /// How often a shown tile with real regions is asked again (with its etag), and the source's terrain
 /// versions re-read.
 pub const MAP_REVALIDATE_MS: u64 = 30_000;
@@ -77,6 +81,14 @@ impl MapWorld {
         h.update(&std::fs::read(entry_dir.join("world.json")).unwrap_or_default());
         MapWorld { id: u64::from(h.finalize()), how: MapWorldSource::Local { store: store.to_path_buf() } }
     }
+
+    /// The world `world` (its id, or the server's address) served at `base` (`{base}/v1/map/tiles/…`).
+    pub fn http(world: &str, base: &str) -> MapWorld {
+        let mut h = crc32fast::Hasher::new();
+        h.update(world.as_bytes());
+        h.update(base.as_bytes());
+        MapWorld { id: u64::from(h.finalize()), how: MapWorldSource::Http { base: base.trim_end_matches('/').to_string() } }
+    }
 }
 
 /// One tile's three textures (integer formats, sampled by `textureLoad`): height `R16Sint` (m),
@@ -101,9 +113,8 @@ struct Entry {
     used: u64,
 }
 
-/// A fetch's answer, decoded on the worker. (wasm builds none until its HTTP fetch, Task 11.)
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-enum Answer {
+/// A fetch's answer, decoded on the worker.
+pub(super) enum Answer {
     Unchanged,
     Tile { etag: u64, tile: MapTile },
     Failed(String),
@@ -132,6 +143,9 @@ pub struct MapTiles {
     fetches: u64,
     failures: u64,
     logged_at: f64,
+    /// The HTTP source's fetcher, and the keys it has been asked for and not answered yet.
+    http: Option<super::http::HttpFetcher>,
+    http_waiting: std::collections::HashSet<MapTileKey>,
     /// Tiles a served answer replaced (levels a local painting covers): painted again in full.
     replaced: Vec<MapTileKey>,
     paints: u64,
@@ -257,6 +271,7 @@ fn pause_map_tiles(world: &mut World) {
         tiles.active = false;
         tiles.wanted.clear();
         tiles.in_flight.clear();
+        tiles.http_waiting.clear();
         tiles.refresh = None;
     }
 }
@@ -308,7 +323,10 @@ fn follow_map_world(world: Option<Res<MapWorld>>, mut tiles: ResMut<MapTiles>, i
         }
         MapWorldSource::Http { base } => {
             if !matches!(&tiles.source, MapSource::Http { base: b } if b == base) {
+                info!("[map] tiles from {base}");
                 tiles.source = MapSource::Http { base: base.clone() };
+                tiles.http = Some(super::http::HttpFetcher::start(base.clone(), world.id));
+                tiles.http_waiting.clear();
             }
         }
     }
@@ -347,7 +365,7 @@ fn spawn_fetch(source: &MapSource, key: MapTileKey, have: Option<u64>) -> Option
                 }
             }))
         }
-        // Task 11.
+        // The HTTP source asks through its fetcher (`http.rs`).
         MapSource::Http { .. } | MapSource::None => None,
     }
 }
@@ -406,8 +424,12 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
             done.push((*key, answer));
         }
     }
+    if let Some(http) = tiles.http.as_ref() {
+        done.extend(http.answers());
+    }
     for (key, answer) in done {
         tiles.in_flight.remove(&key);
+        tiles.http_waiting.remove(&key);
         match answer {
             Answer::Unchanged => {
                 if let Some(e) = tiles.entries.get_mut(&key) {
@@ -475,10 +497,17 @@ fn fetch_tiles(mut tiles: ResMut<MapTiles>, mut images: ResMut<Assets<Image>>, t
             }
             None => None,
         };
-        if tiles.in_flight.len() >= MAP_FETCH_IN_FLIGHT || tiles.in_flight.contains_key(&key) {
+        let busy = tiles.in_flight.len() + tiles.http_waiting.len();
+        if busy >= MAP_FETCH_IN_FLIGHT || tiles.in_flight.contains_key(&key) || tiles.http_waiting.contains(&key) {
             continue;
         }
         if tiles.retry_at.get(&key).is_some_and(|&t| now < t) {
+            continue;
+        }
+        if let (MapSource::Http { .. }, Some(http)) = (&tiles.source, tiles.http.as_ref()) {
+            http.request(key, have);
+            tiles.fetches += 1;
+            tiles.http_waiting.insert(key);
             continue;
         }
         if let Some(task) = spawn_fetch(&tiles.source, key, have) {

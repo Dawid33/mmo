@@ -373,7 +373,7 @@ async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<LogoutRequest>)
 
 async fn worlds(State(s): State<AppState>) -> Result<Json<Vec<WorldEntry>>, Fail> {
     let rows = s.store.worlds().await?;
-    Ok(Json(rows.into_iter().map(|w| WorldEntry { id: w.world_id, name: w.name, status: w.status }).collect()))
+    Ok(Json(rows.into_iter().map(|w| WorldEntry { id: w.world_id, name: w.name, status: w.status, map_url: w.map_url }).collect()))
 }
 
 async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> Result<Json<JoinResponse>, Fail> {
@@ -482,6 +482,7 @@ async fn join_inner(s: &AppState, req: JoinRequest) -> Result<Json<JoinResponse>
             webtransport,
             cert_hash,
             expires_in_secs: JOIN_JWT_TTL_SECS,
+            map_url: world.map_url,
         },
         refresh_token,
     }))

@@ -187,6 +187,7 @@ pub mod lease;
 pub mod load;
 pub mod lod_workers;
 pub mod login_link;
+pub mod map_api;
 pub mod peer_link;
 pub mod perf;
 pub mod player_store;
@@ -1019,6 +1020,20 @@ pub fn run() -> claims::ServerExit {
     // The world map was built when the world was written and is read from
     // the store with it (procedural worlds: none).
     let world_map = world_file::install_world(&mut opened);
+    // The bare dev server's world map tiles (`VOXEL_MAP_BIND`, loopback, plain HTTP; `map_api.rs`).
+    if let Ok(bind) = std::env::var(map_api::MAP_BIND_ENV) {
+        let served = bind.parse::<std::net::SocketAddr>().map_err(|e| format!("{}={bind}: {e}", map_api::MAP_BIND_ENV)).and_then(|bind| {
+            let (Some(store), Some(world)) = (store.clone(), worldgen::forged::active()) else {
+                return Err("no forged world in a store (a procedural world has no map)".into());
+            };
+            let cfg = map_tiles::TileSourceConfig::SERVER;
+            map_api::install(map_tiles::TileSource::forged_installed(store, world, map_api::materials(), cfg));
+            map_api::serve_plain(bind, true)
+        });
+        if let Err(e) = served {
+            log::warn!("[map] no dev tile route: {e}");
+        }
+    }
     let world_seed = worldgen::WORLD_SEED;
     // Prefabs, and (only when the environment asks) a dev structure source: before the cache key and
     // anything that can generate terrain.

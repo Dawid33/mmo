@@ -71,7 +71,9 @@
 #      `SKIP 7d` (INCONCLUSIVE when the pod went not Ready without a stall line): the policy is removed, the
 #      run continues and the final line says "7d skipped"; never a failure.
 #   8. The web Ingress answers through Traefik; its /login proxy reaches login's key set
-#      and API, and login's /metrics and /healthz are NOT published (404).
+#      and API, and login's /metrics and /healthz are NOT published (404). 8b: a world map tile
+#      through the web's /map/twin/ proxy (the coordinator's plain tile route): 200 with an ETag,
+#      the same with If-None-Match 304; the coordinator's /v1/hosts/ routes are NOT reachable there.
 #   9. world-drain <second host> 5 (the recipe): it leaves at the deadline (drained); the
 #      coordinator marks its desired row draining (mmo_fleet_drained_total grows), removes the
 #      row once the host left (mmo_fleet_removed_total grows) and the reconciler deletes its
@@ -1080,6 +1082,25 @@ for path in /login/metrics /login/healthz; do
     [ "$code" = 404 ] || fail "http://game.localhost:8480$path answered $code, not 404 (the proxy publishes it)"
     say "$path 404"
 done
+
+step "8b. a world map tile through the web proxy (/map/twin/), then 304 on its ETag"
+# A level-12 tile is 1,048,576 m a side: one of the four around the origin holds the world.
+map_tile=''
+for key in 12/0/0 12/-1/0 12/0/-1 12/-1/-1; do
+    code=$(http_code "/map/twin/v1/map/tiles/$key")
+    if [ "$code" = 200 ]; then map_tile=$key; break; fi
+done
+[ -n "$map_tile" ] || fail "no level-12 map tile around the origin answered 200 through /map/twin/ (last: $code)"
+etag=$(curl -s -D - -o /dev/null --max-time 20 -H 'Host: game.localhost' "http://127.0.0.1:8480/map/twin/v1/map/tiles/$map_tile" |
+    tr -d '\r' | awk -F': ' 'tolower($1) == "etag" { print $2 }')
+[ -n "$etag" ] || fail "map tile $map_tile came without an ETag"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H 'Host: game.localhost' -H "If-None-Match: $etag" \
+    "http://127.0.0.1:8480/map/twin/v1/map/tiles/$map_tile" || true)
+[ "$code" = 304 ] || fail "map tile $map_tile with If-None-Match $etag answered $code, not 304"
+say "map tile $map_tile 200 (ETag $etag), then 304"
+code=$(http_code /map/twin/v1/hosts/1/mailbox)
+[ "$code" = 404 ] || fail "/map/twin/v1/hosts/1/mailbox answered $code, not 404 (the proxy reaches the coordinator's host routes)"
+say "/map/twin/v1/hosts/… 404"
 
 # ---------------------------------------------------------------------------------
 step "9. drain host $hb (world-drain $hb 5): drained, its row and objects removed by themselves, a new name on its slot"

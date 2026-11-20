@@ -51,8 +51,25 @@ pub enum Fetched {
 }
 
 enum Terrain {
-    Forged { world: Arc<ForgedWorld>, extent: MapExtent },
+    Forged { world: WorldRef, extent: MapExtent },
     Procedural(u64),
+}
+
+/// The forged world a source reads: its own, or the process's installed one (`forged::install`, role
+/// `all`), which lives for the process.
+enum WorldRef {
+    Owned(Arc<ForgedWorld>),
+    Installed(&'static ForgedWorld),
+}
+
+impl std::ops::Deref for WorldRef {
+    type Target = ForgedWorld;
+    fn deref(&self) -> &ForgedWorld {
+        match self {
+            WorldRef::Owned(w) => w,
+            WorldRef::Installed(w) => w,
+        }
+    }
 }
 
 /// A region's stored surface: per block column (`lx + REGION_BLOCKS * lz`) the highest stored chunk's top
@@ -74,7 +91,19 @@ impl TileSource {
     /// Over a forged world (the store opened `OpenMode::ReadOnly` by a reader beside a server).
     pub fn forged(store: StoreHandle, world: Arc<ForgedWorld>, mats: Materials, cfg: TileSourceConfig) -> TileSource {
         let extent = worldgen::surface::map_extent(&world);
-        TileSource::new(store, Terrain::Forged { world, extent }, mats, cfg)
+        TileSource::new(store, Terrain::Forged { world: WorldRef::Owned(world), extent }, mats, cfg)
+    }
+
+    /// Over the process's installed forged world (`worldgen::forged::active()`).
+    pub fn forged_installed(store: StoreHandle, world: &'static ForgedWorld, mats: Materials, cfg: TileSourceConfig) -> TileSource {
+        let extent = worldgen::surface::map_extent(world);
+        TileSource::new(store, Terrain::Forged { world: WorldRef::Installed(world), extent }, mats, cfg)
+    }
+
+    /// Whether `key`'s tile can never change for the world's life: above [`MAP_EDIT_MAX_LEVEL`] no stored
+    /// terrain is overlaid. (A pristine tile at or below it changes once a region under it is saved.)
+    pub fn immutable(key: MapTileKey) -> bool {
+        key.level > MAP_EDIT_MAX_LEVEL
     }
 
     /// Over the procedural world of `seed`.

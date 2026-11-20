@@ -53,6 +53,16 @@ resource "kubernetes_deployment_v1" "web" {
             name  = "LOGIN_UPSTREAM"
             value = var.web.login_upstream
           }
+          # The world map's tiles (nginx.conf `location /map/`): the coordinator's plain route, the
+          # world id the prefix the page asks under.
+          env {
+            name  = "MAP_UPSTREAM"
+            value = "http://${local.coordinator_fq}:${local.map_port}"
+          }
+          env {
+            name  = "MAP_WORLD"
+            value = var.world_id
+          }
           port {
             name           = "http"
             container_port = 8080

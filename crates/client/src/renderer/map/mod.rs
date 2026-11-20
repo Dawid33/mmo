@@ -7,6 +7,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod disk;
 pub mod full;
+mod http;
 pub mod paint;
 pub mod palette;
 pub mod pass;

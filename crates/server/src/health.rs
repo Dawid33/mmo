@@ -60,6 +60,9 @@ pub const ATTACH_GRACE_MS: i64 = 10_000;
 /// `last_beat_ms` before the first [`Health::loop_beat`].
 const NEVER: i64 = i64::MIN;
 
+/// The map tile route's status codes, the `code` label of `mmo_map_requests_total` (any other: `other`).
+pub const MAP_CODES: [u16; 5] = [200, 304, 400, 404, 503];
+
 /// The coordinator HTTP API's routes, the `route` label of `mmo_coordinator_api_requests_total`
 /// ([`Health::api_request`]); a path that is none of the four is `other`.
 pub const API_ROUTES: [&str; 5] = ["host_messages", "host_mailbox", "login_orders", "login_answers", "other"];
@@ -119,6 +122,12 @@ pub struct Health {
     coordinator_stalled: AtomicU64,
     /// Per [`API_ROUTES`] × ([`API_CODES`] + `other`): requests the coordinator's API answered.
     api_requests: [[AtomicU64; API_CODES.len() + 1]; API_ROUTES.len()],
+    /// The world map's tile route (`map_api.rs`): requests per [`MAP_CODES`] (+ `other`), tiles built,
+    /// their build time (ms, summed), the reader's cache.
+    map_requests: [AtomicU64; MAP_CODES.len() + 1],
+    map_built: AtomicU64,
+    map_build_ms: AtomicU64,
+    map_cache_bytes: AtomicU64,
     /// A host's link to the coordinator (`world_http.rs`): up now.
     world_link_up: AtomicBool,
     /// `Attach` batches the host's link posted after its first (each a re-attach).
@@ -176,6 +185,10 @@ impl Health {
             coordinator_mailbox_oldest_ms: AtomicU64::new(0),
             coordinator_stalled: AtomicU64::new(0),
             api_requests: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            map_requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            map_built: AtomicU64::new(0),
+            map_build_ms: AtomicU64::new(0),
+            map_cache_bytes: AtomicU64::new(0),
             world_link_up: AtomicBool::new(false),
             world_link_reattach: AtomicU64::new(0),
             coordinator_is_ticker: AtomicBool::new(false),
@@ -386,6 +399,19 @@ impl Health {
     /// The ticker detached `n` hosts as stalled (their mailbox unread past `MAILBOX_STALL_MS`).
     pub fn hosts_stalled(&self, n: u64) {
         self.coordinator_stalled.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// The map route answered `status`.
+    pub fn map_request(&self, status: u16) {
+        let code = MAP_CODES.iter().position(|&c| c == status).unwrap_or(MAP_CODES.len());
+        self.map_requests[code].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The map route built a tile in `ms`, its reader's cache now `cache_bytes`.
+    pub fn map_built(&self, ms: u64, cache_bytes: u64) {
+        self.map_built.fetch_add(1, Ordering::Relaxed);
+        self.map_build_ms.fetch_add(ms, Ordering::Relaxed);
+        self.map_cache_bytes.store(cache_bytes, Ordering::Relaxed);
     }
 
     /// The coordinator's API answered a request on route `route` (an index of [`API_ROUTES`];
@@ -602,6 +628,17 @@ impl Health {
             }
         }
         register(Box::new(requests));
+        // The world map's tile route (constant 0 where it is not served).
+        counter("mmo_map_tiles_built_total", "Map tiles the tile route built (cache misses).", load(&self.map_built));
+        counter("mmo_map_build_ms_total", "Milliseconds spent building map tiles (with mmo_map_tiles_built_total: the mean).", load(&self.map_build_ms));
+        gauge("mmo_map_cache_bytes", "Bytes of encoded tiles in the tile route's cache.", load(&self.map_cache_bytes));
+        let map_requests = IntCounterVec::new(opts("mmo_map_requests_total", "Requests the map tile route answered, by status code."), &["code"])
+            .expect("valid metric");
+        for (c, n) in self.map_requests.iter().enumerate() {
+            let code = MAP_CODES.get(c).map_or_else(|| "other".to_string(), u16::to_string);
+            map_requests.with_label_values(&[code.as_str()]).inc_by(load(n));
+        }
+        register(Box::new(map_requests));
         // A host's link to the coordinator (constant 0 on the other roles, and on role `all`).
         gauge("mmo_world_link_up", "1 while this host's link to the world coordinator is up.", u64::from(self.world_link_up.load(Ordering::Relaxed)));
         counter(

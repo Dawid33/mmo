@@ -50,6 +50,9 @@ locals {
   secret_mode    = "0440"
   health_port    = 9100
   coordinator_fq = "coordinator.${local.ns}.svc.cluster.local"
+  # The coordinator's plain-HTTP world map tile route (crates/server/src/map_api.rs), the web proxy's
+  # upstream for /map/<world>/.
+  map_port = 6470
 
   # Mount points (the hash files' directories hold the identities' Secrets).
   service_token_dir = "/run/voxel/service"

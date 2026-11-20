@@ -68,6 +68,9 @@ pub struct JoinTicket {
     /// A dev host's self-signed WebTransport certificate hash.
     pub cert_hash: Option<String>,
     pub expires_in_secs: u64,
+    /// The world map's tile route base (as [`WorldEntry::map_url`]).
+    #[serde(default)]
+    pub map_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +129,9 @@ pub struct WorldEntry {
     pub id: String,
     pub name: String,
     pub status: WorldStatus,
+    /// The world map's tile route base (`<url>/v1/map/tiles/{level}/{x}/{z}`), if it serves one.
+    #[serde(default)]
+    pub map_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -23,6 +23,7 @@ const USAGE: &str = "usage: login [--db <url>] <command>
   keygen [--dir <d>]
   world add <id> --name <n> [--quic host:port] [--wt url] [--cert-hash h] [--closed]
             [--link <https://host:port[,…]> --link-cert <sha256>]   (the world coordinator's API and pin: join posts SpawnPlayer)
+            [--map-url <url>]   (the world map's tile route base, sent to native clients)
   world list | remove <id> | open <id> | close <id>
   account issue-refresh <email>   (prints a new refresh token; creates the account, verified,
                                    if missing; an existing account is left as it is)
@@ -85,6 +86,7 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     let cert_hash = take_opt(&mut args, "--cert-hash")?;
     let link = take_opt(&mut args, "--link")?;
     let link_cert = take_opt(&mut args, "--link-cert")?;
+    let map_url = take_opt(&mut args, "--map-url")?;
     let closed = take_flag(&mut args, "--closed");
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -114,6 +116,7 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
                 created_at: now_secs(),
                 host_link,
                 host_link_cert,
+                map_url,
             };
             let cleared = block_on(async {
                 let store = open(&db_url()?).await?;
@@ -142,13 +145,14 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
                 };
                 writeln!(
                     out,
-                    "{}\t{status}\t{}\tquic={}\twt={}\tcert_hash={}\tlink={}",
+                    "{}\t{status}\t{}\tquic={}\twt={}\tcert_hash={}\tlink={}\tmap={}",
                     w.world_id,
                     w.name,
                     w.quic.as_deref().unwrap_or("-"),
                     w.webtransport.as_deref().unwrap_or("-"),
                     w.cert_hash.as_deref().unwrap_or("-"),
                     w.host_link.as_deref().unwrap_or("-"),
+                    w.map_url.as_deref().unwrap_or("-"),
                 )
                 .map_err(io)?;
             }

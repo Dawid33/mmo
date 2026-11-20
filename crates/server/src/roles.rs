@@ -444,6 +444,20 @@ pub fn run_coordinator() -> ServerExit {
     }
     let store = opened.store.clone().expect("a Postgres world has a store");
     let map = opened.map.clone().expect("a stored world has a map");
+    // The world map's tiles, served on the coordinator's listener (`map_api.rs`): this process's own
+    // forged world (the coordinator never installs one), its store read like any reader's.
+    if let Some(world) = opened.world.take() {
+        let cfg = map_tiles::TileSourceConfig::SERVER;
+        crate::map_api::install(map_tiles::TileSource::forged(store.clone(), std::sync::Arc::new(world), crate::map_api::materials(), cfg));
+        // The `web` proxy's upstream (nginx speaks HTTP/1.1, the API HTTP/2 only).
+        if let Ok(bind) = std::env::var(crate::map_api::MAP_BIND_ENV) {
+            let served = bind
+                .parse::<std::net::SocketAddr>()
+                .map_err(|e| format!("{}={bind}: {e}", crate::map_api::MAP_BIND_ENV))
+                .and_then(|bind| crate::map_api::serve_plain(bind, false));
+            served.unwrap_or_else(|e| fatal(e));
+        }
+    }
     // Elastic 1: no host count. `claim` (R4): any number of hosts, each with an issued id, all
     // saving in world cuts this coordinator runs (every save period, at the world tick of its
     // own clock), a crashed host's land inherited by one heir — the coordinator declares and
