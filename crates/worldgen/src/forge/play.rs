@@ -23,22 +23,23 @@ pub fn preview_cell_for(width_m: f64, height_m: f64) -> f64 {
         .unwrap_or(PREVIEW_CELL_CHOICES[PREVIEW_CELL_CHOICES.len() - 1])
 }
 
-/// Forge wall time per million cells at 1 M cells. Measured 2026-11-01 with
-/// `just forge-bench` (release, rayon on all 20 logical cores of the dev box,
-/// incl. writing the PNGs): 16 km / 16 m (1.0 M cells) 9.1 s, 32 km / 16 m
-/// (4.0 M) 33.7 s. 64 km and 100 km at 16 m were not timed (minutes; the
-/// 100 km / 16 m benchmark waits on the user), so those labels extrapolate.
-pub const FORGE_SECS_PER_MCELL: f64 = 9.0;
+/// Forge wall time per million cells at 1 M cells. Fitted 2026-11-20 to nine
+/// `just forge-bench` runs of the Planet (release, rayon on all 20 logical
+/// cores of an i7-12700H laptop with 31 GB RAM, incl. writing the PNGs and the
+/// world file): every menu size at 16 m and 32 m and the dev size at 32 m,
+/// 0.13 M cells (1.0 s) to 78.7 M (655 s, Large at 16 m). Least squares on
+/// log-log; with [`FORGE_COST_EXPONENT`] the worst row is off by 6.8 %
+/// (dev at 32 m). Table: the design's Measurements, Phase 1a.
+pub const FORGE_SECS_PER_MCELL: f64 = 7.7;
 
-/// Wall time grows as cells^this. The two measured points give 0.94; rounded
-/// up because bigger grids fall out of cache and the pre-optimisation runs
-/// grew faster than linearly.
-pub const FORGE_COST_EXPONENT: f64 = 1.05;
+/// Wall time grows as cells^this (the same fit: 1.017, rounded).
+pub const FORGE_COST_EXPONENT: f64 = 1.02;
 
-/// Peak memory of a forge: a fixed base plus this per cell (the same runs:
-/// 284 MB at 1.0 M cells, 813 MB at 4.0 M).
-pub const FORGE_RAM_BYTES_PER_CELL: f64 = 180.0;
-pub const FORGE_RAM_BASE_BYTES: f64 = 100.0e6;
+/// Peak memory of a forge: a fixed base plus this per cell (the same runs,
+/// max RSS 0.08 GB at 0.13 M cells to 13.5 GB at 78.7 M; worst row off by
+/// 16 %, Tiny at 32 m, and under 3 % from 4.9 M cells up).
+pub const FORGE_RAM_BYTES_PER_CELL: f64 = 172.0;
+pub const FORGE_RAM_BASE_BYTES: f64 = 70.0e6;
 
 /// What a forge at a size and cell is expected to cost (an estimate, scaled
 /// from measured runs, see [`FORGE_SECS_PER_MCELL`]).

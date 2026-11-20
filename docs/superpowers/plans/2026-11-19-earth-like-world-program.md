@@ -319,8 +319,23 @@ lengths in degrees of latitude; every size measured.
 
 To be appended as phases finish. Already known:
 
-- After Phase 1a: `just run --reset`; look at the world map (white poles, hot middle, matching left and right
-  edges); walk east across the seam; pan the LOD rings across it.
+- After Phase 1a (built 2026-11-20; evidence below):
+  1. `just run --reset` (a new dev world; a world of a deleted layout is refused with the re-forge wording).
+  2. Open the world map: ice-pale polar seas top and bottom, the hot band across the middle, the left and right
+     edges continuing into each other (as in `target/world-forge/phase1a-map.png-tiles-biomes.png`; a Medium
+     world for comparison: `target/world-forge/phase1a-medium-map.png-tiles-biomes.png`).
+  3. Walk east across the seam (x = the world's width): no cliff, no step in trees, rivers or biome, no hitch.
+  4. Turn and pan the far LOD rings across the seam: no gap or doubled strip (a second image of the terrain past
+     half the world's width is a known limit).
+  5. Commit or drop the working-tree-only edits made in the OWNER's untracked or uncommitted files (never committed
+     by the run): `crates/panel/src/forge.rs` (`PRESETS`), `crates/panel/src/web.rs` and
+     `crates/panel/templates/world.html` (the size select) — `task-3-report.md` and `task-17-report.md`;
+     `crates/client/src/renderer/look_target.rs` (lines 80, 94, 99, 100) and `block_damage.rs` (`block_centre` and
+     its callers) — `task-15-report.md`; the one line in `crates/game/src/people.rs` `follow_path_safe`
+     (`w.waypoint(…)` in the region's frame) — `task-7-report.md` (all under
+     `.superpowers/sdd/2026-11-14-planet-frame-1a/`).
+  6. Re-forge every world before running this build: dev worlds (`just run --reset`, `worlds/`), the web world, dev
+     Postgres worlds (`just pg-reset`), the twin and orion (artifact v9, world map v3).
 - After Phases 2–5: `just world-map` on a Medium world — do the continents, ranges, climates and coasts read
   as a small Earth?
 - Before or during Phase 6: decide the day length.
@@ -376,3 +391,83 @@ Everything else is a ruling in the ledger.
      (the phase's one re-record).
 - **Design amended** (status, the test rule, the multi-host row, the closed seam, the day length, Phase 6's row).
 - `just smoke`: `smoke ok in 2s`, exit 0 (2026-11-19, tree at `c16f7e3d` + this phase's documents).
+
+### Phase 1a — the planet frame (2026-11-20)
+
+Plan `docs/superpowers/plans/2026-11-14-planet-frame-1a.md` ("As built": commits per task, every ruling, the
+deferred minors). Tree at `a6fb06f9` (Phase 1a's last code commit is `be8ab249`), plus Task 19's estimate refit,
+which changes no forged byte.
+
+- **`just forge-report --size dev --cell 32 --seeds 8`** (seeds `…0206`–`…020D`; `--cell 64` gives the same
+  field verdicts, per-seed differences noted under the table):
+
+  | line | 0206 | 0207 | 0208 | 0209 | 020A | 020B | 020C | 020D |
+  |---|---|---|---|---|---|---|---|---|
+  | polar_rows_all_sea | yes | yes | yes | yes | yes | yes | yes | yes |
+  | sea_level_temp_c north / middle / south | −23.2 / 26.9 / −23.2 | −23.2 / 26.9 / −23.3 | −23.3 / 26.9 / −23.2 | −23.3 / 26.9 / −23.2 | −23.2 / 26.9 / −23.1 | −23.2 / 26.9 / −23.2 | −23.2 / 26.9 / −23.2 | −23.2 / 26.9 / −23.2 |
+  | land_share | 0.310 | 0.352 | 0.258 | 0.321 | 0.294 | 0.304 | 0.317 | 0.372 |
+  | land_components_over_1pct | 2 | 2 | 4 | 1 | 3 | 2 | 3 | 2 |
+  | drains_to_sea | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+  | seam_step_ratio_height (rank, ok) | 0.740 (0.117, yes) | 0.295 (0.726, yes) | 0.059 (0.904, yes) | 0.931 (0.268, yes) | 0.035 (0.949, yes) | 0.040 (0.918, yes) | 0.213 (0.575, yes) | 1.751 (0.008, no) |
+  | seam_step_ratio_precip (rank, ok) | 0.569 (0.327, yes) | 0.368 (0.569, yes) | 0.208 (0.750, yes) | 0.171 (0.843, yes) | 0.134 (0.941, yes) | 0.665 (0.286, yes) | 0.559 (0.427, yes) | 0.708 (0.339, yes) |
+  | seam_step_ratio_biome (rank, ok) | 1.801 (0.139, yes) | 1.070 (0.442, yes) | 1.149 (0.378, yes) | 0.510 (0.785, yes) | 0.100 (0.949, yes) | 0.886 (0.552, yes) | 1.529 (0.209, yes) | 1.633 (0.131, yes) |
+  | aliased_regions_identical | yes | yes | yes | yes | yes | yes | yes | yes |
+  | seam_region_cliff | 0.500 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.500 | 1.000 |
+  | world_map_wraps | yes | yes | yes | yes | yes | yes | yes | yes |
+  | rivers_across_seam (max gap, cells) | 0 | 1 (0.031) | 0 | 0 | 0 | 0 | 0 | 2 (0.031) |
+  | trees_across_seam_ok | yes | yes | yes | yes | yes | yes | yes | yes |
+
+  Summary lines: `seam_seeds_not_ok_height: 1`, `seam_pass_height: yes`; `seam_seeds_not_ok_precip: 0`,
+  `seam_pass_precip: yes`; `seam_seeds_not_ok_biome: 0`, `seam_pass_biome: yes`; median ranks 0.6505 / 0.498 /
+  0.410; `lakes_across_seam` 0 on every seed. At 64 m: the same yes/no lines except precipitation on seed 0207
+  (ratio 3.894, rank 0.008, `no`) and the seam height miss again on 020D (1.756, rank 0.000); `seam_pass_*` yes ×3;
+  land share 0.259–0.372; temperatures −23.1…−22.9 / 26.8 / −23.1…−22.9; components and drainage unchanged.
+- **Judged against the Phase 1a ranges:** rows 0 and `nz−1` all sea — met (8/8). Polar sea-level temperature
+  below −15 °C (−23.3…−23.1) and the middle row above 20 °C (26.9) — met (8/8). Land share 0.15–0.6 — met
+  (0.258–0.372). Seam height step "at most 1.5 × the interior's" — not met as written on every seed: the ratios
+  are listed above (worst 1.751 height, 0.708 precipitation, 1.801 biome); judged by the ruled seed-set rule (a
+  seed is `ok` when its ratio ≤ 1.5 or its rank ≥ 0.05; a field passes when at most 2 of 8 seeds are `no` and the
+  median rank ≥ 0.25) all three fields PASS. Aliased regions identical — met (8/8). Also: every land cell drains to
+  the sea, the world map wraps, trees and rivers continue across the seam (river gaps ≤ 0.031 cell), the seam's
+  region cliff is at most the interior's (≤ 1.0). Two land components over 1 % on 7 of 8 seeds (`…0209` has one).
+- **Map:** `just forge-proto --size dev --cell 32 --out target/world-forge/phase1a` (`phase1a.world`, 0.4 MiB, and
+  its forge PNGs `target/world-forge/phase1a-{biome,temperature,rain,relief,…}.png`), then `just world-map --world
+  target/world-forge/phase1a.world --tiles --out target/world-forge/phase1a-map.png` → `target/world-forge/
+  phase1a-map.png-tiles-{biomes,relief,temperature,rain,regions}.png` (2048 × 1032, 256 × 129 tiles). The biome
+  map shows pale polar sea bands top and bottom with glacier and tundra on the southern coasts, tropical forest and
+  savanna across the middle and one large continent with a central mountain spine, its southern lobe leaving the
+  right edge and coming back at the left; the temperature map is a smooth cold–hot–cold banding, warmest over the
+  middle rows, whose left and right columns match. A Medium world for the owner: `just forge-proto --size medium
+  --cell 32 --out target/world-forge/phase1a-medium` (7.7 MiB) and its map
+  `target/world-forge/phase1a-medium-map.png-tiles-{biomes,relief,temperature,rain,regions}.png` (1568 × 785 tiles).
+- **Every size timed** (`just forge-bench`, 2026-11-20): the design's Measurements, "Phase 1a" — Dev 32 m 1.04 s,
+  Tiny 2.3 / 10.0 s, Small 9.3 / 39.3 s, Medium 38.5 / 160.9 s, Large 164.5 s at 32 m and 655.3 s / 13.5 GB at
+  16 m. The menu's estimate refitted: `FORGE_SECS_PER_MCELL` 9.0 → 7.7, `FORGE_COST_EXPONENT` 1.05 → 1.02,
+  `FORGE_RAM_BYTES_PER_CELL` 180 → 172, `FORGE_RAM_BASE_BYTES` 100 → 70 MB (worst row 6.8 % time, 16 % memory).
+- **The quality gate** (`forge_quality_matches_baseline`, recorded onto the dev Planet 16,384 × 8,192 at 32 m; final
+  recording `be8ab249`, which superseded `bd42b95b` inside Task 18):
+
+  | field | old (16 km one-island) | `bd42b95b` | `be8ab249` (final) |
+  |---|---|---|---|
+  | land_share | 0.329968 | 0.309761 | 0.309761 |
+  | height p50 / p90 / p99 m | 60.47 / 1083.76 / 2059.08 | 33.48 / 619.95 / 1495.92 | 33.11 / 628.40 / 1641.65 |
+  | max_peak_m | 2326.68 | 1785.72 | 1992.11 |
+  | concavity θ / Hack exponent | 0.6680 / 0.4697 | 0.3608 / 0.4358 | 0.2621 / 0.4343 |
+  | river mouths / km / max Strahler | 30 / 49.32 / 3 | 15 / 15.63 / 3 | 14 / 15.84 / 2 |
+  | lakes | 6 | 2 | 1 |
+- **Rulings that changed how a criterion was judged** (all in the plan's "As built"): the seam — "ratio ≤ 1.5 or
+  rank ≥ 0.05" per seed, then "at most 2 of 8 seeds `no` and median rank ≥ 0.25" per field (ordinary interior column
+  pairs fail the per-seed rule 4.7 % of the time); 7 of 8 seeds with two continents accepted (the land formula is
+  replaced in Phase 2); Tiny is 25,600 × 12,800 m (12,544 m is not whole 512 m regions); outside role `all` the seam
+  is closed, not refused (Phase 7 opens it); the two rain blurs moved to degrees inside Task 18, so the gate was
+  recorded twice within that task (`bd42b95b`, then `be8ab249`).
+- **`just test`** (once, 2026-11-20, tree at `a6fb06f9` + this task's uncommitted documents and estimate):
+  `PASS test-audit`, `FAIL workspace`, `PASS physics-next-upstream`, `PASS slotmapd`, `PASS quest`, `PASS site-test`.
+  The workspace stage's one failure: `game --test wasm_determinism` `scene_hash_native` — `native scene digest
+  0xE6CD22F6 != golden 0x38D86635`. Not Phase 1a's: the same value was recorded failing with and without Task 5
+  (the first Phase 1a change to `game`) and unchanged through Tasks 12, 13 and 17, and the same test on the
+  COMMITTED tree (`git archive HEAD` at `a6fb06f9`, its own target dir) passes, 7 of 7 — the digest moves with the
+  owner's uncommitted `crates/game` work (physics goldens and sim files). Every other test passed; the slow
+  `scene_hash_golden::` / `tree_fall::` are `#[ignore]`d in `just test` (not run). Workspace clippy is not a stage
+  of `just test` (its known failures in `block-mesh`, `bbmodel`, `macros` are in crates Phase 1a did not touch).
+- Status: the controller sets the Status row after the whole-plan review.
