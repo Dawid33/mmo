@@ -18,6 +18,7 @@ pub mod tile_map;
 pub mod world_store;
 pub mod sites;
 pub mod structures;
+pub mod surface;
 pub mod trees;
 mod slopes;
 

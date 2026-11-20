@@ -2009,6 +2009,38 @@ impl crate::Patch for ForgedPatch<'_> {
     }
 }
 
+/// One exact point of `world` as a patch: no lattice and no window — ground, rivers and lakes read at the
+/// point itself, as [`ForgedWorld::sample`] does. For map samples too far apart to share a patch
+/// (`surface::surface_tile_forged` above `SURFACE_PATCH_MAX_LEVEL`).
+pub(crate) struct PointPatch<'a> {
+    pub(crate) world: &'a ForgedWorld,
+}
+
+impl crate::Patch for PointPatch<'_> {
+    fn geo(&self, x: f64, z: f64) -> i16 {
+        self.world.geo_offset_blocks(x, z)
+    }
+
+    fn strata(&self, mats: &Materials) -> Vec<(i16, BlockId)> {
+        self.world.strata_blocks(mats)
+    }
+
+    fn climate(&self, x: f64, z: f64) -> Option<ColumnClimate> {
+        Some(self.world.column_climate(x, z))
+    }
+
+    fn sample(&self, x: f64, z: f64) -> (ColumnProfile, i32, bool) {
+        let (ax, az) = self.world.to_artifact(x, z);
+        let g = self.world.ground(ax, az);
+        if self.world.place(ax, az) != Place::Inside {
+            return (ColumnProfile::from_surface(SEA_LEVEL + g), SEA_TOP_BLOCK, false);
+        }
+        let (g, water, lake) = self.world.refine(ax, az, g, self.world.bucket_segments(ax, az), true);
+        let water_top = water.map_or(SEA_TOP_BLOCK, |w| ((SEA_LEVEL + w) as i32 - 1).max(SEA_TOP_BLOCK));
+        (ColumnProfile::from_surface(SEA_LEVEL + g), water_top, lake)
+    }
+}
+
 /// `VOXEL_WORLD_FILE` value that selects the procedural noise world.
 pub const PROCEDURAL_KEYWORD: &str = "procedural";
 
