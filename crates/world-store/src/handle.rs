@@ -677,8 +677,9 @@ impl StoreHandle {
         leaving: Vec<HostId>,
         generation: u64,
         settles: Vec<SuccessionId>,
+        moves: Vec<game::LandMove>,
     ) -> Result<bool, StoreError> {
-        let d = StoreDecision::DecideCut(game::coordinator::CutDecide { cut, tick, commit, hosts, leaving, generation, settles });
+        let d = StoreDecision::DecideCut(game::coordinator::CutDecide { cut, tick, commit, hosts, leaving, generation, settles, moves });
         match self.decide_alone(d)? {
             Decided::Cut { committed, .. } => committed,
             other => Err(unexpected(other)),

@@ -249,6 +249,11 @@ pub enum StoreError {
     /// commit whose answer was lost). Nothing was written — the transition's store decisions
     /// neither.
     Conflict,
+    /// Elastic 5: a statement that must wait for something to settle first, refused at once
+    /// (nothing written; asking again later succeeds): a declaration or a landless end while a
+    /// part of a cut decided as committed is still staged (`two_phase::staged_committed`) — its
+    /// `COMMIT PREPARED` may still move land to the host being declared. `String`: what waits.
+    Busy(String),
 }
 
 impl StoreError {
@@ -361,6 +366,7 @@ impl fmt::Display for StoreError {
             StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
             StoreError::NotDrainable(why) => write!(f, "{why}"),
+            StoreError::Busy(what) => write!(f, "not yet: {what}; nothing was written, ask again later"),
             StoreError::Conflict => write!(
                 f,
                 "the world coordinator's row changed since this process read it (its version moved: another \

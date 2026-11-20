@@ -102,6 +102,11 @@ pub struct WorldCut {
     /// when the cut commits and stay this host's if it aborts. A one-phase cut refuses any.
     /// Empty everywhere until hosts release idle land.
     pub releases: Vec<crate::SuperRegion>,
+    /// Elastic 5: super-regions of this host's fence this part hands to another host (the
+    /// taker): the store sets the row's owner to the taker at `epoch + 1` inside the prepared
+    /// part, so the land is the taker's exactly when the cut commits and stays this host's if it
+    /// aborts. A one-phase cut refuses any; a super-region is never both released and moved.
+    pub moves: Vec<(crate::SuperRegion, HostId)>,
 }
 
 /// A region's snapshots not committed yet, merged ([`PortableRegion::merge`]);

@@ -3267,6 +3267,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Masked since its `BeginCut`, or above for a leave (`land.rs`): the store frees
             // them with the commit.
             releases,
+            // Elastic 5: filled by the giver's move path (Task 4).
+            moves: Vec::new(),
         };
         log::debug!(
             "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",

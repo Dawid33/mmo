@@ -41,6 +41,22 @@ pub struct HostLoad {
     pub regions: u32,
     pub tick_permille: u32,
 }
+/// Elastic 5: one move of occupied land in place, numbered by the coordinator's move runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct MoveId(pub u64);
+
+/// Elastic 5: one move a world cut carries — `sr` passes from `giver` to `taker` (the taker's
+/// boot when the move was chosen) with the cut's commit: the giver's part sets the row's owner
+/// to the taker at `epoch + 1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LandMove {
+    pub id: MoveId,
+    pub sr: SuperRegion,
+    pub giver: HostId,
+    pub taker: HostId,
+    pub taker_boot: u64,
+}
+
 /// How long a host's lease lasts without a beat: the coordinator declares a host dead once
 /// it has read the same `seen_ms` over this long of its own successful reads; a booting host
 /// counts another host alive while `db_now - seen_ms` is within it.

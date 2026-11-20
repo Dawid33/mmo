@@ -268,6 +268,8 @@ async fn run_one(tx: &mut sqlx::PgConnection, d: &StoreDecision, dials: Decision
                 &c.leaving,
                 c.generation,
                 &c.settles,
+                &c.moves,
+                dials.lease_ms,
             )
             .await;
             let keep = committed.is_ok();

@@ -138,6 +138,10 @@ pub struct CutDecide {
     /// Task 9). The store records the commit as an abort unless this is exactly the set of
     /// open successions.
     pub settles: Vec<SuccessionId>,
+    /// Elastic 5: the moves this cut carries ([`crate::LandMove`]). A commit is recorded only if
+    /// every taker is a live, undrained, listed participant not leaving, at the boot named, and
+    /// every giver is listed (`two_phase::decide_in`); otherwise an abort.
+    pub moves: Vec<crate::LandMove>,
 }
 
 /// The world cut running.
@@ -551,6 +555,8 @@ impl Coordinator {
             leaving: run.leaving.clone(),
             generation: run.generation,
             settles: run.settles.clone(),
+            // Elastic 5: filled from the run by Task 3.
+            moves: Vec::new(),
         };
         self.push_decision(StoreDecision::DecideCut(d.clone()));
         Some(d)

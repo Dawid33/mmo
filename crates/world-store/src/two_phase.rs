@@ -33,6 +33,7 @@ use std::time::Duration;
 use game::HostId;
 use game::{CutId, Tick};
 use sqlx::PgPool;
+use sqlx::Row;
 
 use crate::rows::i;
 use crate::rows::pg::cut_decision;
@@ -159,6 +160,29 @@ pub(crate) async fn staged_hosts(conn: &mut sqlx::PgConnection) -> Result<Vec<Ho
     Ok(hosts.into_iter().collect())
 }
 
+/// Elastic 5: whether a part of a cut decided as COMMITTED is still staged — its `COMMIT
+/// PREPARED` (a post-commit effect of the decision's transition, or any finisher's) has not run
+/// yet, so a move it carries is not in the committed rows: a declaration of the move's taker
+/// would read the land as still the giver's and leave it to commit to a dead host
+/// (`succession::declare_in`, `end_landless_in` answer [`StoreError::Busy`]). Lockless: the
+/// world tag, `pg_prepared_xacts`, then the staged cuts' `cut_decisions` rows, plain reads.
+pub(crate) async fn staged_committed(conn: &mut sqlx::PgConnection) -> Result<Option<CutId>, StoreError> {
+    let oid: i64 = sqlx::query_scalar("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")
+        .fetch_one(&mut *conn)
+        .await?;
+    let tag = u32::try_from(oid).map_err(|_| StoreError::Corrupt(format!("database oid {oid}")))?;
+    let cuts: Vec<i64> = staged_parts(&mut *conn, tag, None).await?.into_keys().map(|c| c.0 as i64).collect();
+    if cuts.is_empty() {
+        return Ok(None);
+    }
+    let committed: Option<i64> =
+        sqlx::query_scalar("SELECT MIN(cut_id) FROM cut_decisions WHERE committed = 1 AND cut_id = ANY($1)")
+            .bind(cuts)
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(committed.map(|c| CutId(c as u64)))
+}
+
 /// This database's OID: the world tag of its gids.
 pub(crate) async fn world_tag(pool: &PgPool) -> Result<u32, StoreError> {
     let oid: i64 = sqlx::query_scalar("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")
@@ -221,6 +245,8 @@ pub(crate) async fn decide_in(
     leaving: &[HostId],
     generation: u64,
     settles: &[SuccessionId],
+    moves: &[game::LandMove],
+    lease_ms: u64,
 ) -> Result<bool, StoreError> {
     let decided = match cut_decision(&mut *tx, cut).await? {
         Some(d) => d,
@@ -316,6 +342,19 @@ pub(crate) async fn decide_in(
                         commit = false;
                     }
                 }
+                // Elastic 5: a move commits only to a taker that can hold the land — its `hosts`
+                // row at the move's boot live, dirty, undrained and beaten within the lease, a
+                // listed participant not leaving — and from a listed giver; anything else records an
+                // abort and every part rolls back (the land stays the giver's). The takers' rows are
+                // read `FOR SHARE` in id order after the world row: a prefix of the declaration's
+                // walk (`succession.rs` module notes, "A move's decision"); a beat, a drain mark or a
+                // vouch of a taker waits for this transaction. A prepared part locks no `hosts` row.
+                if commit {
+                    if let Some(why) = move_refusal(&mut *tx, moves, &listed, leaving, lease_ms).await? {
+                        log::warn!("[world-store] cut {}: {why}; recording an abort", cut.0);
+                        commit = false;
+                    }
+                }
             }
             let inserted = insert_decision(&mut *tx, cut, tick, commit).await?;
             // Elastic 2a: a begin below the cut being decided is never read again (only this
@@ -340,6 +379,52 @@ pub(crate) async fn decide_in(
         }
     };
     Ok(decided)
+}
+
+/// Elastic 5: why the moves of a cut cannot commit (`None`: they can) — see [`decide_in`].
+async fn move_refusal(
+    tx: &mut sqlx::PgConnection,
+    moves: &[game::LandMove],
+    listed: &BTreeSet<HostId>,
+    leaving: &[HostId],
+    lease_ms: u64,
+) -> Result<Option<String>, StoreError> {
+    let mut sorted: Vec<&game::LandMove> = moves.iter().collect();
+    sorted.sort_by_key(|m| (m.taker, m.id));
+    for m in sorted {
+        let why = |what: &str| Some(format!("move {} of {:?} aborted: {what}", m.id.0, m.sr));
+        if !listed.contains(&m.giver) {
+            return Ok(why(&format!("giver {} has no part in the cut", m.giver)));
+        }
+        if !listed.contains(&m.taker) {
+            return Ok(why(&format!("taker {} has no part in the cut", m.taker)));
+        }
+        if leaving.contains(&m.taker) {
+            return Ok(why(&format!("taker {} leaves in the cut", m.taker)));
+        }
+        let row = sqlx::query(&format!(
+            "SELECT drain_at_ms IS NOT NULL, seen_ms <> 0 AND {} - seen_ms <= $3 FROM hosts \
+             WHERE id = $1 AND boot = $2 AND state = {} AND clean = 0 FOR SHARE",
+            crate::succession::PG_NOW_MS,
+            crate::HOST_LIVE
+        ))
+        .bind(i(m.taker.0))
+        .bind(m.taker_boot as i64)
+        .bind(i(lease_ms))
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(why(&format!("taker {} (boot {:#x}) has no live dirty row", m.taker, m.taker_boot)));
+        };
+        let (drained, fresh): (bool, bool) = (row.try_get(0)?, row.try_get(1)?);
+        if drained {
+            return Ok(why(&format!("taker {} is marked draining", m.taker)));
+        }
+        if !fresh {
+            return Ok(why(&format!("taker {}'s lease is stale", m.taker)));
+        }
+    }
+    Ok(None)
 }
 
 /// The coordinator records that world cut `cut` began (Elastic 1 Task 4; Elastic 2b Task 3: a

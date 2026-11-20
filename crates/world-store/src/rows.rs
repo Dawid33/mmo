@@ -1608,7 +1608,7 @@ macro_rules! engine_rows {
                 end: &CutEnd,
                 lock_timeout_ms: u64,
             ) -> Result<CutCommitted, StoreError> {
-                release_refusal(cut, fence, end)?;
+                land_refusal(cut, fence, end)?;
                 match end {
                     CutEnd::Commit => {
                         let mut tx = pool.begin().await?;
@@ -1641,25 +1641,39 @@ macro_rules! engine_rows {
                 }
             }
 
-            /// Elastic 3: what refuses a cut's `releases` before any statement (`Unsupported`): a
-            /// release in a one-phase cut (`CutEnd::Commit`: static, all-in-one, SQLite — the land
-            /// would be free with no decision to pair it with), or of a super-region `fence` does
-            /// not hold (it is not this host's to give back).
-            fn release_refusal(cut: &WorldCut, fence: &Fence, end: &CutEnd) -> Result<(), StoreError> {
-                if cut.releases.is_empty() {
+            /// Elastic 3 / 5: what refuses a cut's `releases` or `moves` before any statement
+            /// (`Unsupported`): either in a one-phase cut (`CutEnd::Commit`: static, all-in-one,
+            /// SQLite — the land would change hands with no decision to pair it with); a released
+            /// or moved super-region `fence` does not hold (it is not this host's to give); a
+            /// super-region both released and moved, or moved twice; a move to the part's own host.
+            fn land_refusal(cut: &WorldCut, fence: &Fence, end: &CutEnd) -> Result<(), StoreError> {
+                if cut.releases.is_empty() && cut.moves.is_empty() {
                     return Ok(());
                 }
+                let refuse = |why: String| Err(StoreError::Unsupported(format!("host {}'s cut {} {why}", cut.host, cut.id.0)));
                 if matches!(end, CutEnd::Commit) {
-                    return Err(StoreError::Unsupported(format!(
-                        "a one-phase cut releases no land (host {}'s cut {} releases {:?})",
-                        cut.host, cut.id.0, cut.releases
-                    )));
+                    return refuse(format!(
+                        "is one-phase: it releases or moves no land (releases {:?}, moves {:?})",
+                        cut.releases, cut.moves
+                    ));
                 }
                 if let Some(sr) = cut.releases.iter().find(|sr| !fence.epochs.contains_key(sr)) {
-                    return Err(StoreError::Unsupported(format!(
-                        "host {}'s cut {} releases {sr:?}, which its fence does not hold",
-                        cut.host, cut.id.0
-                    )));
+                    return refuse(format!("releases {sr:?}, which its fence does not hold"));
+                }
+                let mut moved = std::collections::BTreeSet::new();
+                for (sr, taker) in &cut.moves {
+                    if !fence.epochs.contains_key(sr) {
+                        return refuse(format!("moves {sr:?}, which its fence does not hold"));
+                    }
+                    if cut.releases.contains(sr) {
+                        return refuse(format!("both releases and moves {sr:?}"));
+                    }
+                    if !moved.insert(*sr) {
+                        return refuse(format!("moves {sr:?} twice"));
+                    }
+                    if *taker == fence.owner || *taker == cut.host {
+                        return refuse(format!("moves {sr:?} to its own host {taker}"));
+                    }
                 }
                 Ok(())
             }
@@ -1776,8 +1790,12 @@ macro_rules! engine_rows {
             ) -> Result<CutCommitted, StoreError> {
                 let t = i(cut.tick);
                 let releases: std::collections::BTreeSet<SuperRegion> = cut.releases.iter().copied().collect();
-                if !releases.is_empty() {
-                    check_fence(&mut *conn, fence, &releases, RELEASE_LOCK).await?;
+                // Elastic 5: the moved rows are locked and checked with the released ones, in one
+                // key-ordered pass (`land_refusal` made the two sets disjoint).
+                let given: std::collections::BTreeSet<SuperRegion> =
+                    releases.iter().copied().chain(cut.moves.iter().map(|(sr, _)| *sr)).collect();
+                if !given.is_empty() {
+                    check_fence(&mut *conn, fence, &given, RELEASE_LOCK).await?;
                 }
                 check_fence(&mut *conn, fence, &commit_check_set(cut, fence, s), SHARE_LOCK).await?;
                 if !cut.adopts.is_empty() {
@@ -1957,6 +1975,27 @@ macro_rules! engine_rows {
                     .await
                     .map_err(|e| fence_race(e, (sx, sz)))?;
                     if freed.rows_affected() != 1 {
+                        return Err(StoreError::Fenced { sr: Some((sx, sz)) });
+                    }
+                }
+                // Elastic 5: each moved row passes to its taker at the next epoch — the taker's
+                // exactly when the part commits, this host's if it is rolled back. Locks no
+                // `hosts` row (the decision checks the taker).
+                for &((sx, sz), taker) in &cut.moves {
+                    let epoch = fence.epochs[&(sx, sz)];
+                    let handed = sqlx::query(
+                        "UPDATE super_regions SET owner = $5, epoch = epoch + 1 \
+                         WHERE sx = $1 AND sz = $2 AND owner = $3 AND epoch = $4",
+                    )
+                    .bind(i64::from(sx))
+                    .bind(i64::from(sz))
+                    .bind(i(fence.owner.0))
+                    .bind(i(epoch))
+                    .bind(i(taker.0))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| fence_race(e, (sx, sz)))?;
+                    if handed.rows_affected() != 1 {
                         return Err(StoreError::Fenced { sr: Some((sx, sz)) });
                     }
                 }

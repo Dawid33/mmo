@@ -298,6 +298,39 @@
 //!   touches no `super_regions` row, and finishing the parts (`finish_staged`) runs after the
 //!   decision's commit, outside the `coordinator` row: the part's lock never waits for anything.
 //!
+//! **A part's move** (`rows.rs` `cut_rows`, Elastic 5; lock walk (a)): a part may also hand
+//! super-regions of its fence to another host (`WorldCut::moves`): the release's walk with the
+//! moved rows beside the released ones — `super_regions` (releases ∪ moves, `FOR NO KEY UPDATE`,
+//! key order, step 2) → `super_regions` (check set, `FOR SHARE`, step 3) → the data writes and
+//! `in_flight` (still keyed to this host) → after the releases, per move `UPDATE super_regions SET
+//! owner = $taker, epoch = epoch + 1 WHERE … AND owner = $me AND epoch = $e` (anything but one row
+//! → `Fenced`). Refused before any statement (`land_refusal`): a move in a one-phase cut, of a row
+//! the fence does not hold, of a row also released or moved twice, to the part's own host. The
+//! part locks NO `hosts` row (it would hold the taker's beats until `COMMIT PREPARED`); the safe
+//! cycle with a declaration of the giver is the release's, and the moved row is the giver's in
+//! every committed snapshot until `COMMIT PREPARED`, as a released one is.
+//!
+//! **A move's decision** (`two_phase::decide_in` + `move_refusal`, Elastic 5; lock walk (b)):
+//! `coordinator` (the transition's CAS) → `world` (`FOR NO KEY UPDATE`) → `hosts` (each move's
+//! taker at its boot, `FOR SHARE`, in taker-id order) → `cut_decisions`, `cut_begins`, `hosts`
+//! (the leavers, `UPDATE`), `successions`. A prefix of the declaration's walk (`coordinator` →
+//! `world` → `hosts` …), so it adds no edge; a registration serializes on `world`. A beat, a drain
+//! mark or a vouch of the taker waits for it (one row each, wanting nothing after); a re-claim's
+//! share lock does not conflict; a staged part locks no `hosts` row. A taker that is not a live,
+//! dirty, undrained, freshly beaten, listed participant not leaving — or a giver not listed —
+//! records an abort: every part rolls back and the land stays the giver's.
+//!
+//! **A declaration waits for a committed cut's staged parts** (`declare_in`, `end_landless_in`,
+//! Elastic 5; lock walk (c)): right after the world row, a LOCKLESS read — the world tag,
+//! `pg_prepared_xacts`, then those cuts' `cut_decisions` rows (`two_phase::staged_committed`) —
+//! answers `StoreError::Busy` (decided again later) while any part of a cut decided as committed
+//! is still staged. Without it a taker that dies between the decision's commit and `COMMIT
+//! PREPARED` is declared against the COMMITTED rows (the land still the giver's), and the moved
+//! row then commits to a dead host no run covers. A start's `resolve_prepared` finishes such parts
+//! before a total-crash registration, so registration needs no wait. Residual: if every finisher
+//! is gone (the deciding replica and every participant dead), declarations wait until a
+//! coordinator replica starts and resolves the staged parts.
+//!
 //! **A cut's begin** (`two_phase::begin_in`, Elastic 1 Task 4): in the transition that starts
 //! the cut, after its compare-and-set holds `coordinator`, a PLAIN read of `world.next_host_id`
 //! (no lock: a registration holding the world row commits its id before the read — below the
@@ -648,6 +681,22 @@ impl From<StoreError> for DeclareError {
     }
 }
 
+/// Elastic 5: a declaration (or a landless end) waits while a part of a cut decided as committed
+/// is still staged — `StoreError::Busy`, asked again later: such a part may move land to the very
+/// host being declared, and this transaction would read the land as still its giver's (the
+/// committed rows) and move nothing, so the land would commit to a dead host no run covers. Every
+/// finisher (the deciding replica's post-commit effect, a participant's `cut_decided`, a start's
+/// `resolve_prepared`) runs `COMMIT PREPARED` within moments. Lockless (lock walk (c)).
+async fn wait_for_committed_parts(tx: &mut sqlx::PgConnection) -> Result<(), DeclareError> {
+    if let Some(cut) = crate::two_phase::staged_committed(&mut *tx).await? {
+        return Err(DeclareError::Store(StoreError::Busy(format!(
+            "cut {} is decided committed but a part of it is still staged",
+            cut.0
+        ))));
+    }
+    Ok(())
+}
+
 /// The declaration's statements inside `tx` — a coordinator transition's, its `coordinator`
 /// row held by the compare-and-set (Elastic 2b Task 3; see the module docs for the locks);
 /// anything but `Done` is rolled back by the caller (to its savepoint). `lease_ms`: a row
@@ -663,6 +712,7 @@ pub(crate) async fn declare_in(
     lease_ms: u64,
 ) -> Result<Declared, DeclareError> {
     lock_world_at(&mut *tx, Some(generation)).await?;
+    wait_for_committed_parts(&mut *tx).await?;
     let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM successions WHERE settled_cut IS NULL AND abandoned = 0")
         .fetch_one(&mut *tx)
         .await?;
@@ -849,6 +899,7 @@ pub(crate) async fn end_landless_in(
     // The declaration's prefix: the world row (no generation compared: the generation is not
     // touched — a host of an older one is refused anyway).
     lock_world_at(&mut *tx, None).await?;
+    wait_for_committed_parts(&mut *tx).await?;
     // The host's row: a heartbeat waits for this transaction, so a beat between the lapse check
     // and the update cannot be lost; a claim's `check_live` (`FOR SHARE`, its last statement)
     // waits too and then finds the row dead — the zombie's claim is refused.
