@@ -766,7 +766,7 @@ water-proto-wasm:
 # Forge speed benchmark: one forge of `width` × `height` m at `cell` m, printing wall
 # time and max RSS (needs /usr/bin/time). Output goes to target/forge-bench/. Timing
 # run: ask before launching the default (the dev size, 16 × 8 km at 32 m).
-# e.g. `just forge-bench 4096 2048 64`.
+# e.g. `just forge-bench 8192 4096 64`.
 forge-bench width="16384" height="8192" cell="32":
     mkdir -p target/forge-bench
     {{cap}} {{cargo}} build --release -p worldgen --example forge_proto
@@ -776,9 +776,14 @@ forge-bench width="16384" height="8192" cell="32":
 # file only with `--out <stem>`) and prints one `key: value` line per number —
 # size, edges, height_crc (a crc of the forged height raster), land
 # share, land components over 1 % / 3 % of the map, lakes, river mouths, highest
-# peak, each land biome's share of land — per seed, then min / median / max over
-# them. Takes forge_proto's flags plus `--seeds <n>` (seed, seed + 1, …; default 1),
-# forged one after another. e.g. `just forge-report --size dev --cell 64 --seeds 8`.
+# peak, each land biome's share of land; the Planet's polar rows, sea-level
+# temperatures, share draining to the sea, the seam's steps, ranks and verdicts
+# (`seam_ok_*`) and the runtime seam lines (aliased regions, seam cliff, the world
+# map's wrap, rivers and trees across the seam) — per seed, then min / median / max
+# over them and the seam rule over the seeds (`seam_pass_*`: at most a quarter of 4
+# or more seeds fail; n/a for 2 or 3). Takes forge_proto's flags plus `--seeds <n>`
+# (seed, seed + 1, …; default 1), forged one after another.
+# e.g. `just forge-report --size dev --cell 64 --seeds 8`.
 forge-report *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- --report {{args}}
 
