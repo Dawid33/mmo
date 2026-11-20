@@ -455,6 +455,8 @@ impl GeneratorState {
                 if !offered.contains(&self.world_cell) {
                     self.world_cell = offered.first().copied().unwrap_or(0);
                     self.row_updates.push(WORLD_CELL_KEY.to_string());
+                    // The size row's labels carry the estimate at the cell.
+                    self.rows_dirty = true;
                 }
             }
             WORLD_CELL_KEY => {
