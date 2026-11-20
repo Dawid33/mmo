@@ -613,7 +613,10 @@ prefab-check *args:
 # --layer rain|temperature|moisture|salinity (extra habitat PNG; with --world
 # also coloured biome|temperature|precipitation|drainage|regions from the forged
 # world's rasters, `<out>-<layer>.png`; those pictures are --size wide and as tall as the
-# world's proportions give, at the same m/px, so --span 600 on a 2:1 world is 600 x 300 m), e.g.
+# world's proportions give, at the same m/px, so --span 600 on a 2:1 world is 600 x 300 m;
+# `--layer monthly-temperature|monthly-rain --month <1..12>` (default 4 = northern midsummer)
+# draws one month's normal at the ground as `<out>-<layer>-<MM>.png` over the WHOLE world unless
+# --span/--center are given, and prints the value at 75/45/0/-45/-75 degrees of latitude), e.g.
 # `just world-map --span 65536 --size 2048`. `--world <file> --tiles` writes the
 # in-game world map instead (every map layer, `<out>-tiles-<layer>.png`) and
 # prints the WorldMap packet size; pass `region_blocks=256` for the play tiling.

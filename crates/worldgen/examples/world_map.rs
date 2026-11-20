@@ -19,6 +19,14 @@
 //! (a 2:1 world: `size / 2` rows), at the same m/px; the height follows the world, not the
 //! requested window (`--span 600` on a 2:1 world covers 600 x 300 m).
 //!
+//! `--world <file> --layer monthly-temperature|monthly-rain [--month 1..12]` writes one month's
+//! climate normal at the ground (`ForgedWorld::monthly_at_ground`) as
+//! `<out>-monthly-temperature-<MM>.png` / `<out>-monthly-rain-<MM>.png`, in the annual layers'
+//! ramps (rain: the month's mm at its yearly rate, 12 x). `--month` is the calendar's 1-based
+//! month (default 4 = northern midsummer, index 3). Unless `--span` / `--center` are given the
+//! window is the WHOLE world (its width, its middle), so the picture runs pole to pole; the tool
+//! also prints the value at 75, 45, 0, -45 and -75 degrees of latitude in the middle column.
+//!
 //! `--layer rain|temperature|moisture|salinity|trees` also writes `<out>-<layer>.png`
 //! (greyscale ramp over the layer's fixed range, `worldgen::habitat`).
 //!
@@ -98,6 +106,11 @@ struct Args {
     forged_layer: Option<ForgedLayer>,
     /// Write the world map's tile layers instead (needs `world`).
     tiles: bool,
+    /// The calendar month (1..=12) of a monthly layer; `None` = default 4.
+    month: Option<usize>,
+    /// `--span` / `--center` were given (a monthly layer defaults to the whole world otherwise).
+    span_given: bool,
+    center_given: bool,
 }
 
 /// A layer read straight from the forged world's rasters, in the colours of
@@ -109,9 +122,17 @@ enum ForgedLayer {
     Precipitation,
     Drainage,
     Regions,
+    /// One month's temperature at the ground (`--month`).
+    MonthlyTemperature,
+    /// One month's precipitation at the ground, drawn at its yearly rate (`--month`).
+    MonthlyRain,
 }
 
 impl ForgedLayer {
+    fn is_monthly(self) -> bool {
+        matches!(self, ForgedLayer::MonthlyTemperature | ForgedLayer::MonthlyRain)
+    }
+
     fn parse(name: &str) -> Option<ForgedLayer> {
         Some(match name {
             "biome" => ForgedLayer::Biome,
@@ -119,6 +140,8 @@ impl ForgedLayer {
             "precipitation" => ForgedLayer::Precipitation,
             "drainage" => ForgedLayer::Drainage,
             "regions" => ForgedLayer::Regions,
+            "monthly-temperature" => ForgedLayer::MonthlyTemperature,
+            "monthly-rain" => ForgedLayer::MonthlyRain,
             _ => return None,
         })
     }
@@ -130,6 +153,8 @@ impl ForgedLayer {
             ForgedLayer::Precipitation => "precipitation",
             ForgedLayer::Drainage => "drainage",
             ForgedLayer::Regions => "regions",
+            ForgedLayer::MonthlyTemperature => "monthly-temperature",
+            ForgedLayer::MonthlyRain => "monthly-rain",
         }
     }
 }
@@ -181,6 +206,15 @@ impl Layer {
     }
 }
 
+fn layer_name_of(a: &Args) -> &'static str {
+    a.forged_layer.map_or("", ForgedLayer::name)
+}
+
+/// Calendar month of a monthly layer (1-based), default 4 = northern midsummer.
+fn month_of(a: &Args) -> usize {
+    a.month.unwrap_or(4)
+}
+
 fn parse_args() -> Args {
     let mut a = Args {
         span_m: DEFAULT_SPAN_M,
@@ -193,18 +227,25 @@ fn parse_args() -> Args {
         layer: None,
         forged_layer: None,
         tiles: false,
+        month: None,
+        span_given: false,
+        center_given: false,
     };
     let mut layer_name: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
         match flag.as_str() {
-            "--span" => a.span_m = value().parse().expect("--span <meters>"),
+            "--span" => {
+                a.span_m = value().parse().expect("--span <meters>");
+                a.span_given = true;
+            }
             "--size" => a.size = value().parse().expect("--size <pixels>"),
             "--center" => {
                 let v = value();
                 let (x, z) = v.split_once(',').expect("--center <x,z> in meters");
                 a.center = (x.parse().expect("center x"), z.parse().expect("center z"));
+                a.center_given = true;
             }
             "--out" => a.out = PathBuf::from(value()),
             "--seed" => {
@@ -216,8 +257,14 @@ fn parse_args() -> Args {
             "--world" => a.world = Some(PathBuf::from(value())),
             "--layer" => layer_name = Some(value()),
             "--tiles" => a.tiles = true,
+            "--month" => {
+                let m: usize = value().parse().expect("--month <1..=12>");
+                assert!((1..=12).contains(&m), "--month must be 1..=12, got {m}");
+                a.month = Some(m);
+            }
             other => panic!(
-                "unknown argument {other}; flags: --span --size --center --out --seed --relief --world --layer --tiles"
+                "unknown argument {other}; flags: --span --size --center --out --seed --relief --world --layer --tiles \
+                 --month"
             ),
         }
     }
@@ -227,6 +274,23 @@ fn parse_args() -> Args {
         match ForgedLayer::parse(&name) {
             Some(f) if a.world.is_some() || name != "temperature" => a.forged_layer = Some(f),
             _ => a.layer = Some(Layer::parse(&name)),
+        }
+    }
+    let monthly = a.forged_layer.is_some_and(ForgedLayer::is_monthly);
+    assert!(!monthly || a.world.is_some(), "--layer {} needs --world <file>", layer_name_of(&a));
+    assert!(a.month.is_none() || monthly, "--month needs --layer monthly-temperature or monthly-rain");
+    if monthly {
+        // The whole world unless the caller chose a window: the default 8 km window shows only the
+        // middle latitudes of even the Dev planet.
+        let path = a.world.as_ref().expect("checked above");
+        let world =
+            worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let (min, max) = world.artifact_bounds_engine_m();
+        if !a.span_given {
+            a.span_m = max[0] - min[0];
+        }
+        if !a.center_given {
+            a.center = (0.5 * (min[0] + max[0]), 0.5 * (min[1] + max[1]));
         }
     }
     a
@@ -400,7 +464,11 @@ fn main() {
     }
 
     if let Some(layer) = a.forged_layer {
-        let path = format!("{stem}-{}.png", layer.name());
+        let path = if layer.is_monthly() {
+            format!("{stem}-{}-{:02}.png", layer.name(), month_of(&a))
+        } else {
+            format!("{stem}-{}.png", layer.name())
+        };
         write_forged_layer(&a, layer).save(&path).expect("write forged layer");
         println!("wrote {path}");
     }
@@ -444,6 +512,10 @@ fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<
     let step = a.span_m / nx as f64;
     let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - step * nz as f64 * 0.5);
     let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(nx as u32, nz as u32);
+    let m = month_of(a) - 1;
+    if layer.is_monthly() {
+        print_monthly_latitudes(&world, layer, m);
+    }
     for iz in 0..nz {
         for ix in 0..nx {
             let (x, z) = (x0 + (ix as f64 + 0.5) * step, z0 + (iz as f64 + 0.5) * step);
@@ -457,6 +529,12 @@ fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<
                 ForgedLayer::Temperature => dim(temperature_color(f64::from(c.temperature_c))),
                 ForgedLayer::Precipitation => dim(precipitation_color(f64::from(c.precip_mm))),
                 ForgedLayer::Drainage => dim(drainage_color(f64::from(c.drainage))),
+                ForgedLayer::MonthlyTemperature => {
+                    dim(temperature_color(f64::from(world.monthly_at_ground(x, z).temp_c[m])))
+                }
+                ForgedLayer::MonthlyRain => {
+                    dim(precipitation_color(12.0 * f64::from(world.monthly_at_ground(x, z).precip_mm[m])))
+                }
                 ForgedLayer::Regions => {
                     let (id, kind) = world.region_cell(x, z);
                     region_color(id, kind)
@@ -466,6 +544,25 @@ fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<
         }
     }
     img
+}
+
+/// The monthly layer's value at 75, 45, 0, -45 and -75 degrees of latitude in the world's middle
+/// column (map z = (90 - lat) / 180 x height, map x = width / 2, as engine metres), whatever the window.
+fn print_monthly_latitudes(world: &worldgen::forged::ForgedWorld, layer: ForgedLayer, m: usize) {
+    let (min, max) = world.artifact_bounds_engine_m();
+    let (width, height) = (max[0] - min[0], max[1] - min[1]);
+    let (what, unit) = match layer {
+        ForgedLayer::MonthlyRain => ("rain (month's mm)", "mm"),
+        _ => ("temperature at the ground", "C"),
+    };
+    print!("month {} {what} at latitude:", m + 1);
+    for lat in [75.0, 45.0, 0.0, -45.0, -75.0] {
+        let (x, z) = (min[0] + 0.5 * width, min[1] + (90.0 - lat) / 180.0 * height);
+        let n = world.monthly_at_ground(x, z);
+        let v = if matches!(layer, ForgedLayer::MonthlyRain) { n.precip_mm[m] } else { n.temp_c[m] };
+        print!(" {lat:+.0} deg {v:.1} {unit};");
+    }
+    println!();
 }
 
 /// One habitat field per pixel as a greyscale ramp, sampled the way the
