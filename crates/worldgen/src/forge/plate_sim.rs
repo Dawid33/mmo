@@ -728,15 +728,21 @@ impl PlateState {
     /// overriding plate within `SUBDUCTION_REACH_DEG` gains
     /// `(u0 / 6,000) · f(d) · speed · relief · polar_fade · (FIELD_EVERY_STEPS · PLATE_DT_MY)`,
     /// `f` rising over the first `SUBDUCTION_PEAK_SHARE` of the reach and
-    /// falling to 0 at it. Continental cells become `Andean`; oceanic cells,
-    /// only within `ARC_REACH_DEG`, `Arc` — an arc reaching
-    /// `ARC_EMERGE_STRENGTH` becomes continental crust.
+    /// falling to 0 at it. A gain that would sustain a belt (at least
+    /// `BELT_MIN_REL · (1 − root_keep(period))`) labels the cell: continental
+    /// cells `Andean`; oceanic cells, only within `ARC_REACH_DEG`, `Arc`. A
+    /// weaker gain only adds to a labelled cell's strength (its kind, age and
+    /// fold kept) and leaves an unlabelled one as it was. An arc whose
+    /// strength left reaches `ARC_EMERGE_STRENGTH` becomes continental crust.
     fn subduction_field(&mut self) {
         let time = self.time_my();
         let reach = SUBDUCTION_REACH_DEG;
         let peak = SUBDUCTION_PEAK_SHARE * reach;
-        let rate = SUBDUCTION_U0_M_PER_MY / OROGEN_HEIGHT_M[OrogenyKind::Andean as usize]
-            * (f64::from(FIELD_EVERY_STEPS) * PLATE_DT_MY);
+        let period = f64::from(FIELD_EVERY_STEPS) * PLATE_DT_MY;
+        let rate = SUBDUCTION_U0_M_PER_MY / OROGEN_HEIGHT_M[OrogenyKind::Andean as usize] * period;
+        // The gain per field that would sustain a belt (`BELT_MIN_REL`) against
+        // its root's decay over one field period.
+        let belt_gain = BELT_MIN_REL * (1.0 - root_keep(period));
         let Scratch { dist, src, .. } = &mut self.scratch;
         let (ttl, mark) = (&self.mark_ttl, &self.mark);
         let active = chamfer_into(|c| ttl[c] > 0 && !mark[c].contact, PLANET_DEG_PER_CELL, reach, dist, src);
@@ -767,17 +773,27 @@ impl PlateState {
             if gain <= GAIN_MIN {
                 continue;
             }
-            self.strength[c] = orogeny_strength(self.strength[c], self.orogeny_my[c], time, gain);
-            self.orogeny_my[c] = time as f32;
-            self.fold[c] = m.dir;
-            if self.crust[c] == CrustKind::Continental as u8 {
-                self.kind[c] = OrogenyKind::Andean as u8;
+            if gain >= belt_gain {
+                self.strength[c] = orogeny_strength(self.strength[c], self.orogeny_my[c], time, gain);
+                self.orogeny_my[c] = time as f32;
+                self.fold[c] = m.dir;
+                self.kind[c] = if self.crust[c] == CrustKind::Continental as u8 {
+                    OrogenyKind::Andean as u8
+                } else {
+                    OrogenyKind::Arc as u8
+                };
+            } else if self.kind[c] != OrogenyKind::None as u8 {
+                self.strength[c] = accumulated_strength(self.strength[c], self.orogeny_my[c], time, gain);
             } else {
-                self.kind[c] = OrogenyKind::Arc as u8;
-                if self.strength[c] >= ARC_EMERGE_STRENGTH {
-                    self.crust[c] = CrustKind::Continental as u8;
-                    self.base_m[c] = 0.0;
-                }
+                continue;
+            }
+            let now = f64::from(self.strength[c]) * root_keep(time - f64::from(self.orogeny_my[c]));
+            if self.crust[c] == CrustKind::Oceanic as u8
+                && self.kind[c] == OrogenyKind::Arc as u8
+                && now >= f64::from(ARC_EMERGE_STRENGTH)
+            {
+                self.crust[c] = CrustKind::Continental as u8;
+                self.base_m[c] = 0.0;
             }
         }
     }
@@ -883,6 +899,13 @@ impl PlateState {
             if gain <= GAIN_MIN {
                 continue;
             }
+            if gain < BELT_MIN_REL {
+                // Too weak to make a belt: an existing one gains, nothing is relabelled.
+                if self.kind[c] != OrogenyKind::None as u8 {
+                    self.strength[c] = accumulated_strength(self.strength[c], self.orogeny_my[c], time, gain);
+                }
+                continue;
+            }
             self.strength[c] = orogeny_strength(self.strength[c], self.orogeny_my[c], time, gain);
             self.orogeny_my[c] = time as f32;
             self.kind[c] = kind;
@@ -916,6 +939,14 @@ impl PlateState {
         self.counters.sutures += 1;
     }
 }
+
+/// The strength left that makes a belt — the same as Task 4's belt
+/// definition (`strength · root_keep ≥ 0.12`). A gain labels a cell (kind,
+/// age, fold) only when it would sustain that: a suture's `Δ ≥ BELT_MIN_REL`,
+/// a field's per-period gain `≥ BELT_MIN_REL · (1 − root_keep(period))`
+/// (controller's ruling after Task 2's review: weak tails no longer relabel
+/// or rejuvenate older belts).
+pub const BELT_MIN_REL: f64 = 0.12;
 
 /// A gain at or below this writes nothing (the brief's field threshold;
 /// sutures use it too).
@@ -977,6 +1008,16 @@ fn cell_elevation_m(crust: u8, born_my: f32, base_m: f32, strength: f32, orogeny
 /// cell's strength is 0, so its root does not matter).
 fn orogeny_strength(strength: f32, orogeny_my: f32, time: f64, gain: f64) -> f32 {
     (f64::from(strength) * root_keep(time - f64::from(orogeny_my)) + gain).min(1.0) as f32
+}
+
+/// A gain too weak to label a belt, added to what is left of a labelled
+/// cell's strength WITHOUT moving its age: the strength left is
+/// `strength · root_keep(time − orogeny_my)`, so adding `gain` to it means
+/// adding `gain / root_keep(…)` to the stored strength (capped at 1). Restamping
+/// nothing, the older orogeny's age and root stay its own; folding the decay
+/// in as `orogeny_strength` does would apply it again at every field.
+fn accumulated_strength(strength: f32, orogeny_my: f32, time: f64, gain: f64) -> f32 {
+    (f64::from(strength) + gain / root_keep(time - f64::from(orogeny_my))).min(1.0) as f32
 }
 
 /// `v` over its length, `[0, 0]` for a zero vector (never NaN).
