@@ -9,12 +9,14 @@
 //! `<stem>-planet-strength.png`, the seeds side by side in rows of 4, each
 //! 512 × 256. `--frames n` writes `n` evenly spaced `plates` frames of
 //! the FIRST seed, `<stem>-planet-t<My>.png`.
-//! Plan: docs/superpowers/plans/2026-11-20-plates-and-aged-relief-2.md (Tasks 1, 2).
+//! Plan: docs/superpowers/plans/2026-11-20-plates-and-aged-relief-2.md (Tasks 1–3).
 
 use std::time::Instant;
 
-use worldgen::forge::planet::{CrustKind, OrogenyKind, PlanetKey, PLANET_CELLS, PLANET_NX, PLANET_NZ};
-use worldgen::forge::plate_sim::{simulate, PlateState, NO_PLATE, PLATE_DT_MY};
+use worldgen::forge::planet::{planet_lat_deg, CrustKind, OrogenyKind, PlanetKey, PLANET_CELLS, PLANET_NX, PLANET_NZ};
+use worldgen::forge::plate_sim::{
+    elevation_m, simulate, PlateState, BELT_MIN_REL, CONT_BASE_M, NO_PLATE, PLATE_DT_MY, POLAR_FADE_DEG,
+};
 use worldgen::forge::render::{encode_png, Rgba};
 use worldgen::forge::ForgeParams;
 
@@ -151,6 +153,39 @@ fn lines(start: &PlateState, end: &PlateState, stage_ms: f64) -> Vec<(String, St
     for (q, name) in [(0.1, "p10"), (0.5, "p50"), (0.9, "p90")] {
         rows.push((format!("planet.orogeny_age_{name}_my"), format!("{:.1}", percentile(&orogeny_age, q))));
     }
+    // Task 3: rifts, hotspots and the polar fade.
+    let hotspot_recent = |c: usize| {
+        end.kind[c] == OrogenyKind::Hotspot as u8 && t_end - f64::from(end.orogeny_my[c]) < 30.0
+    };
+    let hotspot_cells = (0..PLANET_CELLS).filter(|&c| hotspot_recent(c)).count();
+    let hotspot_island_cells = (0..PLANET_CELLS)
+        .filter(|&c| hotspot_recent(c) && end.crust[c] == CrustKind::Oceanic as u8 && elevation_m(end, c) > CONT_BASE_M)
+        .count();
+    let is_belt_kind = |k: u8| {
+        matches!(
+            k,
+            x if x == OrogenyKind::Arc as u8
+                || x == OrogenyKind::Andean as u8
+                || x == OrogenyKind::Collision as u8
+                || x == OrogenyKind::Plateau as u8
+        )
+    };
+    let (mut belt_total, mut belt_polar) = (0usize, 0usize);
+    for c in 0..PLANET_CELLS {
+        if is_belt_kind(end.kind[c]) && f64::from(end.strength[c]) >= BELT_MIN_REL {
+            belt_total += 1;
+            if 90.0 - planet_lat_deg(c / PLANET_NX).abs() < POLAR_FADE_DEG {
+                belt_polar += 1;
+            }
+        }
+    }
+    rows.push(("planet.rifts".into(), end.counters.rifts.to_string()));
+    rows.push(("planet.hotspot_cells".into(), hotspot_cells.to_string()));
+    rows.push(("planet.hotspot_island_cells".into(), hotspot_island_cells.to_string()));
+    rows.push((
+        "planet.belt_cells_in_polar_fade_share".into(),
+        format!("{:.4}", if belt_total == 0 { 0.0 } else { belt_polar as f64 / belt_total as f64 }),
+    ));
     rows
 }
 
