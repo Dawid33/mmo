@@ -142,7 +142,10 @@ impl MonthlyClimate {
     /// cell's `cell_normals` bit for bit. Call `validate` first.
     ///
     /// Total and the same in every build: a coordinate beyond `i64` cells
-    /// saturates to the edge cell (`as i64`, `saturating_add`); an infinite
+    /// saturates (`as i64`, `saturating_add`) — to the edge cell without
+    /// `wrap_x`; with `wrap_x` the column is `i64::MAX mod nx` (or
+    /// `i64::MIN`'s), deterministic but meaningless: callers fold x into the
+    /// map first. An infinite
     /// coordinate makes the fraction NaN and every value NaN; a NaN
     /// coordinate reads index 0 and returns every value NaN. No panic.
     pub fn normals_at(&self, ax_m: f64, az_m: f64) -> MonthlyNormals {
@@ -247,6 +250,9 @@ impl MonthlyNormals {
     }
 
     /// Every temperature lowered by `delta_c` (a lapse); nothing else changes.
+    /// Not the canonical ground read: it lowers in `f32`, while
+    /// `worldgen::forged::ground_normals` (what `monthly_at_ground` uses)
+    /// lowers in `f64` — the two do not bit-match.
     pub fn lowered_by(mut self, delta_c: f32) -> MonthlyNormals {
         for t in &mut self.temp_c {
             *t -= delta_c;

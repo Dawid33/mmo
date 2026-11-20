@@ -1495,7 +1495,9 @@ impl ForgedWorld {
     }
 
     /// Bilinear interpolation (artifact metres, cell-centre lattice,
-    /// edge-clamped) of `f` over raster cell indices.
+    /// edge-clamped) of `f` over raster cell indices. Total: the neighbour
+    /// index saturates, so a coordinate past `i64` cells (or infinite) reads
+    /// an edge or wrapped cell instead of overflowing.
     fn bilinear_cells(&self, ax: f64, az: f64, f: impl Fn(usize) -> f64) -> f64 {
         let a = &self.globals;
         let at = |ix: i64, iz: i64| f(self.clamped(ix, iz));
@@ -1503,8 +1505,8 @@ impl ForgedWorld {
         let (iu, iv) = (u.floor(), v.floor());
         let (tu, tv) = (u - iu, v - iv);
         let (iu, iv) = (iu as i64, iv as i64);
-        let row = |iz: i64| at(iu, iz) + tu * (at(iu + 1, iz) - at(iu, iz));
-        row(iv) + tv * (row(iv + 1) - row(iv))
+        let row = |iz: i64| at(iu, iz) + tu * (at(iu.saturating_add(1), iz) - at(iu, iz));
+        row(iv) + tv * (row(iv.saturating_add(1)) - row(iv))
     }
 
     /// The point a block column reads its biome at: engine metres `(x, z)`
@@ -1862,6 +1864,11 @@ impl ForgedWorld {
 /// NaN from it). Diurnal range, wet-day fraction and wind are unchanged.
 /// Exact arithmetic (multiply, subtract, divide), `f64` inside, each value
 /// cast to `f32` last.
+///
+/// This is the CANONICAL ground read (`monthly_at_ground` uses it):
+/// `game::MonthlyNormals::lowered_by` lowers in `f32` and does not bit-match
+/// it, so code that must match the forge or Phase 5 (Phase 6's weather
+/// included) uses this formula — `(f64::from(sea) − lapse · ground) as f32`.
 ///
 /// For a forge-side caller with no `ForgedWorld` (Phase 5's classifier on
 /// `WorldArtifact` cells): fine cell `i` at its centre `(cx_m, cz_m)` in MAP

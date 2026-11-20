@@ -538,6 +538,12 @@ pub struct MonthlyFields {
 pub fn monthly_placeholder(w: &World, c: &Climate, p: &ForgeParams) -> MonthlyFields {
     let months = game::CLIMATE_MONTHS;
     let s = climate_stride(w.dx, w.nz);
+    assert!(
+        w.nx % s == 0 && w.nz % s == 0,
+        "monthly_placeholder: a {} × {} grid is not whole climate cells of stride {s} (check_climate_grid refuses such a world)",
+        w.nx,
+        w.nz
+    );
     let (cnx, cnz) = (w.nx / s, w.nz / s);
     let cell_m = w.dx * s as f64;
     let height_m = w.nz as f64 * w.dx;
