@@ -59,7 +59,7 @@ pub const PRESETS: &[Preset] = &[
         overrides: &[
             ("rain_max", 1.8),
             ("rain_min", 0.15),
-            ("land_depletion_m", 4_000.0),
+            ("land_depletion_deg", 7.1),
             ("lake_basins", 3.0),
             ("river_min_discharge_m2", 1_200_000.0),
         ],
@@ -70,7 +70,7 @@ pub const PRESETS: &[Preset] = &[
         overrides: &[
             ("rain_max", 4.5),
             ("rain_min", 0.7),
-            ("land_depletion_m", 30_000.0),
+            ("land_depletion_deg", 53.3),
             ("lake_basins", 18.0),
             ("river_min_discharge_m2", 200_000.0),
         ],

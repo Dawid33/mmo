@@ -9,9 +9,10 @@
 //!   row's latitude plus a slow, seed-derived displacement
 //!   (`meander_field`: a few long waves running mostly along x, like
 //!   planetary waves on the jet stream), so isotherms and band edges wander
-//!   instead of running ruler-straight. Set in metres and degrees
-//!   (`meander_amplitude_deg`, `meander_wavelength_km`), so it is the same
-//!   field at every cell size and coarse-to-fine level; 0 = straight rows.
+//!   instead of running ruler-straight. Set in degrees of latitude
+//!   (`meander_amplitude_deg`, `meander_wavelength_deg`), so it is the same
+//!   field at every cell size, coarse-to-fine level and world size; 0 =
+//!   straight rows.
 //! - **Temperature** at sea level follows the cosine of latitude between
 //!   `pole_temp_c` and `equator_temp_c`, minus `lapse_c_per_km` per km of
 //!   ground above the sea.
@@ -21,7 +22,7 @@
 //!   blends both directions, so no line marks the edge. Each row's moisture
 //!   sweep runs downwind. Over flat land the air's moisture relaxes toward
 //!   the continental equilibrium `CONTINENTAL_MOISTURE` over
-//!   `land_depletion_m` (rain-out balanced by evaporation from the land);
+//!   `land_depletion_deg` (rain-out balanced by evaporation from the land);
 //!   forced up a slope it rains out (`orographic_scale_m` of rise wrings out
 //!   about all of it) and arrives dry on the lee side; it recharges toward
 //!   saturation over any sea (inland seas included) and any lake. Air that
@@ -36,6 +37,13 @@
 //!   flat land far inland gets exactly the table, coasts downwind of the sea
 //!   more, lee sides less. Every smoothing length is in metres, so the field
 //!   does not depend on the cell size.
+//! - **Planetary lengths are in degrees of latitude**: every world size is a
+//!   whole planet, so the lengths the air travels over seas and continents
+//!   (`land_depletion_deg`, `sea_recharge_deg`) and the meander's wavelength
+//!   (`meander_wavelength_deg`) scale with the world (`metres_per_degree`):
+//!   a small planet is the same planet as a large one. The lengths that
+//!   describe hills (`OROGRAPHIC_RUN_M`, the blurs, `orographic_scale_m`)
+//!   stay in metres.
 //!
 //! Precipitation weights discharge (`discharge_weight`), so wet flanks grow
 //! bigger rivers and erode faster — Dwarf Fortress computes rain shadows AFTER
@@ -68,7 +76,7 @@ pub const BAND_BLEND_DEG: f64 = 5.0;
 /// small world still sees whole waves instead of one big kink.
 pub const MEANDER_MIN_WAVES: f64 = 2.0;
 /// The meander's component waves: (wavelength as a share of
-/// `meander_wavelength_km`, amplitude as a share of `meander_amplitude_deg`,
+/// `meander_wavelength_deg`, amplitude as a share of `meander_amplitude_deg`,
 /// largest angle (rad) of the wave's travel off the x axis). The main wave
 /// runs along x (a meander of the westerly jet) and shifts every band
 /// together; the shorter ones turn up to ~80° off it, so neighbouring
@@ -137,7 +145,8 @@ pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
     if k.meander_amplitude_deg <= 0.0 {
         return 0.0;
     }
-    let wavelength = (k.meander_wavelength_km * 1000.0).min(p.span_m() / MEANDER_MIN_WAVES).max(1.0);
+    let wavelength =
+        (k.meander_wavelength_deg * metres_per_degree(p.height_m)).min(p.span_m() / MEANDER_MIN_WAVES).max(1.0);
     let wrap = PeriodicX::for_world(p);
     let mut d = 0.0;
     for (wave, &(share, weight, spread)) in MEANDER_WAVES.iter().enumerate() {
@@ -163,6 +172,12 @@ pub fn effective_latitudes(nx: usize, nz: usize, dx: f64, p: &ForgeParams) -> Ve
     let rows = latitudes(nz);
     let meander = meander_field(nx, nz, dx, p);
     (0..nx * nz).map(|i| (rows[i / nx] + meander[i]).clamp(-90.0, 90.0)).collect()
+}
+
+/// Metres of the world per degree of latitude: the pole-to-pole height
+/// `height_m` spans 180°.
+pub fn metres_per_degree(height_m: f64) -> f64 {
+    height_m / 180.0
 }
 
 /// Sea-level temperature (deg C) at latitude `lat_deg`.
@@ -291,8 +306,9 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
         box_blur_rows(&box_blur_rows(&ground, nx, nz, terrain, true, wrap_x), nx, nz, terrain, false, wrap_x);
     // `World::edges` order: N, E, S, W.
     let inflow = |edge: usize| if w.edges[edge] == EdgeKind::Sea { 1.0 } else { CONTINENTAL_MOISTURE };
-    let recharge = (dx / k.sea_recharge_m).min(1.0);
-    let relax = (dx / k.land_depletion_m).min(1.0);
+    let per_degree = metres_per_degree(p.height_m);
+    let recharge = (dx / (k.sea_recharge_deg * per_degree)).min(1.0);
+    let relax = (dx / (k.land_depletion_deg * per_degree)).min(1.0);
     let lift = OROGRAPHIC_RUN_M / k.orographic_scale_m / dx;
 
     // One row's precipitation relative to the base, wind from the west or

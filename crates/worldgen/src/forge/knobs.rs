@@ -95,13 +95,13 @@ knobs! {
         pole_temp_c: -25.0, [-50.0, 5.0], "Pole temperature (C)", "Mean sea-level temperature at a pole; between, temperature follows the cosine of latitude.";
         lapse_c_per_km: 6.5, [3.0, 10.0], "Lapse rate (C/km)", "Cooling per kilometre of height above the sea.";
         meander_amplitude_deg: 5.0, [0.0, 15.0], "Band meander (deg)", "Amplitude of the slow north-south wander of the climate bands (a jet-stream / planetary-wave warp of latitude): temperature, the latitude rain table and the wind bands follow it, so band edges and isotherms wander instead of running ruler-straight. 0 = straight bands.";
-        meander_wavelength_km: 40.0, [5.0, 200.0], "Meander wavelength (km)", "Wavelength of the main meander wave along the map (two shorter waves ride on it). Capped at half the world's size, so a small world still sees whole waves.";
+        meander_wavelength_deg: 72.0, [9.0, 180.0], "Meander wavelength (deg)", "Wavelength of the main meander wave along the map, in degrees of latitude, so every world size sees the same waves (two shorter waves ride on it). Capped at 90 deg (half the pole-to-pole span), so the planet still sees whole waves.";
         trade_wind_edge_deg: 30.0, [5.0, 45.0], "Trade winds to (deg)", "Below this latitude the wind blows from the east (trade winds); above it the westerlies. Within 5 deg either side (BAND_BLEND_DEG) the two directions blend, so no line marks the edge.";
         polar_edge_deg: 60.0, [45.0, 85.0], "Polar easterlies from (deg)", "Above this latitude the wind blows from the east again (polar easterlies). Within 5 deg either side (BAND_BLEND_DEG) the westerlies and easterlies blend.";
         climate_strength: 1.0, [0.0, 1.0], "Rain shadow strength", "0 = precipitation follows latitude only; 1 = full orographic rain and rain shadows along the prevailing wind.";
-        land_depletion_m: 9_000.0, [1_500.0, 60_000.0], "Inland relaxation (m)", "Distance over flat land in which the air's moisture relaxes toward the continental equilibrium (rain-out balanced by evaporation from the land): shorter = the interior reaches its equilibrium sooner.";
+        land_depletion_deg: 16.0, [3.0, 100.0], "Inland relaxation (deg)", "Distance over flat land, in degrees of latitude, in which the air's moisture relaxes toward the continental equilibrium (rain-out balanced by evaporation from the land): shorter = the interior reaches its equilibrium sooner. In degrees, so every world size is the same planet.";
         orographic_scale_m: 650.0, [100.0, 3_000.0], "Orographic scale (m)", "Rise that rains out about two thirds of the air's moisture: lower = sharper wet/dry contrast.";
-        sea_recharge_m: 5_000.0, [500.0, 20_000.0], "Sea recharge (m)", "Distance over open sea in which the air regains its moisture.";
+        sea_recharge_deg: 9.0, [1.0, 36.0], "Sea recharge (deg)", "Distance over open sea, in degrees of latitude, in which the air regains its moisture.";
         rain_min: 0.4, [0.05, 1.0], "Driest rain", "Lower bound of precipitation relative to its latitude's base (the latitude table).";
         rain_max: 3.0, [1.0, 6.0], "Wettest rain", "Upper bound of precipitation relative to its latitude's base (the latitude table).";
     }
