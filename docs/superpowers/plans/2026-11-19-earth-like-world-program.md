@@ -132,7 +132,7 @@ The Phase 1a plan and the design were written against the tree and the rules of 
 | 1a | Planet frame: 2:1 sizes, east–west wrap (role `all`; closed seam elsewhere), polar seas, one layout, old options deleted | DONE 2026-11-20 | `2026-11-14-planet-frame-1a.md` (19 tasks; "As built"); commits `804d85c0` … `4176aacd` (Tasks 1–2: `8d6b29a2`, `77f8e8a3`) | Evidence § Phase 1a |
 | 1b | The stored monthly-climate family, filled by a placeholder seasonal curve | PLANNED 2026-11-20 (builder check settled) | `2026-11-20-monthly-climate-container-1b.md` | — |
 | 2 | Plates and aged relief | PLANNED 2026-11-20 (builder check settled; re-check Phase 1b's symbols at dispatch) | `2026-11-20-plates-and-aged-relief-2.md` | — |
-| 3 | Monthly climate | TODO | — | — |
+| 3 | Monthly climate | PLANNED 2026-11-20 (builder check settled; re-check Phases 1b's and 2's symbols at dispatch) | `2026-11-20-monthly-climate-3.md` | — |
 | 4 | Water and ice | TODO | — | — |
 | 5 | Biomes | TODO | — | — |
 | 6 | Runtime seasons and weather | TODO | — | — |
