@@ -526,6 +526,7 @@ fn write_trees(a: &Args, source: &(dyn HabitatSource + Sync), heights: &[f32]) -
         (x0 + a.span_m).ceil() as i32,
         (z0 + a.span_m).ceil() as i32,
         a.seed,
+        None,
         source,
         &surface,
     );

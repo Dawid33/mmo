@@ -178,7 +178,8 @@ fn surface(columns: &[(game::ColumnCoords, game::Column)], x: usize, z: usize) -
 
 /// The world-runtime seam lines (Task 12) of a world that wraps east–west:
 /// `aliased_regions_identical`, `seam_region_cliff`, `world_map_wraps`,
-/// `rivers_across_seam` (+ its gaps). `n/a` for a world that does not wrap.
+/// `rivers_across_seam` (+ its gaps), `trees_across_seam_ok`. `n/a` for a
+/// world that does not wrap.
 fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
     let a = world.artifact().expect("whole world");
     let wraps = a.edges[1] == worldgen::forge::world::EdgeKind::Wrap;
@@ -189,6 +190,7 @@ fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
         "rivers_across_seam",
         "rivers_across_seam_max_gap_cells",
         "rivers_across_seam_gaps_cells",
+        "trees_across_seam_ok",
     ];
     if !wraps {
         return keys.iter().map(|k| (k.to_string(), "n/a".to_string())).collect();
@@ -271,6 +273,28 @@ fn runtime_seam(world: &ForgedWorld) -> Vec<(String, String)> {
     rows.push((keys[4].to_string(), format!("{:.3}", gaps.iter().copied().fold(0.0, f64::max))));
     let list: Vec<String> = gaps.iter().map(|g| format!("{g:.3}")).collect();
     rows.push((keys[5].to_string(), if list.is_empty() { "none".to_string() } else { list.join(",") }));
+    // The trees of the last canonical region of a row and of the first
+    // regions of that row and its two neighbours, the latter one lap east:
+    // no two trunks closer than the placement's spacing rule allows (the
+    // wider crown radius of the two).
+    let lap = w * game::REGION_BLOCKS as i32;
+    let spaced = (1..=CLIFF_ROWS).all(|k| {
+        let z = o.z + k * h / (CLIFF_ROWS + 1);
+        let east = worldgen::region_trees_forged(world, game::RegionCoords::new(o.x + w - 1, z), mats);
+        (-1..=1).all(|dz| {
+            let west = worldgen::region_trees_forged(world, game::RegionCoords::new(o.x, z + dz), mats);
+            east.iter().all(|e| {
+                west.iter().all(|t| {
+                    let r = worldgen::trees::SPECIES[e.species as usize]
+                        .crown_radius_blocks
+                        .max(worldgen::trees::SPECIES[t.species as usize].crown_radius_blocks);
+                    let (dx, dz) = (t.base[0] + lap - e.base[0], t.base[2] - e.base[2]);
+                    dx * dx + dz * dz >= r * r
+                })
+            })
+        })
+    });
+    rows.push((keys[6].to_string(), (if spaced { "yes" } else { "no" }).to_string()));
     rows
 }
 

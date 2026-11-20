@@ -273,11 +273,20 @@ fn tree_ground(c: ColSample, slope: bool) -> Option<i32> {
     (!slope && c.s >= c.water_top && c.trees).then_some(c.s)
 }
 
-/// Where trees come from: the habitat and the placement seed.
+/// Where trees come from: the habitat, the placement seed and the lattice's
+/// wrap (`None`: the world does not wrap east–west).
 #[derive(Clone, Copy)]
 struct TreeSource<'a> {
     habitat: &'a dyn habitat::HabitatSource,
     seed: u64,
+    wrap: Option<trees::LatticeWrap>,
+}
+
+impl<'a> TreeSource<'a> {
+    /// The trees of forged world `world`.
+    fn forged(world: &'a forged::ForgedWorld) -> Self {
+        TreeSource { habitat: world, seed: world.seed(), wrap: tree_lattice_wrap(world) }
+    }
 }
 
 /// A `HabitatSource` that remembers its answers: placement asks again for
@@ -316,6 +325,7 @@ fn trees_for_window(
         (x1 + TREE_REACH_BLOCKS).min(rx + REGION_BLOCKS),
         (z1 + TREE_REACH_BLOCKS).min(rz + REGION_BLOCKS),
         trees_from.seed,
+        trees_from.wrap,
         &memo,
         surface,
     )
@@ -412,9 +422,10 @@ pub fn generate_columns(
         let cb = CHUNK_BLOCKS as i32;
         let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
         let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
-        let trees_from = TreeSource { habitat: world, seed: world.seed() };
+        let trees_from = TreeSource::forged(world);
         let patch = world.patch(ox, oz, span);
-        return columns_from_patch(&patch, coords, xs, zs, mats, trees_from, structures::active());
+        let structures = wrapped_structures(world, structures::active());
+        return columns_from_patch(&patch, coords, xs, zs, mats, trees_from, &structures);
     }
     generate_columns_with(coords, xs, zs, seed, mats, structures::active())
 }
@@ -434,7 +445,7 @@ pub fn generate_columns_with(
     let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
     let habitat = habitat::ProceduralHabitat::new(seed);
-    let trees_from = TreeSource { habitat: &habitat, seed };
+    let trees_from = TreeSource { habitat: &habitat, seed, wrap: None };
     columns_from_patch(&ProceduralPatch(grid), coords, xs, zs, mats, trees_from, structures)
 }
 
@@ -482,16 +493,77 @@ pub fn is_wet(x: i32, z: i32, seed: u64, mats: Materials) -> bool {
 /// key yields the terrain (trees and structures included) of its canonical
 /// image, laid out where the caller asked.
 fn wrap_shift_blocks(world: &forged::ForgedWorld, x: i32) -> i32 {
+    wrap_frame(world).map_or(0, |(origin, width)| (x - origin).div_euclid(width) * width)
+}
+
+/// The canonical block columns `[origin, origin + width)` of a world that
+/// wraps east–west, as `(origin, width)`; `None` for a world that does not.
+/// A width that is not whole regions cannot shift a region onto a region
+/// (the forge refuses such a wrapping world): `None` too, and the sampler
+/// still folds every point it reads.
+fn wrap_frame(world: &forged::ForgedWorld) -> Option<(i32, i32)> {
     let g = world.globals();
-    // A width that is not whole regions cannot shift a region onto a region
-    // (the forge refuses such a wrapping world): the sampler still folds
-    // every point it reads.
     if g.edges[1] != forged::EdgeKind::Wrap || g.width_m % f64::from(REGION_BLOCKS) != 0.0 {
-        return 0;
+        return None;
     }
-    let width = g.width_m as i32;
     let (origin, _, _) = tile_map::map_extent(world);
-    (x - origin.x * REGION_BLOCKS).div_euclid(width) * width
+    Some((origin.x * REGION_BLOCKS, g.width_m as i32))
+}
+
+/// `structures` as `world` sees it: on a world that wraps east–west a window
+/// near the seam also gets the other side's placements and paints, moved to
+/// its frame (`structures::WrappedStructures`); otherwise exactly `structures`.
+fn wrapped_structures<'a>(
+    world: &forged::ForgedWorld,
+    structures: &'a dyn structures::StructureSource,
+) -> structures::WrappedStructures<'a> {
+    structures::WrappedStructures { inner: structures, frame: wrap_frame(world) }
+}
+
+/// The tree lattice's wrap on `world` (`wrap_frame` in lattice columns; a
+/// region is a whole number of them): `None` when it does not wrap.
+///
+/// Tree ids then repeat with the period too. Two cells share an id only when
+/// their folded columns are equal mod 512 (`placement::tree_id`), so across
+/// the seam their unwrapped distance is ≡ period (mod 512): with the period a
+/// multiple of 64 cells (every wrapping width is whole 512 m) that is at least
+/// 64 cells = 512 blocks. `game::trees::fell`'s same-id flood fill reads ids
+/// one halo band (16 blocks) past its region and a tree spans at most 9 blocks
+/// from its trunk, so it never reaches a second tree of the same id.
+pub fn tree_lattice_wrap(world: &forged::ForgedWorld) -> Option<trees::LatticeWrap> {
+    let l = trees::TREE_LATTICE_BLOCKS;
+    wrap_frame(world).map(|(origin, width)| {
+        let period = width / l;
+        debug_assert_eq!(period % 64, 0, "tree id spacing across the seam needs a period of whole 64 cells, got {period}");
+        trees::LatticeWrap { origin: origin / l, period }
+    })
+}
+
+/// The trees region `coords` of `world` stands, as its generation places
+/// them with no structure source (a forged world has none outside the dev
+/// tools), sorted by id, positioned in the frame `coords` is in. Empty when
+/// `mats` has trees off. For tools (the forge report).
+pub fn region_trees_forged(world: &forged::ForgedWorld, coords: RegionCoords, mats: Materials) -> Vec<trees::TreeSeed> {
+    if !mats.trees.enabled() {
+        return Vec::new();
+    }
+    let shift = wrap_shift_blocks(world, coords.x * REGION_BLOCKS);
+    let coords = canonical_region(world, coords);
+    let (rx, rz) = (coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS);
+    let (ox, oz, span) = patch_window(rx, rz, REGION_BLOCKS, &mats);
+    let patch = world.patch(ox, oz, span);
+    // `columns_from_patch`'s tree surface, without structures.
+    let sample = |x: i32, z: i32| column_sample(&patch, &mats, x, z);
+    let surface = |x: i32, z: i32| {
+        let c = sample(x, z);
+        tree_ground(c, slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz)).is_some())
+    };
+    let window = [rx, rz, rx + REGION_BLOCKS, rz + REGION_BLOCKS];
+    let mut out = trees_for_window(coords, window, TreeSource::forged(world), &surface);
+    for t in &mut out {
+        t.base[0] += shift;
+    }
+    out
 }
 
 /// Region `coords` folded onto `world`'s canonical regions (itself on a
@@ -584,9 +656,10 @@ pub fn generate_region_forged_with(
 ) -> Vec<(ColumnCoords, Column)> {
     let coords = canonical_region(world, coords);
     let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS, &mats);
-    let trees_from = TreeSource { habitat: world, seed: world.seed() };
+    let trees_from = TreeSource::forged(world);
     let patch = world.patch(ox, oz, span);
-    columns_from_patch(&patch, coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats, trees_from, structures)
+    let structures = wrapped_structures(world, structures);
+    columns_from_patch(&patch, coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats, trees_from, &structures)
 }
 
 /// Material of a solid block: sand under standing water (lake and river
@@ -1067,7 +1140,7 @@ pub fn coarse_tile_with(
     let (ox, oz, span) = coarse_patch_window(key, &mats, 0);
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
     let habitat = habitat::ProceduralHabitat::new(seed);
-    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed }, structures, 0)
+    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed, wrap: None }, structures, 0)
 }
 
 /// `coarse_tile` for an explicit forged world (tests, tools). A coarse cell is
@@ -1095,8 +1168,9 @@ pub fn coarse_tile_forged_with(
     let shift = coarse_shift(world, key);
     let (ox, oz, span) = coarse_patch_window(key, &mats, shift);
     let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
-    let trees_from = TreeSource { habitat: world, seed: world.seed() };
-    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from, structures, shift)
+    let trees_from = TreeSource::forged(world);
+    let structures = wrapped_structures(world, structures);
+    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from, &structures, shift)
 }
 
 /// `wrap_shift_blocks` of a coarse key's window: LOD keys arrive in the
@@ -1163,7 +1237,8 @@ pub fn coarse_water_forged_with(
 ) -> game::lod::LodWater {
     let shift = coarse_shift(world, key);
     let (ox, oz, span) = coarse_window(key, shift);
-    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats, structures, shift)
+    let structures = wrapped_structures(world, structures);
+    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats, &structures, shift)
 }
 
 /// One LOD column's `(water_top, depth)` (see [`coarse_water`]).
@@ -1464,7 +1539,7 @@ fn coarse_from_patch(
         };
         let memo_habitat = MemoHabitat { inner: trees_from.habitat, memo: Default::default() };
         let (x1, z1) = (ox + span_blocks, oz + span_blocks);
-        for tree in trees::trees_in(ox, oz, x1, z1, trees_from.seed, &memo_habitat, &surface) {
+        for tree in trees::trees_in(ox, oz, x1, z1, trees_from.seed, trees_from.wrap, &memo_habitat, &surface) {
             let Some((lo, hi, radius)) = crown_extent(&tree) else { continue };
             let leaves = Voxel::new(mats.trees.species[tree.species as usize].leaves);
             let [bx, by, bz] = tree.base;

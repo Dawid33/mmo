@@ -117,6 +117,70 @@ impl StructureSource for NoStructures {
     }
 }
 
+/// `inner` as a world that wraps east–west sees it (`frame` = its canonical block columns `[origin, origin
+/// + width)`): a window is asked of every image of the map it may reach, and each placement or paint is
+/// moved by whole widths to that image, so a window past the seam sees the other side's. `inner` places
+/// in canonical columns: one whose anchor x (a paint: its rectangle's x0) lies outside them is left out,
+/// as its canonical image is found anyway. `frame` `None`: exactly `inner`.
+pub struct WrappedStructures<'a> {
+    pub inner: &'a dyn StructureSource,
+    pub frame: Option<(i32, i32)>,
+}
+
+impl WrappedStructures<'_> {
+    /// The image shifts (blocks) a query of x span `[gx0, gx1)`, margin included, may reach: one image
+    /// more on each side, for what reaches past its anchor's image.
+    fn shifts(origin: i32, width: i32, gx0: i32, gx1: i32) -> impl Iterator<Item = i32> {
+        let (k0, k1) = ((gx0 - origin).div_euclid(width) - 1, (gx1 - 1 - origin).div_euclid(width) + 1);
+        (k0..=k1).map(move |k| k * width)
+    }
+}
+
+impl StructureSource for WrappedStructures<'_> {
+    fn placements_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Arc<StructurePlacement>> {
+        let Some((origin, width)) = self.frame else { return self.inner.placements_in(x0, z0, x1, z1, margin) };
+        let mut out = Vec::new();
+        for s in Self::shifts(origin, width, x0 - margin, x1 + margin) {
+            for p in self.inner.placements_in(x0 - s, z0, x1 - s, z1, margin) {
+                if !(origin..origin + width).contains(&p.at.anchor[0]) {
+                    continue;
+                }
+                if s == 0 {
+                    out.push(p);
+                } else {
+                    let mut moved = (*p).clone();
+                    moved.at.anchor[0] += s;
+                    out.push(Arc::new(moved));
+                }
+            }
+        }
+        out
+    }
+
+    fn paints_in(&self, x0: i32, z0: i32, x1: i32, z1: i32, margin: i32) -> Vec<Paint> {
+        let Some((origin, width)) = self.frame else { return self.inner.paints_in(x0, z0, x1, z1, margin) };
+        let mut out = Vec::new();
+        for s in Self::shifts(origin, width, x0 - margin, x1 + margin) {
+            for mut p in self.inner.paints_in(x0 - s, z0, x1 - s, z1, margin) {
+                if (origin..origin + width).contains(&p.rect[0]) {
+                    p.rect[0] += s;
+                    p.rect[2] += s;
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    fn content_hash(&self) -> u32 {
+        self.inner.content_hash()
+    }
+
+    fn region_requested(&self, rc: game::RegionCoords) {
+        self.inner.region_requested(rc)
+    }
+}
+
 /// An explicit list of placements and paints with a spatial index (x/z buckets of
 /// `STRUCTURE_BUCKET_BLOCKS`).
 pub struct StructureList {
