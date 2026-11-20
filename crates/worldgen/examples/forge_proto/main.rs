@@ -150,12 +150,8 @@ impl Params {
                     p.knobs = worldgen::forge::presets::apply(preset);
                 }
                 // Any knob by its key (knobs.rs; the tuning page's "Copy as flags").
-                "--set" => {
-                    let v = value();
-                    let (key, number) = v.split_once('=').expect("--set <knob>=<value>");
-                    let number: f64 = number.parse().unwrap_or_else(|_| panic!("--set {key}: not a number"));
-                    assert!(p.knobs.set(key, number), "--set: no knob named {key} (see knobs.rs)");
-                }
+                // In the knob's range: load holds a stored knob to it.
+                "--set" => p.knobs.set_flag(&value()).unwrap_or_else(|e| panic!("{e}")),
                 other => panic!(
                     "unknown argument {other}; flags: --size <name> | --width <m> --height <m>, --cell --iters --seed --out --dt \
                      --uplift --k --diffusivity --no-geology --no-climate --preset <name> --set <knob>=<value> \

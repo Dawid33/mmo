@@ -179,14 +179,8 @@ pub fn parse_forge(args: &[String]) -> Result<(StoreUrl, ForgeParams), String> {
                     .ok_or_else(|| format!("--preset: no preset named {name} (see forge/presets.rs)"))?;
                 p.knobs = forge::presets::apply(preset);
             }
-            "--set" => {
-                let v = value()?;
-                let (key, number) = v.split_once('=').ok_or("--set <knob>=<value>")?;
-                let number: f64 = number.parse().map_err(|_| format!("--set {key}: not a number"))?;
-                if !p.knobs.set(key, number) {
-                    return Err(format!("--set: no knob named {key} (see forge/knobs.rs)"));
-                }
-            }
+            // In the knob's range: load holds a stored knob to it.
+            "--set" => p.knobs.set_flag(value()?)?,
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
     }

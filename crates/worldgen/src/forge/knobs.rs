@@ -129,6 +129,26 @@ knobs! {
 pub const CHOICES: &[(&str, &[&str])] = &[];
 
 impl Knobs {
+    /// One `--set <knob>=<value>` flag of the forge tools (`worldctl forge`,
+    /// `forge_proto`): the knob takes the value only if it is a number inside
+    /// the knob's [`Spec`] range (NaN and infinities are not). A world's
+    /// stored knobs are held to that range at load
+    /// (`forged::knobs_from_map`), so a value outside it would forge one world
+    /// and run another.
+    pub fn set_flag(&mut self, arg: &str) -> Result<(), String> {
+        let (key, number) = arg.split_once('=').ok_or("--set <knob>=<value>")?;
+        let spec = SPECS
+            .iter()
+            .find(|s| s.key == key)
+            .ok_or_else(|| format!("--set: no knob named {key} (see forge/knobs.rs)"))?;
+        let value: f64 = number.parse().map_err(|_| format!("--set {key}: not a number"))?;
+        if !(spec.min..=spec.max).contains(&value) {
+            return Err(format!("--set {key}={number}: outside the knob's range; give {} to {}", spec.min, spec.max));
+        }
+        self.set(key, value);
+        Ok(())
+    }
+
     pub fn plate_total(&self) -> usize {
         self.plate_count.round().clamp(2.0, 64.0) as usize
     }
