@@ -950,8 +950,8 @@ forged world) yielding the region's chunk columns; that is what makes "park, or 
 `pipeline` `column()` must mirror the `#[cfg(test)]` `DensityFn` graph bit-for-bit.
 The forge makes ONE kind of world, the **Planet** (since 2026-11-20; plan
 `docs/superpowers/plans/2026-11-14-planet-frame-1a.md`): 2:1, x wraps east–west (`EdgeKind::Wrap`), polar seas
-north and south (`forge::world::PLANET_EDGES`), 90° N at row 0 to 90° S. Sizes (`forge::play`): Tiny 25,088 ×
-12,544 m, Small 50,176 × 25,088, Medium (default) 100,352 × 50,176, Large 200,704 × 100,352, and Dev 16,384 ×
+north and south (`forge::world::PLANET_EDGES`), 90° N at row 0 to 90° S. Sizes (`forge::play`): Tiny 25,600 ×
+12,800 m, Small 50,176 × 25,088, Medium (default) 100,352 × 50,176, Large 200,704 × 100,352, and Dev 16,384 ×
 8,192 (not in the menu; `ForgeParams::default()` at 32 m) — every width a whole number of 512 m, so regions tile the
 circle at every region size. Any other world — an older artifact version (< 9), another layout's edges, a width off
 512 m — is refused with "re-forge this world" (file, tiles and store alike: `forged.rs` `validate_wrap`).
