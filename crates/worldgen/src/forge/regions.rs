@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::forge::par;
 use crate::forge::world::hash01;
 use crate::forged::WorldArtifact;
+use crate::forge::periodic::PeriodicX;
 use crate::noise::OctaveNoise;
 
 /// Edge of one DF world tile (m): 16 × 16 embarks of 48 m. DF Medium
@@ -339,14 +340,25 @@ pub fn assign_alignment(regions: &mut [RegionRecord], seed: u64, good_share: f64
 }
 
 /// Savagery 0..100 per cell of an `nx` × `nz` grid of `cell_m` cells:
-/// fractal noise, first octave `SAVAGERY_WAVELENGTH_M`.
-pub fn savagery(seed: u64, nx: usize, nz: usize, cell_m: f64) -> Vec<u8> {
+/// fractal noise, first octave `SAVAGERY_WAVELENGTH_M`; periodic in x with
+/// `wrap` (a planet).
+pub fn savagery(seed: u64, nx: usize, nz: usize, cell_m: f64, wrap: Option<PeriodicX>) -> Vec<u8> {
     let noise = OctaveNoise::new(seed ^ 0x5A7A_6E27, -13, vec![1.0; SAVAGERY_OCTAVES]);
     // Octave -13 is 8,192 m; stretch the coordinates onto the wavelength.
     let scale = 8_192.0 / SAVAGERY_WAVELENGTH_M;
+    let wrap = wrap.map(|w| w.for_noise(SAVAGERY_WAVELENGTH_M));
     par::map_range(nx * nz, |i| {
-        let (x, z) = (((i % nx) as f64 + 0.5) * cell_m * scale, ((i / nx) as f64 + 0.5) * cell_m * scale);
-        (50.0 + 50.0 * SAVAGERY_GAIN * noise.sample2(x, z)).round().clamp(0.0, 100.0) as u8
+        let value = match &wrap {
+            Some(wrap) => {
+                let (mx, mz) = (((i % nx) as f64 + 0.5) * cell_m, ((i / nx) as f64 + 0.5) * cell_m);
+                wrap.sample(mx, mz, |x, z| noise.sample2(x * scale, z * scale))
+            }
+            None => {
+                let (x, z) = (((i % nx) as f64 + 0.5) * cell_m * scale, ((i / nx) as f64 + 0.5) * cell_m * scale);
+                noise.sample2(x, z)
+            }
+        };
+        (50.0 + 50.0 * SAVAGERY_GAIN * value).round().clamp(0.0, 100.0) as u8
     })
 }
 
@@ -366,7 +378,8 @@ pub fn derive(a: &mut WorldArtifact, good_share: f64, evil_share: f64) {
     let wrap_x = a.edges[1] == crate::forge::world::EdgeKind::Wrap;
     let (region, mut regions) = flood(&biome, &a.drainage, nx, nz, a.cell_m, wrap_x);
     assign_alignment(&mut regions, a.seed, good_share, evil_share, a.cell_m);
-    a.savagery = savagery(a.seed, nx, nz, a.cell_m);
+    let wrap = PeriodicX::for_edges(&a.edges, nx as f64 * a.cell_m);
+    a.savagery = savagery(a.seed, nx, nz, a.cell_m, wrap);
     a.biome = biome;
     a.region = region;
     a.regions = regions;

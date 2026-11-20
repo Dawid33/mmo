@@ -45,6 +45,7 @@ pub mod geology;
 pub mod hydrology;
 pub mod knobs;
 mod par;
+pub mod periodic;
 pub mod plates;
 pub mod play;
 pub mod post;

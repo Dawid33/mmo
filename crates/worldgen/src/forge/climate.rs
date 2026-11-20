@@ -47,6 +47,7 @@
 use crate::forge::erosion;
 use crate::forge::hydrology::LAKE_MIN_DEPTH_M;
 use crate::forge::par;
+use crate::forge::periodic::PeriodicX;
 use crate::forge::world::{hash01, smoothstep, EdgeKind, ForgeParams, World};
 
 /// `Knobs::pole` values.
@@ -141,19 +142,32 @@ pub fn latitudes(nz: usize, p: &ForgeParams) -> Vec<f32> {
 }
 
 /// Latitude displacement (deg, northward positive) of the meander at artifact
-/// metres `(x_m, z_m)`: a function of position, seed and knobs only.
+/// metres `(x_m, z_m)`: a function of position, seed and knobs only. On a
+/// planet each wave's x-frequency is rounded to a whole number of cycles
+/// round the width (at least 1), so the meander meets itself at the seam.
 pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
     let k = &p.knobs;
     if k.meander_amplitude_deg <= 0.0 {
         return 0.0;
     }
     let wavelength = (k.meander_wavelength_km * 1000.0).min(p.span_m() / MEANDER_MIN_WAVES).max(1.0);
+    let wrap = PeriodicX::for_world(p);
     let mut d = 0.0;
     for (wave, &(share, weight, spread)) in MEANDER_WAVES.iter().enumerate() {
         let angle = (hash01(p.seed, MEANDER_SALT, 2 * wave as u64) - 0.5) * 2.0 * spread;
         let phase = hash01(p.seed, MEANDER_SALT, 2 * wave as u64 + 1) * std::f64::consts::TAU;
-        let along = x_m * angle.cos() + z_m * angle.sin();
-        d += weight * (std::f64::consts::TAU * along / (wavelength * share) + phase).sin();
+        match &wrap {
+            Some(wrap) => {
+                // |angle| < π/2, so the wave always travels east (cos > 0).
+                let cycles = (wrap.period_m * angle.cos() / (wavelength * share)).round().max(1.0);
+                let turns = cycles * x_m / wrap.period_m + z_m * angle.sin() / (wavelength * share);
+                d += weight * (std::f64::consts::TAU * turns + phase).sin();
+            }
+            None => {
+                let along = x_m * angle.cos() + z_m * angle.sin();
+                d += weight * (std::f64::consts::TAU * along / (wavelength * share) + phase).sin();
+            }
+        }
     }
     k.meander_amplitude_deg * d
 }

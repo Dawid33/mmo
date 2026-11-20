@@ -199,11 +199,16 @@ pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, wrap_x: bool, is_sea
     };
     pair(&mut d);
     if wrap_x {
+        let mut settled = false;
         for _ in 0..CHAMFER_WRAP_EXTRA_PASSES {
             if !pair(&mut d) {
+                settled = true;
                 break;
             }
         }
+        // The cap is a bound, not a proof: a debug build checks that one
+        // more pass pair would change nothing.
+        debug_assert!(settled || !pair(&mut d), "chamfer distance not settled after the capped pass pairs");
     }
     d
 }

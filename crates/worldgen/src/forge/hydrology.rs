@@ -287,8 +287,8 @@ fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &
         // the shorter way round (`seam_dx`).
         let width = w.nx as f64 * w.dx;
         if w.wrap_x {
-            for k in 1..points.len() {
-                points[k].x = points[k - 1].x + seam_dx(points[k].x - points[k - 1].x, width);
+            for n in 1..points.len() {
+                points[n].x = points[n - 1].x + seam_dx(points[n].x - points[n - 1].x, width);
             }
         }
         for _ in 0..RIVER_SMOOTHING_PASSES {

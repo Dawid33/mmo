@@ -12,6 +12,7 @@
 //! through the column; hard bands stand proud, soft ones floor the valleys.
 
 use crate::forge::par;
+use crate::forge::periodic::PeriodicX;
 use crate::noise::OctaveNoise;
 use crate::forge::world::{hash01, ForgeParams, World};
 
@@ -50,7 +51,11 @@ const SILL_THICKNESS_M: (f64, f64) = (6.0, 12.0);
 /// The fold noise's first octave (2^11 = 2 km). Dip, fold amplitude,
 /// formation thickness and basement depth are knobs: a dip of 0.04 over a
 /// 16 km world walks the outcrop through ~640 m of column — broad provinces.
+/// On a planet (x wraps) the bedding has no x dip — a tilt along x cannot
+/// meet itself round the circle — only the dip's z part, and the folds are
+/// periodic in x.
 const FOLD_FIRST_OCTAVE: i32 = -11;
+const FOLD_WAVELENGTH_M: f64 = 2_048.0;
 
 pub struct Geology {
     /// Bedding surface height per cell (m): tilt + folds.
@@ -71,9 +76,15 @@ impl Geology {
         let basement_top = k.basement_top_s;
         let (thin, thick) = (k.formation_min_m, k.formation_max_m.max(k.formation_min_m));
         let (half_x, half_z) = (p.width_m * 0.5, p.height_m * 0.5);
+        let wrap = PeriodicX::for_world(p).map(|w| w.for_noise(FOLD_WAVELENGTH_M));
         let bedding = par::map_range(w.cells(), |i| {
             let (x, z) = w.center(i);
-            dip_x * (x - half_x) + dip_z * (z - half_z) + k.fold_amplitude_m * 2.0 * folds.sample2(x, z)
+            match &wrap {
+                Some(wrap) => {
+                    dip_z * (z - half_z) + k.fold_amplitude_m * 2.0 * wrap.sample(x, z, |x, z| folds.sample2(x, z))
+                }
+                None => dip_x * (x - half_x) + dip_z * (z - half_z) + k.fold_amplitude_m * 2.0 * folds.sample2(x, z),
+            }
         });
 
         let mut column = Vec::new();

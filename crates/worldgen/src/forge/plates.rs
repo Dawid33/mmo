@@ -17,9 +17,16 @@
 //! erosion schedule and the final grid see the same plates, and a 100 km
 //! world is the 16 km one scaled up — except the interior range length,
 //! which is in km.
+//!
+//! On a planet (`PeriodicX::for_knobs`) x is a circle: sites spread round the
+//! whole width and keep apart the shorter way round, the Voronoi diagram and
+//! its boundaries are built over the sites with their images one width east
+//! and west, the warp noises are periodic, and the interior ranges are given
+//! images too — so the plate field meets itself at the seam.
 
 use crate::forge::knobs::Knobs;
 use crate::forge::par;
+use crate::forge::periodic::{sample_or, PeriodicX};
 use crate::forge::world::{edges, hash01, smoothstep, span_m, EdgeKind, LAND_EDGE_TAPER_M, REFERENCE_SIZE_M};
 use crate::noise::OctaveNoise;
 
@@ -68,19 +75,28 @@ pub struct Plate {
 }
 
 /// The plates of a world, from the seed and knobs only.
+/// On a planet the sites lie in `[0, width)` (x is a circle: no reach past
+/// the east and west edges) and keep apart the shorter way round.
 pub fn plates(seed: u64, width_m: f64, height_m: f64, k: &Knobs) -> Vec<Plate> {
     let count = k.plate_total();
+    let wrap = PeriodicX::for_knobs(k, width_m);
     let min_gap = PLATE_SPACING_SHARE * span_m(width_m, height_m) / (count as f64).sqrt();
     let (span_x, span_z) = (width_m * (1.0 + 2.0 * PLATE_SITE_REACH), height_m * (1.0 + 2.0 * PLATE_SITE_REACH));
     let mut sites: Vec<(f64, f64)> = Vec::with_capacity(count);
     let mut attempt = 0u64;
     while sites.len() < count {
         attempt += 1;
-        let x = hash01(seed, 0x91A7, attempt) * span_x - PLATE_SITE_REACH * width_m;
+        let x = match wrap {
+            Some(_) => hash01(seed, 0x91A7, attempt) * width_m,
+            None => hash01(seed, 0x91A7, attempt) * span_x - PLATE_SITE_REACH * width_m,
+        };
         let z = hash01(seed, 0x91A8, attempt) * span_z - PLATE_SITE_REACH * height_m;
+        let gap = |sx: f64, sz: f64| match &wrap {
+            Some(wrap) => wrap.dx(sx, x).hypot(sz - z),
+            None => (sx - x).hypot(sz - z),
+        };
         // After the attempt budget, accept anything (never loops forever).
-        let clear = attempt > PLATE_PLACEMENT_ATTEMPTS
-            || sites.iter().all(|&(sx, sz)| (sx - x).hypot(sz - z) >= min_gap);
+        let clear = attempt > PLATE_PLACEMENT_ATTEMPTS || sites.iter().all(|&(sx, sz)| gap(sx, sz) >= min_gap);
         if clear {
             sites.push((x, z));
         }
@@ -111,22 +127,40 @@ struct Warp {
     along: OctaveNoise,
     scale: f64,
     amplitude: f64,
+    /// A planet's periodicity for `x` / `z` and for `along` (`None` otherwise).
+    wrap_xz: Option<PeriodicX>,
+    wrap_along: Option<PeriodicX>,
 }
 
 impl Warp {
-    fn new(seed: u64, span_m: f64) -> Warp {
+    fn new(seed: u64, span_m: f64, wrap: Option<PeriodicX>) -> Warp {
+        let scale = span_m / REFERENCE_SIZE_M;
         Warp {
             x: OctaveNoise::new(seed ^ 0xF101, -13, vec![1.0, 0.5]), // 8 km at the reference size
             z: OctaveNoise::new(seed ^ 0xF102, -13, vec![1.0, 0.5]),
             along: OctaveNoise::new(seed ^ 0xF103, -12, vec![1.0, 0.5]), // 4 km
-            scale: span_m / REFERENCE_SIZE_M,
+            scale,
             amplitude: PLATE_WARP_SHARE * span_m,
+            wrap_xz: wrap.map(|w| w.for_noise(8_192.0 * scale)),
+            wrap_along: wrap.map(|w| w.for_noise(4_096.0 * scale)),
         }
     }
 
     fn at(&self, mx: f64, mz: f64) -> (f64, f64) {
+        if let Some(wrap) = &self.wrap_xz {
+            let scale = self.scale;
+            let wx = wrap.sample(mx, mz, |x, z| self.x.sample2(x / scale, z / scale));
+            let wz = wrap.sample(mx, mz, |x, z| self.z.sample2(x / scale, z / scale));
+            return (mx + self.amplitude * wx, mz + self.amplitude * wz);
+        }
         let (sx, sz) = (mx / self.scale, mz / self.scale);
         (mx + self.amplitude * self.x.sample2(sx, sz), mz + self.amplitude * self.z.sample2(sx, sz))
+    }
+
+    /// The along-strike noise at warped (px, pz).
+    fn along(&self, px: f64, pz: f64) -> f64 {
+        let scale = self.scale;
+        sample_or(self.wrap_along.as_ref(), px, pz, |x, z| self.along.sample2(x / scale, z / scale))
     }
 }
 
@@ -253,8 +287,14 @@ fn belt_profile(d: f64, half_width: f64) -> f64 {
 /// world.
 pub fn plate_field(seed: u64, width_m: f64, height_m: f64, nx: usize, nz: usize, k: &Knobs) -> PlateField {
     let span = span_m(width_m, height_m);
-    let plates = plates(seed, width_m, height_m, k);
-    let warp = Warp::new(seed, span);
+    let wrap = PeriodicX::for_knobs(k, width_m);
+    let plates = match wrap {
+        // Entry j is a copy of plate j / 3 (`with_images`).
+        Some(wrap) => wrap.with_images(&plates(seed, width_m, height_m, k), |s| s.x, |s, d| Plate { x: s.x + d, ..*s }),
+        None => plates(seed, width_m, height_m, k),
+    };
+    let plate_of = |j: usize| if wrap.is_some() { j / 3 } else { j };
+    let warp = Warp::new(seed, span, wrap);
     let (cell_x, cell_z) = (width_m / nx as f64, height_m / nz as f64);
     let half_width = (k.plate_belt_width * span).max(cell_x.max(cell_z));
     let land = edges(seed, k).map(|e| e == EdgeKind::Land);
@@ -273,9 +313,8 @@ pub fn plate_field(seed: u64, width_m: f64, height_m: f64, nx: usize, nz: usize,
             .iter()
             .map(|b| b.strength * belt_profile(segment_distance(px, pz, b.x0, b.z0, b.x1, b.z1), half_width))
             .fold(0.0, f64::max);
-        let along = 1.0
-            - ALONG_STRIKE_VARIATION * (0.5 + 0.5 * warp.along.sample2(px / warp.scale, pz / warp.scale)).clamp(0.0, 1.0);
-        (a as u16, (belt * along) as f32)
+        let along = 1.0 - ALONG_STRIKE_VARIATION * (0.5 + 0.5 * warp.along(px, pz)).clamp(0.0, 1.0);
+        (plate_of(a) as u16, (belt * along) as f32)
     });
     let (plate, convergence) = per_cell.into_iter().unzip();
     PlateField { plate, convergence }
@@ -290,20 +329,30 @@ pub struct InteriorRange {
     pub z1: f64,
 }
 
-/// The interior ranges of a world (`Knobs::interior_ranges` of them).
+/// The interior ranges of a world (`Knobs::interior_ranges` of them). On a
+/// planet their centres spread round the whole width and each comes with its
+/// images one width east and west.
 pub fn interior_ranges(seed: u64, width_m: f64, height_m: f64, k: &Knobs) -> Vec<InteriorRange> {
     let count = k.interior_ranges.round().max(0.0) as u64;
     let length = (k.belt_length_km * 1_000.0).min(INTERIOR_RANGE_MAX_SHARE * span_m(width_m, height_m));
     let (lo, hi) = INTERIOR_RANGE_BOX;
-    (0..count)
+    let wrap = PeriodicX::for_knobs(k, width_m);
+    let ranges: Vec<InteriorRange> = (0..count)
         .map(|r| {
-            let cx = (lo + (hi - lo) * hash01(seed, 0x1A7E, r)) * width_m;
+            let cx = match wrap {
+                Some(_) => hash01(seed, 0x1A7E, r) * width_m,
+                None => (lo + (hi - lo) * hash01(seed, 0x1A7E, r)) * width_m,
+            };
             let cz = (lo + (hi - lo) * hash01(seed, 0x1A7F, r)) * height_m;
             let a = hash01(seed, 0x1A80, r) * std::f64::consts::PI;
             let (dx, dz) = (0.5 * length * a.cos(), 0.5 * length * a.sin());
             InteriorRange { x0: cx - dx, z0: cz - dz, x1: cx + dx, z1: cz + dz }
         })
-        .collect()
+        .collect();
+    match wrap {
+        Some(wrap) => wrap.with_images(&ranges, |r| r.x0, |r, d| InteriorRange { x0: r.x0 + d, x1: r.x1 + d, ..*r }),
+        None => ranges,
+    }
 }
 
 /// Interior-range belt strength at (x, z) in m: `INTERIOR_RANGE_STRENGTH` on

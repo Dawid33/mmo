@@ -33,6 +33,7 @@ use crate::forge::geology::{rock_index, Geology};
 use crate::forge::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
 use crate::forge::knobs::Knobs;
 use crate::forge::par;
+use crate::forge::periodic::{sample_or, PeriodicX};
 use crate::forge::plates::{self, PlateField};
 use crate::forge::world::{hash01, smoothstep, span_m, ForgeParams, World, REFERENCE_SIZE_M};
 use crate::noise::OctaveNoise;
@@ -286,11 +287,16 @@ fn nearest_water(nx: usize, nz: usize, dx: f64, wrap_x: bool, level: &[f64], q: 
     };
     pair(&mut dist, &mut at);
     if wrap_x {
+        let mut settled = false;
         for _ in 0..crate::habitat::CHAMFER_WRAP_EXTRA_PASSES {
             if !pair(&mut dist, &mut at) {
+                settled = true;
                 break;
             }
         }
+        // The cap is a bound, not a proof: a debug build checks that one
+        // more pass pair would change nothing.
+        debug_assert!(settled || !pair(&mut dist, &mut at), "chamfer distance not settled after the capped pass pairs");
     }
     (dist, at)
 }
@@ -333,39 +339,48 @@ struct VolcanismNoise {
     base: OctaveNoise,
     spots: OctaveNoise,
     scale: f64,
+    /// A planet's periodicity for `base` and `spots` (`None` otherwise).
+    wrap_base: Option<PeriodicX>,
+    wrap_spots: Option<PeriodicX>,
 }
 
 impl VolcanismNoise {
-    fn new(seed: u64, span_m: f64) -> VolcanismNoise {
+    fn new(seed: u64, span_m: f64, wrap: Option<PeriodicX>) -> VolcanismNoise {
+        let scale = span_m / REFERENCE_SIZE_M;
         VolcanismNoise {
             base: OctaveNoise::new(seed ^ 0xF201, -14, vec![1.0, 0.5]), // 16 km at the reference size
             spots: OctaveNoise::new(seed ^ 0xF202, -11, vec![1.0, 0.5]), // 2 km
-            scale: span_m / REFERENCE_SIZE_M,
+            scale,
+            wrap_base: wrap.map(|w| w.for_noise(16_384.0 * scale)),
+            wrap_spots: wrap.map(|w| w.for_noise(2_048.0 * scale)),
         }
     }
 
     /// Volcanism 0..1 (unclamped above) at (mx, mz) m with plate-belt
     /// `convergence` there.
     fn at(&self, mx: f64, mz: f64, convergence: f64, k: &Knobs) -> f64 {
-        let (sx, sz) = (mx / self.scale, mz / self.scale);
-        let base = VOLCANISM_BASE_MAX * (0.5 + 0.5 * self.base.sample2(sx, sz)).clamp(0.0, 1.0);
+        let scale = self.scale;
+        let base_at = sample_or(self.wrap_base.as_ref(), mx, mz, |x, z| self.base.sample2(x / scale, z / scale));
+        let base = VOLCANISM_BASE_MAX * (0.5 + 0.5 * base_at).clamp(0.0, 1.0);
         let flank = smoothstep(VOLCANISM_FLANK.0, VOLCANISM_FLANK.1, convergence)
             * (1.0 - VOLCANISM_CORE_DAMP * smoothstep(VOLCANISM_CORE.0, VOLCANISM_CORE.1, convergence));
-        let spot = smoothstep(VOLCANISM_SPOT.0, VOLCANISM_SPOT.1, 0.5 + 0.5 * self.spots.sample2(sx, sz));
+        let spots_at = sample_or(self.wrap_spots.as_ref(), mx, mz, |x, z| self.spots.sample2(x / scale, z / scale));
+        let spot = smoothstep(VOLCANISM_SPOT.0, VOLCANISM_SPOT.1, 0.5 + 0.5 * spots_at);
         k.volcanism_strength.max(0.0) * (base + VOLCANISM_HOTSPOT_GAIN * flank * spot)
     }
 }
 
 /// Volcanism 0..100 on an `nx` x `nz` grid over a `width_m` x `height_m`
-/// world.
+/// world; `wrap` makes it periodic in x (a planet).
 pub fn volcanism_grid(
     seed: u64,
     (width_m, height_m): (f64, f64),
     (nx, nz): (usize, usize),
     plates: &PlateField,
     k: &Knobs,
+    wrap: Option<PeriodicX>,
 ) -> Vec<u8> {
-    let noise = VolcanismNoise::new(seed, span_m(width_m, height_m));
+    let noise = VolcanismNoise::new(seed, span_m(width_m, height_m), wrap);
     let (cell_x, cell_z) = (width_m / nx as f64, height_m / nz as f64);
     par::map_range(nx * nz, |i| {
         let (mx, mz) = (((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z);
@@ -377,13 +392,16 @@ pub fn volcanism_grid(
 /// along the convergent boundaries of `plates` (all-zero convergence for the
 /// island layouts: base only, never 100).
 pub fn volcanism(seed: u64, w: &World, plates: &PlateField, k: &Knobs) -> Vec<u8> {
-    volcanism_grid(seed, (w.nx as f64 * w.dx, w.nz as f64 * w.dx), (w.nx, w.nz), plates, k)
+    let width_m = w.nx as f64 * w.dx;
+    let wrap = PeriodicX::for_edges(&w.edges, width_m);
+    volcanism_grid(seed, (width_m, w.nz as f64 * w.dx), (w.nx, w.nz), plates, k, wrap)
 }
 
 /// Volcano sites: cells of `volcanism` (an `nx` x `nz` grid of `cell_x` x
 /// `cell_z` m cells) at 100 that are `eligible`, taken in a seeded random
 /// order, each kept only if `VOLCANO_SPACING_M` from every earlier one, at
-/// most `Knobs::volcano_count_max`. Cell centres, world metres.
+/// most `Knobs::volcano_count_max`. Cell centres, world metres. With `wrap`
+/// (a planet) the spacing is measured the shorter way round.
 pub fn volcanoes(
     seed: u64,
     volcanism: &[u8],
@@ -391,6 +409,7 @@ pub fn volcanoes(
     (nx, nz): (usize, usize),
     (cell_x, cell_z): (f64, f64),
     k: &Knobs,
+    wrap: Option<PeriodicX>,
 ) -> Vec<[f32; 2]> {
     assert_eq!(volcanism.len(), nx * nz, "volcanism raster vs its {nx} x {nz} grid");
     let max = k.volcano_count_max.round().max(0.0) as usize;
@@ -402,7 +421,11 @@ pub fn volcanoes(
             break;
         }
         let p = [((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z];
-        if sites.iter().all(|s| (s[0] - p[0]).hypot(s[1] - p[1]) >= VOLCANO_SPACING_M) {
+        let gap = |s: &[f64; 2]| match &wrap {
+            Some(wrap) => wrap.dx(s[0], p[0]).hypot(s[1] - p[1]),
+            None => (s[0] - p[0]).hypot(s[1] - p[1]),
+        };
+        if sites.iter().all(|s| gap(s) >= VOLCANO_SPACING_M) {
             sites.push(p);
         }
     }
@@ -422,15 +445,17 @@ pub fn volcano_sites_on(p: &ForgeParams, eligible: &dyn Fn(f64, f64) -> bool) ->
     let (nx, nz) = (grid(p.width_m), grid(p.height_m));
     let (cell_x, cell_z) = (p.width_m / nx as f64, p.height_m / nz as f64);
     let field = plates::plate_field(p.seed, p.width_m, p.height_m, nx, nz, k);
-    let v = volcanism_grid(p.seed, (p.width_m, p.height_m), (nx, nz), &field, k);
+    let wrap = PeriodicX::for_world(p);
+    let v = volcanism_grid(p.seed, (p.width_m, p.height_m), (nx, nz), &field, k, wrap);
     let ok: Vec<bool> = (0..nx * nz)
         .map(|i| eligible(((i % nx) as f64 + 0.5) * cell_x, ((i / nx) as f64 + 0.5) * cell_z))
         .collect();
-    volcanoes(p.seed, &v, &ok, (nx, nz), (cell_x, cell_z), k)
+    volcanoes(p.seed, &v, &ok, (nx, nz), (cell_x, cell_z), k, wrap)
 }
 
 /// Cone of uplift at (mx, mz): 1 on a site, falling linearly to 0 at
-/// `VOLCANO_CONE_RADIUS_M`; the largest of all sites.
+/// `VOLCANO_CONE_RADIUS_M`; the largest of all sites. On a planet `sites`
+/// carries each site's images east and west (`PeriodicX::with_images`).
 pub fn cone(sites: &[[f32; 2]], mx: f64, mz: f64) -> f64 {
     sites
         .iter()

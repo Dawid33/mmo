@@ -6,6 +6,7 @@ use crate::forge::knobs::{
 };
 use crate::forge::fields;
 use crate::forge::par;
+use crate::forge::periodic::{sample_or, PeriodicX};
 use crate::forge::plates;
 use crate::noise::OctaveNoise;
 
@@ -114,7 +115,9 @@ enum ContinentalMass {
     /// Coast `coast[e]` half-widths in from each sea edge.
     Continent { coast: [f64; 4], sea: [bool; 4] },
     /// As a continent, cut by seas along the Voronoi boundaries of `centres`.
-    /// Also the planet's (its sea edges are north and south only).
+    /// Also the planet's (its sea edges are north and south only; its
+    /// centres spread round the whole width, and `centres` holds each with
+    /// its images one width (2 half-widths) east and west).
     Continents { coast: [f64; 4], sea: [bool; 4], centres: Vec<(f64, f64)>, channel: f64 },
     /// Land all round an inland sea of `radius` at `centre`.
     Inland { centre: (f64, f64), radius: f64 },
@@ -131,17 +134,29 @@ impl ContinentalMass {
         match k.layout() {
             LAYOUT_CONTINENTS | LAYOUT_PLANET => {
                 let count = k.continent_count.round().clamp(2.0, 4.0) as usize;
+                // A planet's x is a circle 2 half-widths round: centres
+                // anywhere on it, kept apart the shorter way round.
+                let wrap = PeriodicX::for_edges(edges, 2.0);
                 let mut centres: Vec<(f64, f64)> = Vec::new();
                 let mut attempt = 0u64;
                 while centres.len() < count {
                     attempt += 1;
-                    let x = (2.0 * hash01(seed, 0xC0A6, attempt) - 1.0) * CONTINENT_CENTRE_BOX;
+                    let x = match wrap {
+                        Some(_) => 2.0 * hash01(seed, 0xC0A6, attempt) - 1.0,
+                        None => (2.0 * hash01(seed, 0xC0A6, attempt) - 1.0) * CONTINENT_CENTRE_BOX,
+                    };
                     let z = (2.0 * hash01(seed, 0xC0A7, attempt) - 1.0) * CONTINENT_CENTRE_BOX;
-                    let clear = attempt > 400
-                        || centres.iter().all(|&(cx, cz)| (cx - x).hypot(cz - z) >= CONTINENT_CENTRE_GAP);
+                    let gap = |cx: f64, cz: f64| match &wrap {
+                        Some(wrap) => wrap.dx(cx, x).hypot(cz - z),
+                        None => (cx - x).hypot(cz - z),
+                    };
+                    let clear = attempt > 400 || centres.iter().all(|&(cx, cz)| gap(cx, cz) >= CONTINENT_CENTRE_GAP);
                     if clear {
                         centres.push((x, z));
                     }
+                }
+                if let Some(wrap) = wrap {
+                    centres = wrap.with_images(&centres, |c| c.0, |c, d| (c.0 + d, c.1));
                 }
                 ContinentalMass::Continents { coast, sea, centres, channel: k.continent_sea_width }
             }
@@ -195,6 +210,11 @@ struct ContinentalShape {
     mass: ContinentalMass,
     shape_lo: OctaveNoise,
     shape_hi: OctaveNoise,
+    /// A planet's periodicity for `shape_lo` / `shape_hi` (`None` otherwise).
+    wrap_lo: Option<PeriodicX>,
+    wrap_hi: Option<PeriodicX>,
+    /// A planet's periodicity (`None` otherwise): x is folded into the width.
+    wrap: Option<PeriodicX>,
     half_x: f64,
     half_z: f64,
     width_m: f64,
@@ -208,9 +228,14 @@ impl ContinentalShape {
     fn new(p: &ForgeParams) -> ContinentalShape {
         let k = &p.knobs;
         let edges = edges(p.seed, k);
+        let scale = p.span_m() / REFERENCE_SIZE_M;
+        let wrap = PeriodicX::for_world(p);
         ContinentalShape {
             edges,
             mass: ContinentalMass::new(p.seed, k, &edges),
+            wrap_lo: wrap.map(|w| w.for_noise(8_192.0 * scale)),
+            wrap_hi: wrap.map(|w| w.for_noise(1_024.0 * scale)),
+            wrap,
             // Same noises as the island layouts, sampled at the world's scale.
             shape_lo: OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]), // 8 km at the reference size
             shape_hi: OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]), // 1 km
@@ -227,11 +252,15 @@ impl ContinentalShape {
     /// (shape, landness) at (mx, mz) m: landness > 0 is land; shape < 0 is
     /// the sea's own (not the margin's) — shelf and abyss.
     fn at(&self, mx: f64, mz: f64) -> (f64, f64) {
+        let mx = match &self.wrap {
+            Some(wrap) => wrap.fold(mx),
+            None => mx,
+        };
         let (rx, rz) = ((mx - self.half_x) / self.half_x, (mz - self.half_z) / self.half_z);
-        let (sx, sz) = (mx / self.scale, mz / self.scale);
-        let shape = self.mass.at(rx, rz)
-            + self.coast_noise.0 * self.shape_lo.sample2(sx, sz)
-            + self.coast_noise.1 * self.shape_hi.sample2(sx, sz);
+        let scale = self.scale;
+        let lo = sample_or(self.wrap_lo.as_ref(), mx, mz, |x, z| self.shape_lo.sample2(x / scale, z / scale));
+        let hi = sample_or(self.wrap_hi.as_ref(), mx, mz, |x, z| self.shape_hi.sample2(x / scale, z / scale));
+        let shape = self.mass.at(rx, rz) + self.coast_noise.0 * lo + self.coast_noise.1 * hi;
         let prox = edge_proximity(rx, rz);
         let sea_prox = (0..4).filter(|&e| self.edges[e] == EdgeKind::Sea).map(|e| prox[e]).fold(-1.0, f64::max);
         (shape, shape - 2.0 * smoothstep(self.margin.0, self.margin.1, sea_prox))
@@ -614,12 +643,18 @@ impl World {
         let scale = p.span_m() / REFERENCE_SIZE_M;
         let rough = OctaveNoise::new(p.seed ^ 0xF004, -8, vec![1.0, 1.0, 1.0]); // 256 m
         let taper_noise = OctaveNoise::new(p.seed ^ 0xF005, -12, vec![1.0, 0.5]); // 4 km
+        let wrap = PeriodicX::for_world(p);
+        let (wrap_rough, wrap_taper) = (wrap.map(|w| w.for_noise(256.0 * scale)), wrap.map(|w| w.for_noise(4_096.0 * scale)));
         let shape_of = ContinentalShape::new(p);
         let edges = shape_of.edges;
         let field = plates::plate_field(p.seed, p.width_m, p.height_m, nx, nz, k);
+        // On a planet: each range with its images east and west.
         let ranges = plates::interior_ranges(p.seed, p.width_m, p.height_m, k);
         let taper_m = LAND_EDGE_TAPER_M.min(LAND_EDGE_TAPER_MAX_SHARE * p.span_m());
-        let volcanoes = volcano_sites(p);
+        let mut volcanoes = volcano_sites(p);
+        if let Some(wrap) = wrap {
+            volcanoes = wrap.with_images(&volcanoes, |s| s[0] as f64, |s, d| [(s[0] as f64 + d) as f32, s[1]]);
+        }
 
         let mut w = World {
             nx,
@@ -651,14 +686,22 @@ impl World {
                     };
                     continue;
                 }
-                w.h[i] = (1.0 + 45.0 * smoothstep(0.0, 0.5, land) + 3.0 * rough.sample2(sx, sz)).max(0.5);
+                let rough_at = match &wrap_rough {
+                    Some(wr) => wr.sample(mx, mz, |x, z| rough.sample2(x / scale, z / scale)),
+                    None => rough.sample2(sx, sz),
+                };
+                w.h[i] = (1.0 + 45.0 * smoothstep(0.0, 0.5, land) + 3.0 * rough_at).max(0.5);
                 let interior = plates::interior_strength(&ranges, mx, mz, p.width_m, p.height_m, k);
                 let belt = (field.convergence[i] as f64).max(interior);
                 let to_land_edge = shape_of.to_land_edge(mx, mz);
                 // Only the belts taper: the lowland share runs on to the edge,
                 // so the land near it neither sinks below the edge nor rises
                 // into a divide where a uniform taper would end.
-                let taper = taper_m * (1.0 + LAND_EDGE_TAPER_VARIATION * taper_noise.sample2(sx, sz).clamp(-1.0, 1.0));
+                let taper_at = match &wrap_taper {
+                    Some(wt) => wt.sample(mx, mz, |x, z| taper_noise.sample2(x / scale, z / scale)),
+                    None => taper_noise.sample2(sx, sz),
+                };
+                let taper = taper_m * (1.0 + LAND_EDGE_TAPER_VARIATION * taper_at.clamp(-1.0, 1.0));
                 let edge_taper = if to_land_edge.is_finite() { smoothstep(0.0, taper, to_land_edge) } else { 1.0 };
                 let coast_taper = smoothstep(0.0, 0.05, land);
                 w.uplift[i] = k.uplift
@@ -847,4 +890,3 @@ impl World {
         (((i % self.nx) as f64 + 0.5) * self.dx, ((i / self.nx) as f64 + 0.5) * self.dx)
     }
 }
-

@@ -134,6 +134,30 @@ fn seam_step_ratio(v: &[f64], nx: usize, nz: usize) -> f64 {
     if interior > 0.0 { seam / interior } else { f64::INFINITY }
 }
 
+/// The seam's step against every interior column pair's, for a field whose
+/// step between cells `a` and `b` is `step(a, b)` and whose statistic over a
+/// column pair's rows is `stat`: (seam ÷ the pooled interior's statistic,
+/// the share of interior column pairs whose own statistic is at least the
+/// seam's — 1.0 = the seam is the smoothest pair, 0.0 = the roughest).
+fn seam_steps(nx: usize, nz: usize, step: impl Fn(usize, usize) -> f64, stat: fn(Vec<f64>) -> f64) -> (f64, f64) {
+    let pair = |x0: usize, x1: usize| -> Vec<f64> { (0..nz).map(|z| step(z * nx + x0, z * nx + x1)).collect() };
+    let seam = stat(pair(nx - 1, 0));
+    let pooled = stat((0..nx - 1).flat_map(|x| pair(x, x + 1)).collect());
+    let ratio = if pooled > 0.0 { seam / pooled } else if seam > 0.0 { f64::INFINITY } else { 0.0 };
+    let rougher = (0..nx - 1).filter(|&x| stat(pair(x, x + 1)) >= seam).count();
+    (ratio, rougher as f64 / (nx - 1).max(1) as f64)
+}
+
+/// Mean of `v`; 0 when empty.
+fn mean(v: Vec<f64>) -> f64 {
+    if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 }
+}
+
+/// A seed passes a seam field when its ratio is at most this…
+const SEAM_RATIO_OK: f64 = 1.5;
+/// …or the seam is not among the roughest this share of column pairs.
+const SEAM_RANK_OK: f64 = 0.05;
+
 /// Stored lake bodies with a cell in both column 0 and column `nx - 1`.
 fn lakes_across_seam(a: &WorldArtifact) -> usize {
     let nx = a.nx as usize;
@@ -193,6 +217,20 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     let precip: Vec<f64> = forged.climate.precip_mm.iter().map(|&v| v as f64).collect();
     row("seam_step_ratio_precip", format!("{:.3}", seam_step_ratio(&precip, w.nx, w.nz)));
     row("lakes_across_seam", lakes_across_seam(&artifact).to_string());
+    // Task 11 (periodic noise and geometry): the biome's seam, and each
+    // field's seam ranked among the interior column pairs.
+    let (nx, nz) = (w.nx, w.nz);
+    let height = seam_steps(nx, nz, |a, b| (w.h[b] - w.h[a]).abs(), p99);
+    let precip_steps = seam_steps(nx, nz, |a, b| (precip[b] - precip[a]).abs(), p99);
+    let biome = seam_steps(nx, nz, |a, b| if artifact.biome[a] != artifact.biome[b] { 1.0 } else { 0.0 }, mean);
+    row("seam_step_ratio_biome", format!("{:.3}", biome.0));
+    row("seam_step_rank_height", format!("{:.3}", height.1));
+    row("seam_step_rank_precip", format!("{:.3}", precip_steps.1));
+    row("seam_step_rank_biome", format!("{:.3}", biome.1));
+    for (name, (ratio, rank)) in [("height", height), ("precip", precip_steps), ("biome", biome)] {
+        let ok = ratio <= SEAM_RATIO_OK || rank >= SEAM_RANK_OK;
+        row(&format!("seam_ok_{name}"), (if ok { "yes" } else { "no" }).to_string());
+    }
     rows
 }
 

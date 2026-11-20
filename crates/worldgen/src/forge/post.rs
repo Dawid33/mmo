@@ -122,9 +122,9 @@ pub fn carve_lake_basins(w: &mut World, rain: &[f64], seed: u64, k: &Knobs) -> u
 
     let (nx, nz) = (w.nx, w.nz);
     let mut sites: Vec<usize> = Vec::new();
+    let width = w.nx as f64 * w.dx;
     for (_, i) in candidates {
         let (x, z) = w.center(i);
-        let width = w.nx as f64 * w.dx;
         let far_enough = sites.iter().all(|&s| {
             let (sx, sz) = w.center(s);
             // The shorter way round on a wrapping world.
