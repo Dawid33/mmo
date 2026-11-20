@@ -100,6 +100,14 @@ pub const DESPAWNED_ARRIVAL_IDS_KEPT: usize = 256;
 /// LRU cap on `lod_cache`; subscribed keys are pinned past this (see
 /// `evict_lod_cache`).
 pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
+/// How far past a wrapping map's west or east edge, in map widths, a LOD key
+/// may reach (keys are in the client's unwrapped frame): a client sees at most
+/// its view distance (`MAX_VIEW_DISTANCE_M`, 16 km) past the seam, as wide as
+/// the narrowest world, plus a tile's overhang and a frame that has not
+/// re-centred yet after a crossing — two widths cover that with room. A key
+/// reaching farther is dropped (no `LodData`, as for an invalid factor) and
+/// indexes nothing.
+pub const LOD_WRAP_REACH_WIDTHS: i64 = 2;
 /// LRU cap on *pristine* `terrain_cache` entries — full-resolution snapshots
 /// generated only to feed a factor 2/4/16 LOD build for a region that has
 /// never run. Only reached with a builder that does not
@@ -1103,12 +1111,13 @@ pub struct WorldManager<S: RegionSpawner> {
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
     lod_subscribers: BTreeMap<LodKey, BTreeSet<ClientId>>,
-    /// On a wrapping map, every image `k ≠ 0` (x shifted by `k` map widths)
-    /// any requested LOD key reaches: a client sends keys in its own unwrapped
-    /// frame, so an edit of a canonical region also stales its images'
-    /// keys (`invalidate_region_lod`). Only grows (one entry per image a
-    /// client's frame ever reached, a handful).
-    lod_wrap_images: BTreeSet<i64>,
+    /// On a wrapping map, the subscribed LOD keys that reach image `k ≠ 0`
+    /// (x shifted by `k` map widths), by `k`: a client sends keys in its own
+    /// unwrapped frame, so an edit of a canonical region also stales its
+    /// images' keys (`invalidate_region_lod`). Follows `lod_subscribers` (a
+    /// key leaves with its last subscriber, an empty image with its last key);
+    /// `k` is bounded by [`LOD_WRAP_REACH_WIDTHS`].
+    lod_wrap_images: BTreeMap<i64, BTreeSet<LodKey>>,
     /// key -> RLE payload + water layer; LRU-evicted past
     /// LOD_CACHE_MAX_ENTRIES, subscribed keys pinned. `u64` is a
     /// monotonically increasing access stamp (not wall time — determinism).
@@ -1582,7 +1591,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             out,
             region_out_send,
             lod_subscribers: BTreeMap::new(),
-            lod_wrap_images: BTreeSet::new(),
+            lod_wrap_images: BTreeMap::new(),
             lod_cache: BTreeMap::new(),
             lod_cache_max: LOD_CACHE_MAX_ENTRIES,
             lod_access_counter: 0,
@@ -3796,12 +3805,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.unsubscribe_link(id, rc, now_ms);
         }
         for key in session.lod_subscribed {
-            if let Some(set) = self.lod_subscribers.get_mut(&key) {
-                set.remove(&id);
-                if set.is_empty() {
-                    self.lod_subscribers.remove(&key);
-                }
-            }
+            self.lod_drop_subscriber(id, key);
         }
     }
 
@@ -4849,20 +4853,18 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::debug!("dropping RequestLod with invalid factor {}", key.factor);
             return;
         }
+        let Some(images) = self.lod_key_images(key) else {
+            log::debug!("dropping RequestLod {key:?}: out of range");
+            return;
+        };
         let Some(session) = self.sessions.get_mut(&client) else {
             log::debug!("dropping RequestLod from sessionless client {client}");
             return;
         };
         session.lod_subscribed.insert(key);
         self.lod_subscribers.entry(key).or_default().insert(client);
-        if let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) {
-            let o = key.origin_region();
-            let image = |x: i32| (i64::from(x) - i64::from(map.origin.x)).div_euclid(i64::from(map.width));
-            for k in image(o.x)..=image(o.x + (key.region_span() - 1)) {
-                if k != 0 {
-                    self.lod_wrap_images.insert(k);
-                }
-            }
+        for k in images {
+            self.lod_wrap_images.entry(k).or_default().insert(key);
         }
         self.lod_access_counter += 1;
         let stamp = self.lod_access_counter;
@@ -4884,12 +4886,42 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(session) = self.sessions.get_mut(&client) {
             session.lod_subscribed.remove(&key);
         }
+        self.lod_drop_subscriber(client, key);
+    }
+
+    /// `client` no longer holds `key`: the key leaves `lod_subscribers` (and
+    /// `lod_wrap_images`) with its last subscriber.
+    fn lod_drop_subscriber(&mut self, client: ClientId, key: LodKey) {
         if let Some(set) = self.lod_subscribers.get_mut(&key) {
             set.remove(&client);
             if set.is_empty() {
                 self.lod_subscribers.remove(&key);
+                self.lod_wrap_images.retain(|_, keys| {
+                    keys.remove(&key);
+                    !keys.is_empty()
+                });
             }
         }
+    }
+
+    /// The images `k ≠ 0` (x shifted by `k` map widths) `key`'s regions reach on
+    /// a wrapping map; none without wrap. `None` refuses the key: its regions
+    /// do not fit `i32`, or it reaches more than [`LOD_WRAP_REACH_WIDTHS`] past
+    /// a wrapping map's west or east edge.
+    fn lod_key_images(&self, key: LodKey) -> Option<Vec<i64>> {
+        let span = key.region_span();
+        let fits = |c: i32| c.checked_mul(span).and_then(|o| o.checked_add(span - 1)).is_some();
+        if !fits(key.coords[0]) || !fits(key.coords[1]) {
+            return None;
+        }
+        let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) else { return Some(Vec::new()) };
+        let x0 = i64::from(key.coords[0]) * i64::from(span);
+        let image = |x: i64| (x - i64::from(map.origin.x)).div_euclid(i64::from(map.width));
+        let (lo, hi) = (image(x0), image(x0 + i64::from(span) - 1));
+        if lo < -LOD_WRAP_REACH_WIDTHS || hi > LOD_WRAP_REACH_WIDTHS {
+            return None;
+        }
+        Some((lo..=hi).filter(|k| *k != 0).collect())
     }
 
     /// Kick off a build for `key`. Sub-block factors: authoritative terrain if
@@ -5053,7 +5085,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn invalidate_region_lod(&mut self, rc: RegionCoords) {
         self.invalidate_lod_at(rc);
         let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) else { return };
-        let images: Vec<i64> = self.lod_wrap_images.iter().copied().collect();
+        let images: Vec<i64> = self.lod_wrap_images.keys().copied().collect();
         for k in images {
             let x = i64::from(rc.x) + k * i64::from(map.width);
             if let Ok(x) = i32::try_from(x) {
