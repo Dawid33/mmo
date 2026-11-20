@@ -12,6 +12,10 @@
 # Env: AWS_REGION (eu-central-1), WORLD_BIN_DIR (target/release), WEB_DIR
 # (target/web), SERVER_REPOSITORY / WEB_REPOSITORY (default: the registry root's
 # `repository_urls` output, read with $TOFU, default tofu).
+# The deploy orchestrator sets DIGEST_OUT=<file> to receive `name=<digest ref>`
+# lines (server and web) instead of parsing stdout. Each image is labelled with
+# mmo.content-sha256 (the staged files' hash) so `just deploy --game` can skip a
+# release whose content did not change.
 # The ECR password goes through a pipe (`--password-stdin`), never argv.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -46,6 +50,9 @@ registry="${server_repo%%/*}"
 revfile="${WORLD_REVISION_FILE:-target/world-images/revision}"
 [ -s "$revfile" ] || { echo "orion-world-push: no $revfile (run just world-images-build); refusing to push images with no known revision" >&2; exit 1; }
 rev=$(cat "$revfile")
+if [ -n "${DIGEST_OUT:-}" ]; then
+    : > "$DIGEST_OUT"
+fi
 
 stage_server=$(mktemp -d)
 stage_web=$(mktemp -d)
@@ -61,8 +68,10 @@ aws ecr get-login-password --region "$region" | docker login --username AWS --pa
 # build_push <name> <repo> <stage dir>: prints "<name>: <digest ref>".
 build_push() {
     local name="$1" repo="$2" stage="$3" image="$2:latest" digest_ref
-    echo "orion-world: building $image (revision $rev)"
-    docker build -q --label "org.opencontainers.image.revision=$rev" -t "$image" "$stage" > /dev/null
+    content=$(PYTHONPATH="$PWD/scripts" python3 -m deploy.images hash "$stage")
+    echo "orion-world: building $image (revision $rev, content $content)"
+    docker build -q --label "org.opencontainers.image.revision=$rev" \
+        --label "mmo.content-sha256=$content" -t "$image" "$stage" > /dev/null
     docker push -q "$image" > /dev/null
     # The pushed image's digest in THIS repository (RepoDigests may list others).
     digest_ref=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" |
@@ -71,7 +80,10 @@ build_push() {
         echo "orion-world-push: pushed $image but found no digest for $repo in its RepoDigests" >&2
         exit 1
     fi
-    echo "orion-world: pushed $name $digest_ref (revision $rev)"
+    if [ -n "${DIGEST_OUT:-}" ]; then
+        printf '%s=%s\n' "$name" "$digest_ref" >> "$DIGEST_OUT"
+    fi
+    echo "orion-world: pushed $name $digest_ref (revision $rev, content $content)"
 }
 
 build_push server "$server_repo" "$stage_server"

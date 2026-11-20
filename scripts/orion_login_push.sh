@@ -19,6 +19,10 @@
 # Env: KUBE_CONTEXT (orion), AWS_REGION (eu-central-1), LOGIN_BIN
 # (target/release/login), IMAGE_REPOSITORY (default: the registry root's
 # `repository_url` output, read with $TOFU, default tofu).
+# The deploy orchestrator sets PUSH_ONLY=1 (build and push, no `set image`) and
+# DIGEST_OUT=<file> (write `login=<digest ref>` there instead of parsing stdout).
+# The image is labelled with mmo.content-sha256 (the staged files' hash), which
+# lets `just deploy --game` skip a release whose content did not change.
 # The ECR password goes through a pipe (`--password-stdin`), never argv.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -50,8 +54,12 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cp "$bin" "$stage/login"
 cp deploy/images/login/Dockerfile "$stage/Dockerfile"
-echo "orion-login: building $image (revision $rev)"
-docker build -q --label "org.opencontainers.image.revision=$rev" -t "$image" "$stage" > /dev/null
+# One implementation of the content hash in scripts/deploy/images.py; the
+# orchestrator computes the same hash from the same staged files.
+content=$(PYTHONPATH="$PWD/scripts" python3 -m deploy.images hash "$stage")
+echo "orion-login: building $image (revision $rev, content $content)"
+docker build -q --label "org.opencontainers.image.revision=$rev" \
+    --label "mmo.content-sha256=$content" -t "$image" "$stage" > /dev/null
 
 aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry" > /dev/null
 docker push -q "$image" > /dev/null
@@ -63,6 +71,14 @@ if [ -z "$digest_ref" ]; then
     exit 1
 fi
 echo "orion-login: pushed $image ($digest_ref, revision $rev)"
+
+if [ -n "${DIGEST_OUT:-}" ]; then
+    printf 'login=%s\n' "$digest_ref" > "$DIGEST_OUT"
+fi
+if [ "${PUSH_ONLY:-0}" = 1 ]; then
+    echo "orion-login: pushed only; nothing rolled out"
+    exit 0
+fi
 
 if current=$(kubectl --context "$ctx" -n login get deploy/login \
         -o jsonpath='{.spec.template.spec.containers[?(@.name=="login")].image}' 2>&1); then
