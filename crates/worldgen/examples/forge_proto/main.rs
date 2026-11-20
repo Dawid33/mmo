@@ -12,6 +12,9 @@
 //!      just forge-report --size dev --seeds 4    (forge in-process, print the
 //!                                                 report's numbers, no PNGs)
 //!      just forge-proto --search 64              (rank 64 seeds at 32 m)
+//!      just forge-planet --seeds 8 --out <stem>  (the plate simulation on the
+//!                                                 planet grid: its lines and
+//!                                                 contact sheets, no forge)
 //!      just forge-proto --no-geology --no-climate   (the F0 behaviour)
 //!      just forge-ui                             (tuning page: every knob as a
 //!                                                 slider, live map preview)
@@ -38,6 +41,7 @@
 //! Not bit-reproducible across machines by design (sqrt/ln/sin used freely):
 //! the forge's output is a stored artifact, not a function both sides evaluate.
 
+mod planet_view;
 mod render;
 use worldgen::forge::render::PreviewLayer;
 mod report;
@@ -75,6 +79,13 @@ pub struct Params {
     pub seeds: usize,
     /// `--out` was given (`--report` writes a world file only then).
     pub out_given: bool,
+    /// `--planet`: run the plate simulation alone ([`planet_view::run`]).
+    pub planet: bool,
+    /// `--frames n`: with `--planet`, `n` evenly spaced frames of the first seed.
+    pub frames: usize,
+    /// `--key <name>=<value>`: `PlanetKey` fields set by name (until Task 7
+    /// makes them knobs), checked against their ranges at parse time.
+    pub planet_keys: Vec<(String, f64)>,
 }
 
 impl Deref for Params {
@@ -101,6 +112,9 @@ impl Params {
             report: false,
             seeds: 1,
             out_given: false,
+            planet: false,
+            frames: 0,
+            planet_keys: Vec::new(),
         };
         let (mut width, mut height) = (None, None);
         let mut it = std::env::args().skip(1);
@@ -114,6 +128,9 @@ impl Params {
                 "--width" => width = Some(value().parse().expect("--width <meters>")),
                 "--height" => height = Some(value().parse().expect("--height <meters>")),
                 "--report" => p.report = true,
+                "--planet" => p.planet = true,
+                "--frames" => p.frames = value().parse().expect("--frames <count>"),
+                "--key" => p.planet_keys.push(planet_view::parse_key(&value()).unwrap_or_else(|e| panic!("{e}"))),
                 "--seeds" => p.seeds = value().parse().expect("--seeds <count>"),
                 "--cell" => p.cell_m = value().parse().expect("--cell <meters>"),
                 "--iters" => p.knobs.iters = value().parse().expect("--iters <count>"),
@@ -155,7 +172,8 @@ impl Params {
                 other => panic!(
                     "unknown argument {other}; flags: --size <name> | --width <m> --height <m>, --cell --iters --seed --out --dt \
                      --uplift --k --diffusivity --no-geology --no-climate --preset <name> --set <knob>=<value> \
-                     --search <n> --serve <port> --spawn <x>,<z> --report [--seeds <n>]"
+                     --search <n> --serve <port> --spawn <x>,<z> --report [--seeds <n>] \
+                     --planet [--seeds <n>] [--frames <n>] [--key <name>=<value>]"
                 ),
             }
         }
@@ -167,6 +185,13 @@ impl Params {
 
 fn main() {
     let p = Params::parse();
+    if p.planet {
+        if let Some(dir) = p.out.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).expect("create output directory");
+        }
+        planet_view::run(&p);
+        return;
+    }
     if p.report {
         if p.out_given {
             if let Some(dir) = p.out.parent().filter(|d| !d.as_os_str().is_empty()) {

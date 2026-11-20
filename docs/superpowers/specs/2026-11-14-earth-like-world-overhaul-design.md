@@ -451,7 +451,7 @@ Large, 3 MiB at Dev), outside the tile cache's budget.
 ## Left to the builder
 
 - All internal names, module layout, and how width/height thread through each API.
-- The climate cell size (about 256 m) and planet grid size (512 × 256 to 1,024 × 512).
+- The climate cell size (about 256 m); the planet grid is 512 × 256 on every size (Phase 2, Ruling 2).
 - Every tuning constant. All thresholds from the research are starting values; where the report marks one
   recalled or inferred it must be checked against its source before it becomes a named constant (the IUCN
   typology first, for the biome rules).

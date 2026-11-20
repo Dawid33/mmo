@@ -804,6 +804,15 @@ forge-bench width="16384" height="8192" cell="32":
 forge-report *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- --report {{args}}
 
+# The plate simulation alone on the 512 × 256 planet grid (forge/plate_sim.rs; Phase 2 —
+# nothing in the forge reads it yet): per seed the `planet.` lines, then a summary; with
+# `--out <stem>` contact sheets `<stem>-planet-plates.png` and `-planet-crust-age.png`
+# (seeds in rows of 4); `--frames <n>` writes n frames of the first seed
+# (`<stem>-planet-t<My>.png`); `--key <name>=<value>` sets one plate number until the
+# plate knobs exist. e.g. `just forge-planet --seeds 8 --out target/world-forge/p2/t1`.
+forge-planet *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- --planet {{args}}
+
 # Tuning page for the world forge: every knob (crates/worldgen/src/forge/knobs.rs) as
 # a slider with a live map preview, on http://127.0.0.1:<port>/. A change
 # re-forges at a coarse preview cell size (64 m is about a second); "Save world

@@ -192,8 +192,8 @@ lengths in degrees of latitude; every size measured.
 
 ### Phase 2 — plates and aged relief
 
-- A plate simulation on the planet grid (512 × 256 to 1,024 × 512, wrapping in x), run once and resampled
-  per erosion level: rigid plates as rasters with a transform; subduction uplift by distance to the front;
+- A plate simulation on the planet grid (512 × 256 on every world size, wrapping in x), run once and resampled
+  per erosion level: rigid plates as whole-cell translations of one record per planet cell (no rotation, no resampling); subduction uplift by distance to the front;
   continental collision as a suture with an uplift pulse; rifting; new ocean crust with depth from age;
   hotspot chains. It starts from one supercontinent plus microcontinents. Per cell it records crust kind, age
   and thickness, orogeny age and kind, fold direction. Sea level is then solved for a target land fraction.

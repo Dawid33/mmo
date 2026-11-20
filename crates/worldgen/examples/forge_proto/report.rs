@@ -116,7 +116,7 @@ fn drains_to_sea(f: &Forged) -> f64 {
 }
 
 /// 99th percentile (nearest rank) of `v`; 0 when empty.
-fn p99(mut v: Vec<f64>) -> f64 {
+pub(crate) fn p99(mut v: Vec<f64>) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
@@ -746,9 +746,17 @@ pub fn run(base: &Params) {
         println!();
         all.push(rows);
     }
+    print_summary(&all, seeds);
+}
+
+/// The summary of a multi-seed run (`all`: each seed's rows): min / median /
+/// max of every numeric key (`NOT_NUMBERS` and any key with a non-numeric
+/// value: the value, or how many distinct ones), then the seam rule over the
+/// seed set. Also the `--planet` run's summary.
+pub(crate) fn print_summary(all: &[Vec<(String, String)>], seeds: usize) {
     println!("summary ({seeds} seed(s)):");
     let mut keys: Vec<&str> = Vec::new();
-    for rows in &all {
+    for rows in all {
         for (key, _) in rows {
             if !keys.contains(&key.as_str()) {
                 keys.push(key);

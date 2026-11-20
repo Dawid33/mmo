@@ -43,6 +43,8 @@ pub mod hydrology;
 pub mod knobs;
 mod par;
 pub mod periodic;
+pub mod planet;
+pub mod plate_sim;
 pub mod plates;
 pub mod play;
 pub mod post;
