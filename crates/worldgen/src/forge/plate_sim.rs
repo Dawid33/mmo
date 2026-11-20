@@ -122,6 +122,11 @@ pub const FRONT_TTL_STEPS: u8 = 8;
 /// The subduction field (front chamfer and gains) runs every this many steps
 /// (Ruling 1's budget; the first dial if the stage is too slow).
 pub const FIELD_EVERY_STEPS: u32 = 4;
+/// Ocean floor of the overriding plate takes a subduction gain only this
+/// close to the front, degrees: the belt's peak distance (`SUBDUCTION_PEAK_SHARE`
+/// of the continental reach). Earth's arc–trench gap is 1–2°; beyond this
+/// the ocean floor stays plain (controller's ruling after Task 2's review).
+pub const ARC_REACH_DEG: f64 = 4.0;
 /// An oceanic cell whose strength reaches this becomes continental: an
 /// island arc (untested design).
 pub const ARC_EMERGE_STRENGTH: f32 = 0.25;
@@ -723,8 +728,9 @@ impl PlateState {
     /// overriding plate within `SUBDUCTION_REACH_DEG` gains
     /// `(u0 / 6,000) · f(d) · speed · relief · polar_fade · (FIELD_EVERY_STEPS · PLATE_DT_MY)`,
     /// `f` rising over the first `SUBDUCTION_PEAK_SHARE` of the reach and
-    /// falling to 0 at it. Continental cells become `Andean`, oceanic `Arc`;
-    /// an arc reaching `ARC_EMERGE_STRENGTH` becomes continental crust.
+    /// falling to 0 at it. Continental cells become `Andean`; oceanic cells,
+    /// only within `ARC_REACH_DEG`, `Arc` — an arc reaching
+    /// `ARC_EMERGE_STRENGTH` becomes continental crust.
     fn subduction_field(&mut self) {
         let time = self.time_my();
         let reach = SUBDUCTION_REACH_DEG;
@@ -746,6 +752,9 @@ impl PlateState {
             }
             let m = self.mark[src[c] as usize];
             if self.plate[c] != m.over {
+                continue;
+            }
+            if self.crust[c] == CrustKind::Oceanic as u8 && d >= ARC_REACH_DEG {
                 continue;
             }
             let f = if d < peak { smoothstep(0.0, peak, d) } else { 1.0 - smoothstep(peak, reach, d) };
