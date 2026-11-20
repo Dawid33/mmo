@@ -55,12 +55,14 @@ pub mod protocol;
 mod region;
 pub mod region_runner;
 pub mod save_cut;
+pub mod season;
 mod slot_order;
 pub mod registry;
 pub mod peer;
 pub mod people;
 pub mod slime;
 pub mod slope;
+pub mod solar;
 pub mod state;
 pub mod stored_terrain;
 pub mod trees;
@@ -129,10 +131,12 @@ pub use portable::{restore_portable, ChunkTerms, PortableRegion, RegionMeta, Sto
 pub use protocol::*;
 pub use region_runner::*;
 pub use save_cut::{CutId, InFlightRow, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS};
+pub use season::*;
 pub use slot_order::*;
 pub use registry::*;
 // Not a glob: `slope::classify` would collide with `biome::classify`; call it as `slope::classify`.
 pub use slope::{display_name, slope_chisel, walk_up, Side, SlopeShape};
+pub use solar::*;
 pub use state::*;
 pub use stored_terrain::{load_stored_or_warn, NoStoredTerrain, StoredTerrain};
 pub use ui::*;
