@@ -1103,6 +1103,12 @@ pub struct WorldManager<S: RegionSpawner> {
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
     lod_subscribers: BTreeMap<LodKey, BTreeSet<ClientId>>,
+    /// On a wrapping map, every image `k ≠ 0` (x shifted by `k` map widths)
+    /// any requested LOD key reaches: a client sends keys in its own unwrapped
+    /// frame, so an edit of a canonical region also stales its images'
+    /// keys (`invalidate_region_lod`). Only grows (one entry per image a
+    /// client's frame ever reached, a handful).
+    lod_wrap_images: BTreeSet<i64>,
     /// key -> RLE payload + water layer; LRU-evicted past
     /// LOD_CACHE_MAX_ENTRIES, subscribed keys pinned. `u64` is a
     /// monotonically increasing access stamp (not wall time — determinism).
@@ -1576,6 +1582,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             out,
             region_out_send,
             lod_subscribers: BTreeMap::new(),
+            lod_wrap_images: BTreeSet::new(),
             lod_cache: BTreeMap::new(),
             lod_cache_max: LOD_CACHE_MAX_ENTRIES,
             lod_access_counter: 0,
@@ -4848,6 +4855,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         session.lod_subscribed.insert(key);
         self.lod_subscribers.entry(key).or_default().insert(client);
+        if let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) {
+            let o = key.origin_region();
+            let image = |x: i32| (i64::from(x) - i64::from(map.origin.x)).div_euclid(i64::from(map.width));
+            for k in image(o.x)..=image(o.x + (key.region_span() - 1)) {
+                if k != 0 {
+                    self.lod_wrap_images.insert(k);
+                }
+            }
+        }
         self.lod_access_counter += 1;
         let stamp = self.lod_access_counter;
         if let Some((payload, water, access)) = self.lod_cache.get_mut(&key) {
@@ -4880,11 +4896,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the region has state (running-and-seeded or parked-with-cache), request
     /// terrain if running-but-unseeded, generate otherwise. Block-scale and
     /// coarser factors coarse-sample instead (`start_tile_build`). `client` is
-    /// the requester used for terrain round-trips.
+    /// the requester used for terrain round-trips. `key` may lie past a
+    /// wrapping map's seam (the client's frame): its terrain is that of the
+    /// canonical region(s), answered under `key` itself.
     fn start_lod_build(&mut self, key: LodKey, client: ClientId) {
         if key.factor < crate::lod::COARSE_MIN_FACTOR {
             debug_assert_eq!(key.region_span(), 1, "sub-block factors key per region");
-            let rc = key.origin_region();
+            let rc = self.canonical(key.origin_region());
             let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
             if let Some(snap) = self.terrain_cache.get(&rc) {
                 if let Some(stamp) = self.pristine_terrain.get_mut(&rc) {
@@ -4940,11 +4958,16 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `TerrainChanged` (invalidation + rebuild), matching the spec's
     /// freshness decision.
     fn start_tile_build(&mut self, key: LodKey, client: ClientId) {
+        // `(canonical, unwrapped)`: terrain from the first, placed in the
+        // tile at the second (the key's own region, maybe past the seam).
+        let map = self.map_extent();
+        let regions: Vec<(RegionCoords, RegionCoords)> =
+            key.regions().into_iter().map(|at| (crate::canonical(map, at), at)).collect();
         let mut waiting = BTreeSet::new();
-        for rc in key.regions() {
+        for &(rc, _) in &regions {
             let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
-            if running && !self.terrain_cache.contains_key(&rc) {
-                waiting.insert(rc);
+            // A key wider than the map holds a region twice: asked once.
+            if running && !self.terrain_cache.contains_key(&rc) && waiting.insert(rc) {
                 self.lod_pending_terrain.entry(rc).or_default().insert(key);
                 self.send_to_region(rc, RegionInput::RequestTerrain(client));
             }
@@ -4953,17 +4976,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.lod_tile_waiting.insert(key, waiting);
             return;
         }
-        let overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)> = key
-            .regions()
-            .into_iter()
-            .filter_map(|rc| self.terrain_cache.get(&rc).map(|snap| (rc, snap.chunks.clone())))
+        let overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)> = regions
+            .iter()
+            .filter_map(|(rc, at)| self.terrain_cache.get(rc).map(|snap| (*at, snap.chunks.clone())))
             .collect();
         // Saved regions with no terrain here: the builder overlays them from
         // the store (none of them is running — those were waited for above).
-        let stored: Vec<RegionCoords> = key
-            .regions()
+        let stored: Vec<(RegionCoords, RegionCoords)> = regions
             .into_iter()
-            .filter(|rc| !self.terrain_cache.contains_key(rc) && self.lod_reads_stored(*rc))
+            .filter(|(rc, _)| !self.terrain_cache.contains_key(rc) && self.lod_reads_stored(*rc))
             .collect();
         self.mark_lod_in_flight(key);
         self.lod_builder.submit(LodBuildJob::Tile { key, overlays, stored });
@@ -5027,9 +5048,25 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A region's terrain changed (cadence push) or it parked: every LOD key
     /// depending on it is stale. Drop them from the cache; rebuild the ones
     /// with live subscribers (the fresh terrain_cache entry is the new source).
+    /// `rc` is canonical; on a wrapping map the keys of its images that
+    /// clients requested ([`Self::lod_wrap_images`]) are stale too.
     fn invalidate_region_lod(&mut self, rc: RegionCoords) {
+        self.invalidate_lod_at(rc);
+        let Some(map) = self.map_extent().filter(crate::MapExtent::wraps) else { return };
+        let images: Vec<i64> = self.lod_wrap_images.iter().copied().collect();
+        for k in images {
+            let x = i64::from(rc.x) + k * i64::from(map.width);
+            if let Ok(x) = i32::try_from(x) {
+                self.invalidate_lod_at(RegionCoords::new(x, rc.z));
+            }
+        }
+    }
+
+    /// [`Self::invalidate_region_lod`] of the keys over the (maybe unwrapped)
+    /// region `at`, one per factor.
+    fn invalidate_lod_at(&mut self, at: RegionCoords) {
         for factor in crate::lod::LOD_FACTORS {
-            let key = LodKey::for_region(factor, rc);
+            let key = LodKey::for_region(factor, at);
             self.lod_cache.remove(&key);
             let has_subs = self.lod_subscribers.get(&key).is_some_and(|s| !s.is_empty());
             if has_subs && !self.lod_in_flight.contains(&key) {

@@ -55,12 +55,16 @@ pub enum LodBuildJob {
     /// here, which is what keeps the wide outer rings affordable.
     Tile {
         key: LodKey,
+        /// Each overlaid region at its place in the key (unwrapped, as
+        /// `stored`'s second), with its terrain.
         overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)>,
         /// Regions of the key the builder overlays from the world store
-        /// (what `Stored` is for sub-block factors); one it cannot read
-        /// stays coarse (pristine). Only non-empty for builders that
-        /// [`reads_stored`](LodBuilder::reads_stored).
-        stored: Vec<RegionCoords>,
+        /// (what `Stored` is for sub-block factors), as `(canonical,
+        /// unwrapped)`: read by the first, overlaid at the second (the key's
+        /// own region, past a wrapping map's seam in the client's frame); one
+        /// it cannot read stays coarse (pristine). Only non-empty for
+        /// builders that [`reads_stored`](LodBuilder::reads_stored).
+        stored: Vec<(RegionCoords, RegionCoords)>,
     },
 }
 
@@ -125,10 +129,10 @@ fn build_terrain(
             None => LodBuildJob::Pristine { key, region },
         },
         LodBuildJob::Tile { key, mut overlays, stored: regions } => {
-            for rc in regions {
+            for (canonical, at) in regions {
                 // Not read: the coarse (pristine) terrain stays.
-                if let Some(snap) = load_stored_or_warn(stored, rc, "LOD tile build") {
-                    overlays.push((rc, snap.chunks));
+                if let Some(snap) = load_stored_or_warn(stored, canonical, "LOD tile build") {
+                    overlays.push((at, snap.chunks));
                 }
             }
             LodBuildJob::Tile { key, overlays, stored: Vec::new() }

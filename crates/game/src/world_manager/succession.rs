@@ -337,7 +337,7 @@ macro_rules! host_fields {
             claim_reported, player_hop, hop_renumbers, outbox, world_request_timeout_ms, world_counters,
             site_regions, society_grid, world_ms, world_notices, adventurer_of, player_of,
             parking, moving, parked_players, awaiting_park, deferred_packets, clock_ms, unavailable, ownership,
-            creating, out, region_out_send, lod_subscribers, lod_cache, lod_cache_max, lod_access_counter,
+            creating, out, region_out_send, lod_subscribers, lod_wrap_images, lod_cache, lod_cache_max, lod_access_counter,
             lod_in_flight, lod_submitted_at, perf, lod_pending_terrain, lod_tile_waiting, lod_builder,
             lod_results, directive_stamps, in_flight, pending_cut, ready_cut, outstanding_cuts, uncommitted,
             uncommitted_seq, cut_lead, next_cut_id, cut_order, silent_stopping, last_cut_caught,
