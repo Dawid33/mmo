@@ -31,6 +31,12 @@ pub const FULL_MAP_ZOOM_STEP: f32 = 1.25;
 pub const FULL_MAP_MIN_M_PER_PX: f32 = 0.25;
 /// A site marker's edge (view logical px).
 pub const SITE_MARKER_PX: f32 = 8.0;
+/// A click this close to a site marker (view logical px) picks that site.
+pub const SITE_PICK_PX: f32 = 10.0;
+/// Picking a site eases the view onto it over this long…
+pub const SITE_EASE_S: f32 = 0.4;
+/// …at this zoom, where a town reads (metres per window pixel).
+pub const SITE_EASE_M_PER_PX: f32 = 1.5;
 
 /// The layer button captions: the block surface first, then the world map's layers.
 pub fn layer_names() -> Vec<SharedString> {
@@ -98,6 +104,10 @@ struct Pushed {
     /// The selection as this view last saw it: a change made elsewhere (the arrival list) is brought
     /// into view.
     selection: (i32, i32),
+    /// The picked site as last seen: a new pick eases the view onto it.
+    picked: Option<game::history::SiteId>,
+    /// An ease under way: from (centre, m/px) to (centre, m/px), started at (secs).
+    ease: Option<(DVec2, f32, DVec2, f32, f32)>,
 }
 
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
@@ -115,6 +125,7 @@ fn drive_full_map(
     body: Query<&GlobalTransform, With<LocalBody>>,
     cam: Option<Res<crate::renderer::commander::CommanderCamera>>,
     mut pushed: SessionLocal<Pushed>,
+    time: Res<Time>,
 ) {
     let (Some(slint), Some(inputs)) = (slint, inputs) else { return };
     let Ok(mut view) = views.single_mut() else {
@@ -163,7 +174,18 @@ fn drive_full_map(
             Input::Click(x, y) => {
                 let Some(map) = state.map.as_ref() else { continue };
                 let b = view.screen_to_world(to_px(x, y));
-                let rc = region_of_block(b);
+                // A click on (or near) a site marker is that site's region: in the Adventure tab
+                // selecting it picks the site (`UiAction::SelectTile`).
+                let near = history
+                    .sites
+                    .iter()
+                    .filter_map(|site| {
+                        let at = site_at(map, site.region, view.centre)?;
+                        let d = (view.world_to_screen(at) / scale - origin).distance(Vec2::new(x, y));
+                        (d <= SITE_PICK_PX).then_some((d, site.region))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                let rc = near.map_or_else(|| region_of_block(b), |(_, rc)| rc);
                 if let Some((col, row)) = map_tile(map, rc) {
                     ui.set_selected_col(col);
                     ui.set_selected_row(row);
@@ -179,8 +201,34 @@ fn drive_full_map(
         return;
     }
     let Some(map) = state.map.as_ref() else { return };
-    // A selection made elsewhere (the arrival panel's list): centre on it.
+    // A newly picked site (from the list or the map): ease onto its landing at a readable zoom.
+    let now = time.elapsed_secs();
+    let picked = history.adventure.site;
+    let mut eased = false;
+    if picked != pushed.picked {
+        pushed.picked = picked;
+        let site = picked.and_then(|id| history.sites.iter().find(|s| s.site == id));
+        if let Some(at) = site.and_then(|s| site_at(map, s.region, view.centre)) {
+            let m = SITE_EASE_M_PER_PX.clamp(FULL_MAP_MIN_M_PER_PX, max_m);
+            pushed.ease = Some((view.centre, view.m_per_px, at, m, now));
+            eased = true;
+        }
+    }
+    if let Some((c0, m0, c1, m1, t0)) = pushed.ease {
+        let t = ((now - t0) / SITE_EASE_S).clamp(0.0, 1.0);
+        let k = t * t * (3.0 - 2.0 * t);
+        view.centre = c0 + (c1 - c0) * k as f64;
+        // Zoom eases in log space, so the scale changes evenly.
+        view.m_per_px = (m0.ln() + (m1.ln() - m0.ln()) * k).exp();
+        if t >= 1.0 {
+            pushed.ease = None;
+        }
+    }
+    // A selection made elsewhere (the arrival panel's list): centre on it (unless a pick eases there).
     let selection = (ui.get_selected_col(), ui.get_selected_row());
+    if selection != pushed.selection && (eased || pushed.ease.is_some()) {
+        pushed.selection = selection;
+    }
     if selection != pushed.selection {
         pushed.selection = selection;
         if let Some(rc) = tile_region(map, selection.0, selection.1) {
@@ -250,10 +298,8 @@ fn drive_full_map(
         marks.extend(frame(hover.0, hover.1, config.get_hover_color(), 1.0, 0.0));
     }
     for site in &history.sites {
-        let Some(rc) = map.tile(site.region).map(|_| site.region) else { continue };
-        let rc = nearest_copy(map, map.extent().canonical(rc), view.centre);
-        let rb = REGION_BLOCKS as f64;
-        let c = view.world_to_screen(DVec2::new((rc.x as f64 + 0.5) * rb, (rc.z as f64 + 0.5) * rb)) / scale - origin;
+        let Some(at) = site_at(map, site.region, view.centre) else { continue };
+        let c = view.world_to_screen(at) / scale - origin;
         let half = SITE_MARKER_PX / 2.0;
         let color = site_color(site.civ);
         marks.push(MapMarker {
@@ -276,6 +322,16 @@ fn drive_full_map(
 
 fn top_level_of(map: &WorldMap) -> u8 {
     game::map_tile::top_level(map)
+}
+
+/// Where a site's marker stands (world blocks, the copy nearest `centre`): its region's landing column
+/// (`TileSummary::landing`, the block centre), else the region's centre; `None` off the map.
+pub fn site_at(map: &WorldMap, region: RegionCoords, centre: DVec2) -> Option<DVec2> {
+    let tile = map.tile(region)?;
+    let rc = nearest_copy(map, map.extent().canonical(region), centre);
+    let rb = REGION_BLOCKS as f64;
+    let (lx, lz) = tile.landing.map_or((rb / 2.0, rb / 2.0), |[x, z]| (x as f64 + 0.5, z as f64 + 0.5));
+    Some(DVec2::new(rc.x as f64 * rb + lx, rc.z as f64 * rb + lz))
 }
 
 /// The region holding block `b` (unwrapped).
