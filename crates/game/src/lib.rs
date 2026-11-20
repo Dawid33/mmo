@@ -21,6 +21,7 @@ pub mod block_props;
 pub mod body;
 pub mod buoyancy;
 pub mod camera;
+pub mod climate_wire;
 pub mod containers;
 pub mod coordinator;
 pub mod creature_shapes;

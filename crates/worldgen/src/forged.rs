@@ -45,7 +45,7 @@ pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
 /// the Planet is the only world (`forge::world::PLANET_EDGES`); a world of a
 /// deleted layout is refused (`validate_wrap`). v10: `climate`, the
 /// monthly-normals family (`game::MonthlyClimate`, row-delta encoded per
-/// plane: `climate_to_wire`).
+/// plane: `game::MonthlyClimate::delta_encode`).
 pub const ARTIFACT_VERSION: u32 = 10;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
@@ -465,7 +465,7 @@ impl WorldArtifact {
             delta_rows_u8(raster, n);
         }
         delta_rows(&mut wire.region, n);
-        climate_to_wire(&mut wire.climate);
+        wire.climate.delta_encode();
         let body = bincode::serialize(&wire).expect("artifact serializes");
         let mut out = MAGIC.to_vec();
         out.extend_from_slice(&self.version.to_le_bytes());
@@ -504,7 +504,7 @@ impl WorldArtifact {
             undelta_rows_u8(raster, n);
         }
         undelta_rows(&mut artifact.region, n);
-        climate_from_wire(&mut artifact.climate);
+        artifact.climate.delta_decode();
         artifact.validate_regions()?;
         Ok(artifact)
     }
@@ -627,62 +627,13 @@ pub(crate) fn validate_climate(
     Ok(())
 }
 
-/// Row-delta encodes a plane in rows of `n` (`delta_rows`' rule, wrapping
-/// `sub`). A month plane is `n · nz` values, so rows never straddle two
-/// months: every month is encoded on its own. Walks `chunks_mut`, so a plane
-/// of any length is safe (a wrong one is refused by its size check).
-#[cfg(not(target_arch = "wasm32"))]
-fn delta_plane<T: Copy>(plane: &mut [T], n: usize, sub: fn(T, T) -> T) {
-    for row in plane.chunks_mut(n.max(1)) {
-        for i in (1..row.len()).rev() {
-            row[i] = sub(row[i], row[i - 1]);
-        }
-    }
-}
-
-/// Inverse of [`delta_plane`] (`add` the wrapping inverse of its `sub`).
-#[cfg(not(target_arch = "wasm32"))]
-fn undelta_plane<T: Copy>(plane: &mut [T], n: usize, add: fn(T, T) -> T) {
-    for row in plane.chunks_mut(n.max(1)) {
-        for i in 1..row.len() {
-            row[i] = add(row[i], row[i - 1]);
-        }
-    }
-}
-
-/// The monthly climate's wire form (the world file and the tiled meta):
-/// every month plane of the six fields row-delta encoded in rows of the
-/// CLIMATE grid's `nx`; bincode and zstd follow with the rest of the struct.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn climate_to_wire(c: &mut game::MonthlyClimate) {
-    let n = c.nx as usize;
-    delta_plane(&mut c.temp_sea_centi_c, n, i16::wrapping_sub);
-    delta_plane(&mut c.diurnal_deci_c, n, u8::wrapping_sub);
-    delta_plane(&mut c.precip_deci_mm, n, u16::wrapping_sub);
-    delta_plane(&mut c.wet_day_255, n, u8::wrapping_sub);
-    delta_plane(&mut c.wind_east_q, n, i8::wrapping_sub);
-    delta_plane(&mut c.wind_south_q, n, i8::wrapping_sub);
-}
-
-/// Inverse of [`climate_to_wire`].
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn climate_from_wire(c: &mut game::MonthlyClimate) {
-    let n = c.nx as usize;
-    undelta_plane(&mut c.temp_sea_centi_c, n, i16::wrapping_add);
-    undelta_plane(&mut c.diurnal_deci_c, n, u8::wrapping_add);
-    undelta_plane(&mut c.precip_deci_mm, n, u16::wrapping_add);
-    undelta_plane(&mut c.wet_day_255, n, u8::wrapping_add);
-    undelta_plane(&mut c.wind_east_q, n, i8::wrapping_add);
-    undelta_plane(&mut c.wind_south_q, n, i8::wrapping_add);
-}
-
 /// Bytes the monthly climate alone takes packed as the world file packs it
-/// (`climate_to_wire`, bincode, zstd at the file's level): the forge
+/// (`MonthlyClimate::delta_encode`, bincode, zstd at the file's level): the forge
 /// report's `climate_bytes_packed`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn climate_packed_len(c: &game::MonthlyClimate) -> usize {
     let mut wire = c.clone();
-    climate_to_wire(&mut wire);
+    wire.delta_encode();
     let body = bincode::serialize(&wire).expect("monthly climate serializes");
     zstd::bulk::compress(&body, ZSTD_LEVEL).expect("zstd compresses").len()
 }

@@ -410,7 +410,7 @@ fn unwrap(magic: &[u8; 4], what: &str, bytes: &[u8]) -> Result<Vec<u8>, Artifact
 #[cfg(not(target_arch = "wasm32"))]
 pub fn encode_meta(meta: &ForgedMeta) -> Vec<u8> {
     let mut wire = meta.clone();
-    crate::forged::climate_to_wire(&mut wire.climate);
+    wire.climate.delta_encode();
     wrap(META_MAGIC, &bincode::serialize(&wire).expect("meta serializes"))
 }
 
@@ -423,7 +423,7 @@ pub fn decode_meta(bytes: &[u8]) -> Result<ForgedMeta, ArtifactError> {
     // the meta is checked by `ForgedMeta::validate` when a world is made).
     let g = &meta.globals;
     crate::forged::validate_climate(&meta.climate, g.width_m, g.height_m, &g.edges)?;
-    crate::forged::climate_from_wire(&mut meta.climate);
+    meta.climate.delta_decode();
     Ok(meta)
 }
 
