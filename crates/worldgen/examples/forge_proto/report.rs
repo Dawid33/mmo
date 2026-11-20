@@ -147,13 +147,18 @@ fn mean(v: Vec<f64>) -> f64 {
 const SEAM_RATIO_OK: f64 = 1.5;
 /// …or the seam is not among the roughest this share of column pairs.
 const SEAM_RANK_OK: f64 = 0.05;
-/// A field passes over a seed set when at most this many seeds fail
-/// (`seam_ok_*: no`; an ordinary column pair fails about 5% of the time, so
-/// 3 or more of 8 has a chance of about 0.5%)…
-const SEAM_PASS_MAX_NOT_OK: usize = 2;
+/// A field passes over a set of `n` seeds (`n` at least
+/// `SEAM_PASS_MIN_SEEDS`) when at most `n / SEAM_PASS_SEEDS_PER_NOT_OK` seeds
+/// (integer division) fail (`seam_ok_*: no`; an ordinary column pair fails
+/// about 5% of the time, so at the ruled 8 seeds — 2 allowed — 3 or more has
+/// a chance of about 0.5%)…
+const SEAM_PASS_SEEDS_PER_NOT_OK: usize = 4;
 /// …and the median rank is at least this (an ordinary seam's ranks are
-/// uniform on 0–1).
+/// uniform on 0–1). One seed is judged by its own rule (`seam_ok_*`); 2 or 3
+/// seeds get no verdict over the set (`seam_pass_*: n/a`), only theirs.
 const SEAM_PASS_MEDIAN_RANK: f64 = 0.25;
+/// Fewest seeds (above one) the rule over the set is given for.
+const SEAM_PASS_MIN_SEEDS: usize = 4;
 
 /// Rows of the map `aliased_regions_identical` compares.
 const ALIAS_ROWS: i32 = 4;
@@ -435,9 +440,10 @@ pub fn run(base: &Params) {
             }
         }
     }
-    // The seam rule over the seed set, per field: at most
-    // `SEAM_PASS_MAX_NOT_OK` seeds fail and the median rank is at least
-    // `SEAM_PASS_MEDIAN_RANK` (one seed: that seed's own rule).
+    // The seam rule over the seed set, per field: at most a quarter of the
+    // seeds (`SEAM_PASS_SEEDS_PER_NOT_OK`) fail and the median rank is at
+    // least `SEAM_PASS_MEDIAN_RANK` (one seed: that seed's own rule; 2 or 3
+    // seeds: no verdict over the set).
     let values = |key: &str| -> Vec<String> {
         all.iter().flat_map(|rows| rows.iter().filter(|(k, _)| k == key).map(|(_, v)| v.clone())).collect()
     };
@@ -451,8 +457,16 @@ pub fn run(base: &Params) {
         ranks.sort_by(f64::total_cmp);
         let n = ranks.len();
         let median = if n == 0 { 0.0 } else if n % 2 == 1 { ranks[n / 2] } else { (ranks[n / 2 - 1] + ranks[n / 2]) / 2.0 };
-        let pass = if seeds == 1 { not_ok == 0 } else { not_ok <= SEAM_PASS_MAX_NOT_OK && median >= SEAM_PASS_MEDIAN_RANK };
         println!("seam_seeds_not_ok_{field}: {not_ok}");
+        if seeds > 1 && seeds < SEAM_PASS_MIN_SEEDS {
+            println!("seam_pass_{field}: n/a (needs ≥ {SEAM_PASS_MIN_SEEDS} seeds)");
+            continue;
+        }
+        let pass = if seeds == 1 {
+            not_ok == 0
+        } else {
+            not_ok <= seeds / SEAM_PASS_SEEDS_PER_NOT_OK && median >= SEAM_PASS_MEDIAN_RANK
+        };
         println!("seam_pass_{field}: {}", if pass { "yes" } else { "no" });
     }
 }
