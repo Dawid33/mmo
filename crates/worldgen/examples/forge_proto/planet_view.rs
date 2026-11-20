@@ -2,15 +2,18 @@
 //! the plate simulation (`worldgen::forge::plate_sim`) on its own, on the
 //! planet grid — the `planet.` lines per seed, the summary, and contact
 //! sheets: `<stem>-planet-plates.png` (one colour per plate id, continental
-//! cells brighter) and `<stem>-planet-crust-age.png` (ocean floor on a ramp
-//! over 0 … 500 My, continental grey), the seeds side by side in rows of 4,
-//! each 512 × 256. `--frames n` writes `n` evenly spaced `plates` frames of
+//! cells brighter), `<stem>-planet-crust-age.png` (ocean floor on a ramp
+//! over 0 … 500 My, continental grey), `<stem>-planet-orogeny-kind.png` (a
+//! colour per orogeny kind on grey continental / dark oceanic crust),
+//! `<stem>-planet-orogeny-age.png` (the age ramp where a kind is set) and
+//! `<stem>-planet-strength.png`, the seeds side by side in rows of 4, each
+//! 512 × 256. `--frames n` writes `n` evenly spaced `plates` frames of
 //! the FIRST seed, `<stem>-planet-t<My>.png`.
-//! Plan: docs/superpowers/plans/2026-11-20-plates-and-aged-relief-2.md (Task 1).
+//! Plan: docs/superpowers/plans/2026-11-20-plates-and-aged-relief-2.md (Tasks 1, 2).
 
 use std::time::Instant;
 
-use worldgen::forge::planet::{CrustKind, PlanetKey, PLANET_CELLS, PLANET_NX, PLANET_NZ};
+use worldgen::forge::planet::{CrustKind, OrogenyKind, PlanetKey, PLANET_CELLS, PLANET_NX, PLANET_NZ};
 use worldgen::forge::plate_sim::{simulate, PlateState, NO_PLATE, PLATE_DT_MY};
 use worldgen::forge::render::{encode_png, Rgba};
 use worldgen::forge::ForgeParams;
@@ -91,6 +94,9 @@ pub fn run(base: &Params) {
     if base.out_given {
         write_png(&sheet(&finals, plate_colour), &format!("{stem}-planet-plates.png"));
         write_png(&sheet(&finals, age_colour), &format!("{stem}-planet-crust-age.png"));
+        write_png(&sheet(&finals, kind_colour), &format!("{stem}-planet-orogeny-kind.png"));
+        write_png(&sheet(&finals, orogeny_age_colour), &format!("{stem}-planet-orogeny-age.png"));
+        write_png(&sheet(&finals, strength_colour), &format!("{stem}-planet-strength.png"));
     }
     crate::report::print_summary(&all, seeds);
 }
@@ -111,7 +117,7 @@ fn lines(start: &PlateState, end: &PlateState, stage_ms: f64) -> Vec<(String, St
         .map(|c| t_end - f64::from(end.born_my[c]))
         .collect();
     let share = |n: usize| n as f64 / PLANET_CELLS as f64;
-    vec![
+    let mut rows: Vec<(String, String)> = vec![
         ("planet.steps".into(), end.step.to_string()),
         ("planet.plates_final".into(), plates.to_string()),
         ("planet.continental_share_start".into(), format!("{:.4}", share(cont0))),
@@ -124,7 +130,48 @@ fn lines(start: &PlateState, end: &PlateState, stage_ms: f64) -> Vec<(String, St
         ),
         ("planet.stage_ms".into(), format!("{stage_ms:.0}")),
         ("planet.state_crc".into(), state_crc(end)),
-    ]
+    ];
+    // Task 2: orogeny.
+    let active: Vec<usize> = (0..PLANET_CELLS).filter(|&c| end.kind[c] != OrogenyKind::None as u8).collect();
+    let strength: Vec<f64> = active.iter().map(|&c| f64::from(end.strength[c])).collect();
+    let orogeny_age: Vec<f64> = active.iter().map(|&c| t_end - f64::from(end.orogeny_my[c])).collect();
+    rows.push(("planet.sutures".into(), end.counters.sutures.to_string()));
+    rows.push((
+        "planet.collided_share".into(),
+        format!("{:.4}", end.counters.collided as f64 / cont0.max(1) as f64),
+    ));
+    for (name, kind) in KINDS {
+        let n = (0..PLANET_CELLS)
+            .filter(|&c| end.crust[c] == CrustKind::Continental as u8 && end.kind[c] == kind as u8)
+            .count();
+        rows.push((format!("planet.kind_share.{name}"), format!("{:.4}", n as f64 / cont1.max(1) as f64)));
+    }
+    rows.push(("planet.strength_p50".into(), format!("{:.3}", percentile(&strength, 0.5))));
+    rows.push(("planet.strength_p90".into(), format!("{:.3}", percentile(&strength, 0.9))));
+    for (q, name) in [(0.1, "p10"), (0.5, "p50"), (0.9, "p90")] {
+        rows.push((format!("planet.orogeny_age_{name}_my"), format!("{:.1}", percentile(&orogeny_age, q))));
+    }
+    rows
+}
+
+/// The six orogeny kinds a cell can carry, with their line names.
+const KINDS: [(&str, OrogenyKind); 6] = [
+    ("arc", OrogenyKind::Arc),
+    ("andean", OrogenyKind::Andean),
+    ("collision", OrogenyKind::Collision),
+    ("plateau", OrogenyKind::Plateau),
+    ("rift_shoulder", OrogenyKind::RiftShoulder),
+    ("hotspot", OrogenyKind::Hotspot),
+];
+
+/// The `q` quantile (nearest rank, as `report::p99`) of `v`; 0 when empty.
+fn percentile(v: &[f64], q: f64) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mut v = v.to_vec();
+    v.sort_by(f64::total_cmp);
+    v[((v.len() - 1) as f64 * q).round() as usize]
 }
 
 /// crc32 of every per-cell field of the final state that persists across
@@ -173,10 +220,59 @@ fn age_colour(s: &PlateState, c: usize) -> [u8; 3] {
     if s.crust[c] == CrustKind::Continental as u8 {
         return [150, 150, 150];
     }
-    let t = ((s.time_my() - f64::from(s.born_my[c])) / AGE_RAMP_MY).clamp(0.0, 1.0);
+    age_ramp(s.time_my() - f64::from(s.born_my[c]))
+}
+
+/// Young red → yellow → old deep blue over 0 … `AGE_RAMP_MY`.
+fn age_ramp(age_my: f64) -> [u8; 3] {
+    let t = (age_my / AGE_RAMP_MY).clamp(0.0, 1.0);
     const STOPS: [[f64; 3]; 3] = [[230.0, 50.0, 30.0], [240.0, 220.0, 80.0], [20.0, 30.0, 110.0]];
     let (a, b, u) = if t < 0.5 { (STOPS[0], STOPS[1], 2.0 * t) } else { (STOPS[1], STOPS[2], 2.0 * t - 1.0) };
     [0, 1, 2].map(|j| (a[j] + (b[j] - a[j]) * u).round() as u8)
+}
+
+/// The ground of the orogeny layers: continental grey, oceanic dark.
+fn crust_ground(s: &PlateState, c: usize) -> [u8; 3] {
+    if s.crust[c] == CrustKind::Continental as u8 { [120, 120, 120] } else { [25, 30, 45] }
+}
+
+/// A colour per orogeny kind (Arc cyan, Andean orange, Collision red,
+/// Plateau magenta, RiftShoulder green, Hotspot yellow) on `crust_ground`.
+fn kind_colour(s: &PlateState, c: usize) -> [u8; 3] {
+    const COLOURS: [[u8; 3]; 7] = [
+        [0, 0, 0],
+        [60, 200, 230],
+        [245, 150, 30],
+        [220, 40, 40],
+        [200, 60, 220],
+        [80, 200, 80],
+        [250, 230, 60],
+    ];
+    match s.kind[c] {
+        0 => crust_ground(s, c),
+        k => COLOURS[k as usize],
+    }
+}
+
+/// The age ramp of the last orogeny where a kind is set, else `crust_ground`.
+fn orogeny_age_colour(s: &PlateState, c: usize) -> [u8; 3] {
+    if s.kind[c] == OrogenyKind::None as u8 {
+        return crust_ground(s, c);
+    }
+    age_ramp(s.time_my() - f64::from(s.orogeny_my[c]))
+}
+
+/// `strength` from black (0) through red and yellow to white (1); a cell
+/// with no orogeny shows `crust_ground`.
+fn strength_colour(s: &PlateState, c: usize) -> [u8; 3] {
+    if s.kind[c] == OrogenyKind::None as u8 {
+        return crust_ground(s, c);
+    }
+    let t = f64::from(s.strength[c]).clamp(0.0, 1.0);
+    const STOPS: [[f64; 3]; 4] = [[0.0, 0.0, 0.0], [200.0, 30.0, 20.0], [250.0, 210.0, 40.0], [255.0, 255.0, 255.0]];
+    let i = ((t * 3.0) as usize).min(2);
+    let u = t * 3.0 - i as f64;
+    [0, 1, 2].map(|j| (STOPS[i][j] + (STOPS[i + 1][j] - STOPS[i][j]) * u).round() as u8)
 }
 
 fn hsv(h: f64, s: f64, v: f64) -> [u8; 3] {

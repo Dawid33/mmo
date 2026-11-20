@@ -806,7 +806,8 @@ forge-report *args:
 
 # The plate simulation alone on the 512 × 256 planet grid (forge/plate_sim.rs; Phase 2 —
 # nothing in the forge reads it yet): per seed the `planet.` lines, then a summary; with
-# `--out <stem>` contact sheets `<stem>-planet-plates.png` and `-planet-crust-age.png`
+# `--out <stem>` contact sheets `<stem>-planet-plates.png`, `-planet-crust-age.png`,
+# `-planet-orogeny-kind.png`, `-planet-orogeny-age.png` and `-planet-strength.png`
 # (seeds in rows of 4); `--frames <n>` writes n frames of the first seed
 # (`<stem>-planet-t<My>.png`); `--key <name>=<value>` sets one plate number until the
 # plate knobs exist. e.g. `just forge-planet --seeds 8 --out target/world-forge/p2/t1`.

@@ -23,9 +23,10 @@
 
 use crate::forge::periodic::PeriodicX;
 use crate::forge::planet::{
-    planet_deg, planet_step, CrustKind, OrogenyKind, PlanetKey, PlanetNoise, PLANET_CELLS, PLANET_NX, PLANET_NZ,
+    planet_deg, planet_lat_deg, planet_step, CrustKind, OrogenyKind, PlanetKey, PlanetNoise, PLANET_CELLS,
+    PLANET_DEG_PER_CELL, PLANET_NX, PLANET_NZ,
 };
-use crate::forge::world::hash01;
+use crate::forge::world::{hash01, smoothstep};
 
 /// Model time per step, My (Ruling 1).
 pub const PLATE_DT_MY: f64 = 1.5;
@@ -87,6 +88,61 @@ const SLOW_PLATE_CONT_SHARE: f64 = 0.30;
 const SLOW_SPEED: [f64; 2] = [0.15, 0.30];
 const FAST_SPEED: [f64; 2] = [0.40, 0.60];
 
+/// Oceanic elevation, m: `OCEAN_ABYSS_M + (OCEAN_RIDGE_M − OCEAN_ABYSS_M) ·
+/// exp(−crust_age / OCEAN_SUBSIDE_MY)` — Cortial's ridge `zr` and abyss `za`;
+/// the e-folding is a shape only (untested design).
+pub const OCEAN_RIDGE_M: f64 = -1_000.0;
+pub const OCEAN_ABYSS_M: f64 = -6_000.0;
+pub const OCEAN_SUBSIDE_MY: f64 = 40.0;
+/// A full-strength orogen's height above its crust, m, by `OrogenyKind`
+/// (None, Arc, Andean, Collision, Plateau, RiftShoulder, Hotspot; the plan's
+/// vocabulary, untested design).
+pub const OROGEN_HEIGHT_M: [f64; 7] = [0.0, 3_000.0, 6_000.0, 6_000.0, 6_000.0, 800.0, 7_000.0];
+/// A hotspot mark's sinking e-folding, My (untested design; Task 3 makes hotspots).
+pub const HOTSPOT_SUBSIDE_MY: f64 = 25.0;
+/// `root_keep(age) = ROOT_RESIDUAL + (1 − ROOT_RESIDUAL) · exp(−age / ROOT_DECAY_MY)`:
+/// how much of an orogen's crustal root is left. 333 My = `zc / εc` = 10 km ÷
+/// 0.03 mm/yr, Cortial's continental-erosion e-folding; the residual is untested design.
+pub const ROOT_RESIDUAL: f64 = 0.15;
+pub const ROOT_DECAY_MY: f64 = 333.0;
+
+/// A subduction belt's reach from its front, degrees: Cortial's `rs` 1,800 km.
+pub const SUBDUCTION_REACH_DEG: f64 = 16.2;
+/// Where the belt's profile peaks, as a share of the reach (untested: the
+/// paper gives no control distance).
+pub const SUBDUCTION_PEAK_SHARE: f64 = 0.25;
+/// Cortial's subduction uplift `u0`, m per My (0.6 mm/yr); a gain is this
+/// over the Andean `OROGEN_HEIGHT_M` (6,000) per My.
+pub const SUBDUCTION_U0_M_PER_MY: f64 = 600.0;
+/// The ends of Cortial's elevation scale `z̃`, m.
+pub const TRENCH_M: f64 = -10_000.0;
+pub const CONT_MAX_M: f64 = 10_000.0;
+/// A mark's life, steps (untested design: two field refreshes).
+pub const FRONT_TTL_STEPS: u8 = 8;
+/// The subduction field (front chamfer and gains) runs every this many steps
+/// (Ruling 1's budget; the first dial if the stage is too slow).
+pub const FIELD_EVERY_STEPS: u32 = 4;
+/// An oceanic cell whose strength reaches this becomes continental: an
+/// island arc (untested design).
+pub const ARC_EMERGE_STRENGTH: f32 = 0.25;
+/// Continental cells of one pair consumed before the pair sutures (untested design).
+pub const SUTURE_CONSUMED_CELLS: u32 = 24;
+/// A collision belt's radius, degrees: at most Cortial's `rc` 4,200 km, at
+/// least `COLLISION_RADIUS_MIN_DEG` (untested), `r ∝ sqrt(speed · A)`.
+pub const COLLISION_RADIUS_MAX_DEG: f64 = 37.8;
+pub const COLLISION_RADIUS_MIN_DEG: f64 = 3.0;
+/// A collision's peak gain per square degree of terrane: Cortial's `Δc`
+/// 1.3·10⁻⁵ km⁻¹ × 12,321 km² per square degree ÷ `OROGEN_HEIGHT_M` 6,000.
+/// `COLLISION_GAIN_PER_DEG2 · A` reaches 1 at 37.5 square degrees (about 76
+/// cells), so with `SUTURE_CONSUMED_CELLS = 24` nearly every suture has a
+/// full-strength core — in this model a terrane's AREA sets the belt's
+/// radius (`r ∝ sqrt(A)`), not its peak.
+pub const COLLISION_GAIN_PER_DEG2: f64 = 0.0267;
+/// A terrane at least this large, square degrees, raises a `Plateau` (untested design).
+pub const PLATEAU_MIN_DEG2: f64 = 300.0;
+/// The merged plate's velocity is multiplied by this after a suture (untested design).
+pub const COLLISION_BRAKE: f64 = 0.5;
+
 /// Noise salts and wavelengths (degrees).
 const N_SHAPE: u64 = 0x5C01;
 const N_SHAPE2: u64 = 0x5C02;
@@ -147,10 +203,24 @@ pub struct PlateState {
     pub acc: Vec<[f64; 2]>,
     /// Per plate: the id is in use.
     pub alive: Vec<bool>,
+    /// Per pair of plates `(O, U)` at `O · PLATES_MAX + U`: continental cells
+    /// of `U` consumed under `O` since their last suture.
+    pub pending: Vec<u32>,
     pub step: u32,
     pub counters: Counters,
     /// The destination arrays of a step (swapped in at its end).
     next: Next,
+    /// Buffers of the field and the sutures (no state between steps).
+    scratch: Scratch,
+}
+
+/// Work buffers reused across steps.
+#[derive(Clone, Default)]
+struct Scratch {
+    dist: Vec<f64>,
+    src: Vec<u32>,
+    terrane: Vec<bool>,
+    stack: Vec<u32>,
 }
 
 /// What a step writes before the swap, and pass A's winners.
@@ -175,6 +245,9 @@ struct Next {
     winner: Vec<u32>,
     /// Per SOURCE cell: its destination this step (`NO_DEST` = past a pole).
     dest: Vec<u32>,
+    /// This step's consumptions `(destination, consumed source)`, in pass B's
+    /// (row-major source) order.
+    consumed: Vec<(u32, u32)>,
 }
 
 const NO_SOURCE: u32 = u32::MAX;
@@ -386,15 +459,23 @@ impl PlateState {
             vel,
             acc: vec![[0.0; 2]; PLATES_MAX],
             alive,
+            pending: vec![0; PLATES_MAX * PLATES_MAX],
             step: 0,
             counters: Counters::default(),
             next: Next::default(),
+            scratch: Scratch::default(),
         }
     }
 
-    /// One step of `PLATE_DT_MY`: move, resolve overlaps, fill gaps (Tasks 2 and 3 add to it).
+    /// One step of `PLATE_DT_MY` (the plan's step list; Task 3 adds items
+    /// 6, 9–11): move, resolve overlaps and leave marks, fill gaps; every
+    /// `FIELD_EVERY_STEPS` the subduction field; then the sutures.
     pub fn advance(&mut self, _key: &PlanetKey) {
         self.advance_in(0..PLANET_CELLS);
+        if self.step % FIELD_EVERY_STEPS == 0 {
+            self.subduction_field();
+        }
+        self.sutures();
     }
 
     /// `advance` with pass A visiting the source cells in `order` (a
@@ -460,7 +541,9 @@ impl PlateState {
             mark_dir: n_dir,
             winner,
             dest,
+            consumed,
         } = &mut self.next;
+        consumed.clear();
         let (plate, crust, born_my) =
             (&self.plate[..PLANET_CELLS], &self.crust[..PLANET_CELLS], &self.born_my[..PLANET_CELLS]);
         let (n_plate, winner, dest) =
@@ -592,11 +675,39 @@ impl PlateState {
                     n_relief[d] = relief[c];
                     n_dir[d] = dir[c];
                 }
-            } else if crust[c] == CrustKind::Continental as u8 {
-                counters.collided += 1;
             } else {
-                counters.subducted += 1;
+                consumed.push((d as u32, c as u32));
+                if crust[c] == CrustKind::Continental as u8 {
+                    counters.collided += 1;
+                } else {
+                    counters.subducted += 1;
+                }
             }
+        }
+        // The consumptions' marks, after every winner moved (a mark is written
+        // on the WINNER's record at the destination; with several losers on
+        // one destination the last in row-major source order stays). An
+        // oceanic loser leaves a subduction front, a continental one a
+        // collision contact and counts toward its pair's suture.
+        let now = self.step as f64 * PLATE_DT_MY;
+        for &(d, c) in consumed.iter() {
+            let (d, c) = (d as usize, c as usize);
+            let (o, u) = (n_plate[d] as usize, plate[c] as usize);
+            let dv = [self.vel[u][0] - self.vel[o][0], self.vel[u][1] - self.vel[o][1]];
+            let elevation = cell_elevation_m(crust[c], born_my[c], base_m[c], strength[c], orogeny_my[c], kind[c], now);
+            let z = (elevation - TRENCH_M) / (CONT_MAX_M - TRENCH_M);
+            let is_contact = crust[c] == CrustKind::Continental as u8;
+            if is_contact {
+                let p = &mut self.pending[o * PLATES_MAX + u];
+                *p = p.saturating_add(1);
+            }
+            n_ttl[d] = FRONT_TTL_STEPS;
+            n_contact[d] = is_contact;
+            n_over[d] = o as u8;
+            n_under[d] = u as u8;
+            n_speed[d] = (0.5 * dv[0].hypot(dv[1])).min(1.0) as f32;
+            n_relief[d] = (z * z) as f32;
+            n_dir[d] = unit(dv);
         }
         // 3. Gaps: new oceanic crust, born at the step's end, owned by the
         // plate that held the cell before the step (two plates moving apart
@@ -642,6 +753,245 @@ impl PlateState {
     pub fn time_my(&self) -> f64 {
         self.step as f64 * PLATE_DT_MY
     }
+
+    /// The subduction belts (step list item 7): a chamfer from every live
+    /// front mark carries each cell its nearest mark; a cell of that mark's
+    /// overriding plate within `SUBDUCTION_REACH_DEG` gains
+    /// `(u0 / 6,000) · f(d) · speed · relief · polar_fade · (FIELD_EVERY_STEPS · PLATE_DT_MY)`,
+    /// `f` rising over the first `SUBDUCTION_PEAK_SHARE` of the reach and
+    /// falling to 0 at it. Continental cells become `Andean`, oceanic `Arc`;
+    /// an arc reaching `ARC_EMERGE_STRENGTH` becomes continental crust.
+    fn subduction_field(&mut self) {
+        let time = self.time_my();
+        let reach = SUBDUCTION_REACH_DEG;
+        let peak = SUBDUCTION_PEAK_SHARE * reach;
+        let rate = SUBDUCTION_U0_M_PER_MY / OROGEN_HEIGHT_M[OrogenyKind::Andean as usize]
+            * (f64::from(FIELD_EVERY_STEPS) * PLATE_DT_MY);
+        let Scratch { dist, src, .. } = &mut self.scratch;
+        let (ttl, contact) = (&self.mark_ttl, &self.mark_contact);
+        chamfer_into(|c| ttl[c] > 0 && !contact[c], PLANET_DEG_PER_CELL, reach, dist, src);
+        for c in 0..PLANET_CELLS {
+            let d = dist[c];
+            if d >= reach {
+                continue;
+            }
+            let m = src[c] as usize;
+            if self.plate[c] != self.mark_over[m] {
+                continue;
+            }
+            let f = if d < peak { smoothstep(0.0, peak, d) } else { 1.0 - smoothstep(peak, reach, d) };
+            let lat = planet_lat_deg(c / PLANET_NX);
+            let gain = rate
+                * f
+                * f64::from(self.mark_speed[m])
+                * f64::from(self.mark_relief[m])
+                * polar_fade(lat);
+            if gain <= 1e-5 {
+                continue;
+            }
+            self.strength[c] = orogeny_strength(self.strength[c], self.orogeny_my[c], time, gain);
+            self.orogeny_my[c] = time as f32;
+            self.fold[c] = self.mark_dir[m];
+            if self.crust[c] == CrustKind::Continental as u8 {
+                self.kind[c] = OrogenyKind::Andean as u8;
+            } else {
+                self.kind[c] = OrogenyKind::Arc as u8;
+                if self.strength[c] >= ARC_EMERGE_STRENGTH {
+                    self.crust[c] = CrustKind::Continental as u8;
+                    self.base_m[c] = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Step list item 8: every pair `(O, U)` with `pending ≥
+    /// SUTURE_CONSUMED_CELLS`, ascending, sutures.
+    fn sutures(&mut self) {
+        for o in 0..PLATES_MAX {
+            for u in 0..PLATES_MAX {
+                if self.pending[o * PLATES_MAX + u] >= SUTURE_CONSUMED_CELLS {
+                    self.suture(o, u);
+                }
+            }
+        }
+    }
+
+    /// The suture of `U`'s terrane onto `O` (the plan's Collision rule). The
+    /// terrane `R`: the continental cells of `U` 8-connected (x wraps) to a
+    /// continental cell of `U` that is an 8-neighbour of a live contact mark
+    /// of the pair. An empty `R` (the colliding crust is all consumed) makes
+    /// no suture and clears the pair's count.
+    fn suture(&mut self, o: usize, u: usize) {
+        let time = self.time_my();
+        self.pending[o * PLATES_MAX + u] = 0;
+        let continental = CrustKind::Continental as u8;
+        let Scratch { dist, src, terrane, stack } = &mut self.scratch;
+        terrane.clear();
+        terrane.resize(PLANET_CELLS, false);
+        stack.clear();
+        let in_u = |c: usize| self.plate[c] as usize == u && self.crust[c] == continental;
+        for c in 0..PLANET_CELLS {
+            let is_mark = self.mark_ttl[c] > 0
+                && self.mark_contact[c]
+                && self.mark_over[c] as usize == o
+                && self.mark_under[c] as usize == u;
+            if !is_mark {
+                continue;
+            }
+            for (dx, dz) in NEIGHBOURS_8 {
+                if let Some(n) = planet_step(c, dx, dz) {
+                    if in_u(n) && !terrane[n] {
+                        terrane[n] = true;
+                        stack.push(n as u32);
+                    }
+                }
+            }
+        }
+        while let Some(c) = stack.pop() {
+            for (dx, dz) in NEIGHBOURS_8 {
+                if let Some(n) = planet_step(c as usize, dx, dz) {
+                    if in_u(n) && !terrane[n] {
+                        terrane[n] = true;
+                        stack.push(n as u32);
+                    }
+                }
+            }
+        }
+        // Size and centroid (longitude by circular mean), row-major.
+        let (mut n_r, mut sin_sum, mut cos_sum, mut lat_s_sum) = (0usize, 0.0f64, 0.0f64, 0.0f64);
+        for c in 0..PLANET_CELLS {
+            if terrane[c] {
+                let (lon, lat_s) = planet_deg(c);
+                sin_sum += lon.to_radians().sin();
+                cos_sum += lon.to_radians().cos();
+                lat_s_sum += lat_s;
+                n_r += 1;
+            }
+        }
+        if n_r == 0 {
+            return;
+        }
+        let wrap = PeriodicX::for_width(360.0);
+        let q = (wrap.fold(sin_sum.atan2(cos_sum).to_degrees()), lat_s_sum / n_r as f64);
+        let q_cell = {
+            let qx = ((q.0 / PLANET_DEG_PER_CELL) as usize).min(PLANET_NX - 1);
+            let qz = ((q.1 / PLANET_DEG_PER_CELL) as usize).min(PLANET_NZ - 1);
+            qz * PLANET_NX + qx
+        };
+        let area = n_r as f64 * PLANET_DEG_PER_CELL * PLANET_DEG_PER_CELL;
+        let dv = [self.vel[u][0] - self.vel[o][0], self.vel[u][1] - self.vel[o][1]];
+        let speed = (0.5 * dv[0].hypot(dv[1])).min(1.0);
+        let a0 = PLANET_DEG2 / PLATES_INITIAL as f64;
+        let r = (COLLISION_RADIUS_MAX_DEG * (speed * area / a0).sqrt())
+            .clamp(COLLISION_RADIUS_MIN_DEG, COLLISION_RADIUS_MAX_DEG);
+        let peak = (COLLISION_GAIN_PER_DEG2 * area).min(1.0);
+        let kind =
+            if area >= PLATEAU_MIN_DEG2 { OrogenyKind::Plateau as u8 } else { OrogenyKind::Collision as u8 };
+        chamfer_into(|c| terrane[c], PLANET_DEG_PER_CELL, r, dist, src);
+        let mut n_o = 0usize;
+        for c in 0..PLANET_CELLS {
+            if self.crust[c] != continental {
+                continue;
+            }
+            let of_o = self.plate[c] as usize == o;
+            n_o += of_o as usize;
+            let d = dist[c];
+            if d >= r || !(of_o || terrane[c]) {
+                continue;
+            }
+            let t = 1.0 - (d / r) * (d / r);
+            let gain = peak * t * t * polar_fade(planet_lat_deg(c / PLANET_NX));
+            self.strength[c] = orogeny_strength(self.strength[c], self.orogeny_my[c], time, gain);
+            self.orogeny_my[c] = time as f32;
+            self.kind[c] = kind;
+            self.fold[c] = if c == q_cell {
+                [0.0; 2]
+            } else {
+                let (lon, lat_s) = planet_deg(c);
+                unit([wrap.dx(q.0, lon), lat_s - q.1])
+            };
+        }
+        let mut u_cells = 0usize;
+        for c in 0..PLANET_CELLS {
+            if terrane[c] {
+                self.plate[c] = o as u8;
+            } else if self.plate[c] as usize == u {
+                u_cells += 1;
+            }
+        }
+        if u_cells == 0 {
+            self.alive[u] = false;
+        }
+        let (wo, wr) = (n_o as f64, n_r as f64);
+        for j in 0..2 {
+            self.vel[o][j] = (self.vel[o][j] * wo + self.vel[u][j] * wr) / (wo + wr) * COLLISION_BRAKE;
+        }
+        self.counters.sutures += 1;
+    }
+}
+
+/// The 8 neighbours as `(dx, dz)`, row-major.
+const NEIGHBOURS_8: [(i32, i32); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+
+/// How much of an orogen's crustal root is left after `age_my` (the
+/// vocabulary's `root_keep`; 1 at age 0, `ROOT_RESIDUAL` for ever).
+pub fn root_keep(age_my: f64) -> f64 {
+    ROOT_RESIDUAL + (1.0 - ROOT_RESIDUAL) * (-age_my / ROOT_DECAY_MY).exp()
+}
+
+/// The factor on every orogeny gain near the poles (Ruling 10): 1 away from
+/// them. Task 3 gives it its ramp over the last `POLAR_FADE_DEG`; until then 1.
+pub fn polar_fade(_lat_deg: f64) -> f64 {
+    1.0
+}
+
+/// The vocabulary's model elevation of cell `c`, m, at the state's current
+/// time (`time_my`): oceanic crust sinks from the ridge to the abyss with its
+/// age, continental crust stands at its `base_m`; either carries its orogen's
+/// `OROGEN_HEIGHT_M[kind] · strength · root_keep(orogeny_age)` — a `Hotspot`
+/// `7,000 · strength · exp(−orogeny_age / HOTSPOT_SUBSIDE_MY)` instead.
+pub fn elevation_m(state: &PlateState, c: usize) -> f64 {
+    cell_elevation_m(
+        state.crust[c],
+        state.born_my[c],
+        state.base_m[c],
+        state.strength[c],
+        state.orogeny_my[c],
+        state.kind[c],
+        state.time_my(),
+    )
+}
+
+/// `elevation_m` of one cell's record at `time`.
+fn cell_elevation_m(crust: u8, born_my: f32, base_m: f32, strength: f32, orogeny_my: f32, kind: u8, time: f64) -> f64 {
+    let ground = if crust == CrustKind::Continental as u8 {
+        f64::from(base_m)
+    } else {
+        let age = time - f64::from(born_my);
+        OCEAN_ABYSS_M + (OCEAN_RIDGE_M - OCEAN_ABYSS_M) * (-age / OCEAN_SUBSIDE_MY).exp()
+    };
+    let orogeny_age = time - f64::from(orogeny_my);
+    let height = OROGEN_HEIGHT_M[kind as usize] * f64::from(strength);
+    let orogen = if kind == OrogenyKind::Hotspot as u8 {
+        height * (-orogeny_age / HOTSPOT_SUBSIDE_MY).exp()
+    } else {
+        height * root_keep(orogeny_age)
+    };
+    ground + orogen
+}
+
+/// One strength, two decays: an orogeny acting at `time` with `gain` on a
+/// cell whose last orogeny was `strength` at `orogeny_my` leaves
+/// `min(1, strength · root_keep(time − orogeny_my) + gain)` (a never-active
+/// cell's strength is 0, so its root does not matter).
+fn orogeny_strength(strength: f32, orogeny_my: f32, time: f64, gain: f64) -> f32 {
+    (f64::from(strength) * root_keep(time - f64::from(orogeny_my)) + gain).min(1.0) as f32
+}
+
+/// `v` over its length, `[0, 0]` for a zero vector (never NaN).
+fn unit(v: [f64; 2]) -> [f32; 2] {
+    let len = v[0].hypot(v[1]);
+    if len > 0.0 { [(v[0] / len) as f32, (v[1] / len) as f32] } else { [0.0; 2] }
 }
 
 /// A plate's mean `born_my` over its oceanic cells (`sum` over `count`);
@@ -687,38 +1037,193 @@ fn beats(plate: &[u8], crust: &[u8], cont: &[u32; PLATES_MAX], ocean: &[f64; PLA
 /// nothing changes (at most 3 pairs); a cell takes a neighbour's distance only
 /// when strictly smaller. `INFINITY` with no seed.
 fn chamfer(seed: &[bool], unit: f64) -> Vec<f64> {
+    let (mut d, mut src) = (Vec::new(), Vec::new());
+    chamfer_into(|c| seed[c], unit, f64::INFINITY, &mut d, &mut src);
+    d
+}
+
+/// `chamfer` into `d`, with `src[c]` the seed cell whose distance `c` took (a
+/// cell takes a neighbour's distance AND source only when strictly smaller,
+/// in the order of the passes' neighbour lists, so ties keep what was written
+/// first). No value at or above `cap` is written (such a cell stays
+/// `INFINITY`): every distance below `cap`, and its source, is exactly the
+/// uncapped one — along a chamfer path the sums only grow, so a value below
+/// the cap is built only from values below it. For the same reason the passes
+/// skip every `CHAMFER_TILE`² tile farther from all seed tiles (Chebyshev,
+/// x wrapping) than a cap's worth of cells: no cell there can come below the
+/// cap (every step costs at least `unit`), so it would never change.
+fn chamfer_into(seed: impl Fn(usize) -> bool, unit: f64, cap: f64, d: &mut Vec<f64>, src: &mut Vec<u32>) {
     const PAIRS_MAX: usize = 3;
+    const NX: usize = PLANET_NX;
+    const T: usize = CHAMFER_TILE;
+    const TX: usize = PLANET_NX / CHAMFER_TILE;
+    const TZ: usize = PLANET_NZ / CHAMFER_TILE;
     let diag = std::f64::consts::SQRT_2 * unit;
-    let forward = [(-1, 0, unit), (-1, -1, diag), (0, -1, unit), (1, -1, diag)];
-    let backward = [(1, 0, unit), (1, 1, diag), (0, 1, unit), (-1, 1, diag)];
-    let mut d: Vec<f64> = seed.iter().map(|&s| if s { 0.0 } else { f64::INFINITY }).collect();
-    let relax = |d: &mut Vec<f64>, c: usize, dirs: &[(i32, i32, f64); 4]| -> bool {
+    d.clear();
+    d.resize(PLANET_CELLS, f64::INFINITY);
+    src.clear();
+    src.extend(0..PLANET_CELLS as u32);
+    // Tiles that can hold a value below the cap: within `out` tiles of a
+    // tile holding a seed, where `out · T + 1` cells cost at least the cap.
+    let mut seeded = [false; TX * TZ];
+    for c in 0..PLANET_CELLS {
+        if seed(c) {
+            d[c] = 0.0;
+            seeded[(c / NX / T) * TX + (c % NX) / T] = true;
+        }
+    }
+    let cells = cap / unit;
+    let out = if cells.is_finite() { ((cells - 1.0) / T as f64).ceil().max(0.0) as usize } else { TX };
+    let mut active = [false; TX * TZ];
+    for tz in 0..TZ {
+        for tx in 0..TX {
+            if !seeded[tz * TX + tx] {
+                continue;
+            }
+            for az in tz.saturating_sub(out)..(tz + out + 1).min(TZ) {
+                if out * 2 + 1 >= TX {
+                    active[az * TX..(az + 1) * TX].fill(true);
+                    continue;
+                }
+                for k in 0..=2 * out {
+                    active[az * TX + (tx + TX + k - out) % TX] = true;
+                }
+            }
+        }
+    }
+    let none_d = [f64::INFINITY; NX];
+    let none_s = [0u32; NX];
+    // Each pass visits the active tiles' cells in its order, one row span
+    // of `T` cells at a time; a cell's neighbour along the row (the one the
+    // scan comes from) rides in registers. A span whose inputs did not change
+    // since the same pass last visited it is skipped — none of its cells
+    // could change: its inputs are its own cells, the span the scan enters it
+    // from, and the three spans of the row it reads. `stamp` = the visit (a
+    // clock) that last changed a span, `seen` = each pass's last visit.
+    const SPANS: usize = PLANET_NZ * TX;
+    let mut clock = 1u32;
+    let mut stamp = vec![1u32; SPANS];
+    let mut seen = [vec![0u32; SPANS], vec![0u32; SPANS]];
+    #[inline(always)]
+    fn take(best: &mut f64, from: &mut u32, v: f64, s: u32, cap: f64) {
+        let ok = (v < *best) & (v < cap);
+        *best = if ok { v } else { *best };
+        *from = if ok { s } else { *from };
+    }
+    for _ in 0..PAIRS_MAX {
         let mut changed = false;
-        for &(dx, dz, w) in dirs {
-            if let Some(n) = planet_step(c, dx, dz) {
-                let v = d[n] + w;
-                if v < d[c] {
-                    d[c] = v;
+        // Forward: west, north-west, north, north-east.
+        for z in 0..PLANET_NZ {
+            let row = z * NX;
+            let (d_head, d_tail) = d.split_at_mut(row);
+            let (s_head, s_tail) = src.split_at_mut(row);
+            let cur: &mut [f64; NX] = (&mut d_tail[..NX]).try_into().unwrap();
+            let s_cur: &mut [u32; NX] = (&mut s_tail[..NX]).try_into().unwrap();
+            let (up, s_up): (&[f64; NX], &[u32; NX]) = if z > 0 {
+                ((&d_head[row - NX..]).try_into().unwrap(), (&s_head[row - NX..]).try_into().unwrap())
+            } else {
+                (&none_d, &none_s)
+            };
+            for tx in 0..TX {
+                if !active[(z / T) * TX + tx] {
+                    continue;
+                }
+                let k = z * TX + tx;
+                let (txw, txe) = ((tx + TX - 1) % TX, (tx + 1) % TX);
+                let last = seen[0][k];
+                let mut fresh = stamp[k] > last || stamp[z * TX + txw] > last;
+                if z > 0 {
+                    let u = k - TX;
+                    fresh |= stamp[u] > last || stamp[z * TX - TX + txw] > last || stamp[z * TX - TX + txe] > last;
+                }
+                if !fresh {
+                    continue;
+                }
+                clock += 1;
+                seen[0][k] = clock;
+                let x0 = tx * T;
+                let xw0 = if x0 == 0 { NX - 1 } else { x0 - 1 };
+                let (mut along, mut s_along) = (cur[xw0], s_cur[xw0]);
+                let mut span_changed = false;
+                for x in x0..x0 + T {
+                    let xw = if x == 0 { NX - 1 } else { x - 1 };
+                    let xe = if x == NX - 1 { 0 } else { x + 1 };
+                    let (mut best, mut from) = (cur[x], s_cur[x]);
+                    take(&mut best, &mut from, along + unit, s_along, cap);
+                    take(&mut best, &mut from, up[xw] + diag, s_up[xw], cap);
+                    take(&mut best, &mut from, up[x] + unit, s_up[x], cap);
+                    take(&mut best, &mut from, up[xe] + diag, s_up[xe], cap);
+                    span_changed |= best < cur[x];
+                    cur[x] = best;
+                    s_cur[x] = from;
+                    (along, s_along) = (best, from);
+                }
+                if span_changed {
+                    stamp[k] = clock;
                     changed = true;
                 }
             }
         }
-        changed
-    };
-    for _ in 0..PAIRS_MAX {
-        let mut changed = false;
-        for c in 0..PLANET_CELLS {
-            changed |= relax(&mut d, c, &forward);
-        }
-        for c in (0..PLANET_CELLS).rev() {
-            changed |= relax(&mut d, c, &backward);
+        // Backward: east, south-east, south, south-west.
+        for z in (0..PLANET_NZ).rev() {
+            let row = z * NX;
+            let (d_head, d_tail) = d.split_at_mut(row + NX);
+            let (s_head, s_tail) = src.split_at_mut(row + NX);
+            let cur: &mut [f64; NX] = (&mut d_head[row..]).try_into().unwrap();
+            let s_cur: &mut [u32; NX] = (&mut s_head[row..]).try_into().unwrap();
+            let (down, s_down): (&[f64; NX], &[u32; NX]) = if z + 1 < PLANET_NZ {
+                ((&d_tail[..NX]).try_into().unwrap(), (&s_tail[..NX]).try_into().unwrap())
+            } else {
+                (&none_d, &none_s)
+            };
+            for tx in (0..TX).rev() {
+                if !active[(z / T) * TX + tx] {
+                    continue;
+                }
+                let k = z * TX + tx;
+                let (txw, txe) = ((tx + TX - 1) % TX, (tx + 1) % TX);
+                let last = seen[1][k];
+                let mut fresh = stamp[k] > last || stamp[z * TX + txe] > last;
+                if z + 1 < PLANET_NZ {
+                    let b = k + TX;
+                    fresh |= stamp[b] > last || stamp[z * TX + TX + txw] > last || stamp[z * TX + TX + txe] > last;
+                }
+                if !fresh {
+                    continue;
+                }
+                clock += 1;
+                seen[1][k] = clock;
+                let x1 = (tx + 1) * T - 1;
+                let xe1 = if x1 == NX - 1 { 0 } else { x1 + 1 };
+                let (mut along, mut s_along) = (cur[xe1], s_cur[xe1]);
+                let mut span_changed = false;
+                for x in (tx * T..=x1).rev() {
+                    let xw = if x == 0 { NX - 1 } else { x - 1 };
+                    let xe = if x == NX - 1 { 0 } else { x + 1 };
+                    let (mut best, mut from) = (cur[x], s_cur[x]);
+                    take(&mut best, &mut from, along + unit, s_along, cap);
+                    take(&mut best, &mut from, down[xe] + diag, s_down[xe], cap);
+                    take(&mut best, &mut from, down[x] + unit, s_down[x], cap);
+                    take(&mut best, &mut from, down[xw] + diag, s_down[xw], cap);
+                    span_changed |= best < cur[x];
+                    cur[x] = best;
+                    s_cur[x] = from;
+                    (along, s_along) = (best, from);
+                }
+                if span_changed {
+                    stamp[k] = clock;
+                    changed = true;
+                }
+            }
         }
         if !changed {
             break;
         }
     }
-    d
 }
+
+/// The chamfer's skipping tile, cells (divides both grid sides).
+const CHAMFER_TILE: usize = 16;
 
 /// `initial`, then `advance` until `key.plate_duration_my`; `on_frame` sees the state every `every` steps (0 = never).
 pub fn simulate(key: &PlanetKey, every: u32, on_frame: &mut dyn FnMut(&PlateState)) -> PlateState {
