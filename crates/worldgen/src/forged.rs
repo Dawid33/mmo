@@ -580,7 +580,7 @@ fn validate_wrap(edges: &[EdgeKind; 4], width_m: f64) -> Result<(), ArtifactErro
         )));
     }
     if let Some(why) = too_narrow_to_wrap(width_m) {
-        return Err(ArtifactError::Format(why));
+        return Err(ArtifactError::Format(format!("{why}: re-forge this world")));
     }
     if (width_m / WRAP_WIDTH_STEP_M).fract() != 0.0 {
         return Err(ArtifactError::Format(format!(
