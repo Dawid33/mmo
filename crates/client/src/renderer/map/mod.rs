@@ -5,17 +5,26 @@
 //! [`MapTiles`], which belongs to the WORLD: a session end keeps it, another world clears it.
 
 pub mod palette;
+pub mod pass;
 pub mod store;
+pub mod views;
 
 use bevy::prelude::*;
 
 pub use palette::MapPalette;
 pub use store::{GpuTile, MapSource, MapTiles, MapWorld};
+pub use views::{MapLayerKind, MapView};
 
 pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
         store::build(app);
+        pass::build(app);
+        app.add_systems(PostUpdate, views::collect_map_draws);
+    }
+
+    fn finish(&self, app: &mut App) {
+        pass::finish(app);
     }
 }

@@ -61,6 +61,11 @@ pub fn pick_ui_view(candidates: impl IntoIterator<Item = (Entity, isize)>) -> Op
 #[derive(Resource, Default)]
 struct ExtractedSlintLayers(Vec<AssetId<Image>>);
 
+/// The composite's place in `Core3d`, for ordering only: the map pass (`map/pass.rs`) runs right
+/// before it, so the Slint layers draw over the map.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SlintCompositeSystems;
+
 #[derive(Component)]
 struct ViewSlintComposite(CachedRenderPipelineId, BlitPipelineKey);
 
@@ -80,7 +85,7 @@ impl Plugin for SlintCompositePlugin {
             )
             .add_systems(
                 Core3d,
-                slint_composite_pass.after(Core3dSystems::PostProcess).before(upscaling),
+                slint_composite_pass.in_set(SlintCompositeSystems).after(Core3dSystems::PostProcess).before(upscaling),
             );
     }
 }
