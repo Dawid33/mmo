@@ -504,6 +504,11 @@ fn season_phase(m: usize, lag: f64) -> f64 {
     (std::f64::consts::TAU * (m as f64 + 0.5 - (game::SOLSTICE_NORTH_SUMMER_MONTHS + lag)) / months).cos()
 }
 
+/// Climate rows `monthly_placeholder` computes in parallel before it
+/// scatters them into the planes (bounds its transient per-row arrays: 64
+/// rows of 784 cells at Large are 12 MB, against 74 MB for every row).
+const MONTHLY_ROWS_PER_BATCH: usize = 64;
+
 /// The monthly family before quantisation: six planes of 12 * nx * nz, month-major (the plan's vocabulary).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MonthlyFields {
@@ -572,8 +577,10 @@ pub fn monthly_placeholder(w: &World, c: &Climate, p: &ForgeParams) -> MonthlyFi
         wind_south_ms: vec![0.0; plane],
     };
     // Each row's cells, each cell its twelve (temperature, diurnal, precip,
-    // wet day, wind east) values.
-    let rows: Vec<Vec<[[f32; 5]; game::CLIMATE_MONTHS]>> = par::map_range(cnz, |cz| {
+    // wet day, wind east) values, computed in batches of rows scattered into
+    // the month-major planes before the next batch: the per-row arrays never
+    // hold more than `MONTHLY_ROWS_PER_BATCH` rows beside the planes.
+    let row_values = |cz: usize| -> Vec<[[f32; 5]; game::CLIMATE_MONTHS]> {
         let zc = (cz as f64 + 0.5) * cell_m;
         (0..cnx)
             .map(|cx| {
@@ -603,16 +610,20 @@ pub fn monthly_placeholder(w: &World, c: &Climate, p: &ForgeParams) -> MonthlyFi
                 })
             })
             .collect()
-    });
-    for (cz, row) in rows.iter().enumerate() {
-        for (cx, cell) in row.iter().enumerate() {
-            for (m, v) in cell.iter().enumerate() {
-                let i = m * cnx * cnz + cz * cnx + cx;
-                f.temp_sea_c[i] = v[0];
-                f.diurnal_c[i] = v[1];
-                f.precip_mm[i] = v[2];
-                f.wet_day[i] = v[3];
-                f.wind_east_ms[i] = v[4];
+    };
+    for z0 in (0..cnz).step_by(MONTHLY_ROWS_PER_BATCH) {
+        let rows = par::map_range(MONTHLY_ROWS_PER_BATCH.min(cnz - z0), |k| row_values(z0 + k));
+        for (k, row) in rows.iter().enumerate() {
+            let cz = z0 + k;
+            for (cx, cell) in row.iter().enumerate() {
+                for (m, v) in cell.iter().enumerate() {
+                    let i = m * cnx * cnz + cz * cnx + cx;
+                    f.temp_sea_c[i] = v[0];
+                    f.diurnal_c[i] = v[1];
+                    f.precip_mm[i] = v[2];
+                    f.wet_day[i] = v[3];
+                    f.wind_east_ms[i] = v[4];
+                }
             }
         }
     }

@@ -193,10 +193,15 @@ Claude's calls (each is a proposal until this document is approved):
    decides the day length.) Everything is specified in calendar days and reads the day length from the one
    existing constant, so a later change rescales the weather. The sim derives the date from the world tick
    (today only the coordinator knows it). Season names are local to the hemisphere.
-7. **Monthly climate is stored coarse**: twelve monthly normals per CLIMATE cell (about 256 m) of
-   sea-level temperature, diurnal range, precipitation and wet-day fraction; the lapse rate is re-applied
-   from the fine height at read time; the fine annual precipitation raster stays as the rain-shadow
-   modulator.
+7. **Monthly climate is stored coarse**: twelve monthly normals per CLIMATE cell of
+   sea-level temperature, diurnal range, precipitation, wet-day fraction and wind (east and south
+   components) — six integer planes, 96 B per cell; the lapse rate is re-applied from the fine height at
+   read time; the fine annual precipitation raster stays as the rain-shadow modulator. The climate cell is
+   about 256 m but never coarser than 96 rows pole to pole (the stride halves until it has them) and never
+   finer than the forge cell: Dev 64 m, Tiny 128 m, Small to Large 256 m. The family is always resident —
+   whole in the world file and in the tiled store's meta (`ForgedMeta`), never in tiles. The type is
+   `game::MonthlyClimate` (Phase 6's weather lives in `game`, which cannot depend on `worldgen`); the
+   world-position API is on `worldgen::forged::ForgedWorld`. (Amended 2026-11-20 by Phase 1b Task 3.)
 8. **Seasonal state is derived, not edited**: snow depth, ice thickness and foliage are recipe data on the
    column, computed from (date, stored climate), in the manner of `water_top`. Only player edits (a
    cleared path, a hole in the ice) are stored, as sparse deltas with an expiry. Crops and soil moisture

@@ -219,7 +219,9 @@ fn main() {
         forged.simulated_peak_m, forged.height_fit
     );
     print_climate(&forged, &p.forge);
+    let started = std::time::Instant::now();
     let mut artifact = forged.artifact(&p.forge);
+    let artifact_s = started.elapsed().as_secs_f64();
     if let Some(spawn) = p.spawn {
         artifact.spawn = spawn;
     }
@@ -260,6 +262,8 @@ fn main() {
         artifact.spawn[1],
         worldgen::forged::WORLD_FILE_ENV
     );
+    // The wall time of `forged.artifact` (the monthly climate included).
+    println!("artifact: {artifact_s:.2} s");
 }
 
 /// The climate in eight latitude bands (north to south): wind, land

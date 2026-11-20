@@ -376,6 +376,14 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     // Phase 1b: the crc of what the runtime reads from the artifact (taken
     // before the artifact moves into the sampler below; printed after it).
     let rasters_crc = artifact_rasters_crc(&artifact);
+    // Phase 1b Task 3: the world file's size and the monthly family's share
+    // of it (raw, packed alone, resident), taken before the move too.
+    let sizes = [
+        ("world_file_bytes", artifact.to_bytes().len()),
+        ("climate_bytes_raw", artifact.climate.cells() * game::CLIMATE_BYTES_PER_CELL),
+        ("climate_bytes_packed", worldgen::forged::climate_packed_len(&artifact.climate)),
+        ("climate_resident_bytes", artifact.climate.resident_bytes()),
+    ];
     // Task 12 (the runtime sampler wraps): regions, the world map and rivers
     // at the seam, read through the game's sampler.
     for (key, value) in runtime_seam(&ForgedWorld::new(artifact)) {
@@ -386,6 +394,9 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     row("artifact_rasters_crc", rasters_crc);
     for (key, value) in monthly_lines(forged, p) {
         row(&key, value);
+    }
+    for (key, bytes) in sizes {
+        row(key, bytes.to_string());
     }
     rows
 }

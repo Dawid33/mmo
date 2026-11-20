@@ -953,8 +953,15 @@ The forge makes ONE kind of world, the **Planet** (since 2026-11-20; plan
 north and south (`forge::world::PLANET_EDGES`), 90° N at row 0 to 90° S. Sizes (`forge::play`): Tiny 25,600 ×
 12,800 m, Small 50,176 × 25,088, Medium (default) 100,352 × 50,176, Large 200,704 × 100,352, and Dev 16,384 ×
 8,192 (not in the menu; `ForgeParams::default()` at 32 m) — every width a whole number of 512 m, so regions tile the
-circle at every region size. Any other world — an older artifact version (< 9), another layout's edges, a width off
+circle at every region size. Any other world — an older artifact version (< 10), another layout's edges, a width off
 512 m — is refused with "re-forge this world" (file, tiles and store alike: `forged.rs` `validate_wrap`).
+**Monthly climate** (Phase 1b, plan `docs/superpowers/plans/2026-11-20-monthly-climate-container-1b.md`): every world
+stores `game::MonthlyClimate` — twelve months × six integer planes (sea-level temperature, diurnal range,
+precipitation, wet-day share, wind east / south; 96 B per CLIMATE cell) on a coarse grid of about 256 m, never
+fewer than 96 rows pole to pole (`forge::climate::climate_stride`; Dev 256 × 128 of 64 m, Large 784 × 392 of 256 m,
+28 MiB). It is always RESIDENT: whole in `WorldArtifact::climate` (artifact v10) and in `ForgedMeta::climate` (tiled
+format v3), never in tiles, one copy per process (the tile cache holds it, outside its budget); read through
+`ForgedWorld::monthly_climate`. Filled by `forge::climate::monthly_placeholder` until Phase 3.
 **Canonical coordinates**: everything stored, simulated, hashed or sent is canonical (x folded into the map's width,
 `canonical_region` in `worldgen/src/lib.rs`, one nearest-image helper into a region's frame); LOD keys and the client's render frame
 are the only unwrapped coordinates. **The wrap is for one process** (`VOXEL_ROLE=all`): under any other role the seam

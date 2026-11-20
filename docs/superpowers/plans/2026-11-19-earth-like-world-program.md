@@ -184,7 +184,8 @@ lengths in degrees of latitude; every size measured.
 - Filled by a placeholder: today's annual mean plus an amplitude by latitude and distance from the sea, a
   one-month lag on land. Phase 3 replaces the values, not the format.
 - Sampler API in `worldgen` that Phases 5 and 6 read: monthly normals at a world position, and the derived
-  warmest / coldest month and driest-month values.
+  warmest / coldest month and driest-month values. The container type is `game::MonthlyClimate` (data and
+  map-metre sampler in `game`, for Phase 6's weather); the world-position API is on `ForgedWorld`.
 - Evidence: the report prints, per latitude band, January and July sea-level temperature (opposite signs of
   the seasonal swing in the two hemispheres, near zero at the equator); world-file size per world size.
 - Research: `climate_simulation.md` (representation), the audit's storage section.
@@ -224,7 +225,8 @@ lengths in degrees of latitude; every size measured.
   advection with convergence, subtropical suppression, frontal and orographic rain (the orographic term on
   the fine grid). Derived per cell: snow months, sea-ice months, growing degree days, potential
   evapotranspiration (Thornthwaite), aridity index, a monthly soil-water bucket and runoff.
-- It fills Phase 1b's container, adds wind direction by season to it, and deletes the annual-climate knobs
+- It fills Phase 1b's container — including its stored monthly wind (east and south components), which it
+  FILLS rather than adds — averaging its planet grid onto the container's grid, and deletes the annual-climate knobs
   (wind band edges, latitude temperatures, meander, relaxation lengths).
 - Evidence: Köppen class shares of land by the Peel 2007 rules, unweighted, against ranges around Earth's
   (arid 20–40%, cold 10–35%, tropical 10–30%, temperate 8–22%, polar 6–20%); three synthetic worlds (all

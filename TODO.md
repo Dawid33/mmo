@@ -30,6 +30,17 @@ v9). Open:
 - North and south are polar sea: no world edge is reachable on foot in role `all`; the closed seam above is the only
   one, and only under split roles.
 
+Monthly-climate container, Phase 1b (plans/2026-11-20-monthly-climate-container-1b.md; ledger
+`.superpowers/sdd/2026-11-20-monthly-climate-container-1b/`) — IN PROGRESS. Since its Task 3 every world stores the
+monthly climate family (artifact v10, tiled format v3). Open:
+- Re-forge every world before it runs this build (Dawid): a v9 world file, a store of tiles v2 and a menu world whose
+  `world.json` says artifact 9 are refused with "re-forge". Every dev world (`just run --reset`, the menu's worlds),
+  the public web world (move its store aside BEFORE `just deploy`), the dev Postgres worlds (`just pg-reset`), the
+  twin (`twin-check` forges into a fresh database) and any orion world (a new empty database, as the runbooks above).
+- Memory: the family is resident in every process that loads the world — +28 MiB per host and coordinator pod at
+  Large (3 MiB at Dev), outside the tile cache budget; check it against the pods' memory requests
+  (`deploy/modules/world`) before a Large world runs there.
+
 Direction (2026-10-20): Dwarf Fortress–style game on the multi-region engine, MVP = fortress
 mode. No phased plan (rejected 2026-10-20): implement features piece by piece, roughly
 modelling DF; reference research in docs/superpowers/specs/2026-10-20-dwarf-fortress-research/

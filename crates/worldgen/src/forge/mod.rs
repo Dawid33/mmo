@@ -140,6 +140,7 @@ impl Forged {
             regions: Vec::new(),
             savagery: Vec::new(),
             knobs: crate::world_store::knobs_map(&p.knobs),
+            climate: climate::monthly_placeholder(w, &self.climate, p).quantise(w.wrap_x),
         };
         // Classified from the stored (quantised) fields, so a reader that
         // re-classifies a cell gets the stored biome.

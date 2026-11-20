@@ -43,8 +43,10 @@ pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
 /// (`forge::regions`). v8: width x height (`width_m`, `height_m`, `nx`,
 /// `nz` replace `size_m`, `n`) and the forge's `knobs`. v9: no byte change —
 /// the Planet is the only world (`forge::world::PLANET_EDGES`); a world of a
-/// deleted layout is refused (`validate_wrap`).
-pub const ARTIFACT_VERSION: u32 = 9;
+/// deleted layout is refused (`validate_wrap`). v10: `climate`, the
+/// monthly-normals family (`game::MonthlyClimate`, row-delta encoded per
+/// plane: `climate_to_wire`).
+pub const ARTIFACT_VERSION: u32 = 10;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const ZSTD_LEVEL: i32 = 19;
@@ -342,6 +344,11 @@ pub struct WorldArtifact {
     /// was forged with, read back by [`WorldGlobals::knobs`] (the lapse rate,
     /// the good / evil shares). Empty = the defaults.
     pub knobs: BTreeMap<String, f64>,
+    /// The monthly climate normals on the climate grid (`forge::climate`'s
+    /// placeholder until Phase 3): always resident — whole here, and in a
+    /// tiled world's `ForgedMeta`, never in tiles. Its grid spans the world
+    /// exactly and `wrap_x` matches `edges` (`validate_climate`).
+    pub climate: game::MonthlyClimate,
 }
 
 /// [`crate::forge::Knobs`] defaults overlaid with a stored knob map; names
@@ -458,6 +465,7 @@ impl WorldArtifact {
             delta_rows_u8(raster, n);
         }
         delta_rows(&mut wire.region, n);
+        climate_to_wire(&mut wire.climate);
         let body = bincode::serialize(&wire).expect("artifact serializes");
         let mut out = MAGIC.to_vec();
         out.extend_from_slice(&self.version.to_le_bytes());
@@ -496,6 +504,7 @@ impl WorldArtifact {
             undelta_rows_u8(raster, n);
         }
         undelta_rows(&mut artifact.region, n);
+        climate_from_wire(&mut artifact.climate);
         artifact.validate_regions()?;
         Ok(artifact)
     }
@@ -503,12 +512,14 @@ impl WorldArtifact {
     /// The invariants every reader relies on (`from_bytes` and
     /// `ForgedWorld::new` both check them): a grid of `nx * cell_m` by
     /// `nz * cell_m` that is exactly `width_m` by `height_m`, rasters of
-    /// `nx * nz`, known rocks, and a non-empty rock column sorted by
-    /// descending top (the strata lookups binary-search it).
+    /// `nx * nz`, known rocks, a non-empty rock column sorted by descending
+    /// top (the strata lookups binary-search it), and a monthly climate grid
+    /// that spans the world (`validate_climate`).
     pub fn validate(&self) -> Result<(), ArtifactError> {
         let artifact = self;
         validate_grid(artifact.nx, artifact.nz, artifact.cell_m, artifact.width_m, artifact.height_m)?;
         validate_wrap(&artifact.edges, artifact.width_m)?;
+        validate_climate(&artifact.climate, artifact.width_m, artifact.height_m, &artifact.edges)?;
         let cells = artifact.nx as usize * artifact.nz as usize;
         if artifact.qrasters().iter().any(|raster| raster.len() != cells)
             || artifact.byte_rasters().iter().any(|raster| raster.len() != cells)
@@ -588,6 +599,92 @@ fn validate_wrap(edges: &[EdgeKind; 4], width_m: f64) -> Result<(), ArtifactErro
         )));
     }
     Ok(())
+}
+
+/// The monthly climate's checks (a whole world's artifact, a tiled world's
+/// meta — and `forged_tiles::decode_meta` before it un-deltas the planes):
+/// its own grid and plane sizes (`MonthlyClimate::validate`), a grid that
+/// spans the world exactly, and `wrap_x` equal to whether the east edge
+/// wraps.
+pub(crate) fn validate_climate(
+    c: &game::MonthlyClimate,
+    width_m: f64,
+    height_m: f64,
+    edges: &[EdgeKind; 4],
+) -> Result<(), ArtifactError> {
+    let bad = |why: String| ArtifactError::Format(format!("monthly climate: {why}"));
+    c.validate().map_err(bad)?;
+    if f64::from(c.nx) * c.cell_m != width_m || f64::from(c.nz) * c.cell_m != height_m {
+        return Err(bad(format!(
+            "{} x {} cells of {} m are not the world's {width_m} x {height_m} m",
+            c.nx, c.nz, c.cell_m
+        )));
+    }
+    let wraps = edges[1] == EdgeKind::Wrap;
+    if c.wrap_x != wraps {
+        return Err(bad(format!("wrap_x is {} but the world's east edge is {:?}", c.wrap_x, edges[1])));
+    }
+    Ok(())
+}
+
+/// Row-delta encodes a plane in rows of `n` (`delta_rows`' rule, wrapping
+/// `sub`). A month plane is `n · nz` values, so rows never straddle two
+/// months: every month is encoded on its own. Walks `chunks_mut`, so a plane
+/// of any length is safe (a wrong one is refused by its size check).
+#[cfg(not(target_arch = "wasm32"))]
+fn delta_plane<T: Copy>(plane: &mut [T], n: usize, sub: fn(T, T) -> T) {
+    for row in plane.chunks_mut(n.max(1)) {
+        for i in (1..row.len()).rev() {
+            row[i] = sub(row[i], row[i - 1]);
+        }
+    }
+}
+
+/// Inverse of [`delta_plane`] (`add` the wrapping inverse of its `sub`).
+#[cfg(not(target_arch = "wasm32"))]
+fn undelta_plane<T: Copy>(plane: &mut [T], n: usize, add: fn(T, T) -> T) {
+    for row in plane.chunks_mut(n.max(1)) {
+        for i in 1..row.len() {
+            row[i] = add(row[i], row[i - 1]);
+        }
+    }
+}
+
+/// The monthly climate's wire form (the world file and the tiled meta):
+/// every month plane of the six fields row-delta encoded in rows of the
+/// CLIMATE grid's `nx`; bincode and zstd follow with the rest of the struct.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn climate_to_wire(c: &mut game::MonthlyClimate) {
+    let n = c.nx as usize;
+    delta_plane(&mut c.temp_sea_centi_c, n, i16::wrapping_sub);
+    delta_plane(&mut c.diurnal_deci_c, n, u8::wrapping_sub);
+    delta_plane(&mut c.precip_deci_mm, n, u16::wrapping_sub);
+    delta_plane(&mut c.wet_day_255, n, u8::wrapping_sub);
+    delta_plane(&mut c.wind_east_q, n, i8::wrapping_sub);
+    delta_plane(&mut c.wind_south_q, n, i8::wrapping_sub);
+}
+
+/// Inverse of [`climate_to_wire`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn climate_from_wire(c: &mut game::MonthlyClimate) {
+    let n = c.nx as usize;
+    undelta_plane(&mut c.temp_sea_centi_c, n, i16::wrapping_add);
+    undelta_plane(&mut c.diurnal_deci_c, n, u8::wrapping_add);
+    undelta_plane(&mut c.precip_deci_mm, n, u16::wrapping_add);
+    undelta_plane(&mut c.wet_day_255, n, u8::wrapping_add);
+    undelta_plane(&mut c.wind_east_q, n, i8::wrapping_add);
+    undelta_plane(&mut c.wind_south_q, n, i8::wrapping_add);
+}
+
+/// Bytes the monthly climate alone takes packed as the world file packs it
+/// (`climate_to_wire`, bincode, zstd at the file's level): the forge
+/// report's `climate_bytes_packed`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn climate_packed_len(c: &game::MonthlyClimate) -> usize {
+    let mut wire = c.clone();
+    climate_to_wire(&mut wire);
+    let body = bincode::serialize(&wire).expect("monthly climate serializes");
+    zstd::bulk::compress(&body, ZSTD_LEVEL).expect("zstd compresses").len()
 }
 
 /// The checks on a world's global tables that every reader relies on (whole
@@ -947,6 +1044,15 @@ impl Rasters {
             Rasters::Tiled(_) => None,
         }
     }
+
+    /// The monthly climate, whole (resident in both kinds of world: the
+    /// artifact's, or the tile cache's copy of the meta's).
+    pub(crate) fn climate(&self) -> &game::MonthlyClimate {
+        match self {
+            Rasters::Whole(w) => &w.artifact.climate,
+            Rasters::Tiled(t) => t.climate(),
+        }
+    }
 }
 
 /// The segments of one bucket: `(segment id, segment)` in stored order
@@ -1094,8 +1200,15 @@ impl ForgedWorld {
         budget_bytes: usize,
     ) -> Result<ForgedWorld, ArtifactError> {
         meta.validate()?;
-        let cache = crate::forged_tiles::TileCache::new(&meta, loader, budget_bytes);
-        Ok(Self::with_rasters(meta.globals, Rasters::Tiled(std::sync::Arc::new(cache)), content_crc))
+        let crate::forged_tiles::ForgedMeta { tile_cells, globals, climate, .. } = meta;
+        let cache = crate::forged_tiles::TileCache::new(&globals, tile_cells, climate, loader, budget_bytes);
+        Ok(Self::with_rasters(globals, Rasters::Tiled(std::sync::Arc::new(cache)), content_crc))
+    }
+
+    /// The world's monthly climate normals (always resident; map metres —
+    /// a reader at engine metres converts first).
+    pub fn monthly_climate(&self) -> &game::MonthlyClimate {
+        self.rasters.climate()
     }
 
     /// The tile cache of a tiled world (`None` for a whole one).

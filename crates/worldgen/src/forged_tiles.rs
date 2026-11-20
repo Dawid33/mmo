@@ -35,7 +35,8 @@ pub const TILE_CELLS: u32 = 256;
 /// Version of the tiled format (meta + tiles), independent of the forge
 /// file's `ARTIFACT_VERSION`. A mismatch is refused: re-tile or re-forge.
 /// v2: width x height worlds (`WorldGlobals` `nx`, `nz`, and the knobs).
-pub const TILED_FORMAT_VERSION: u32 = 2;
+/// v3: `ForgedMeta::climate`, the monthly-normals family (resident, never in tiles).
+pub const TILED_FORMAT_VERSION: u32 = 3;
 /// Decoded bytes the tile cache keeps before it evicts the least recently
 /// used tile (Decision 4); `VOXEL_TILE_CACHE_MB` overrides it
 /// ([`tile_cache_budget_from_env`]).
@@ -168,11 +169,15 @@ pub struct ForgedMeta {
     pub tile_cells: u32,
     pub globals: WorldGlobals,
     pub lakes: Vec<LakeRecord>,
+    /// The monthly climate normals, whole (`WorldArtifact::climate`): always
+    /// resident, never in tiles; the tile cache holds the one copy.
+    pub climate: game::MonthlyClimate,
 }
 
 impl ForgedMeta {
     /// What a reader checks before it samples: this build's format, a tile
-    /// edge that is a whole number of river buckets, sound global tables.
+    /// edge that is a whole number of river buckets, sound global tables, a
+    /// monthly climate whose grid spans the world (`validate_climate`).
     pub fn validate(&self) -> Result<(), ArtifactError> {
         if self.format_version != TILED_FORMAT_VERSION {
             return Err(ArtifactError::Format(format!(
@@ -181,6 +186,8 @@ impl ForgedMeta {
             )));
         }
         self.globals.validate()?;
+        let g = &self.globals;
+        crate::forged::validate_climate(&self.climate, g.width_m, g.height_m, &g.edges)?;
         if self.tile_cells == 0 || !tile_is_whole_buckets(self.tile_cells, self.globals.cell_m) {
             return Err(ArtifactError::Format(format!(
                 "tile of {} cells x {} m is not a whole number of {BUCKET_M} m river buckets",
@@ -300,6 +307,7 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Ti
         tile_cells,
         globals: globals.clone(),
         lakes: Vec::new(),
+        climate: world.monthly_climate().clone(),
     };
     check.validate()?;
     let Rasters::Whole(whole) = world.rasters() else {
@@ -401,13 +409,22 @@ fn unwrap(magic: &[u8; 4], what: &str, bytes: &[u8]) -> Result<Vec<u8>, Artifact
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn encode_meta(meta: &ForgedMeta) -> Vec<u8> {
-    wrap(META_MAGIC, &bincode::serialize(meta).expect("meta serializes"))
+    let mut wire = meta.clone();
+    crate::forged::climate_to_wire(&mut wire.climate);
+    wrap(META_MAGIC, &bincode::serialize(&wire).expect("meta serializes"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn decode_meta(bytes: &[u8]) -> Result<ForgedMeta, ArtifactError> {
     let body = unwrap(META_MAGIC, "tiled world meta", bytes)?;
-    bincode::deserialize(&body).map_err(|e| ArtifactError::Format(format!("corrupt tiled world meta: {e}")))
+    let mut meta: ForgedMeta =
+        bincode::deserialize(&body).map_err(|e| ArtifactError::Format(format!("corrupt tiled world meta: {e}")))?;
+    // The planes' sizes are checked before they are un-deltaed (the rest of
+    // the meta is checked by `ForgedMeta::validate` when a world is made).
+    let g = &meta.globals;
+    crate::forged::validate_climate(&meta.climate, g.width_m, g.height_m, &g.edges)?;
+    crate::forged::climate_from_wire(&mut meta.climate);
+    Ok(meta)
 }
 
 /// The tile codec: every raster row-delta encoded (rows of `w`), then
@@ -532,6 +549,9 @@ pub struct TileCache {
     geometry: TileGeometry,
     q_scale: [(f32, f32); 5],
     region_count: usize,
+    /// The world's monthly climate (`ForgedMeta::climate`): the one resident
+    /// copy, not counted against the budget.
+    climate: game::MonthlyClimate,
     /// One entry per tile of the grid (`tz * tiles_x + tx`): `Some`
     /// while the tile is cached or loading.
     slots: RwLock<Vec<Option<Arc<Slot>>>>,
@@ -616,15 +636,24 @@ impl Drop for TilePins {
 }
 
 impl TileCache {
-    /// `meta` must have passed [`ForgedMeta::validate`].
-    pub fn new(meta: &ForgedMeta, loader: Arc<dyn TileLoader>, budget_bytes: usize) -> TileCache {
-        let geometry = TileGeometry::new(&meta.globals, meta.tile_cells);
+    /// The parts of a meta that passed [`ForgedMeta::validate`]: its
+    /// `globals`, `tile_cells` and `climate` (moved in: the cache holds the
+    /// one resident copy).
+    pub fn new(
+        globals: &WorldGlobals,
+        tile_cells: u32,
+        climate: game::MonthlyClimate,
+        loader: Arc<dyn TileLoader>,
+        budget_bytes: usize,
+    ) -> TileCache {
+        let geometry = TileGeometry::new(globals, tile_cells);
         TileCache {
             loader,
             budget_bytes,
             geometry,
-            q_scale: meta.globals.q_scale,
-            region_count: meta.globals.regions.len(),
+            q_scale: globals.q_scale,
+            region_count: globals.regions.len(),
+            climate,
             slots: RwLock::new(vec![None; geometry.tile_count()]),
             clock: AtomicU64::new(0),
             resident: AtomicUsize::new(0),
@@ -634,6 +663,11 @@ impl TileCache {
             load_errors: AtomicU64::new(0),
             id: NEXT_CACHE_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// The world's monthly climate (`ForgedWorld::monthly_climate`).
+    pub(crate) fn climate(&self) -> &game::MonthlyClimate {
+        &self.climate
     }
 
     /// Decoded bytes of the tiles the cache holds (pinned ones included).
