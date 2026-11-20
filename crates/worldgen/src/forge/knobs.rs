@@ -45,9 +45,9 @@ macro_rules! knobs {
 knobs! {
     "Land" {
         continent_count: 3.0, [2.0, 4.0], "Continents", "How many landmasses the world is split into, spread round the whole width.";
-        continent_sea_width: 0.08, [0.02, 0.3], "Sea between continents", "Half-width of the seas between neighbouring continents, as a share of the half-width.";
+        continent_sea_width: 0.20, [0.02, 0.3], "Sea between continents", "Half-width of the seas between neighbouring continents, as a share of the half-width.";
         continent_coast: 0.45, [0.15, 0.9], "Polar coast distance", "How far in from the north and south edges the coast sits, as a share of the half-height (each edge varies a little by seed).";
-        coast_noise_lo: 0.75, [0.0, 1.6], "Coast wander (8 km)", "Strength of the 8 km noise that pushes the coast in and out: bays, peninsulas, the overall outline.";
+        coast_noise_lo: 0.6, [0.0, 1.6], "Coast wander (8 km)", "Strength of the 8 km noise that pushes the coast in and out: bays, peninsulas, the overall outline.";
         coast_noise_hi: 0.18, [0.0, 0.7], "Coast detail (1 km)", "Strength of the 1 km noise on the coastline: coves and headlands.";
         ocean_margin_start: 0.84, [0.55, 0.95], "Ocean margin", "Land is forced under the sea beyond this share of the half-height toward the north and south edges: the polar seas.";
     }
