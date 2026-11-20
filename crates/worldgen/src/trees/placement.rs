@@ -220,6 +220,13 @@ fn candidate(
     })
 }
 
+/// The species of the tree lattice cell `(lx, lz)` would hold standing at surface block `sy`, without
+/// the spacing between neighbours `trees_in` settles: the world map's coarse levels, where a sample is
+/// as wide as a cell or wider, colour by it (`surface::surface_tile_forged`).
+pub(crate) fn cell_tree(lx: i32, lz: i32, seed: u64, wrap: Option<LatticeWrap>, habitat: &dyn HabitatSource, sy: i32) -> Option<u8> {
+    candidate(lx, lz, seed, wrap, habitat, &|_, _| Some(sy)).map(|c| c.species)
+}
+
 fn too_close(a: &Candidate, b: &Candidate) -> bool {
     let r = SPECIES[a.species as usize].crown_radius_blocks.max(SPECIES[b.species as usize].crown_radius_blocks);
     let (dx, dz) = (a.pos[0] - b.pos[0], a.pos[1] - b.pos[1]);

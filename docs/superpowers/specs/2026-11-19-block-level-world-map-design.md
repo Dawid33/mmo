@@ -420,5 +420,9 @@ Nothing was run in a window, on the twin or on orion: every hand check is owed (
 | Login | `worlds.map_url` (migration 0005), `world add --map-url` | Also in the join ticket. |
 | Removed | `tile_map::{rasterize, MAP_TILE_PX, MAP_GRID_PX, play_blocker}`, `rebuild_minimap_base`, `minimap-base`, `map-image`, `play_region`, `PlayRefusal` | `PlayRegion` / `PlayRefused` stay as unsent variants (`PlayRefused(RegionCoords)`). |
 
-Pristine tree canopies are not drawn (plan departure 4; §10: stamping costs more than a level-0 tile); proposed
-next: stamping on demand at levels 0–1 (TODO.md).
+Pristine tree canopies (added 2026-11-20 at the owner's word, after the plan): level 0 stamps the real crowns of
+generation's own tree placement (each tree's leaf-ball footprint and height; tree / no tree agrees with generation on
+96.8 % of a forest region's columns, the exact block on 92 % — the rest is branch vs leaf inside crowns); coarser
+levels show the leaves of the tree a lattice cell would hold (`trees::placement::cell_tree`, habitat per 32 m).
+Release, dev Planet, a forest tile: level 0 55 ms (was 22), 1 26, 2 42, 3 49, 4 39, 6 21. Procedural worlds stay
+treeless on the map. `map_tiles::MAP_TILE_RENDER_VERSION` (2) in every etag makes caches drop the treeless tiles.

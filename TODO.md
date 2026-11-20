@@ -29,9 +29,8 @@ check is owed to the owner, none was run:
 - (g) `just twin-check` (phase 8b: a tile through the web proxy, 200 then 304) — needs `twin-images`; on orion an
   `orion-apply world` (new Service port `map`, web env MAP_UPSTREAM / MAP_WORLD) and `world-register` again (prints
   `--map-url`); the login service needs its migration 0005 (a release) before `world add --map-url`.
-- Pristine tree canopies are not drawn (departure 4): trees show only where a region was saved. Proposed (owner
-  asked 2026-11-20): stamp crowns on demand at levels 0–1 (~+33 ms per fresh level-0 tile, cached), a per-biome
-  canopy tint above; NOT saving every region at forge (est. tens–hundreds of GB for Medium).
+- Pristine tree canopies are drawn since 2026-11-20 (crowns at level 0, lattice-cell leaves above; spec As built):
+  check them in (a) — a forest at 1 m/px against the world, and zoomed out.
 - Open: the client decodes tiles on the browser's main thread (a compute JobKind if it hitches); the map route
   revalidates terrain versions on a 30 s timer, not the per-cut NOTIFY.
 

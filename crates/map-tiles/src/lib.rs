@@ -15,6 +15,12 @@ use world_store::{StoreError, StoreHandle};
 use worldgen::forged::ForgedWorld;
 use worldgen::material::Materials;
 
+/// What tiles look like, in every etag: bump it on any change to what a tile built from the same world
+/// and the same stored terrain holds (worldgen's surface, the overlay, the canopy), or every cache —
+/// the browser's, the native disk's — keeps answering 304 with the old picture.
+/// 2: pristine tree canopies (crowns at level 0, the lattice cells' leaves above).
+pub const MAP_TILE_RENDER_VERSION: u32 = 2;
+
 /// Stored chunk tops are overlaid on levels up to this one (8 m per sample); above it a tile is
 /// worldgen's alone (spec §9, decision 3).
 pub const MAP_EDIT_MAX_LEVEL: u8 = 3;
@@ -273,6 +279,7 @@ impl TileSource {
 /// with its version.
 fn etag_of(tag: u64, key: MapTileKey, stored: &[(RegionCoords, RegionCoords, u64)]) -> u64 {
     let mut h = crc32fast::Hasher::new();
+    h.update(&MAP_TILE_RENDER_VERSION.to_le_bytes());
     h.update(&tag.to_le_bytes());
     h.update(&[key.level]);
     h.update(&key.x.to_le_bytes());
