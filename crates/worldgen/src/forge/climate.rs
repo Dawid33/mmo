@@ -4,7 +4,8 @@
 //! - **Latitude** runs along z (rows): `pole` puts a pole on the north
 //!   (z = 0) edge, the south edge, both, or none (the whole map at
 //!   `latitude_center_deg`); `latitude_span_deg` is how far the map reaches
-//!   from its pole(s). Southern latitudes are negative; everything below uses
+//!   from its pole(s). A planet has both poles and the full span: 90° N at
+//!   the north edge, the equator in the middle row, 90° S at the south edge. Southern latitudes are negative; everything below uses
 //!   the absolute value.
 //! - **Meander**: everything that depends on latitude below (temperature, the
 //!   rain table, the wind bands) reads an EFFECTIVE latitude per cell — the
@@ -28,7 +29,9 @@
 //!   about all of it) and arrives dry on the lee side; it recharges toward
 //!   saturation over any sea (inland seas included) and any lake. Air that
 //!   enters across a SEA edge is saturated; air that enters across a LAND
-//!   edge has crossed endless land and is at the equilibrium.
+//!   edge has crossed endless land and is at the equilibrium. On a world that
+//!   wraps east-west (the planet) no air enters: each row's sweep goes once
+//!   round from saturation, then records the lap after it.
 //! - **Precipitation** (mm/yr) is the latitude's base (`LATITUDE_PRECIP_MM`:
 //!   wet equator, dry ~25° belts, wet ~50°, dry poles) times the air's
 //!   moisture relative to the equilibrium, raised on windward slopes
@@ -121,7 +124,7 @@ pub enum Wind {
 /// Latitude (deg) of each of `nz` rows.
 pub fn latitudes(nz: usize, p: &ForgeParams) -> Vec<f32> {
     let k = &p.knobs;
-    let span = k.latitude_span_deg.clamp(0.0, 180.0);
+    let span = k.latitude_span();
     (0..nz)
         .map(|z| {
             let t = (z as f64 + 0.5) / nz as f64; // 0 at the north edge, 1 at the south
@@ -203,9 +206,27 @@ pub fn base_precip_mm(lat_deg: f32) -> f32 {
 }
 
 /// Box blur of an `nx` x `nz` raster along x (each row) or along z (each
-/// column).
-fn box_blur_rows(src: &[f64], nx: usize, nz: usize, radius: usize, along_x: bool) -> Vec<f64> {
+/// column). `wrap_x`: a row is a circle (column `nx - 1` beside 0), so the
+/// blur along x runs round the seam with the full `2 * radius + 1` box.
+fn box_blur_rows(src: &[f64], nx: usize, nz: usize, radius: usize, along_x: bool, wrap_x: bool) -> Vec<f64> {
     let mut out = vec![0.0; nx * nz];
+    if along_x && wrap_x {
+        // Columns b - radius ..= b + radius, mod nx (a box wider than the row
+        // counts some columns twice, every one the same number of times).
+        let back = nx * (radius / nx + 1); // >= radius + 1: keeps indices unsigned
+        let count = (2 * radius + 1) as f64;
+        for a in 0..nz {
+            let row = &src[a * nx..(a + 1) * nx];
+            let at = |b: usize| row[b % nx];
+            let mut sum: f64 = (0..=2 * radius).map(|o| at(back + o - radius)).sum();
+            for b in 0..nx {
+                out[a * nx + b] = sum / count;
+                sum += at(b + radius + 1);
+                sum -= at(back + b - radius);
+            }
+        }
+        return out;
+    }
     // `lines` rows (or columns) of `len` cells each.
     let (lines, len) = if along_x { (nz, nx) } else { (nx, nz) };
     for a in 0..lines {
@@ -272,18 +293,31 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
     let (nx, nz, k, dx) = (w.nx, w.nz, &p.knobs, w.dx);
     let ground: Vec<f64> = w.h.iter().map(|h| h.max(0.0)).collect();
     let terrain = radius_cells(TERRAIN_BLUR_M, dx);
-    let ground = box_blur_rows(&box_blur_rows(&ground, nx, nz, terrain, true), nx, nz, terrain, false);
+    let wrap_x = w.wrap_x;
+    let ground =
+        box_blur_rows(&box_blur_rows(&ground, nx, nz, terrain, true, wrap_x), nx, nz, terrain, false, wrap_x);
     // `World::edges` order: N, E, S, W.
     let inflow = |edge: usize| if w.edges[edge] == EdgeKind::Sea { 1.0 } else { CONTINENTAL_MOISTURE };
     let recharge = (dx / k.sea_recharge_m).min(1.0);
     let relax = (dx / k.land_depletion_m).min(1.0);
     let lift = OROGRAPHIC_RUN_M / k.orographic_scale_m / dx;
 
-    // One row's precipitation relative to the base, wind from the west or east.
+    // One row's precipitation relative to the base, wind from the west or
+    // east. A wrapping world has no edge to blow in across: the air goes
+    // once round the row from saturation (a spin-up lap, not recorded), then
+    // the recorded lap carries on from where it ended.
     let sweep = |z: usize, from_west: bool, row: &mut [f64]| {
-        let mut moisture: f64 = if from_west { inflow(3) } else { inflow(1) };
+        let mut moisture: f64 = if wrap_x {
+            1.0
+        } else if from_west {
+            inflow(3)
+        } else {
+            inflow(1)
+        };
         let mut prev: Option<usize> = None;
-        for step in 0..nx {
+        let laps = if wrap_x { 2 } else { 1 };
+        for step in 0..laps * nx {
+            let step = step % nx;
             let x = if from_west { step } else { nx - 1 - step };
             let i = z * nx + x;
             if w.ocean[i] {
@@ -319,7 +353,8 @@ fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f6
     let rain: Vec<f64> = rows.concat();
     let land: Vec<f64> = w.ocean.iter().map(|&o| if o { 0.0 } else { 1.0 }).collect();
     let (cross, along) = (radius_cells(RAIN_CROSS_BLUR_M, dx), radius_cells(RAIN_ALONG_BLUR_M, dx));
-    let blur = |v: &[f64]| box_blur_rows(&box_blur_rows(v, nx, nz, cross, false), nx, nz, along, true);
+    let blur =
+        |v: &[f64]| box_blur_rows(&box_blur_rows(v, nx, nz, cross, false, wrap_x), nx, nz, along, true, wrap_x);
     let (rain_sum, land_share) = (blur(&rain), blur(&land));
     (0..w.cells())
         .map(|i| {

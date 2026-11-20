@@ -178,8 +178,6 @@ pub fn drainage_at(slope: f64, permeability: f64, above_water: f64, water_dist: 
 /// or lake) is skipped for a one-sided difference, so a channel's own banks
 /// do not count as a slope.
 pub fn ground_slope(w: &World, is_water: &dyn Fn(usize) -> bool, i: usize) -> f64 {
-    let (nx, nz) = (w.nx, w.nz);
-    let (x, z) = w.xz(i);
     let h = |j: usize| w.h[j].max(0.0);
     let axis = |lo: Option<usize>, hi: Option<usize>| {
         let ok = |j: &usize| !is_water(*j);
@@ -190,8 +188,9 @@ pub fn ground_slope(w: &World, is_water: &dyn Fn(usize) -> bool, i: usize) -> f6
             (None, None) => 0.0,
         }
     };
-    let gx = axis((x > 0).then(|| i - 1), (x + 1 < nx).then(|| i + 1));
-    let gz = axis((z > 0).then(|| i - nx), (z + 1 < nz).then(|| i + nx));
+    // `World::step`: x wraps round on a wrapping world.
+    let gx = axis(w.step(i, -1, 0), w.step(i, 1, 0));
+    let gz = axis(w.step(i, 0, -1), w.step(i, 0, 1));
     gx.hypot(gz)
 }
 
@@ -243,36 +242,54 @@ pub fn water_discharge(w: &World, a: &Analysis) -> Vec<f64> {
 /// For each cell, the distance (m) to the nearest cell with a water level
 /// (not NaN), that level and that water's discharge: a two-pass chamfer
 /// carrying the source's (level, q). (INFINITY, NaN, NaN) when there is no
-/// water at all.
-fn nearest_water(nx: usize, nz: usize, dx: f64, level: &[f64], q: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>) {
+/// water at all. With `wrap_x` columns 0 and `nx - 1` are neighbours, and the
+/// pass pair repeats (at most `habitat::CHAMFER_WRAP_EXTRA_PASSES` more times) until
+/// nothing changes: the forward pass reads the row's far column before it
+/// was relaxed.
+fn nearest_water(nx: usize, nz: usize, dx: f64, wrap_x: bool, level: &[f64], q: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>) {
     let mut dist: Vec<f64> = level.iter().map(|l| if l.is_nan() { f64::INFINITY } else { 0.0 }).collect();
     let mut at: Vec<(f64, f64)> = level.iter().zip(q).map(|(&l, &q)| (l, q)).collect();
     let diag = dx * std::f64::consts::SQRT_2;
     let relax = |dist: &mut Vec<f64>, at: &mut Vec<(f64, f64)>, x: usize, z: usize, ox: isize, oz: isize, step: f64| {
         let (jx, jz) = (x as isize + ox, z as isize + oz);
+        let jx = if wrap_x { jx.rem_euclid(nx as isize) } else { jx };
         if jx >= 0 && jz >= 0 && (jx as usize) < nx && (jz as usize) < nz {
             let j = jz as usize * nx + jx as usize;
             let i = z * nx + x;
             if dist[j] + step < dist[i] {
                 dist[i] = dist[j] + step;
                 at[i] = at[j];
+                return true;
             }
         }
+        false
     };
-    for z in 0..nz {
-        for x in 0..nx {
-            relax(&mut dist, &mut at, x, z, -1, 0, dx);
-            relax(&mut dist, &mut at, x, z, 0, -1, dx);
-            relax(&mut dist, &mut at, x, z, -1, -1, diag);
-            relax(&mut dist, &mut at, x, z, 1, -1, diag);
+    let pair = |dist: &mut Vec<f64>, at: &mut Vec<(f64, f64)>| {
+        let mut changed = false;
+        for z in 0..nz {
+            for x in 0..nx {
+                changed |= relax(dist, at, x, z, -1, 0, dx);
+                changed |= relax(dist, at, x, z, 0, -1, dx);
+                changed |= relax(dist, at, x, z, -1, -1, diag);
+                changed |= relax(dist, at, x, z, 1, -1, diag);
+            }
         }
-    }
-    for z in (0..nz).rev() {
-        for x in (0..nx).rev() {
-            relax(&mut dist, &mut at, x, z, 1, 0, dx);
-            relax(&mut dist, &mut at, x, z, 0, 1, dx);
-            relax(&mut dist, &mut at, x, z, 1, 1, diag);
-            relax(&mut dist, &mut at, x, z, -1, 1, diag);
+        for z in (0..nz).rev() {
+            for x in (0..nx).rev() {
+                changed |= relax(dist, at, x, z, 1, 0, dx);
+                changed |= relax(dist, at, x, z, 0, 1, dx);
+                changed |= relax(dist, at, x, z, 1, 1, diag);
+                changed |= relax(dist, at, x, z, -1, 1, diag);
+            }
+        }
+        changed
+    };
+    pair(&mut dist, &mut at);
+    if wrap_x {
+        for _ in 0..crate::habitat::CHAMFER_WRAP_EXTRA_PASSES {
+            if !pair(&mut dist, &mut at) {
+                break;
+            }
         }
     }
     (dist, at)
@@ -284,7 +301,7 @@ fn nearest_water(nx: usize, nz: usize, dx: f64, level: &[f64], q: &[f64]) -> (Ve
 /// are 0; a river channel cell takes the mean of its land neighbours (its
 /// banks), so a creek is not a line of marsh.
 pub fn drainage_from(w: &World, water_level: &[f64], water_q: &[f64], rock: &[u8]) -> Vec<u8> {
-    let (dist, nearest) = nearest_water(w.nx, w.nz, w.dx, water_level, water_q);
+    let (dist, nearest) = nearest_water(w.nx, w.nz, w.dx, w.wrap_x, water_level, water_q);
     let is_water = |j: usize| !water_level[j].is_nan();
     let land_value = |i: usize| {
         let (level, q) = nearest[i];
@@ -428,7 +445,6 @@ pub fn cone(sites: &[[f32; 2]], mx: f64, mz: f64) -> f64 {
 /// `q` (m^2, rain-weighted area) in the body, i.e. what leaves through its
 /// outlet — is under `ENDORHEIC_INFLOW_RATIO` times the body's surface.
 pub fn closed_lakes(w: &World, lake_depth: &[f64], q: &[f64]) -> Vec<bool> {
-    let (nx, nz) = (w.nx, w.nz);
     let is_lake = |i: usize| !w.ocean[i] && lake_depth[i] >= LAKE_MIN_DEPTH_M;
     let mut seen = vec![false; w.cells()];
     let mut closed = vec![false; w.cells()];
@@ -440,17 +456,18 @@ pub fn closed_lakes(w: &World, lake_depth: &[f64], q: &[f64]) -> Vec<bool> {
         seen[start] = true;
         while let Some(i) = stack.pop() {
             cells.push(i);
-            let (x, z) = w.xz(i);
             let mut visit = |j: usize| {
                 if !seen[j] && is_lake(j) {
                     seen[j] = true;
                     stack.push(j);
                 }
             };
-            if x > 0 { visit(i - 1); }
-            if x + 1 < nx { visit(i + 1); }
-            if z > 0 { visit(i - nx); }
-            if z + 1 < nz { visit(i + nx); }
+            // West, east, north, south: x wraps round on a wrapping world.
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                if let Some(j) = w.step(i, dx, dz) {
+                    visit(j);
+                }
+            }
         }
         let inflow = cells.iter().map(|&i| q[i]).fold(0.0, f64::max);
         let area = cells.len() as f64 * w.dx * w.dx;
@@ -469,7 +486,7 @@ pub fn closed_lakes(w: &World, lake_depth: &[f64], q: &[f64]) -> Vec<bool> {
 /// the same at any cell size.
 pub fn salinity_from(w: &World, closed: &[bool]) -> Vec<u8> {
     let salt: Vec<f32> = (0..w.cells()).map(|i| if w.ocean[i] || closed[i] { -1.0 } else { 1.0 }).collect();
-    let dist = crate::habitat::coast_distance_m(&salt, w.nx, w.nz, w.dx);
+    let dist = crate::habitat::coast_distance_m(&salt, w.nx, w.nz, w.dx, w.wrap_x);
     dist.iter()
         .map(|&d| if d <= 0.0 { 100 } else { to_u8(1.0 - (d as f64 - 0.5 * w.dx) / SALT_REACH_M as f64) })
         .collect()

@@ -44,7 +44,7 @@ macro_rules! knobs {
 
 knobs! {
     "Island" {
-        layout: 3.0, [0.0, 5.0], "Layout", "One island fills the world; an archipelago scatters several; an island arc strings them along a curve, largest in the middle. A continent fills the world with sea on some edges and land running off the others; continents split it into several landmasses; inland has land on every edge around an inland sea.";
+        layout: 3.0, [0.0, 6.0], "Layout", "One island fills the world; an archipelago scatters several; an island arc strings them along a curve, largest in the middle. A continent fills the world with sea on some edges and land running off the others; continents split it into several landmasses; inland has land on every edge around an inland sea. A planet is continents on a map that wraps east-west, with polar seas north and south and poles on both edges.";
         island_extent: 0.66, [0.35, 0.95], "Island size", "One island: the coast sits about this share of the half-width out, before noise warps it. Several islands: scales all of them.";
         island_count: 6.0, [2.0, 14.0], "Islands", "How many islands an archipelago or arc is given (neighbours may merge, small ones may drown).";
         island_spread: 0.62, [0.25, 0.8], "Spread", "How far from the world center islands are placed, as a share of the half-width.";
@@ -143,7 +143,7 @@ knobs! {
 /// Knobs that are a choice, not a quantity: the page shows a list, and the
 /// value is the index.
 pub const CHOICES: &[(&str, &[&str])] = &[
-    ("layout", &["One island", "Archipelago", "Island arc", "Continent", "Continents", "Inland"]),
+    ("layout", &["One island", "Archipelago", "Island arc", "Continent", "Continents", "Inland", "Planet"]),
     ("pole", &["None", "North", "South", "Both"]),
 ];
 
@@ -156,17 +156,27 @@ pub const LAYOUT_CONTINENT: u32 = 3;
 pub const LAYOUT_CONTINENTS: u32 = 4;
 /// Land on every edge around an inland sea.
 pub const LAYOUT_INLAND: u32 = 5;
-const LAYOUT_LAST: u32 = LAYOUT_INLAND;
+/// A whole planet: the continents' landmasses on a grid that wraps east-west
+/// (`EdgeKind::Wrap`), sea along the north and south edges, a pole on each
+/// edge and the equator in the middle row.
+pub const LAYOUT_PLANET: u32 = 6;
+const LAYOUT_LAST: u32 = LAYOUT_PLANET;
 
 impl Knobs {
     pub fn layout(&self) -> u32 {
         self.layout.round().clamp(0.0, LAYOUT_LAST as f64) as u32
     }
 
-    /// Continent, continents or inland: plate belts, per-edge sea or land,
-    /// noise scaled with the world's size. The island layouts are the rest.
+    /// Continent, continents, inland or planet: plate belts, per-edge sea or
+    /// land, noise scaled with the world's size. The island layouts are the
+    /// rest.
     pub fn is_continental(&self) -> bool {
         self.layout() >= LAYOUT_CONTINENT
+    }
+
+    /// The planet layout: the grid wraps east-west.
+    pub fn is_planet(&self) -> bool {
+        self.layout() == LAYOUT_PLANET
     }
 
     /// Requested sea edges (0-4); `world::edges` forces 0 for inland.
@@ -174,9 +184,23 @@ impl Knobs {
         self.sea_edges.round().clamp(0.0, 4.0) as usize
     }
 
-    /// `climate::POLE_*`: none, north, south or both.
+    /// `climate::POLE_*`: none, north, south or both. A planet always has
+    /// both (`latitude_span` is then the full 90 degrees).
     pub fn pole_choice(&self) -> u32 {
+        if self.is_planet() {
+            return crate::forge::climate::POLE_BOTH;
+        }
         self.pole.round().clamp(0.0, 3.0) as u32
+    }
+
+    /// Degrees of latitude from a pole edge to the far side (both poles: to
+    /// the middle row), `latitude_span_deg` clamped; 90 on a planet (pole,
+    /// equator, pole).
+    pub fn latitude_span(&self) -> f64 {
+        if self.is_planet() {
+            return 90.0;
+        }
+        self.latitude_span_deg.clamp(0.0, 180.0)
     }
 
     pub fn plate_total(&self) -> usize {

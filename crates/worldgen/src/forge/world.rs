@@ -2,6 +2,7 @@
 
 use crate::forge::knobs::{
     Knobs, LAYOUT_ARC, LAYOUT_ARCHIPELAGO, LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_ONE_ISLAND,
+    LAYOUT_PLANET,
 };
 use crate::forge::fields;
 use crate::forge::par;
@@ -62,9 +63,9 @@ pub enum EdgeKind {
     /// are outlets whose base level is their own height, which follows the
     /// land just inside (`World::follow_land_edges`).
     Land,
-    /// The map wraps round to the opposite edge (east <-> west). Appended
-    /// last so the stored discriminants of `Sea` and `Land` stay; nothing
-    /// makes a wrapping edge yet (Task 9 of the Planet Frame plan).
+    /// The map wraps round to the opposite edge (east <-> west): the planet
+    /// layout's east and west edges. Appended last so the stored
+    /// discriminants of `Sea` and `Land` stay.
     Wrap,
 }
 
@@ -83,10 +84,14 @@ pub const EDGE_NAMES: [&str; 4] = ["north", "east", "south", "west"];
 
 /// Which edges are sea. The island layouts are sea all round; the
 /// continental ones take `Knobs::sea_edges` sea edges, which ones picked by
-/// the seed — except inland, which has none.
+/// the seed — except inland, which has none, and the planet, whose north and
+/// south are sea and whose east and west wrap.
 pub fn edges(seed: u64, k: &Knobs) -> [EdgeKind; 4] {
     if !k.is_continental() {
         return [EdgeKind::Sea; 4];
+    }
+    if k.is_planet() {
+        return [EdgeKind::Sea, EdgeKind::Wrap, EdgeKind::Sea, EdgeKind::Wrap];
     }
     let sea = if k.layout() == LAYOUT_INLAND { 0 } else { k.sea_edge_count() };
     let mut order = [0usize, 1, 2, 3];
@@ -109,6 +114,7 @@ enum ContinentalMass {
     /// Coast `coast[e]` half-widths in from each sea edge.
     Continent { coast: [f64; 4], sea: [bool; 4] },
     /// As a continent, cut by seas along the Voronoi boundaries of `centres`.
+    /// Also the planet's (its sea edges are north and south only).
     Continents { coast: [f64; 4], sea: [bool; 4], centres: Vec<(f64, f64)>, channel: f64 },
     /// Land all round an inland sea of `radius` at `centre`.
     Inland { centre: (f64, f64), radius: f64 },
@@ -123,7 +129,7 @@ impl ContinentalMass {
             *c = k.continent_coast * (1.0 + COAST_DISTANCE_VARIATION * u);
         }
         match k.layout() {
-            LAYOUT_CONTINENTS => {
+            LAYOUT_CONTINENTS | LAYOUT_PLANET => {
                 let count = k.continent_count.round().clamp(2.0, 4.0) as usize;
                 let mut centres: Vec<(f64, f64)> = Vec::new();
                 let mut attempt = 0u64;
@@ -475,6 +481,10 @@ pub struct World {
     pub h: Vec<f64>,
     /// Fixed sea cells: the base level everything drains to.
     pub ocean: Vec<bool>,
+    /// Columns 0 and `nx - 1` are neighbours (the planet: east and west are
+    /// `EdgeKind::Wrap`). Every neighbour walk goes through `neighbors` or
+    /// `step`; the outermost columns are then ordinary cells, not border.
+    pub wrap_x: bool,
     /// Rock uplift rate (m/yr).
     pub uplift: Vec<f64>,
     /// Total rock uplift applied so far (m): the rock now at height y started
@@ -487,8 +497,8 @@ pub struct World {
     pub edges: [EdgeKind; 4],
     /// Cells drainage ends at: the sea, and the border cells of land edges
     /// (never eroded, uplifted or diffused: they follow the land just inside,
-    /// `follow_land_edges`). Every border cell is one. Routing gives outlets
-    /// no receiver.
+    /// `follow_land_edges`). Every border cell (`border_cells`) is one.
+    /// Routing gives outlets no receiver.
     pub outlet: Vec<bool>,
 }
 
@@ -516,6 +526,7 @@ impl World {
             dx: p.cell_m,
             h: vec![0.0; nx * nz],
             ocean: vec![false; nx * nz],
+            wrap_x: false,
             uplift: vec![0.0; nx * nz],
             uplifted: vec![0.0; nx * nz],
             margin_drowned: 0,
@@ -616,6 +627,7 @@ impl World {
             dx: p.cell_m,
             h: vec![0.0; nx * nz],
             ocean: vec![false; nx * nz],
+            wrap_x: edges[1] == EdgeKind::Wrap,
             uplift: vec![0.0; nx * nz],
             uplifted: vec![0.0; nx * nz],
             margin_drowned: 0,
@@ -729,16 +741,32 @@ impl World {
         z * self.nx + x
     }
 
-    /// True for a cell on the outermost ring of the grid.
+    /// True for a cell on the outermost ring of the grid — on a wrapping
+    /// world only the first and last rows (its columns 0 and `nx - 1` are
+    /// neighbours, not an edge).
     pub fn on_border(&self, i: usize) -> bool {
         let (x, z) = self.xz(i);
-        x == 0 || z == 0 || x + 1 == self.nx || z + 1 == self.nz
+        z == 0 || z + 1 == self.nz || (!self.wrap_x && (x == 0 || x + 1 == self.nx))
     }
 
-    /// Every cell of the outermost ring (corners more than once).
+    /// Every cell of the outermost ring (corners more than once); on a
+    /// wrapping world the first and last rows only.
     pub fn border_cells(&self) -> impl Iterator<Item = usize> + use<> {
         let (nx, nz) = (self.nx, self.nz);
-        (0..nx).flat_map(move |x| [x, (nz - 1) * nx + x]).chain((0..nz).flat_map(move |z| [z * nx, z * nx + nx - 1]))
+        let columns = if self.wrap_x { 0 } else { nz };
+        (0..nx).flat_map(move |x| [x, (nz - 1) * nx + x]).chain((0..columns).flat_map(move |z| [z * nx, z * nx + nx - 1]))
+    }
+
+    /// The cell `dx` columns east and `dz` rows south of cell `i`: x wraps
+    /// round on a wrapping world, z never. `None` off the north or south
+    /// edge, or off east / west when the world does not wrap. The one
+    /// wrap-aware offset every neighbour walk uses.
+    #[inline]
+    pub fn step(&self, i: usize, dx: i32, dz: i32) -> Option<usize> {
+        let (x, z) = ((i % self.nx) as i64 + dx as i64, (i / self.nx) as i64 + dz as i64);
+        let (w, h) = (self.nx as i64, self.nz as i64);
+        let x = if self.wrap_x { x.rem_euclid(w) } else { x };
+        (x >= 0 && z >= 0 && x < w && z < h).then(|| (z * w + x) as usize)
     }
 
     /// This world's evolved state carried onto the finer grid of `p_fine`
@@ -765,15 +793,24 @@ impl World {
         // grid: a level whose `size / cell` rounds (16 km at 256 m: 62.5 ->
         // 63 cells) covers a little more or less than the fine grid, and a
         // share mapping would stretch it over the fine one. Fine cells past
-        // the coarse grid's centers clamp to its edge.
+        // the coarse grid's centers clamp to its edge — except along a
+        // wrapping x, which samples circularly (column nc - 1 beside 0).
         let ratio = fine.dx / self.dx;
         let axis = |j: usize, nc: usize| {
             let u = ((j as f64 + 0.5) * ratio - 0.5).clamp(0.0, (nc - 1) as f64);
             let i0 = (u.floor() as usize).min(nc.saturating_sub(2));
             (i0, (i0 + 1).min(nc - 1), u - i0 as f64)
         };
+        let circular = |j: usize, nc: usize| {
+            let u = (j as f64 + 0.5) * ratio - 0.5;
+            let f = u.floor();
+            let i0 = (f as i64).rem_euclid(nc as i64) as usize;
+            (i0, (i0 + 1) % nc, u - f)
+        };
+        let wrap_x = self.wrap_x && fine.wrap_x;
         let sample = |grid: &[f64], i: usize| {
-            let ((x0, x1, tx), (z0, z1, tz)) = (axis(i % nfx, ncx), axis(i / nfx, ncz));
+            let x_axis = if wrap_x { circular(i % nfx, ncx) } else { axis(i % nfx, ncx) };
+            let ((x0, x1, tx), (z0, z1, tz)) = (x_axis, axis(i / nfx, ncz));
             let row = |z: usize| grid[z * ncx + x0] * (1.0 - tx) + grid[z * ncx + x1] * tx;
             row(z0) * (1.0 - tz) + row(z1) * tz
         };
@@ -789,12 +826,15 @@ impl World {
         fine
     }
 
-    /// 8-neighbors of cell `i` with their distance in meters.
+    /// 8-neighbors of cell `i` with their distance in meters (x wraps round
+    /// on a wrapping world).
     pub fn neighbors(&self, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
         let (x, z) = ((i % self.nx) as i32, (i / self.nx) as i32);
         let (w, h) = (self.nx as i32, self.nz as i32);
+        let wrap = self.wrap_x;
         NEIGHBORS.iter().filter_map(move |&(ox, oz)| {
             let (jx, jz) = (x + ox, z + oz);
+            let jx = if wrap { jx.rem_euclid(w) } else { jx };
             (jx >= 0 && jz >= 0 && jx < w && jz < h).then(|| {
                 let dist = if ox != 0 && oz != 0 { std::f64::consts::SQRT_2 } else { 1.0 };
                 ((jz * w + jx) as usize, dist * self.dx)

@@ -772,9 +772,13 @@ impl WholeRasters {
         // decoded `f32` copy held), which saves 4 B/cell over keeping both.
         let height = &artifact.height;
         let coast_dist_m =
-            crate::habitat::coast_distance_by(artifact.nx as usize, artifact.nz as usize, artifact.cell_m, |i| {
-                height.get(i) <= 0.0
-            });
+            crate::habitat::coast_distance_by(
+                artifact.nx as usize,
+                artifact.nz as usize,
+                artifact.cell_m,
+                artifact.edges[1] == EdgeKind::Wrap,
+                |i| height.get(i) <= 0.0,
+            );
         let mut lake_runs: Vec<(u32, u32, f32)> = artifact
             .lakes
             .iter()

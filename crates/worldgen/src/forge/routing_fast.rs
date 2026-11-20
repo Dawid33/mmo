@@ -131,14 +131,21 @@ fn height_from_key(k: u64) -> f64 {
 
 /// The 8 neighbours as index offsets, in `World::neighbors` order, with
 /// their distances (the same f64s `neighbors` gives). Valid off the map edge
-/// only: `route_fast` checks the edge is all outlets, so every land cell it
-/// expands is interior.
+/// only: `route_fast` checks the edge (`World::border_cells`) is all outlets,
+/// so every land cell it expands has a row above and below. On a wrapping
+/// world columns 0 and `nx - 1` are ordinary cells: a step east from the last
+/// column lands on column 0 of the same row, west from column 0 on the last.
 #[derive(Clone, Copy)]
 struct Steps {
     off: [isize; 8],
     dist: [f64; 8],
     inv_dist: [f64; 8],
+    nx: usize,
+    wrap_x: bool,
 }
+
+/// Column step (-1, 0, 1) of each direction in `Steps::off`.
+const STEP_X: [i8; 8] = [1, -1, 0, 0, 1, 1, -1, -1];
 
 impl Steps {
     fn new(w: &World) -> Steps {
@@ -149,12 +156,23 @@ impl Steps {
             off: [1, -1, nx, -nx, nx + 1, -nx + 1, nx - 1, -nx - 1],
             dist,
             inv_dist: dist.map(|d| 1.0 / d),
+            nx: w.nx,
+            wrap_x: w.wrap_x,
         }
     }
 
     #[inline]
     fn at(&self, i: usize, k: usize) -> usize {
-        i.wrapping_add_signed(self.off[k])
+        let j = i.wrapping_add_signed(self.off[k]);
+        if !self.wrap_x {
+            return j;
+        }
+        let x = i % self.nx;
+        match STEP_X[k] {
+            1 if x + 1 == self.nx => j.wrapping_sub(self.nx),
+            -1 if x == 0 => j.wrapping_add(self.nx),
+            _ => j,
+        }
     }
 }
 
@@ -218,7 +236,11 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
                 if g.is_outlet(i) {
                     // A shore outlet: land among its (on-map) neighbours. A
                     // land-edge outlet stays at its own height.
-                    let shore = land_near[x.saturating_sub(1)..=(x + 1).min(nx - 1)].iter().any(|&l| l);
+                    let shore = if s.wrap_x {
+                        land_near[(x + nx - 1) % nx] || land_near[x] || land_near[(x + 1) % nx]
+                    } else {
+                        land_near[x.saturating_sub(1)..=(x + 1).min(nx - 1)].iter().any(|&l| l)
+                    };
                     filled[x] = if shore && g.ocean[i] { OUTLET_LEVEL_M } else { g.h[i] };
                     (down[x], basin[x]) = (NO_DIR, SEA);
                     continue;

@@ -272,8 +272,8 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
     let coeff = k.diffusivity * dt / (w.dx * w.dx);
     let substeps = (coeff / 0.2).ceil().max(1.0) as usize;
     let c = coeff / substeps as f64;
-    let World { h, ocean, .. } = w;
-    let ocean = &*ocean;
+    let World { h, ocean, wrap_x, .. } = w;
+    let (ocean, wrap_x) = (&*ocean, *wrap_x);
     for _ in 0..substeps {
         diffuse.clone_from(h);
         let diffuse = &*diffuse;
@@ -283,15 +283,28 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
                 if z == 0 || z == nz - 1 {
                     continue;
                 }
+                // The sea holds sea level at the shore, not its floor depth.
+                let s = |j: usize| if ocean[j] { 0.0 } else { diffuse[j] };
                 for x in 1..nx - 1 {
                     let i = z * nx + x;
                     if ocean[i] {
                         continue;
                     }
-                    // The sea holds sea level at the shore, not its floor depth.
-                    let s = |j: usize| if ocean[j] { 0.0 } else { diffuse[j] };
                     let lap = s(i - 1) + s(i + 1) + s(i - nx) + s(i + nx) - 4.0 * diffuse[i];
                     row[x] = (diffuse[i] + c * lap).max(LAND_FLOOR_M);
+                }
+                // A wrapping world's first and last columns are neighbours:
+                // the same stencil with x +- 1 taken mod nx.
+                if wrap_x {
+                    for x in [0, nx - 1] {
+                        let i = z * nx + x;
+                        if ocean[i] {
+                            continue;
+                        }
+                        let (west, east) = (z * nx + (x + nx - 1) % nx, z * nx + (x + 1) % nx);
+                        let lap = s(west) + s(east) + s(i - nx) + s(i + nx) - 4.0 * diffuse[i];
+                        row[x] = (diffuse[i] + c * lap).max(LAND_FLOOR_M);
+                    }
                 }
             }
         });

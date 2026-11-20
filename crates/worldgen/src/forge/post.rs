@@ -73,6 +73,8 @@ pub fn carve_floodplains(w: &mut World, rain: &[f64], k: &Knobs) {
         for oz in -r_cells..=r_cells {
             for ox in -r_cells..=r_cells {
                 let (x, z) = (cx + ox, cz + oz);
+                // x wraps round on a wrapping world.
+                let x = if w.wrap_x { x.rem_euclid(nx as i64) } else { x };
                 if x < 0 || z < 0 || x >= nx as i64 || z >= nz as i64 {
                     continue;
                 }
@@ -122,9 +124,12 @@ pub fn carve_lake_basins(w: &mut World, rain: &[f64], seed: u64, k: &Knobs) -> u
     let mut sites: Vec<usize> = Vec::new();
     for (_, i) in candidates {
         let (x, z) = w.center(i);
+        let width = w.nx as f64 * w.dx;
         let far_enough = sites.iter().all(|&s| {
             let (sx, sz) = w.center(s);
-            ((sx - x).powi(2) + (sz - z).powi(2)).sqrt() >= k.lake_spacing_m
+            // The shorter way round on a wrapping world.
+            let ex = if w.wrap_x { (sx - x).abs().min(width - (sx - x).abs()) } else { sx - x };
+            (ex.powi(2) + (sz - z).powi(2)).sqrt() >= k.lake_spacing_m
         });
         if far_enough {
             sites.push(i);
@@ -143,7 +148,10 @@ pub fn carve_lake_basins(w: &mut World, rain: &[f64], seed: u64, k: &Knobs) -> u
         for oz in -r_cells..=r_cells {
             for ox in -r_cells..=r_cells {
                 let (x, z) = (cx + ox, cz + oz);
-                if x < 1 || z < 1 || x >= nx as i64 - 1 || z >= nz as i64 - 1 {
+                // Never on the border; x wraps round on a wrapping world.
+                let x = if w.wrap_x { x.rem_euclid(nx as i64) } else { x };
+                let off_x = !w.wrap_x && (x < 1 || x >= nx as i64 - 1);
+                if off_x || z < 1 || z >= nz as i64 - 1 {
                     continue;
                 }
                 let j = z as usize * nx + x as usize;

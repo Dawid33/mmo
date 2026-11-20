@@ -164,9 +164,15 @@ const HILLSHADE_RELIEF: f64 = 1.0;
 fn shade(w: &World, x: usize, z: usize) -> f64 {
     let sun = [-0.5f64, std::f64::consts::FRAC_1_SQRT_2, -0.5];
     let at = |x: usize, z: usize| w.h[w.index(x, z)].max(0.0);
-    let (xl, xr) = (x.saturating_sub(1), (x + 1).min(w.nx - 1));
+    // x wraps round on a wrapping world.
+    let (xl, xr, run) = if w.wrap_x {
+        ((x + w.nx - 1) % w.nx, (x + 1) % w.nx, 2.0)
+    } else {
+        let (xl, xr) = (x.saturating_sub(1), (x + 1).min(w.nx - 1));
+        (xl, xr, (xr - xl) as f64)
+    };
     let (zu, zd) = (z.saturating_sub(1), (z + 1).min(w.nz - 1));
-    let dhdx = (at(xr, z) - at(xl, z)) / ((xr - xl) as f64 * w.dx);
+    let dhdx = (at(xr, z) - at(xl, z)) / (run * w.dx);
     let dhdz = (at(x, zd) - at(x, zu)) / ((zd - zu) as f64 * w.dx);
     let nrm = [-dhdx * HILLSHADE_RELIEF, 1.0, -dhdz * HILLSHADE_RELIEF];
     let len = (nrm[0] * nrm[0] + 1.0 + nrm[2] * nrm[2]).sqrt();
@@ -218,6 +224,8 @@ fn draw_water(img: &mut Image, w: &World, a: &Analysis) {
                 continue;
             }
             let (px, pz, qx, qz) = (p.x / w.dx, p.z / w.dx, q.x / w.dx, q.z / w.dx);
+            // A pair across a wrapping world's seam: the shorter way round.
+            let qx = if w.wrap_x { px + crate::forge::hydrology::seam_dx(qx - px, w.nx as f64) } else { qx };
             let steps = (((qx - px).powi(2) + (qz - pz).powi(2)).sqrt() * 2.0).ceil().max(1.0) as usize;
             for s in 0..=steps {
                 let t = s as f64 / steps as f64;
@@ -226,10 +234,11 @@ fn draw_water(img: &mut Image, w: &World, a: &Analysis) {
                 for oz in -r..=r {
                     for ox in -r..=r {
                         let (x, z) = (cx.floor() as i64 + ox, cz.floor() as i64 + oz);
+                        let d = ((x as f64 + 0.5 - cx).powi(2) + (z as f64 + 0.5 - cz).powi(2)).sqrt();
+                        let x = if w.wrap_x { x.rem_euclid(w.nx as i64) } else { x };
                         if x < 0 || z < 0 || x >= w.nx as i64 || z >= w.nz as i64 {
                             continue;
                         }
-                        let d = ((x as f64 + 0.5 - cx).powi(2) + (z as f64 + 0.5 - cz).powi(2)).sqrt();
                         let alpha = (radius + 0.5 - d).clamp(0.0, 1.0);
                         if alpha <= 0.0 || w.ocean[w.index(x as usize, z as usize)] {
                             continue;

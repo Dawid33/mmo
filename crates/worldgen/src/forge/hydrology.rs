@@ -111,7 +111,6 @@ fn regress(points: &[(f64, f64)]) -> f64 {
 }
 
 fn find_lakes(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], level: &[f64]) -> Vec<Lake> {
-    let (nx, nz) = (w.nx, w.nz);
     let is_lake = |i: usize| !w.ocean[i] && lake_depth[i] >= LAKE_MIN_DEPTH_M;
     let mut body = vec![u32::MAX; w.cells()];
     let mut lakes = Vec::new();
@@ -124,17 +123,18 @@ fn find_lakes(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], level
         body[start] = id;
         while let Some(i) = stack.pop() {
             cells.push(i);
-            let (x, z) = w.xz(i);
             let mut visit = |j: usize| {
                 if body[j] == u32::MAX && is_lake(j) {
                     body[j] = id;
                     stack.push(j);
                 }
             };
-            if x > 0 { visit(i - 1); }
-            if x + 1 < nx { visit(i + 1); }
-            if z > 0 { visit(i - nx); }
-            if z + 1 < nz { visit(i + nx); }
+            // West, east, north, south: x wraps round on a wrapping world.
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                if let Some(j) = w.step(i, dx, dz) {
+                    visit(j);
+                }
+            }
         }
         if cells.len() < LAKE_MIN_CELLS {
             for &i in &cells {
@@ -161,7 +161,6 @@ fn find_lakes(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], level
 
 /// Separate landmasses (4-connected) of at least MIN_ISLAND_KM2: (count, largest km^2).
 fn find_islands(w: &World) -> (usize, f64) {
-    let (nx, nz) = (w.nx, w.nz);
     let mut seen = w.ocean.clone();
     let (mut count, mut largest) = (0usize, 0usize);
     let min_cells = (MIN_ISLAND_KM2 * 1.0e6 / (w.dx * w.dx)).ceil() as usize;
@@ -173,17 +172,18 @@ fn find_islands(w: &World) -> (usize, f64) {
         seen[start] = true;
         while let Some(i) = stack.pop() {
             size += 1;
-            let (x, z) = w.xz(i);
             let mut visit = |j: usize| {
                 if !seen[j] {
                     seen[j] = true;
                     stack.push(j);
                 }
             };
-            if x > 0 { visit(i - 1); }
-            if x + 1 < nx { visit(i + 1); }
-            if z > 0 { visit(i - nx); }
-            if z + 1 < nz { visit(i + nx); }
+            // West, east, north, south: x wraps round on a wrapping world.
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                if let Some(j) = w.step(i, dx, dz) {
+                    visit(j);
+                }
+            }
         }
         if size >= min_cells {
             count += 1;
@@ -211,6 +211,13 @@ fn chaikin(points: &[RiverPoint]) -> Vec<RiverPoint> {
     }
     out.push(*points.last().unwrap());
     out
+}
+
+/// An x difference `dx` (m) on a world `width` m round, taken the shorter
+/// way: folded into (-width / 2, width / 2].
+pub fn seam_dx(dx: f64, width: f64) -> f64 {
+    let d = dx.rem_euclid(width);
+    if d > 0.5 * width { d - width } else { d }
 }
 
 /// Reaches between network nodes, with Strahler order. Returns (rivers, max order).
@@ -274,8 +281,23 @@ fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &
             let (x, z) = w.center(cur);
             points.push(RiverPoint { x, z, bed: w.h[cur], water: w.h[cur], in_lake: 0.0 });
         }
+        // On a wrapping world a reach may step across the seam (x = width
+        // beside x = 0): smooth it unwrapped, then fold every point back, so
+        // stored points stay in [0, width) and a seam-crossing pair is read
+        // the shorter way round (`seam_dx`).
+        let width = w.nx as f64 * w.dx;
+        if w.wrap_x {
+            for k in 1..points.len() {
+                points[k].x = points[k - 1].x + seam_dx(points[k].x - points[k - 1].x, width);
+            }
+        }
         for _ in 0..RIVER_SMOOTHING_PASSES {
             points = chaikin(&points);
+        }
+        if w.wrap_x {
+            for p in &mut points {
+                p.x = p.x.rem_euclid(width);
+            }
         }
         max_order = max_order.max(order[start]);
         rivers.push(River {
@@ -324,9 +346,11 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
             biggest = biggest.max(q[i]);
         }
     }
+    let width = w.nx as f64 * w.dx;
+    let along_x = |a: f64, b: f64| if w.wrap_x { seam_dx(b - a, width) } else { b - a };
     let channel_m: f64 = rivers
         .iter()
-        .map(|r| r.points.windows(2).map(|p| ((p[1].x - p[0].x).powi(2) + (p[1].z - p[0].z).powi(2)).sqrt()).sum::<f64>())
+        .map(|r| r.points.windows(2).map(|p| (along_x(p[0].x, p[1].x).powi(2) + (p[1].z - p[0].z).powi(2)).sqrt()).sum::<f64>())
         .sum();
 
     // Flint's law S ~ Q^-theta (theta = m/n = 0.5 at steady state in uniform

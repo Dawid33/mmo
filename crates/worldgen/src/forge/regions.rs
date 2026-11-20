@@ -83,9 +83,11 @@ pub fn min_region_cells(cell_m: f64) -> u32 {
 
 /// Regions of an `nx` × `nz` world from its biome (`Biome` as `u8`) and
 /// drainage rasters: per-cell region ids and the regions, ids dense from 0
-/// in raster order of each region's first cell.
-pub fn flood(biome: &[u8], drainage: &[u8], nx: usize, nz: usize, cell_m: f64) -> (Vec<u16>, Vec<RegionRecord>) {
-    flood_with(biome, drainage, (nx, nz), min_region_cells(cell_m), MAX_REGIONS)
+/// in raster order of each region's first cell. `wrap_x`: columns 0 and
+/// `nx - 1` are neighbours (a world that wraps east-west), so a region may
+/// run across that seam.
+pub fn flood(biome: &[u8], drainage: &[u8], nx: usize, nz: usize, cell_m: f64, wrap_x: bool) -> (Vec<u16>, Vec<RegionRecord>) {
+    flood_with(biome, drainage, (nx, nz), wrap_x, min_region_cells(cell_m), MAX_REGIONS)
 }
 
 /// `flood` with the merge size (cells) and the region cap as arguments.
@@ -93,6 +95,7 @@ pub fn flood_with(
     biome: &[u8],
     drainage: &[u8],
     (nx, nz): (usize, usize),
+    wrap_x: bool,
     min_cells: u32,
     max_regions: usize,
 ) -> (Vec<u16>, Vec<RegionRecord>) {
@@ -102,16 +105,16 @@ pub fn flood_with(
     let kind: Vec<RegionType> = par::map_range(nx * nz, |i| {
         region_type(Biome::from_u8(biome[i]).unwrap_or(Biome::Ocean), drainage[i])
     });
-    let mut f = Flood::components(&kind, nx, nz);
-    let mut count = f.merge(nx, nz, min_cells, false);
+    let mut f = Flood::components(&kind, nx, nz, wrap_x);
+    let mut count = f.merge(nx, nz, wrap_x, min_cells, false);
     let mut threshold = min_cells.max(1);
     while count > max_regions {
-        count = f.merge(nx, nz, threshold, true);
+        count = f.merge(nx, nz, wrap_x, threshold, true);
         if count <= max_regions {
             break;
         }
         threshold = threshold.saturating_mul(2);
-        count = f.merge(nx, nz, threshold, false);
+        count = f.merge(nx, nz, wrap_x, threshold, false);
     }
     f.finish()
 }
@@ -126,7 +129,7 @@ struct Flood {
 }
 
 impl Flood {
-    fn components(kind: &[RegionType], nx: usize, nz: usize) -> Flood {
+    fn components(kind: &[RegionType], nx: usize, nz: usize, wrap_x: bool) -> Flood {
         let mut label = vec![u32::MAX; nx * nz];
         let (mut size, mut kinds) = (Vec::new(), Vec::new());
         let mut stack = Vec::new();
@@ -148,11 +151,16 @@ impl Flood {
                         stack.push(j);
                     }
                 };
+                // x wraps round on a wrapping world.
                 if x > 0 {
                     visit(i - 1);
+                } else if wrap_x {
+                    visit(i + nx - 1);
                 }
                 if x + 1 < nx {
                     visit(i + 1);
+                } else if wrap_x {
+                    visit(i + 1 - nx);
                 }
                 if z > 0 {
                     visit(i - nx);
@@ -185,7 +193,7 @@ impl Flood {
     /// (same merge class unless `cross_class`), pass after pass until none
     /// can merge. Single-threaded and ordered by id: the result depends only
     /// on the rasters. Returns the region count.
-    fn merge(&mut self, nx: usize, nz: usize, min_cells: u32, cross_class: bool) -> usize {
+    fn merge(&mut self, nx: usize, nz: usize, wrap_x: bool, min_cells: u32, cross_class: bool) -> usize {
         loop {
             // Root of every cell, then the (small root, neighbour root) pairs.
             let roots: Vec<u32> = (0..nx * nz).map(|i| self.find(self.label[i])).collect();
@@ -206,6 +214,8 @@ impl Flood {
                 };
                 if x + 1 < nx {
                     edge(roots[i + 1]);
+                } else if wrap_x {
+                    edge(roots[i + 1 - nx]);
                 }
                 if z + 1 < nz {
                     edge(roots[i + nx]);
@@ -353,7 +363,8 @@ pub fn derive(a: &mut WorldArtifact, good_share: f64, evil_share: f64) {
         }
     }
     let biome = par::map_range(nx * nz, |i| classify(&a.cell_climate_at(i, lake[i])) as u8);
-    let (region, mut regions) = flood(&biome, &a.drainage, nx, nz, a.cell_m);
+    let wrap_x = a.edges[1] == crate::forge::world::EdgeKind::Wrap;
+    let (region, mut regions) = flood(&biome, &a.drainage, nx, nz, a.cell_m, wrap_x);
     assign_alignment(&mut regions, a.seed, good_share, evil_share, a.cell_m);
     a.savagery = savagery(a.seed, nx, nz, a.cell_m);
     a.biome = biome;

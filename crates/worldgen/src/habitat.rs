@@ -146,42 +146,63 @@ impl HabitatSource for ProceduralHabitat {
 /// Distance in metres from each cell of an `nx * nz` height raster (`cell_m`
 /// cells, row-major) to the nearest sea cell (height <= 0): 0 at sea. A
 /// two-pass chamfer (axis step 1, diagonal sqrt 2 cells). A raster with no sea
-/// reports the raster's longer side everywhere.
-pub fn coast_distance_m<T: Copy + Into<f64>>(height: &[T], nx: usize, nz: usize, cell_m: f64) -> Vec<f32> {
-    coast_distance_by(nx, nz, cell_m, |i| height[i].into() <= 0.0)
+/// reports the raster's longer side everywhere. `wrap_x`: columns 0 and
+/// `nx - 1` are neighbours (a world that wraps east-west).
+pub fn coast_distance_m<T: Copy + Into<f64>>(height: &[T], nx: usize, nz: usize, cell_m: f64, wrap_x: bool) -> Vec<f32> {
+    coast_distance_by(nx, nz, cell_m, wrap_x, |i| height[i].into() <= 0.0)
 }
+
+/// A wrapping chamfer distance repeats its pass pair at most this many more
+/// times, until nothing changes: a forward pass reads a row's far column
+/// before it was relaxed.
+pub const CHAMFER_WRAP_EXTRA_PASSES: usize = 2;
 
 /// [`coast_distance_m`] with the sea test as a closure over the raster index
 /// (`ForgedWorld` reads its quantised height without decoding a copy).
-pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, is_sea: impl Fn(usize) -> bool) -> Vec<f32> {
+pub fn coast_distance_by(nx: usize, nz: usize, cell_m: f64, wrap_x: bool, is_sea: impl Fn(usize) -> bool) -> Vec<f32> {
     const DIAGONAL: f32 = 1.414_213_5;
     let far = (nx.max(nz) as f64 * cell_m) as f32;
     let (axis, diag) = (cell_m as f32, cell_m as f32 * DIAGONAL);
     let mut d: Vec<f32> = (0..nx * nz).map(|i| if is_sea(i) { 0.0 } else { far }).collect();
     let relax = |d: &mut Vec<f32>, x: usize, z: usize, dx: isize, dz: isize, step: f32| {
         let (jx, jz) = (x as isize + dx, z as isize + dz);
+        let jx = if wrap_x { jx.rem_euclid(nx as isize) } else { jx };
         if jx >= 0 && jz >= 0 && (jx as usize) < nx && (jz as usize) < nz {
             let via = d[jz as usize * nx + jx as usize] + step;
             let i = z * nx + x;
             if via < d[i] {
                 d[i] = via;
+                return true;
             }
         }
+        false
     };
-    for z in 0..nz {
-        for x in 0..nx {
-            relax(&mut d, x, z, -1, 0, axis);
-            relax(&mut d, x, z, 0, -1, axis);
-            relax(&mut d, x, z, -1, -1, diag);
-            relax(&mut d, x, z, 1, -1, diag);
+    let pair = |d: &mut Vec<f32>| {
+        let mut changed = false;
+        for z in 0..nz {
+            for x in 0..nx {
+                changed |= relax(d, x, z, -1, 0, axis);
+                changed |= relax(d, x, z, 0, -1, axis);
+                changed |= relax(d, x, z, -1, -1, diag);
+                changed |= relax(d, x, z, 1, -1, diag);
+            }
         }
-    }
-    for z in (0..nz).rev() {
-        for x in (0..nx).rev() {
-            relax(&mut d, x, z, 1, 0, axis);
-            relax(&mut d, x, z, 0, 1, axis);
-            relax(&mut d, x, z, 1, 1, diag);
-            relax(&mut d, x, z, -1, 1, diag);
+        for z in (0..nz).rev() {
+            for x in (0..nx).rev() {
+                changed |= relax(d, x, z, 1, 0, axis);
+                changed |= relax(d, x, z, 0, 1, axis);
+                changed |= relax(d, x, z, 1, 1, diag);
+                changed |= relax(d, x, z, -1, 1, diag);
+            }
+        }
+        changed
+    };
+    pair(&mut d);
+    if wrap_x {
+        for _ in 0..CHAMFER_WRAP_EXTRA_PASSES {
+            if !pair(&mut d) {
+                break;
+            }
         }
     }
     d

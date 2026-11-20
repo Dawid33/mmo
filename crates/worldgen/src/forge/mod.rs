@@ -164,7 +164,6 @@ impl Forged {
     /// hydrology lake of the same level nearest the body.
     fn lake_bodies(&self, level: &[f64]) -> Vec<crate::forged::Lake> {
         let (w, a) = (&self.world, &self.analysis);
-        let (nx, nz) = (w.nx, w.nz);
         let is_lake = |i: usize| !w.ocean[i] && a.lake_depth[i] >= hydrology::LAKE_MIN_DEPTH_M;
         let mut seen = vec![false; w.cells()];
         let mut lakes = Vec::new();
@@ -177,17 +176,18 @@ impl Forged {
             seen[start] = true;
             while let Some(i) = stack.pop() {
                 cells.push(i);
-                let (x, z) = w.xz(i);
                 let mut visit = |j: usize| {
                     if !seen[j] && is_lake(j) && level[j] as f32 == water {
                         seen[j] = true;
                         stack.push(j);
                     }
                 };
-                if x > 0 { visit(i - 1); }
-                if x + 1 < nx { visit(i + 1); }
-                if z > 0 { visit(i - nx); }
-                if z + 1 < nz { visit(i + nx); }
+                // West, east, north, south: x wraps round on a wrapping world.
+                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    if let Some(j) = w.step(i, dx, dz) {
+                        visit(j);
+                    }
+                }
             }
             cells.sort_unstable();
             let mut runs: Vec<(u32, u32)> = Vec::new();

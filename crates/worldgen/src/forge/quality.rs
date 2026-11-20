@@ -176,8 +176,8 @@ pub fn within(a: &Quality, baseline: &Quality, tol: &QualityTolerance) -> Result
 /// edge pair; the term is 1 between `rise.1` and `fall.0`. Continental
 /// layouts want 30-60% land; islands and archipelagos share the sea.
 pub fn land_band(layout: u32) -> ((f64, f64), (f64, f64)) {
-    use super::knobs::{LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_ONE_ISLAND};
-    if [LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND].contains(&layout) {
+    use super::knobs::{LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_ONE_ISLAND, LAYOUT_PLANET};
+    if [LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_PLANET].contains(&layout) {
         ((0.20, 0.30), (0.60, 0.70))
     } else if layout == LAYOUT_ONE_ISLAND {
         ((0.22, 0.32), (0.48, 0.58))
@@ -231,6 +231,8 @@ impl BiomeSummary {
 pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> BiomeSummary {
     use super::regions::{biome_shares, region_counts};
     let (nx, nz) = (a.nx as usize, a.nz as usize);
+    // Columns 0 and nx - 1 are neighbours on a world that wraps east-west.
+    let wrap_x = a.edges[1] == crate::forge::world::EdgeKind::Wrap;
     let kind_of = |id: u16| a.regions.get(usize::from(id)).map(|r| r.kind);
 
     // Mountain regions with a 4-neighbour of a different land region.
@@ -250,6 +252,9 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> 
             if x + 1 < nx {
                 touch(a.region[i], a.region[i + 1], &mut bordering);
                 touch(a.region[i + 1], a.region[i], &mut bordering);
+            } else if wrap_x {
+                touch(a.region[i], a.region[i + 1 - nx], &mut bordering);
+                touch(a.region[i + 1 - nx], a.region[i], &mut bordering);
             }
             if z + 1 < nz {
                 touch(a.region[i], a.region[i + nx], &mut bordering);
@@ -268,9 +273,14 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> 
         let (lines, len) = if horizontal { (nz, nx) } else { (nx, nz) };
         for line in 0..lines {
             for k in 0..len {
-                let (lo, hi) = (k.saturating_sub(r), (k + r).min(len - 1));
                 let at = |j: usize| if horizontal { src[line * nx + j] } else { src[j * nx + line] };
-                let m = (lo..=hi).map(at).fold(f32::MIN, f32::max);
+                let m = if horizontal && wrap_x {
+                    // Round the seam: columns k - r ..= k + r mod nx.
+                    (0..=2 * r).map(|o| at((k + len * (r / len + 1) + o - r) % len)).fold(f32::MIN, f32::max)
+                } else {
+                    let (lo, hi) = (k.saturating_sub(r), (k + r).min(len - 1));
+                    (lo..=hi).map(at).fold(f32::MIN, f32::max)
+                };
                 if horizontal {
                     out[line * nx + k] = m;
                 } else {
@@ -281,7 +291,7 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> 
         out
     };
     let wmax = window_max(&window_max(&h, true), false);
-    let peaks_above_snow = count_peaks(&h, &wmax, nx, nz, |i| a.temperature_c.get(i) < crate::forged::SNOW_LINE_C);
+    let peaks_above_snow = count_peaks(&h, &wmax, nx, nz, wrap_x, |i| a.temperature_c.get(i) < crate::forged::SNOW_LINE_C);
 
     BiomeSummary {
         shares: biome_shares(&a.biome),
@@ -296,7 +306,7 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> 
 /// Summits: 8-connected groups of land cells equal to their window maximum
 /// (a flat, quantised summit is one peak, not one per cell), counted when
 /// `cold` holds for the group's first cell.
-fn count_peaks(h: &[f32], wmax: &[f32], nx: usize, nz: usize, cold: impl Fn(usize) -> bool) -> u32 {
+fn count_peaks(h: &[f32], wmax: &[f32], nx: usize, nz: usize, wrap_x: bool, cold: impl Fn(usize) -> bool) -> u32 {
     let is_max = |i: usize| h[i] > 0.0 && h[i] >= wmax[i];
     let mut seen = vec![false; nx * nz];
     let mut peaks = 0;
@@ -310,6 +320,7 @@ fn count_peaks(h: &[f32], wmax: &[f32], nx: usize, nz: usize, cold: impl Fn(usiz
             let (x, z) = ((i % nx) as i64, (i / nx) as i64);
             for (dx, dz) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
                 let (jx, jz) = (x + dx, z + dz);
+                let jx = if wrap_x { jx.rem_euclid(nx as i64) } else { jx };
                 if jx < 0 || jz < 0 || jx >= nx as i64 || jz >= nz as i64 {
                     continue;
                 }

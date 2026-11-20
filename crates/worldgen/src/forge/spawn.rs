@@ -19,7 +19,8 @@ const RIVER_DISCHARGE_M2: f64 = 1.5e6;
 /// "Mountain" for the view criterion: this share of the world's highest peak.
 const MOUNTAIN_SHARE_OF_PEAK: f64 = 0.55;
 /// A scored site keeps this far from the map edge (where a land edge ends the
-/// playable world), or `EDGE_CLEARANCE_MAX_SHARE` of a small world's size.
+/// playable world), or `EDGE_CLEARANCE_MAX_SHARE` of a small world's size —
+/// on a wrapping world from the north and south edges only.
 const EDGE_CLEARANCE_M: f64 = 1_000.0;
 const EDGE_CLEARANCE_MAX_SHARE: f64 = 0.125;
 
@@ -63,8 +64,11 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
     let mut flattest = (f64::MAX, None);
     let mut flattest_clear = (f64::MAX, None);
     let (width, height) = (w.nx as f64 * w.dx, w.nz as f64 * w.dx);
+    // A wrapping world has no east or west edge: every column is a candidate
+    // and the flat window runs across the seam.
+    let columns = if w.wrap_x { 0..nx } else { FLAT_RADIUS_CELLS..nx - FLAT_RADIUS_CELLS };
     for z in FLAT_RADIUS_CELLS..nz - FLAT_RADIUS_CELLS {
-        for x in FLAT_RADIUS_CELLS..nx - FLAT_RADIUS_CELLS {
+        for x in columns.clone() {
             let i = (z * nx + x) as usize;
             if w.ocean[i] || w.h[i] < SPAWN_HEIGHT_M.0 {
                 continue;
@@ -72,7 +76,8 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
             let (mut lo, mut hi, mut dry) = (f64::MAX, f64::MIN, true);
             for oz in -FLAT_RADIUS_CELLS..=FLAT_RADIUS_CELLS {
                 for ox in -FLAT_RADIUS_CELLS..=FLAT_RADIUS_CELLS {
-                    let j = ((z + oz) * nx + x + ox) as usize;
+                    let jx = if w.wrap_x { (x + ox).rem_euclid(nx) } else { x + ox };
+                    let j = ((z + oz) * nx + jx) as usize;
                     lo = lo.min(w.h[j]);
                     hi = hi.max(w.h[j]);
                     dry &= !w.ocean[j] && a.lake_depth[j] < LAKE_MIN_DEPTH_M && a.q[j] < RIVER_DISCHARGE_M2;
@@ -82,7 +87,11 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
                 continue;
             }
             let (cx, cz) = w.center(i);
-            let clear = cx.min(cz).min(width - cx).min(height - cz) >= clearance;
+            let clear = if w.wrap_x {
+                cz.min(height - cz) >= clearance
+            } else {
+                cx.min(cz).min(width - cx).min(height - cz) >= clearance
+            };
             if hi - lo < flattest.0 {
                 flattest = (hi - lo, Some(i));
             }
