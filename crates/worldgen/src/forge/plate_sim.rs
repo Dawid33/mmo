@@ -755,7 +755,7 @@ impl PlateState {
                 * f64::from(m.speed)
                 * f64::from(m.relief)
                 * polar_fade(lat);
-            if gain <= 1e-5 {
+            if gain <= GAIN_MIN {
                 continue;
             }
             self.strength[c] = orogeny_strength(self.strength[c], self.orogeny_my[c], time, gain);
@@ -773,12 +773,13 @@ impl PlateState {
         }
     }
 
-    /// Step list item 8: every pair `(O, U)` with `pending ≥
-    /// SUTURE_CONSUMED_CELLS`, ascending, sutures.
+    /// Step list item 8: every pair `(O, U)` of live plates with `pending ≥
+    /// SUTURE_CONSUMED_CELLS`, ascending, sutures (a plate a suture killed
+    /// earlier in the pass takes part in no later one).
     fn sutures(&mut self) {
         for o in 0..PLATES_MAX {
             for u in 0..PLATES_MAX {
-                if self.pending[o * PLATES_MAX + u] >= SUTURE_CONSUMED_CELLS {
+                if self.alive[o] && self.alive[u] && self.pending[o * PLATES_MAX + u] >= SUTURE_CONSUMED_CELLS {
                     self.suture(o, u);
                 }
             }
@@ -870,6 +871,9 @@ impl PlateState {
             }
             let t = 1.0 - (d / r) * (d / r);
             let gain = peak * t * t * polar_fade(planet_lat_deg(c / PLANET_NX));
+            if gain <= GAIN_MIN {
+                continue;
+            }
             self.strength[c] = orogeny_strength(self.strength[c], self.orogeny_my[c], time, gain);
             self.orogeny_my[c] = time as f32;
             self.kind[c] = kind;
@@ -889,7 +893,12 @@ impl PlateState {
             }
         }
         if u_cells == 0 {
+            // A dead plate's counts go with it (its id may be reused, Task 3).
             self.alive[u] = false;
+            for p in 0..PLATES_MAX {
+                self.pending[u * PLATES_MAX + p] = 0;
+                self.pending[p * PLATES_MAX + u] = 0;
+            }
         }
         let (wo, wr) = (n_o as f64, n_r as f64);
         for j in 0..2 {
@@ -898,6 +907,10 @@ impl PlateState {
         self.counters.sutures += 1;
     }
 }
+
+/// A gain at or below this writes nothing (the brief's field threshold;
+/// sutures use it too).
+const GAIN_MIN: f64 = 1e-5;
 
 /// The 8 neighbours as `(dx, dz)`, row-major.
 const NEIGHBOURS_8: [(i32, i32); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
