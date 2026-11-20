@@ -779,7 +779,11 @@ forge-bench width="16384" height="8192" cell="32":
 # peak, each land biome's share of land; the Planet's polar rows, sea-level
 # temperatures, share draining to the sea, the seam's steps, ranks and verdicts
 # (`seam_ok_*`) and the runtime seam lines (aliased regions, seam cliff, the world
-# map's wrap, rivers and trees across the seam) — per seed, then min / median / max
+# map's wrap, rivers and trees across the seam); artifact_rasters_crc (a crc of what
+# the runtime reads from the world file, the monthly climate excluded); the placeholder
+# monthly climate: its grid, saturated values, January / July sea-level temperature
+# and the swing per latitude band, the annual mean / sum checks and the seam of the
+# monthly temperature and precipitation — per seed, then min / median / max
 # over them and the seam rule over the seeds (`seam_pass_*`: at most a quarter of 4
 # or more seeds fail; n/a for 2 or 3). Takes forge_proto's flags plus `--seeds <n>`
 # (seed, seed + 1, …; default 1), forged one after another.

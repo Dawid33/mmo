@@ -397,3 +397,276 @@ pub fn discharge_weight(c: &Climate, w: &World) -> Vec<f64> {
     c.precip_mm.iter().map(|&mm| mm as f64 / mean).collect()
 }
 
+// ---- The monthly climate (Phase 1b): the climate grid and a placeholder ----
+
+/// The climate cell aimed at (m): the climate grid's cell is this, halved
+/// until the grid has `CLIMATE_MIN_ROWS` rows, never finer than the forge cell.
+pub const CLIMATE_CELL_M: f64 = 256.0;
+/// Fewest climate rows pole to pole (at most 1.9° of latitude per climate cell).
+pub const CLIMATE_MIN_ROWS: usize = 96;
+
+// The placeholder seasonal climate's constants: each is Phase 1b's
+// placeholder, and Phase 3's climate model replaces it (with
+// `monthly_placeholder` itself). Named constants, not knobs (Ruling 11).
+/// Phase 1b placeholder (Phase 3 replaces it): half the annual temperature
+/// range (°C) over the open sea at a pole (`sin(lat)` scales it).
+pub const SEASON_AMP_MARITIME_C: f64 = 7.0;
+/// Phase 1b placeholder (Phase 3 replaces it): half the annual temperature
+/// range (°C) deep inland at a pole.
+pub const SEASON_AMP_CONTINENTAL_C: f64 = 25.0;
+/// Phase 1b placeholder (Phase 3 replaces it): distance from the sea (deg of
+/// latitude) at which continentality is one half.
+pub const CONTINENTALITY_HALF_DEG: f64 = 8.0;
+/// Phase 1b placeholder (Phase 3 replaces it): months the temperature lags
+/// the solstice deep inland.
+pub const SEASON_LAG_LAND_MONTHS: f64 = 1.0;
+/// Phase 1b placeholder (Phase 3 replaces it): months the temperature lags
+/// the solstice over the open sea.
+pub const SEASON_LAG_SEA_MONTHS: f64 = 2.0;
+/// Phase 1b placeholder (Phase 3 replaces it): diurnal range (°C) over the
+/// open sea.
+pub const DIURNAL_SEA_C: f64 = 4.0;
+/// Phase 1b placeholder (Phase 3 replaces it): diurnal range (°C) added deep
+/// inland.
+pub const DIURNAL_CONTINENT_C: f64 = 6.0;
+/// Phase 1b placeholder (Phase 3 replaces it): diurnal range (°C) added over
+/// land with no precipitation.
+pub const DIURNAL_DRY_C: f64 = 6.0;
+/// Phase 1b placeholder (Phase 3 replaces it): annual precipitation (mm) at
+/// and above which land adds no dry diurnal range.
+pub const DIURNAL_DRY_REFERENCE_MM: f64 = 1500.0;
+/// Phase 1b placeholder (Phase 3 replaces it): the share of the monthly mean
+/// precipitation that swings with the season (wetter in the local summer).
+pub const PRECIP_SEASON_SHARE: f64 = 0.5;
+/// Phase 1b placeholder (Phase 3 replaces it): latitude (deg) from which the
+/// precipitation season is full (none at the equator, linear between).
+pub const PRECIP_SEASON_FULL_DEG: f64 = 15.0;
+/// Phase 1b placeholder (Phase 3 replaces it): mean rain (mm) of a wet day in
+/// a cool month (at or below `WET_DAY_COOL_C`).
+pub const WET_DAY_MM_COOL: f64 = 5.0;
+/// Phase 1b placeholder (Phase 3 replaces it): mean rain (mm) of a wet day in
+/// a hot month (at or above `WET_DAY_HOT_C`).
+pub const WET_DAY_MM_HOT: f64 = 14.0;
+/// Phase 1b placeholder (Phase 3 replaces it): sea-level temperature (°C) of
+/// a cool month for the wet-day amount.
+pub const WET_DAY_COOL_C: f64 = 0.0;
+/// Phase 1b placeholder (Phase 3 replaces it): sea-level temperature (°C) of
+/// a hot month for the wet-day amount.
+pub const WET_DAY_HOT_C: f64 = 25.0;
+/// Phase 1b placeholder (Phase 3 replaces it): the largest share of a
+/// month's days that are wet.
+pub const WET_DAY_MAX: f64 = 0.9;
+/// Phase 1b placeholder (Phase 3 replaces it): wind speed (m/s) of the zonal
+/// bands, east–west only.
+pub const WIND_PLACEHOLDER_MS: f64 = 6.0;
+
+/// Fine cells per climate cell per axis (the plan's rule): max(1, round(CLIMATE_CELL_M / cell_m)),
+/// halved while above 1 and nz / s < CLIMATE_MIN_ROWS.
+pub fn climate_stride(cell_m: f64, nz: usize) -> usize {
+    let mut s = ((CLIMATE_CELL_M / cell_m).round() as usize).max(1);
+    while s > 1 && nz / s < CLIMATE_MIN_ROWS {
+        s /= 2;
+    }
+    s
+}
+
+/// Err when nx or nz is not a whole number of strides:
+/// "this world's sides are not whole numbers of its {c} m climate cells ({w} x {h} m)".
+pub fn check_climate_grid(p: &ForgeParams) -> Result<(), String> {
+    let (nx, nz) = (p.nx(), p.nz());
+    let s = climate_stride(p.cell_m, nz);
+    if nx % s != 0 || nz % s != 0 {
+        return Err(format!(
+            "this world's sides are not whole numbers of its {} m climate cells ({} x {} m)",
+            p.cell_m * s as f64,
+            p.width_m,
+            p.height_m
+        ));
+    }
+    Ok(())
+}
+
+/// 90 at the north edge, 0 in the middle, -90 at the south edge (`latitudes`' line, at any z).
+pub fn latitude_at(z_m: f64, height_m: f64) -> f64 {
+    /// Degrees from a pole to the equator.
+    const SPAN: f64 = 90.0;
+    let t = z_m / height_m; // 0 at the north edge, 1 at the south
+    let lat = if t < 0.5 { 90.0 - SPAN * 2.0 * t } else { -90.0 + SPAN * 2.0 * (1.0 - t) };
+    lat.clamp(-90.0, 90.0)
+}
+
+/// The placeholder's seasonal shape of month `m` (0-based) for a curve that
+/// peaks `lag` months after the northern summer solstice: the cosine AT
+/// mid-month, which is 1.1 % above the month's true mean of a cosine (a
+/// placeholder nicety; Phase 3 stores real means). Its twelve values sum to 0.
+fn season_phase(m: usize, lag: f64) -> f64 {
+    let months = game::CLIMATE_MONTHS as f64;
+    (std::f64::consts::TAU * (m as f64 + 0.5 - (game::SOLSTICE_NORTH_SUMMER_MONTHS + lag)) / months).cos()
+}
+
+/// The monthly family before quantisation: six planes of 12 * nx * nz, month-major (the plan's vocabulary).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MonthlyFields {
+    pub nx: usize,
+    pub nz: usize,
+    pub cell_m: f64,
+    pub temp_sea_c: Vec<f32>,
+    pub diurnal_c: Vec<f32>,
+    pub precip_mm: Vec<f32>,
+    pub wet_day: Vec<f32>,
+    pub wind_east_ms: Vec<f32>,
+    pub wind_south_ms: Vec<f32>,
+}
+
+/// The placeholder seasonal climate of `w` on its climate grid
+/// (`climate_stride`), from today's annual climate `c`: Phase 1b's
+/// placeholder, which Phase 3's climate model replaces. Per climate cell, at
+/// its centre's effective latitude: the sea-level temperature swings round
+/// its annual mean by an amplitude growing with latitude and continentality
+/// (distance from the sea on the climate grid), lagging the solstice by two
+/// months at sea and one deep inland; the cell's mean annual precipitation is
+/// shared out wetter in the local summer; the diurnal range grows inland and
+/// with dryness; the wet-day share follows from the month's rain and a wet
+/// day's amount by temperature; the wind is the zonal band's, east–west only.
+/// Reads its arguments only; cells are computed in parallel by row, each from
+/// its own inputs, so the result does not depend on the thread count.
+pub fn monthly_placeholder(w: &World, c: &Climate, p: &ForgeParams) -> MonthlyFields {
+    let months = game::CLIMATE_MONTHS;
+    let s = climate_stride(w.dx, w.nz);
+    let (cnx, cnz) = (w.nx / s, w.nz / s);
+    let cell_m = w.dx * s as f64;
+    let height_m = w.nz as f64 * w.dx;
+    // Per climate cell: (share of land, mean annual precipitation).
+    let shares: Vec<(f64, f64)> = par::map_range(cnz, |cz| {
+        (0..cnx)
+            .map(|cx| {
+                let (mut land, mut precip) = (0usize, 0.0f64);
+                for z in cz * s..(cz + 1) * s {
+                    for x in cx * s..(cx + 1) * s {
+                        let i = z * w.nx + x;
+                        land += usize::from(!w.ocean[i]);
+                        precip += c.precip_mm[i] as f64;
+                    }
+                }
+                let n = (s * s) as f64;
+                (land as f64 / n, precip / n)
+            })
+            .collect::<Vec<_>>()
+    })
+    .concat();
+    let sea: Vec<bool> = shares.iter().map(|&(land, _)| land < 0.5).collect();
+    let coast = crate::habitat::coast_distance_by(cnx, cnz, cell_m, w.wrap_x, |i| sea[i]);
+    let half_m = CONTINENTALITY_HALF_DEG * metres_per_degree(height_m);
+    let days = game::history::calendar::DAYS_PER_MONTH as f64;
+
+    let plane = months * cnx * cnz;
+    let mut f = MonthlyFields {
+        nx: cnx,
+        nz: cnz,
+        cell_m,
+        temp_sea_c: vec![0.0; plane],
+        diurnal_c: vec![0.0; plane],
+        precip_mm: vec![0.0; plane],
+        wet_day: vec![0.0; plane],
+        wind_east_ms: vec![0.0; plane],
+        wind_south_ms: vec![0.0; plane],
+    };
+    // Each row's cells, each cell its twelve (temperature, diurnal, precip,
+    // wet day, wind east) values.
+    let rows: Vec<Vec<[[f32; 5]; game::CLIMATE_MONTHS]>> = par::map_range(cnz, |cz| {
+        let zc = (cz as f64 + 0.5) * cell_m;
+        (0..cnx)
+            .map(|cx| {
+                let ci = cz * cnx + cx;
+                let xc = (cx as f64 + 0.5) * cell_m;
+                let lat = (latitude_at(zc, height_m) + meander_deg(xc, zc, p)).clamp(-90.0, 90.0);
+                let (land, annual_precip) = shares[ci];
+                let mean_c = sea_level_temperature_c(lat, p);
+                let d = coast[ci] as f64;
+                let k = d / (d + half_m);
+                let lag = SEASON_LAG_SEA_MONTHS + (SEASON_LAG_LAND_MONTHS - SEASON_LAG_SEA_MONTHS) * k;
+                let amp = lat.to_radians().sin()
+                    * (SEASON_AMP_MARITIME_C + (SEASON_AMP_CONTINENTAL_C - SEASON_AMP_MARITIME_C) * k);
+                let wet_season = PRECIP_SEASON_SHARE * (lat / PRECIP_SEASON_FULL_DEG).clamp(-1.0, 1.0);
+                let diurnal = DIURNAL_SEA_C
+                    + DIURNAL_CONTINENT_C * k
+                    + DIURNAL_DRY_C * land * (1.0 - annual_precip / DIURNAL_DRY_REFERENCE_MM).clamp(0.0, 1.0);
+                let east = (2.0 * westerly_weight(lat, p) - 1.0) * WIND_PLACEHOLDER_MS;
+                std::array::from_fn(|m| {
+                    let temp = mean_c + amp * season_phase(m, lag);
+                    let precip = annual_precip / months as f64
+                        * (1.0 + wet_season * season_phase(m, SEASON_LAG_LAND_MONTHS));
+                    let warmth = ((temp - WET_DAY_COOL_C) / (WET_DAY_HOT_C - WET_DAY_COOL_C)).clamp(0.0, 1.0);
+                    let amount = WET_DAY_MM_COOL + (WET_DAY_MM_HOT - WET_DAY_MM_COOL) * warmth;
+                    let wet = (precip / (days * amount)).clamp(0.0, WET_DAY_MAX);
+                    [temp as f32, diurnal as f32, precip as f32, wet as f32, east as f32]
+                })
+            })
+            .collect()
+    });
+    for (cz, row) in rows.iter().enumerate() {
+        for (cx, cell) in row.iter().enumerate() {
+            for (m, v) in cell.iter().enumerate() {
+                let i = m * cnx * cnz + cz * cnx + cx;
+                f.temp_sea_c[i] = v[0];
+                f.diurnal_c[i] = v[1];
+                f.precip_mm[i] = v[2];
+                f.wet_day[i] = v[3];
+                f.wind_east_ms[i] = v[4];
+            }
+        }
+    }
+    f
+}
+
+/// `round(v · per)` in f64 and whether it lies outside `lo ..= hi` (a value
+/// that is not a number counts as outside and stores 0).
+fn quantum(v: f32, per: f64, lo: f64, hi: f64) -> (f64, bool) {
+    let r = (f64::from(v) * per).round();
+    if r.is_nan() {
+        return (0.0, true);
+    }
+    (r.clamp(lo, hi), !(lo..=hi).contains(&r))
+}
+
+impl MonthlyFields {
+    /// The six planes with each one's denominator and integer bounds.
+    fn planes(&self) -> [(&[f32], f64, f64, f64); 6] {
+        [
+            (&self.temp_sea_c, game::CLIMATE_TEMP_PER_C, f64::from(i16::MIN), f64::from(i16::MAX)),
+            (&self.diurnal_c, game::CLIMATE_DIURNAL_PER_C, 0.0, f64::from(u8::MAX)),
+            (&self.precip_mm, game::CLIMATE_PRECIP_PER_MM, 0.0, f64::from(u16::MAX)),
+            (&self.wet_day, game::CLIMATE_WET_DAY_PER_ONE, 0.0, f64::from(u8::MAX)),
+            (&self.wind_east_ms, game::CLIMATE_WIND_PER_MS, f64::from(i8::MIN), f64::from(i8::MAX)),
+            (&self.wind_south_ms, game::CLIMATE_WIND_PER_MS, f64::from(i8::MIN), f64::from(i8::MAX)),
+        ]
+    }
+
+    /// round(value * DENOMINATOR) in f64, saturating at each type's bounds (game's CLIMATE_*_PER_* constants).
+    pub fn quantise(&self, wrap_x: bool) -> game::MonthlyClimate {
+        fn q<T>((v, per, lo, hi): (&[f32], f64, f64, f64), cast: fn(f64) -> T) -> Vec<T> {
+            v.iter().map(|&x| cast(quantum(x, per, lo, hi).0)).collect()
+        }
+        let [t, d, pr, wd, we, ws] = self.planes();
+        game::MonthlyClimate {
+            nx: self.nx as u32,
+            nz: self.nz as u32,
+            cell_m: self.cell_m,
+            wrap_x,
+            temp_sea_centi_c: q(t, |r| r as i16),
+            diurnal_deci_c: q(d, |r| r as u8),
+            precip_deci_mm: q(pr, |r| r as u16),
+            wet_day_255: q(wd, |r| r as u8),
+            wind_east_q: q(we, |r| r as i8),
+            wind_south_q: q(ws, |r| r as i8),
+        }
+    }
+
+    /// How many values `quantise` saturates.
+    pub fn clamped_values(&self) -> usize {
+        self.planes()
+            .into_iter()
+            .map(|(v, per, lo, hi)| v.iter().filter(|&&x| quantum(x, per, lo, hi).1).count())
+            .sum()
+    }
+}

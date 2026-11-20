@@ -339,13 +339,16 @@ pub fn check_wrap(p: &ForgeParams) -> Result<(), String> {
 /// Returning `Break` abandons the forge (`None`).
 ///
 /// # Panics
-/// On a world [`check_wrap`] refuses (every caller catches the panic and
-/// shows its message).
+/// On a world [`check_wrap`] or [`climate::check_climate_grid`] refuses
+/// (every caller catches the panic and shows its message).
 pub fn forge_with(
     p: &ForgeParams,
     on_progress: &mut dyn FnMut(ForgeProgress) -> std::ops::ControlFlow<()>,
 ) -> Option<Forged> {
     if let Err(why) = check_wrap(p) {
+        panic!("{why}");
+    }
+    if let Err(why) = climate::check_climate_grid(p) {
         panic!("{why}");
     }
     let levels = schedule(p);

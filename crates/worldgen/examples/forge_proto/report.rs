@@ -373,17 +373,129 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
         let ok = ratio <= SEAM_RATIO_OK || rank >= SEAM_RANK_OK;
         row(&format!("seam_ok_{name}"), (if ok { "yes" } else { "no" }).to_string());
     }
+    // Phase 1b: the crc of what the runtime reads from the artifact (taken
+    // before the artifact moves into the sampler below; printed after it).
+    let rasters_crc = artifact_rasters_crc(&artifact);
     // Task 12 (the runtime sampler wraps): regions, the world map and rivers
     // at the seam, read through the game's sampler.
     for (key, value) in runtime_seam(&ForgedWorld::new(artifact)) {
         row(&key, value);
+    }
+    // Phase 1b Task 2: the safety net's crc and the placeholder seasonal
+    // climate on the climate grid.
+    row("artifact_rasters_crc", rasters_crc);
+    for (key, value) in monthly_lines(forged, p) {
+        row(&key, value);
+    }
+    rows
+}
+
+/// crc32 of the bincode of every field of the artifact the runtime reads (a
+/// FIXED list, never the whole struct: a field added later — the monthly
+/// climate family — does not move it), fed to one hasher in this order.
+fn artifact_rasters_crc(a: &WorldArtifact) -> String {
+    let mut h = crc32fast::Hasher::new();
+    let mut feed = |bytes: Vec<u8>| h.update(&bytes);
+    let enc = |e: bincode::Result<Vec<u8>>| e.expect("artifact field serializes");
+    feed(enc(bincode::serialize(&a.height)));
+    feed(enc(bincode::serialize(&a.uplifted)));
+    feed(enc(bincode::serialize(&a.bedding)));
+    feed(enc(bincode::serialize(&a.temperature_c)));
+    feed(enc(bincode::serialize(&a.precip_mm)));
+    feed(enc(bincode::serialize(&a.drainage)));
+    feed(enc(bincode::serialize(&a.volcanism)));
+    feed(enc(bincode::serialize(&a.salinity)));
+    feed(enc(bincode::serialize(&a.biome)));
+    feed(enc(bincode::serialize(&a.savagery)));
+    feed(enc(bincode::serialize(&a.region)));
+    feed(enc(bincode::serialize(&a.regions)));
+    feed(enc(bincode::serialize(&a.rivers)));
+    feed(enc(bincode::serialize(&a.lakes)));
+    feed(enc(bincode::serialize(&a.spawn)));
+    feed(enc(bincode::serialize(&a.edges)));
+    feed(enc(bincode::serialize(&a.column)));
+    feed(enc(bincode::serialize(&a.rock_names)));
+    feed(enc(bincode::serialize(&a.volcanoes)));
+    format!("{:08x}", h.finalize())
+}
+
+/// The latitude bands of the monthly lines: (name, centre deg); a band is
+/// the climate rows within `BAND_HALF_DEG` of its centre.
+const MONTHLY_BANDS: [(&str, f64); 7] =
+    [("75N", 75.0), ("45N", 45.0), ("15N", 15.0), ("0", 0.0), ("15S", -15.0), ("45S", -45.0), ("75S", -75.0)];
+/// Half-width (deg) of a band of `MONTHLY_BANDS`.
+const BAND_HALF_DEG: f64 = 7.5;
+
+/// The placeholder seasonal climate's lines (Phase 1b Task 2): the climate
+/// grid, saturated values, January / July sea-level temperature by latitude
+/// band, the annual mean and sum checks, and the seam of month 3's
+/// temperature and precipitation on the climate grid.
+fn monthly_lines(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
+    use game::{CLIMATE_MONTHS, NORTH_MIDSUMMER_MONTH, NORTH_MIDWINTER_MONTH};
+    let (w, c) = (&forged.world, &forged.climate);
+    let f = climate::monthly_placeholder(w, c, p);
+    let s = climate::climate_stride(w.dx, w.nz);
+    let (cnx, cnz, cells) = (f.nx, f.nz, f.nx * f.nz);
+    let height_m = w.nz as f64 * w.dx;
+    let mut rows = Vec::new();
+    let mut row = |key: &str, value: String| rows.push((key.to_string(), value));
+    row("climate_grid", format!("{cnx} × {cnz} cells of {} m, stride {s}", f.cell_m));
+    row("climate_clamped_values", f.clamped_values().to_string());
+    let at = |plane: &[f32], m: usize, ci: usize| f64::from(plane[m * cells + ci]);
+    let row_lat = |cz: usize| climate::latitude_at((cz as f64 + 0.5) * f.cell_m, height_m);
+    for (name, centre) in MONTHLY_BANDS {
+        let band: Vec<usize> = (0..cnz).filter(|&cz| (row_lat(cz) - centre).abs() <= BAND_HALF_DEG).collect();
+        let n = (band.len() * cnx).max(1) as f64;
+        let mean = |m: usize| {
+            band.iter().flat_map(|&cz| (0..cnx).map(move |cx| cz * cnx + cx)).map(|ci| at(&f.temp_sea_c, m, ci)).sum::<f64>()
+                / n
+        };
+        let (jan, jul) = (mean(NORTH_MIDWINTER_MONTH), mean(NORTH_MIDSUMMER_MONTH));
+        row(&format!("sea_temp_jan_c.{name}"), format!("{jan:.2}"));
+        row(&format!("sea_temp_jul_c.{name}"), format!("{jul:.2}"));
+        row(&format!("seasonal_swing_c.{name}"), format!("{:.2}", jul - jan));
+    }
+    // The annual mean temperature and annual precipitation each cell's twelve
+    // months must give back: recomputed here from the public pieces.
+    let (mut temp_err, mut precip_err) = (0.0f64, 0.0f64);
+    for cz in 0..cnz {
+        let zc = (cz as f64 + 0.5) * f.cell_m;
+        for cx in 0..cnx {
+            let ci = cz * cnx + cx;
+            let xc = (cx as f64 + 0.5) * f.cell_m;
+            let lat = (climate::latitude_at(zc, height_m) + climate::meander_deg(xc, zc, p)).clamp(-90.0, 90.0);
+            let mean_c = climate::sea_level_temperature_c(lat, p);
+            let mut annual = 0.0;
+            for z in cz * s..(cz + 1) * s {
+                for x in cx * s..(cx + 1) * s {
+                    annual += f64::from(c.precip_mm[z * w.nx + x]);
+                }
+            }
+            annual /= (s * s) as f64;
+            let months = 0..CLIMATE_MONTHS;
+            let temp = months.clone().map(|m| at(&f.temp_sea_c, m, ci)).sum::<f64>() / CLIMATE_MONTHS as f64;
+            let precip = months.map(|m| at(&f.precip_mm, m, ci)).sum::<f64>();
+            temp_err = temp_err.max((temp - mean_c).abs());
+            precip_err = precip_err.max((precip - annual).abs());
+        }
+    }
+    row("monthly_temp_mean_err_c", format!("{temp_err:.2e}"));
+    row("monthly_precip_sum_err_mm", format!("{precip_err:.2e}"));
+    let month = NORTH_MIDSUMMER_MONTH * cells;
+    for (name, plane) in [("monthly_temp", &f.temp_sea_c), ("monthly_precip", &f.precip_mm)] {
+        let (ratio, rank) =
+            seam_steps(cnx, cnz, |a, b| (f64::from(plane[month + b]) - f64::from(plane[month + a])).abs(), p99);
+        row(&format!("seam_step_ratio_{name}"), format!("{ratio:.3}"));
+        row(&format!("seam_step_rank_{name}"), format!("{rank:.3}"));
+        let ok = ratio <= SEAM_RATIO_OK || rank >= SEAM_RANK_OK;
+        row(&format!("seam_ok_{name}"), (if ok { "yes" } else { "no" }).to_string());
     }
     rows
 }
 
 /// Keys whose values are never numbers, however they read (a crc can be all
 /// digits).
-const NOT_NUMBERS: &[&str] = &["seed", "height_crc"];
+const NOT_NUMBERS: &[&str] = &["seed", "height_crc", "artifact_rasters_crc"];
 
 /// The `--report` run: each seed in turn (`seed`, `seed + 1`, …), then the
 /// summary (min / median / max of every numeric key; `NOT_NUMBERS` and any
@@ -447,7 +559,7 @@ pub fn run(base: &Params) {
     let values = |key: &str| -> Vec<String> {
         all.iter().flat_map(|rows| rows.iter().filter(|(k, _)| k == key).map(|(_, v)| v.clone())).collect()
     };
-    for field in ["height", "precip", "biome"] {
+    for field in ["height", "precip", "biome", "monthly_temp", "monthly_precip"] {
         let oks = values(&format!("seam_ok_{field}"));
         if oks.is_empty() {
             continue;
