@@ -216,7 +216,8 @@ impl PlateState {
         for m in 0..micros {
             let gap = chamfer(&continental, 1.0);
             for t in 0..MICRO_ATTEMPTS as u64 {
-                let hm = |j: u64| h(H_MICRO, 8 * m + j + 3 * t);
+                // `96·m + 3·t + j` (m < 10, t < 32, j < 3): no two draws share an index.
+                let hm = |j: u64| h(H_MICRO, 96 * m + 3 * t + j);
                 let lon_c = 360.0 * hm(0);
                 let lat_c = -MICRO_LAT_DEG + 2.0 * MICRO_LAT_DEG * hm(1);
                 let share = MICRO_SHARE[0] + MICRO_SHARE[1] * hm(2);
