@@ -35,6 +35,7 @@
 //! Not bit-reproducible across machines by design (sqrt/ln/sin used freely):
 //! the forge's output is a stored artifact, not a function both sides evaluate.
 
+pub mod belts;
 pub mod climate;
 pub mod erosion;
 pub mod fields;

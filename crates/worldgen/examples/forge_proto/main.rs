@@ -86,6 +86,8 @@ pub struct Params {
     /// `--key <name>=<value>`: `PlanetKey` fields set by name (until Task 7
     /// makes them knobs), checked against their ranges at parse time.
     pub planet_keys: Vec<(String, f64)>,
+    /// `--no-retry`: with `--planet`, run attempt 0 only instead of retrying.
+    pub no_retry: bool,
 }
 
 impl Deref for Params {
@@ -115,6 +117,7 @@ impl Params {
             planet: false,
             frames: 0,
             planet_keys: Vec::new(),
+            no_retry: false,
         };
         let (mut width, mut height) = (None, None);
         let mut it = std::env::args().skip(1);
@@ -129,6 +132,7 @@ impl Params {
                 "--height" => height = Some(value().parse().expect("--height <meters>")),
                 "--report" => p.report = true,
                 "--planet" => p.planet = true,
+                "--no-retry" => p.no_retry = true,
                 "--frames" => p.frames = value().parse().expect("--frames <count>"),
                 "--key" => p.planet_keys.push(planet_view::parse_key(&value()).unwrap_or_else(|e| panic!("{e}"))),
                 "--seeds" => p.seeds = value().parse().expect("--seeds <count>"),
@@ -173,7 +177,7 @@ impl Params {
                     "unknown argument {other}; flags: --size <name> | --width <m> --height <m>, --cell --iters --seed --out --dt \
                      --uplift --k --diffusivity --no-geology --no-climate --preset <name> --set <knob>=<value> \
                      --search <n> --serve <port> --spawn <x>,<z> --report [--seeds <n>] \
-                     --planet [--seeds <n>] [--frames <n>] [--key <name>=<value>]"
+                     --planet [--no-retry] [--seeds <n>] [--frames <n>] [--key <name>=<value>]"
                 ),
             }
         }

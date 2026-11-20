@@ -207,9 +207,10 @@ lengths in degrees of latitude; every size measured.
   column. `fit_height_band`'s single scale factor is revisited so young and old ranges keep their contrast.
 - Polar edges of the plate grid: no source covers them. Start with the research's proposal (crust leaving the
   north or south edge is destroyed, gaps fill with ocean crust, uplift fades in a margin) and judge by maps.
-- Finished worlds are scored and failed seeds re-run with a derived seed (the forge already has a seed
-  score): at least 2 continents above 3% of the map each; at least one belt per continent; both a young and an
-  old belt class present on the map.
+- The plate stage's world is scored on the planet grid inside the forge and a failed seed's PLATE STAGE is re-run
+  with a derived seed, up to six attempts; the finished world is compared with that score in the report
+  (`planet_matches_fine`), and the seed search's score gains the same terms: at least 2 continents above 3% of the
+  map each; at least one belt per continent; both a young and an old belt class present on the map.
 - Evidence (8 seeds, development size, plus Medium for 2): continents per world; belts per continent by age
   class; mean slope and local relief of young versus old belts (young clearly higher on both); land share;
   seam continuity as in 1a; timing of the plate stage alone. Re-record the quality gate.

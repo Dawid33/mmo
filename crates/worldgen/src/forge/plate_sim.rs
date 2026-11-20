@@ -1364,6 +1364,14 @@ fn chamfer(seed: &[bool], unit: f64) -> Vec<f64> {
     d
 }
 
+/// Uncapped chamfer distance in degrees (`PLANET_DEG_PER_CELL` per orthogonal
+/// step) from any cell where `seed(c)` holds.
+pub(crate) fn chamfer_deg(seed: impl Fn(usize) -> bool) -> Vec<f64> {
+    let (mut d, mut src) = (Vec::new(), Vec::new());
+    chamfer_into(seed, PLANET_DEG_PER_CELL, f64::INFINITY, &mut d, &mut src);
+    d
+}
+
 /// `chamfer` into `d`, with `src[c]` the seed cell whose distance `c` took (a
 /// cell takes a neighbour's distance AND source only when strictly smaller,
 /// in the order of the passes' neighbour lists, so ties keep what was written

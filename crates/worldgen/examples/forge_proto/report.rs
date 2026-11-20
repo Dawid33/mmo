@@ -408,6 +408,10 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     }
     row("artifact_climate_crc", climate_crc);
     row("artifact_header_crc", header_crc);
+    let planet = worldgen::forge::planet::planet_for(p);
+    for (key, value) in crate::planet_view::planet_lines(&planet) {
+        row(&key, value);
+    }
     rows
 }
 
@@ -691,8 +695,17 @@ fn monthly_lines(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
 
 /// Keys whose values are never numbers, however they read (a crc can be all
 /// digits).
-const NOT_NUMBERS: &[&str] =
-    &["seed", "height_crc", "artifact_rasters_crc", "artifact_climate_crc", "artifact_header_crc", "planet.state_crc"];
+const NOT_NUMBERS: &[&str] = &[
+    "seed",
+    "height_crc",
+    "artifact_rasters_crc",
+    "artifact_climate_crc",
+    "artifact_header_crc",
+    "planet.state_crc",
+    "planet.belts_per_continent",
+    "planet.belts_per_continent_by_class",
+    "planet.crc",
+];
 
 /// The summary of the keys whose generic line reads badly: the conservation
 /// error in the per-seed lines' short form (no float noise), and the
