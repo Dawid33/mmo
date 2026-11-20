@@ -117,11 +117,13 @@ pub const SUBDUCTION_U0_M_PER_MY: f64 = 600.0;
 /// The ends of Cortial's elevation scale `z̃`, m.
 pub const TRENCH_M: f64 = -10_000.0;
 pub const CONT_MAX_M: f64 = 10_000.0;
-/// A mark's life, steps (untested design: two field refreshes).
+/// A mark's life, steps (untested design: at `FIELD_EVERY_STEPS` 8 every
+/// mark is live at exactly one field refresh).
 pub const FRONT_TTL_STEPS: u8 = 8;
-/// The subduction field (front chamfer and gains) runs every this many steps
-/// (Ruling 1's budget; the first dial if the stage is too slow).
-pub const FIELD_EVERY_STEPS: u32 = 4;
+/// The subduction field (front chamfer and gains) runs every this many steps:
+/// Ruling 1's first cost dial, set from 4 to 8 after Task 2 (the field cost
+/// ~130 ms per run at 4); the gain rate scales with the period.
+pub const FIELD_EVERY_STEPS: u32 = 8;
 /// Ocean floor of the overriding plate takes a subduction gain only this
 /// close to the front, degrees: the belt's peak distance (`SUBDUCTION_PEAK_SHARE`
 /// of the continental reach). Earth's arc–trench gap is 1–2°; beyond this
