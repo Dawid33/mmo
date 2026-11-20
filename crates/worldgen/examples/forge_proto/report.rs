@@ -378,8 +378,9 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     let rasters_crc = artifact_rasters_crc(&artifact);
     // Phase 1b Task 3: the world file's size and the monthly family's share
     // of it (raw, packed alone, resident), taken before the move too.
+    let world_bytes = artifact.to_bytes();
     let sizes = [
-        ("world_file_bytes", artifact.to_bytes().len()),
+        ("world_file_bytes", world_bytes.len()),
         ("climate_bytes_raw", artifact.climate.cells() * game::CLIMATE_BYTES_PER_CELL),
         ("climate_bytes_packed", worldgen::forged::climate_packed_len(&artifact.climate)),
         ("climate_resident_bytes", artifact.climate.resident_bytes()),
@@ -398,6 +399,136 @@ pub fn report(forged: &Forged, p: &ForgeParams) -> Vec<(String, String)> {
     for (key, bytes) in sizes {
         row(key, bytes.to_string());
     }
+    for (key, value) in monthly_api_lines(forged, p, &world_bytes) {
+        row(&key, value);
+    }
+    rows
+}
+
+/// About this many points of each kind `monthly_api_lines` samples (climate
+/// cell centres; fine-lattice cells), so the lines stay linear in the points
+/// sampled, never in a Large world's cells.
+const MONTHLY_API_POINTS: usize = 50_000;
+/// The fine lattice's stride (cells, both axes) on a world small enough.
+const MONTHLY_API_FINE_STRIDE: usize = 7;
+/// Every this many climate rows, a point 0.5 m either side of the seam.
+const MONTHLY_API_SEAM_ROWS: usize = 4;
+
+/// The world-position API's lines (Phase 1b Task 4), through the public API
+/// only: the whole world loaded from the world file's bytes, a tiled one
+/// (`split` → `encode_*` → decode → `MemTiles`). Sample points (engine
+/// metres): every climate cell centre (every k-th in row-major order when
+/// there are more than `MONTHLY_API_POINTS`), the fine cell centres on a
+/// lattice of every `MONTHLY_API_FINE_STRIDE`-th column and row (a stride
+/// grown so about `MONTHLY_API_POINTS` remain), and the points 0.5 m either
+/// side of the seam in every `MONTHLY_API_SEAM_ROWS`-th climate row.
+fn monthly_api_lines(forged: &Forged, p: &ForgeParams, world_bytes: &[u8]) -> Vec<(String, String)> {
+    use game::{MonthlyNormals, CLIMATE_MONTHS};
+    use worldgen::forged_tiles::{decode_meta, encode_meta, encode_tile, split, MemTiles, TILE_CACHE_BYTES, TILE_CELLS};
+    let whole = ForgedWorld::from_bytes(world_bytes).expect("the world file loads");
+    let (meta, tiles) = split(&whole, TILE_CELLS).expect("the world splits");
+    let map = tiles.iter().map(|t| (t.origin, encode_tile(t))).collect();
+    let meta = decode_meta(&encode_meta(&meta)).expect("the meta decodes");
+    let tiled = ForgedWorld::from_tiles_with_budget(meta, std::sync::Arc::new(MemTiles(map)), 0, TILE_CACHE_BYTES)
+        .expect("the tiles load");
+    let g = whole.globals();
+    let c = whole.monthly_climate();
+    let (min, _) = whole.artifact_bounds_engine_m();
+    let engine = |ax: f64, az: f64| (min[0] + ax, min[1] + az);
+    let (cnx, cnz) = (c.nx as usize, c.nz as usize);
+    let ccells = cnx * cnz;
+    // Climate cell centres.
+    let every = ccells.div_ceil(MONTHLY_API_POINTS).max(1);
+    let centres: Vec<(usize, usize)> = (0..ccells).step_by(every).map(|ci| (ci % cnx, ci / cnx)).collect();
+    let centre_m = |(cx, cz): (usize, usize)| engine((cx as f64 + 0.5) * c.cell_m, (cz as f64 + 0.5) * c.cell_m);
+    // The fine lattice.
+    let (nx, nz) = (g.nx as usize, g.nz as usize);
+    let stride = MONTHLY_API_FINE_STRIDE.max(((nx * nz) as f64 / MONTHLY_API_POINTS as f64).sqrt().ceil() as usize);
+    let fine: Vec<(f64, f64)> = (0..nz)
+        .step_by(stride)
+        .flat_map(|iz| (0..nx).step_by(stride).map(move |ix| (ix, iz)))
+        .map(|(ix, iz)| engine((ix as f64 + 0.5) * g.cell_m, (iz as f64 + 0.5) * g.cell_m))
+        .collect();
+    let seam: Vec<(f64, f64)> = (0..cnz)
+        .step_by(MONTHLY_API_SEAM_ROWS)
+        .flat_map(|cz| {
+            let (_, z) = engine(0.0, (cz as f64 + 0.5) * c.cell_m);
+            [(min[0] - 0.5, z), (min[0] + 0.5, z)]
+        })
+        .collect();
+    let points: Vec<(f64, f64)> = centres.iter().map(|&k| centre_m(k)).chain(fine.iter().copied()).chain(seam).collect();
+    let bits = |n: &MonthlyNormals| -> Vec<u32> {
+        (0..CLIMATE_MONTHS)
+            .flat_map(|m| [n.temp_c[m], n.diurnal_c[m], n.precip_mm[m], n.wet_day[m], n.wind_ms[m][0], n.wind_ms[m][1]])
+            .map(f32::to_bits)
+            .collect()
+    };
+    let mut rows = Vec::new();
+    let mut row = |key: &str, value: String| rows.push((key.to_string(), value));
+    // The round trip: the forge's float planes against the stored, decoded,
+    // sampled normals at the climate cell centres.
+    let f = climate::monthly_placeholder(&forged.world, &forged.climate, p);
+    let mut err = [0.0f64; 5];
+    for &(cx, cz) in &centres {
+        let (x, z) = centre_m((cx, cz));
+        let n = whole.monthly_normals(x, z);
+        for m in 0..CLIMATE_MONTHS {
+            let i = m * ccells + cz * cnx + cx;
+            let d = |a: f32, b: f32| (f64::from(a) - f64::from(b)).abs();
+            let wind = d(f.wind_east_ms[i], n.wind_ms[m][0]).max(d(f.wind_south_ms[i], n.wind_ms[m][1]));
+            let e = [d(f.temp_sea_c[i], n.temp_c[m]), d(f.diurnal_c[i], n.diurnal_c[m]), d(f.precip_mm[i], n.precip_mm[m]), d(f.wet_day[i], n.wet_day[m]), wind];
+            for (worst, e) in err.iter_mut().zip(e) {
+                *worst = worst.max(e);
+            }
+        }
+    }
+    row(
+        "climate_roundtrip_max_err",
+        format!("temp {:.4} C, diurnal {:.3} C, precip {:.3} mm, wet {:.5}, wind {:.3} m/s", err[0], err[1], err[2], err[3], err[4]),
+    );
+    let steps = [
+        1.0 / game::CLIMATE_TEMP_PER_C,
+        1.0 / game::CLIMATE_DIURNAL_PER_C,
+        1.0 / game::CLIMATE_PRECIP_PER_MM,
+        1.0 / game::CLIMATE_WET_DAY_PER_ONE,
+        1.0 / game::CLIMATE_WIND_PER_MS,
+    ];
+    let ok = err.iter().zip(steps).all(|(&e, step)| e <= step / 2.0 + 1e-4 * step);
+    row("climate_roundtrip_ok", (if ok { "yes" } else { "no" }).to_string());
+    // Tiles against the whole world, every sample point.
+    let tiles_same = points.iter().all(|&(x, z)| {
+        bits(&tiled.monthly_normals(x, z)) == bits(&whole.monthly_normals(x, z))
+            && bits(&tiled.monthly_at_ground(x, z)) == bits(&whole.monthly_at_ground(x, z))
+    });
+    row("climate_tiles_identical", (if tiles_same { "yes" } else { "no" }).to_string());
+    // A point and its image one lap east.
+    let aliased = if g.edges[1] != worldgen::forge::world::EdgeKind::Wrap {
+        "n/a".to_string()
+    } else {
+        let same = points.iter().all(|&(x, z)| {
+            bits(&whole.monthly_normals(x, z)) == bits(&whole.monthly_normals(x + g.width_m, z))
+                && bits(&whole.monthly_at_ground(x, z)) == bits(&whole.monthly_at_ground(x + g.width_m, z))
+        });
+        (if same { "yes" } else { "no" }).to_string()
+    };
+    row("monthly_aliased_identical", aliased);
+    // The fine annual precipitation conserved by the monthly split.
+    let rel = points
+        .iter()
+        .map(|&(x, z)| {
+            let a = whole.annual_climate(x, z).1;
+            (f64::from(whole.monthly_at_ground(x, z).annual_precip_mm()) - a).abs() / a.max(1.0)
+        })
+        .fold(0.0f64, f64::max);
+    row("monthly_precip_conserved_max_rel", format!("{rel:.2e}"));
+    // The annual mean of the monthly temperatures against the annual raster
+    // (Ruling 13: two reads of one curve).
+    let gaps: Vec<f64> = fine
+        .iter()
+        .map(|&(x, z)| (f64::from(whole.monthly_at_ground(x, z).annual_mean_temp_c()) - whole.annual_climate(x, z).0).abs())
+        .collect();
+    let max = gaps.iter().copied().fold(0.0f64, f64::max);
+    row("monthly_annual_temp_gap_c", format!("p99 {:.3}, max {max:.3}", p99(gaps)));
     rows
 }
 

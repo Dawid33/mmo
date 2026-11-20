@@ -1851,6 +1851,104 @@ impl ForgedWorld {
     }
 }
 
+// ---- Phase 1b: monthly climate normals at a world position ----
+
+/// A place's monthly normals at the ground from its sea-level normals `sea`:
+/// every temperature lowered by `lapse_c_per_m * ground_m` (`ground_m` is
+/// already floored at 0 by the caller: metres above the sea), and the twelve
+/// precipitations replaced by `annual_precip_mm` split in `sea`'s own
+/// monthly shares (`P_m = A · N_m / Σ N`, months added in order as `f64`; an
+/// equal twelfth each when `Σ N` is not above 0, so no division by 0 and no
+/// NaN from it). Diurnal range, wet-day fraction and wind are unchanged.
+/// Exact arithmetic (multiply, subtract, divide), `f64` inside, each value
+/// cast to `f32` last.
+///
+/// For a forge-side caller with no `ForgedWorld` (Phase 5's classifier on
+/// `WorldArtifact` cells): fine cell `i` at its centre `(cx_m, cz_m)` in MAP
+/// metres is `ground_normals(a.climate.normals_at(cx_m, cz_m),
+/// f64::from(a.height.get(i)).max(0.0), f64::from(a.precip_mm.get(i)), lapse)`
+/// — bit-identical to [`ForgedWorld::monthly_at_ground_map`]`(cx_m, cz_m)`,
+/// because a bilinear read at a cell centre returns the cell. (Through engine
+/// metres the identity holds only when the spawn offset round-trips exactly,
+/// which nothing guarantees — hence the map-metre function.)
+pub fn ground_normals(
+    sea: game::MonthlyNormals,
+    ground_m: f64,
+    annual_precip_mm: f64,
+    lapse_c_per_m: f64,
+) -> game::MonthlyNormals {
+    let mut n = sea;
+    let lowered = lapse_c_per_m * ground_m;
+    let mut total = 0.0f64;
+    for p in sea.precip_mm {
+        total += f64::from(p);
+    }
+    for m in 0..game::CLIMATE_MONTHS {
+        n.temp_c[m] = (f64::from(sea.temp_c[m]) - lowered) as f32;
+        n.precip_mm[m] = if total > 0.0 {
+            (annual_precip_mm * (f64::from(sea.precip_mm[m]) / total)) as f32
+        } else {
+            (annual_precip_mm / game::CLIMATE_MONTHS as f64) as f32
+        };
+    }
+    n
+}
+
+impl ForgedWorld {
+    /// Cooling per metre of height the world was forged with (deg C / m;
+    /// `WorldGlobals::knobs().lapse_c_per_km / 1000`).
+    pub fn lapse_per_m(&self) -> f64 {
+        self.lapse_c_per_m
+    }
+
+    /// The annual rasters at engine metres, bilinear: (mean annual
+    /// temperature AT THE GROUND in deg C, annual precipitation in mm/yr) —
+    /// what `column_climate` and the habitat read. On a tiled world it can
+    /// load a tile (as every fine-raster read).
+    pub fn annual_climate(&self, x_m: f64, z_m: f64) -> (f64, f64) {
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        (self.bilinear_q(QRasterId::TemperatureC, ax, az), self.bilinear_q(QRasterId::PrecipMm, ax, az))
+    }
+
+    /// The climate grid's normals at engine metres: SEA-LEVEL temperature,
+    /// the grid's own (coarse) precipitation. Bilinear between climate cells
+    /// (`MonthlyClimate::normals_at`); x folds on a world that wraps (the
+    /// samplers' own fold), clamped north and south. Reads no tile: the
+    /// family is always resident.
+    ///
+    /// For Phase 6: the API takes no date — interpolating between months is
+    /// the caller's; so are a per-column lapse above the bilinear ground
+    /// [`Self::monthly_at_ground`] uses, and the engine-frame offset a
+    /// `game`-side reader of the container needs.
+    pub fn monthly_normals(&self, x_m: f64, z_m: f64) -> game::MonthlyNormals {
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        self.monthly_climate().normals_at(ax, az)
+    }
+
+    /// The normals AT THE GROUND at engine metres ([`ground_normals`] of
+    /// [`Self::monthly_normals`], the ground and annual precipitation read
+    /// from the fine rasters). Reads two fine rasters: on a tiled world it
+    /// can load (or, on a store error, fail on) a tile unless the caller
+    /// holds a prefetch — only `monthly_normals` is load-free.
+    pub fn monthly_at_ground(&self, x_m: f64, z_m: f64) -> game::MonthlyNormals {
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        self.monthly_at_ground_map(ax, az)
+    }
+
+    /// [`Self::monthly_at_ground`] at MAP metres (x east from the west edge,
+    /// z south from the north edge): the function it and a forge-side caller
+    /// share. `ground` is the bilinear height with each CELL floored at 0
+    /// before interpolating (`snow_line_m`'s read: a sea-floor neighbour's
+    /// depth never warms a coast), the lapse the world's own.
+    pub fn monthly_at_ground_map(&self, ax_m: f64, az_m: f64) -> game::MonthlyNormals {
+        let ground = self.bilinear_cells(ax_m, az_m, |i| f64::from(self.rasters.q(QRasterId::Height, i)).max(0.0));
+        let annual = self.bilinear_q(QRasterId::PrecipMm, ax_m, az_m);
+        ground_normals(self.monthly_climate().normals_at(ax_m, az_m), ground, annual, self.lapse_c_per_m)
+    }
+}
+
+// ---- end Phase 1b ----
+
 /// Where an artifact point lies relative to the map (`ForgedWorld::place`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Place {

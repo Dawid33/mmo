@@ -961,7 +961,12 @@ precipitation, wet-day share, wind east / south; 96 B per CLIMATE cell) on a coa
 fewer than 96 rows pole to pole (`forge::climate::climate_stride`; Dev 256 × 128 of 64 m, Large 784 × 392 of 256 m,
 28 MiB). It is always RESIDENT: whole in `WorldArtifact::climate` (artifact v10) and in `ForgedMeta::climate` (tiled
 format v3), never in tiles, one copy per process (the tile cache holds it, outside its budget); read through
-`ForgedWorld::monthly_climate`. Filled by `forge::climate::monthly_placeholder` until Phase 3.
+`ForgedWorld::monthly_climate`. Filled by `forge::climate::monthly_placeholder` until Phase 3. At a world position
+(exact arithmetic, no date — month interpolation is the caller's): `ForgedWorld::monthly_normals(x, z)` = the grid's
+SEA-LEVEL normals at engine metres (reads no tile); `monthly_at_ground(x, z)` = at the GROUND (lapse ×
+the bilinear height, each cell floored at 0; precipitation = the fine annual raster × the grid's monthly shares, so
+the annual total is conserved; may load tiles), the same at MAP metres `monthly_at_ground_map` — a forge-side
+reader with no `ForgedWorld` gets it bit for bit from `forged::ground_normals` at a fine cell centre.
 **Canonical coordinates**: everything stored, simulated, hashed or sent is canonical (x folded into the map's width,
 `canonical_region` in `worldgen/src/lib.rs`, one nearest-image helper into a region's frame); LOD keys and the client's render frame
 are the only unwrapped coordinates. **The wrap is for one process** (`VOXEL_ROLE=all`): under any other role the seam
