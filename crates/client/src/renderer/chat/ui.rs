@@ -227,8 +227,8 @@ pub fn sync_chat(
     mut shown: SessionLocal<ChatShown>,
 ) {
     let shown = shown.get();
-    if entry.on != log.open {
-        entry.on = log.open;
+    if entry.chat != log.open {
+        entry.chat = log.open;
     }
     if let Some(slint) = slint {
         let ui = slint.overlay.ui();

@@ -79,8 +79,13 @@ pub fn system_clock() -> Clock {
 /// How this host checks a connection's credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthMode {
+    /// The owner-launched child server for a native single-player world.
+    SinglePlayer,
     Local,
-    Jwt { world: String, login_url: String },
+    Jwt {
+        world: String,
+        login_url: String,
+    },
 }
 
 impl AuthMode {
@@ -91,7 +96,7 @@ impl AuthMode {
     }
 
     /// The mode of this server process. A single-player server (the one a
-    /// client spawns for its own world) is always [`AuthMode::Local`]: it
+    /// client spawns for its own world) uses its trusted owner mode: it
     /// inherits the client's environment, and a `VOXEL_AUTH=jwt` left
     /// exported from dev-login experiments must not make it need a login
     /// service. The second value is a warning to log when such a setting
@@ -109,7 +114,7 @@ impl AuthMode {
                 "{AUTH_ENV}={other:?} ignored: a single-player server always uses local player names"
             )),
         };
-        Ok((AuthMode::Local, warning))
+        Ok((AuthMode::SinglePlayer, warning))
     }
 
     /// [`from_env`](Self::from_env) over any variable lookup.
@@ -470,6 +475,9 @@ pub struct Admitted {
     /// The ticket's `session_epoch` (`Some` for every `jwt` session): with the player, the
     /// session's world-unique [`game::ClientId`].
     pub session_epoch: Option<u64>,
+    /// The join-time capability authorized by the coordinator, or trusted
+    /// directly by an owner-launched single-player server.
+    pub editor_allowed: bool,
 }
 
 /// The connect edge's credential check. Shared by every connection task.
@@ -488,6 +496,17 @@ impl Authenticator {
     pub fn local() -> Authenticator {
         Authenticator {
             mode: AuthMode::Local,
+            jwks: None,
+            admission: Admission::Newest(Mutex::default()),
+            observers: None,
+            now: system_clock(),
+        }
+    }
+
+    /// The owner-launched local child: local names are trusted with editor access.
+    pub fn single_player() -> Authenticator {
+        Authenticator {
+            mode: AuthMode::SinglePlayer,
             jwks: None,
             admission: Admission::Newest(Mutex::default()),
             observers: None,
@@ -531,6 +550,7 @@ impl Authenticator {
     /// The production authenticator for `mode` (wall clock, HTTP JWKS).
     pub fn for_mode(mode: AuthMode) -> Authenticator {
         match mode {
+            AuthMode::SinglePlayer => Self::single_player(),
             AuthMode::Local => Self::local(),
             AuthMode::Jwt { world, login_url } => {
                 let jwks = JwksCache::from_login(&login_url);
@@ -571,15 +591,20 @@ impl Authenticator {
     /// report when the connection ends ([`session_ended`](Self::session_ended)).
     pub async fn admit(&self, credential: Credential) -> Result<Admitted, String> {
         match (&self.mode, credential) {
-            (AuthMode::Local, Credential::Local(name)) => match PlayerName::parse(&name.0) {
-                Ok(name) => Ok(Admitted {
-                    who: AdmittedAs::Player(PlayerKey::Local(name)),
-                    ticket: None,
-                    session_epoch: None,
-                }),
-                Err(why) => Err(format!("invalid player name: {why}")),
-            },
-            (AuthMode::Local, Credential::Jwt(_)) => Err(REFUSE_JWT_ON_LOCAL_HOST.into()),
+            (mode @ (AuthMode::SinglePlayer | AuthMode::Local), Credential::Local(name)) => {
+                match PlayerName::parse(&name.0) {
+                    Ok(name) => Ok(Admitted {
+                        who: AdmittedAs::Player(PlayerKey::Local(name)),
+                        ticket: None,
+                        session_epoch: None,
+                        editor_allowed: matches!(mode, AuthMode::SinglePlayer),
+                    }),
+                    Err(why) => Err(format!("invalid player name: {why}")),
+                }
+            }
+            (AuthMode::SinglePlayer | AuthMode::Local, Credential::Jwt(_)) => {
+                Err(REFUSE_JWT_ON_LOCAL_HOST.into())
+            }
             (AuthMode::Jwt { .. }, Credential::Local(_)) => Err(REFUSE_LOCAL_ON_JWT_HOST.into()),
             (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => {
                 self.check_jwt(world, &jwt).await
@@ -601,6 +626,7 @@ impl Authenticator {
                             who: AdmittedAs::Observer { client, player },
                             ticket: None,
                             session_epoch: None,
+                            editor_allowed: false,
                         })
                     }
                     Err(why) => {
@@ -684,19 +710,15 @@ impl Authenticator {
         .map_err(|e| shown(e).to_string())?;
         let token = PlayerToken(claims.player_token.clone());
         if !token.is_valid() {
-            log::warn!(
-                "[auth] ticket of account {} carries a malformed player token",
-                claims.sub
-            );
+            log::warn!("[auth] ticket carries a malformed player token");
             return Err("login ticket carries an invalid player token".into());
         }
         let epochs = match &self.admission {
             Admission::SpawnOrders(orders) => {
                 return match orders.admit(&claims.player_token, claims.session_epoch) {
-                    Ok(()) => {
+                    Ok(editor_allowed) => {
                         log::info!(
-                            "[auth] account {} admitted by its spawn order (epoch {})",
-                            claims.sub,
+                            "[auth] ticket admitted by its spawn order (epoch {})",
                             claims.session_epoch
                         );
                         let ticket = SessionTicket {
@@ -707,12 +729,12 @@ impl Authenticator {
                             who: AdmittedAs::Player(PlayerKey::Online(token)),
                             ticket: Some(ticket),
                             session_epoch: Some(claims.session_epoch),
+                            editor_allowed,
                         })
                     }
                     Err(why) => {
                         log::info!(
-                            "[auth] account {} ticket epoch {} refused: {why}",
-                            claims.sub,
+                            "[auth] ticket epoch {} refused: {why}",
                             claims.session_epoch
                         );
                         Err(why.into())
@@ -731,23 +753,48 @@ impl Authenticator {
             .or_insert(claims.session_epoch);
         if claims.session_epoch < *newest {
             log::info!(
-                "[auth] account {} ticket epoch {} refused: epoch {} already admitted",
-                claims.sub,
+                "[auth] ticket epoch {} refused: epoch {} already admitted",
                 claims.session_epoch,
                 *newest
             );
             return Err(REFUSE_SUPERSEDED.into());
         }
         *newest = claims.session_epoch;
-        log::info!(
-            "[auth] account {} admitted (epoch {})",
-            claims.sub,
-            claims.session_epoch
-        );
+        log::info!("[auth] ticket admitted (epoch {})", claims.session_epoch);
         Ok(Admitted {
             who: AdmittedAs::Player(PlayerKey::Online(token)),
             ticket: None,
             session_epoch: Some(claims.session_epoch),
+            editor_allowed: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use game::{Credential, PlayerName};
+
+    /// Regression: `/creative` after `just run --reset` was denied because the
+    /// owner-launched native child used ordinary local-name admission (seen in
+    /// play; single-player is trusted explicitly while LAN remains deny-by-default).
+    #[tokio::test]
+    async fn single_player_owner_gets_editor_permission_but_lan_does_not() {
+        let name = PlayerName::parse("owner").unwrap();
+        let (single_player, warning) = AuthMode::resolve(true, |_| None).unwrap();
+        assert!(warning.is_none());
+        let owner = Authenticator::for_mode(single_player)
+            .admit(Credential::Local(name.clone()))
+            .await
+            .unwrap();
+        assert!(owner.editor_allowed);
+
+        let (local, warning) = AuthMode::resolve(false, |_| None).unwrap();
+        assert!(warning.is_none());
+        let lan = Authenticator::for_mode(local)
+            .admit(Credential::Local(name))
+            .await
+            .unwrap();
+        assert!(!lan.editor_allowed);
     }
 }

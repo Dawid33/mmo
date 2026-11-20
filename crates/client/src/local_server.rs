@@ -124,6 +124,9 @@ impl LocalServer {
                 client: LOCAL_CLIENT_ID,
                 player: LOCAL_PLAYER_ID,
                 record: None,
+                // This process owns the world and bypasses network admission:
+                // its local player is trusted to enter editor mode.
+                editor_allowed: true,
             },
             self.now_ms,
         );

@@ -41,15 +41,19 @@ use crate::renderer::UiCamera;
 pub enum AppState {
     #[default]
     MainMenu,
+    /// The native single-player New / Load submenu.
+    SinglePlayer,
     MapGenerator,
     LoadWorld,
     /// A world session is starting: server launching / connecting / joining.
     Starting,
     InWorld,
-    /// Play online: the login screen (`login::flow`).
+    /// Device sign-in (`login::flow`).
     Login,
-    /// Play online: the login service's world list.
+    /// Multiplayer: the public server browser.
     Worlds,
+    /// The account settings screen (graphics remains the existing settings window).
+    Settings,
 }
 
 /// Root of an entity tree that belongs to the current world session.
@@ -105,9 +109,8 @@ pub struct PendingWorld {
     pub name: String,
 }
 
-/// The server the next session joins, set by the browser menu's Join server
-/// before `AppState::Starting`; the wasm session flow connects to it and
-/// removes it. The address as typed (`web_endpoint::web_server_for`).
+/// The debug browser server named by a localhost-only `?dev_server=` page
+/// parameter. The wasm session flow connects to it and removes it.
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct PendingServer(pub String);
 
@@ -349,7 +352,7 @@ pub fn skip_menu_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
 }
 
 /// [`skip_menu_from_env`] on the process environment; never on wasm, which
-/// opens on the main menu (Join server) like the native client.
+/// opens on the main menu like the native client.
 pub fn skip_menu() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
@@ -361,16 +364,16 @@ pub fn skip_menu() -> bool {
     }
 }
 
-/// The state the app starts in. `login_first`: the browser with a login
-/// service opens on the login screen (else its join-only menu).
-pub fn initial_state(skip_menu: bool, login_first: bool) -> AppState {
+/// The state the app starts in. A debug browser page may supply a local
+/// `PendingServer` and start straight at it; ordinary pages show the menu.
+pub fn initial_state(skip_menu: bool, dev_server: bool) -> AppState {
     // The dev bypass (`VOXEL_SKIP_MENU`, a set `VOXEL_WORLD_FILE`, the probes)
     // goes straight to InWorld with the player already in play (`InPlay`
     // starts as `skip_menu`), connecting to an already running server.
     if skip_menu {
         AppState::InWorld
-    } else if login_first {
-        AppState::Login
+    } else if dev_server {
+        AppState::Starting
     } else {
         AppState::MainMenu
     }
@@ -446,14 +449,14 @@ enum SessionOutcome {
 /// Needs `StatesPlugin` (in `DefaultPlugins` with Bevy's `bevy_state` feature).
 pub struct SessionPlugin {
     pub skip_menu: bool,
-    /// Start on the login screen (`initial_state`).
-    pub login_first: bool,
+    /// A localhost-only debug page starts a `PendingServer`.
+    pub dev_server: bool,
 }
 
 impl Plugin for SessionPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SkipMenu(self.skip_menu))
-            .insert_state(initial_state(self.skip_menu, self.login_first))
+            .insert_state(initial_state(self.skip_menu, self.dev_server))
             .init_resource::<SessionResets>()
             .init_resource::<SessionMessageClears>()
             .init_resource::<SessionGeneration>()
@@ -1003,7 +1006,7 @@ mod flow {
 /// Joining and leaving a server from the browser (wasm has no local server:
 /// it can only join one).
 ///
-/// - Join server ([`PendingServer`]) → `Starting`: a fresh set of
+/// - Debug local server ([`PendingServer`]) → `Starting`: a fresh set of
 ///   [`SessionChannels`], a fresh game manager and a WebTransport connection
 ///   (`sim_driver::start_session`). The first `SetPlayer` moves on to
 ///   `InWorld`, not in play: the arrival map is the start screen, as native.

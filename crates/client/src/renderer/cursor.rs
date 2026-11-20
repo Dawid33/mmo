@@ -87,10 +87,15 @@ impl CursorPolicy {
             || self.inventory_opening.is_some())
     }
 
-    /// A client-local overlay or a modal game screen is open: commander
-    /// input leaves the world alone.
+    /// A client-local overlay or modal game screen is open, or an inventory
+    /// request is waiting for its authoritative projection: commander and
+    /// first-person input leave the world alone.
     pub fn blocks_game(&self) -> bool {
-        self.overlay_open || self.ui_modal || self.loading || self.typing
+        self.overlay_open
+            || self.ui_modal
+            || self.loading
+            || self.typing
+            || self.inventory_opening.is_some()
     }
 
     /// The grab mode and cursor visibility the window should have.

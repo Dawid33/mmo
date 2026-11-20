@@ -37,6 +37,7 @@ use bevy::prelude::*;
 use game::movement::UNITS_PER_METER;
 
 use super::adventure::ClientPlayMode;
+use super::adventure::EditorState;
 use super::first_person::{BodyView, Eyes, FirstPerson};
 use super::smooth;
 use super::view_feel::{ViewFeel, bob_at};
@@ -286,6 +287,7 @@ pub(crate) fn pose_hand(
     time: Res<Time>,
     fp: Res<FirstPerson>,
     mode: Res<ClientPlayMode>,
+    editor: Option<Res<EditorState>>,
     policy: Res<CursorPolicy>,
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -312,7 +314,8 @@ pub(crate) fn pose_hand(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let dt = time.delta_secs();
-    let shown = mode.adventure() && fp.body_view() == Some(BodyView::First);
+    let shown = (mode.adventure() || editor.as_ref().is_some_and(|e| e.active))
+        && fp.body_view() == Some(BodyView::First);
     // What the hands are doing, from the input the sim is sent (the same gate).
     let hands_free = shown && policy.look_live();
     let selected = items.as_ref().map(|i| {

@@ -150,6 +150,7 @@ pub enum ServerEvent {
         client: ClientId,
         player: crate::PlayerId,
         record: Option<crate::PlayerRecord>,
+        editor_allowed: bool,
     },
     ClientDisconnected(ClientId),
     /// The login service gave `player` a newer login (`SpawnPlayer`, reason
@@ -180,6 +181,7 @@ pub enum ServerEvent {
         session_epoch: u64,
         player: crate::PlayerId,
         record_region: Option<RegionCoords>,
+        editor_allowed: bool,
     },
     /// [`ServerEvent::ClientConnected`] of a session a login ticket admitted (role `host`): the manager keeps its login — it travels with the player to another host,
     /// and its end (the session leaving the world) is reported to the login service.
@@ -189,6 +191,7 @@ pub enum ServerEvent {
         record: Option<crate::PlayerRecord>,
         player_token: String,
         session_epoch: u64,
+        editor_allowed: bool,
     },
     /// The login service's kick, applied to the gate host's admission state already: a
     /// session of the login handed here is parked, and every other host is told.
@@ -213,6 +216,7 @@ impl ServerEvent {
             client,
             player: crate::PlayerId(client as u64),
             record: None,
+            editor_allowed: false,
         }
     }
 }
@@ -912,8 +916,9 @@ struct Moving {
     from: RegionCoords,
     target: RegionCoords,
     landing: [u32; 2],
-    /// Server-authored events for `target` that must follow the body's
-    /// creation there (an adventure start's `SetMode`).
+    /// Events for `target` that must follow the body's creation there:
+    /// server-authored requests (an adventure start's `SetMode`) and
+    /// authoritative editor one-shots that arrived while the body moved.
     then: Vec<GameEventKind>,
 }
 
@@ -1154,7 +1159,7 @@ pub struct WorldManager<S: RegionSpawner> {
     /// A player that reconnected while its park was still in flight: its new
     /// session and the edge's record (the fallback should the park bring none
     /// back). Restored when `PlayerParked` arrives.
-    awaiting_park: BTreeMap<PlayerId, (ClientId, Option<PlayerRecord>)>,
+    awaiting_park: BTreeMap<PlayerId, (ClientId, Option<PlayerRecord>, Option<bool>)>,
     /// Requests that move the player (Play, an adventure, …) from a session whose
     /// restore waits for its park: replayed once it is restored.
     deferred_packets: BTreeMap<ClientId, Vec<ClientPacket>>,
@@ -2170,8 +2175,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 client: id,
                 player,
                 record,
+                editor_allowed,
             } => {
-                if !self.client_connected(id, player, record, now_ms) {
+                if !self.client_connected(id, player, record, editor_allowed, now_ms) {
                     return true;
                 }
             }
@@ -2187,6 +2193,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 session_epoch,
                 player,
                 record_region,
+                editor_allowed,
             } => {
                 self.spawn_order(SpawnRequest {
                     origin,
@@ -2195,6 +2202,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     session_epoch,
                     player,
                     record_region,
+                    editor_allowed,
                 });
             }
             ServerEvent::LoginConnected {
@@ -2203,12 +2211,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 record,
                 player_token,
                 session_epoch,
+                editor_allowed,
             } => {
                 // Known before it is placed: a placement that ends the session (a region it
                 // cannot reach) reports its end there, once.
                 let login = (player_token, session_epoch);
                 let before = self.logins.insert(client, login.clone());
-                if !self.client_connected(client, player, record, now_ms) {
+                if !self.client_connected(client, player, record, editor_allowed, now_ms) {
                     if self.client_id_live(client) {
                         // A duplicate: the live session of the id keeps what it had.
                         match before {
@@ -2325,34 +2334,53 @@ impl<S: RegionSpawner> WorldManager<S> {
                             let cid = kind
                                 .origin_client()
                                 .expect("PlayerInput/UiAction/Order carry a client");
-                            let home = self.homes.get(&cid).copied();
-                            match home {
-                                Some(home) if self.regions.contains_key(&home) => {
-                                    // DEBUG: one line per player input drowned the
-                                    // server log (1618 of 1648 lines in a 60 s capture).
-                                    log::debug!(
-                                        "[server] recv {kind:?} from cid={cid:?} -> route to home {home:?}"
-                                    );
-                                    // Regions share one tick numbering, so the
-                                    // stamp holds in whichever region the input
-                                    // reaches; that region makes it follow the
-                                    // body if the body is crossing (`Forward`).
-                                    let input = match after_tick {
-                                        Some(tick) => RegionInput::EventAfterTick(kind, tick),
-                                        None => RegionInput::Event(kind),
-                                    };
-                                    self.send_to_region(home, input);
+                            let editor_while_moving = self.moving.contains_key(&cid)
+                                && matches!(
+                                    &kind,
+                                    GameEventKind::Order(_, crate::Order::SetEditor { .. })
+                                        | GameEventKind::UiAction(
+                                            _,
+                                            crate::UiAction::EditorTake { .. }
+                                                | crate::UiAction::EditorGive { .. }
+                                                | crate::UiAction::EditorTrash
+                                        )
+                                );
+                            if editor_while_moving {
+                                self.moving
+                                    .get_mut(&cid)
+                                    .expect("move checked above")
+                                    .then
+                                    .push(kind);
+                            } else {
+                                let home = self.homes.get(&cid).copied();
+                                match home {
+                                    Some(home) if self.regions.contains_key(&home) => {
+                                        // DEBUG: one line per player input drowned the
+                                        // server log (1618 of 1648 lines in a 60 s capture).
+                                        log::debug!(
+                                            "[server] recv {kind:?} from cid={cid:?} -> route to home {home:?}"
+                                        );
+                                        // Regions share one tick numbering, so the
+                                        // stamp holds in whichever region the input
+                                        // reaches; that region makes it follow the
+                                        // body if the body is crossing (`Forward`).
+                                        let input = match after_tick {
+                                            Some(tick) => RegionInput::EventAfterTick(kind, tick),
+                                            None => RegionInput::Event(kind),
+                                        };
+                                        self.send_to_region(home, input);
+                                    }
+                                    // Its body went to another host: the input follows it there.
+                                    None if self.departed_host(cid).is_some() => {
+                                        let stamp =
+                                            after_tick.unwrap_or_else(|| self.spawner.world_tick());
+                                        self.forward_input(cid, kind, stamp);
+                                    }
+                                    _ => log::info!(
+                                        "[server] DROP {kind:?} from cid={cid:?}: home={home:?} not running (loaded regions: {:?})",
+                                        self.regions.keys().collect::<Vec<_>>()
+                                    ),
                                 }
-                                // Its body went to another host: the input follows it there.
-                                None if self.departed_host(cid).is_some() => {
-                                    let stamp =
-                                        after_tick.unwrap_or_else(|| self.spawner.world_tick());
-                                    self.forward_input(cid, kind, stamp);
-                                }
-                                _ => log::info!(
-                                    "[server] DROP {kind:?} from cid={cid:?}: home={home:?} not running (loaded regions: {:?})",
-                                    self.regions.keys().collect::<Vec<_>>()
-                                ),
                             }
                         }
                         // Manager-internal / server-authored event kinds: a client
@@ -4239,7 +4267,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.forget_claim_reports(player);
         }
         self.deferred_packets.remove(&id);
-        self.awaiting_park.retain(|_, (c, _)| *c != id);
+        self.awaiting_park.retain(|_, (c, _, _)| *c != id);
         self.end_session(id, now_ms);
         // Park the player: its body leaves the region and comes back as its
         // record (`PlayerParked`), so no orphan body stays behind.
@@ -4447,6 +4475,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         id: ClientId,
         player: PlayerId,
         record: Option<PlayerRecord>,
+        editor_allowed: bool,
         now_ms: u64,
     ) -> bool {
         if self.client_id_live(id) {
@@ -4505,12 +4534,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 "client {id}: player {} is still parking; restore deferred",
                 player.0
             );
-            self.awaiting_park.insert(player, (id, record));
+            self.awaiting_park
+                .insert(player, (id, record, Some(editor_allowed)));
             self.deferred_packets.entry(id).or_default();
         } else {
             let held_here = self.parked_players.contains_key(&player);
             let record = self.take_parked(player).or(record);
-            self.place_player(id, record, held_here, now_ms);
+            self.place_player(id, record, held_here, editor_allowed, now_ms);
         }
         if let Some(map) = &self.world_map {
             let _ = self
@@ -4546,12 +4576,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             || self.moving.contains_key(&id)
             || self.creating.contains_key(&id)
             || self.adventurer_of.contains_key(&id)
-            || self.awaiting_park.values().any(|(c, _)| *c == id)
+            || self.awaiting_park.values().any(|(c, _, _)| *c == id)
     }
 
     /// Whether `id` waits for its player's park before it is restored.
     fn restore_pending(&self, id: ClientId) -> bool {
-        self.awaiting_park.values().any(|(c, _)| *c == id)
+        self.awaiting_park.values().any(|(c, _, _)| *c == id)
     }
 
     /// Give a session its body: restored from `record`; a record whose region is
@@ -4562,10 +4592,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn place_player(
         &mut self,
         id: ClientId,
-        record: Option<PlayerRecord>,
+        mut record: Option<PlayerRecord>,
         held_here: bool,
+        editor_allowed: bool,
         now_ms: u64,
     ) {
+        if let Some(record) = &mut record {
+            record.client.editor_allowed = editor_allowed;
+            if !editor_allowed {
+                record.client.editor = false;
+            }
+        }
         // Its region canonical (a record is stored so; folded again here).
         let record = record.map(|r| PlayerRecord {
             region: self.canonical(r.region),
@@ -4652,10 +4689,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // Server-authoritative player creation, once per session.
                 self.ensure_running(SPAWN_REGION);
                 self.homes.insert(id, SPAWN_REGION);
-                self.send_to_region(
+                let client = crate::Client {
+                    inventory: crate::Inventory::starting_kit(),
+                    editor_allowed,
+                    editor: false,
+                    ..crate::Client::default()
+                };
+                let landing = self.landing_in(SPAWN_REGION);
+                self.send_play_event(
                     SPAWN_REGION,
-                    RegionInput::Event(GameEventKind::CreateClient(id)),
+                    GameEventKind::CreateClientAt(id, landing, Some(Box::new(client))),
                 );
+                let _ = self
+                    .out
+                    .send((Some(id), ServerPacket::PlayerRegion(Some(SPAWN_REGION), id)));
             }
         }
     }
@@ -4747,7 +4794,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// edge read from the store, else as a fresh player — and its held
     /// requests are replayed.
     fn park_settled(&mut self, player: PlayerId, now_ms: u64) {
-        let Some((waiting, edge_record)) = self.awaiting_park.remove(&player) else {
+        let Some((waiting, edge_record, editor_allowed)) = self.awaiting_park.remove(&player)
+        else {
             return;
         };
         if !self.sessions.contains_key(&waiting) {
@@ -4755,7 +4803,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let held_here = self.parked_players.contains_key(&player);
         let record = self.take_parked(player).or(edge_record);
-        self.place_player(waiting, record, held_here, now_ms);
+        let editor_allowed = editor_allowed.unwrap_or_else(|| {
+            record
+                .as_ref()
+                .is_some_and(|record| record.client.editor_allowed)
+        });
+        self.place_player(waiting, record, held_here, editor_allowed, now_ms);
         if self.world.is_some() && self.sessions.contains_key(&waiting) {
             self.send_claims(waiting);
             self.world_player_online(waiting);

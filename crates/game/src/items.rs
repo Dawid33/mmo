@@ -72,6 +72,65 @@ pub fn item_name(item: ItemId) -> &'static str {
     }
 }
 
+/// Whether `item` names a real block or extra item that players may hold.
+/// Air and liquids are not items.
+pub fn item_exists(item: ItemId) -> bool {
+    match item.as_block() {
+        Some(block) => {
+            block != BlockId::AIR
+                && block_props().name_of(block).is_some()
+                && !block_props().is_liquid(block)
+        }
+        None => ((item.0 - ITEM_BLOCK_LIMIT) as usize) < EXTRA_ITEMS.len(),
+    }
+}
+
+/// Resolve a manifest block name or extra item name to a real item.
+pub fn item_named(name: &str) -> Option<ItemId> {
+    block_props()
+        .id_named(name)
+        .map(ItemId::block)
+        .or_else(|| ItemId::extra_named(name))
+        .filter(|&item| item_exists(item))
+}
+
+/// All real item ids in stable id order (blocks, then extra items).
+pub fn item_ids() -> Vec<ItemId> {
+    let mut out: Vec<ItemId> = block_props()
+        .names
+        .keys()
+        .copied()
+        .map(BlockId)
+        .map(ItemId::block)
+        .filter(|&item| item_exists(item))
+        .collect();
+    out.extend((0..EXTRA_ITEMS.len()).map(|i| ItemId(ITEM_BLOCK_LIMIT + i as u16)));
+    out
+}
+
+/// Client-facing metadata for one editor palette item, in stable item-id order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteEntry {
+    pub item: ItemId,
+    pub name: &'static str,
+    /// `None` is an extra (non-block) item, which the client puts in Items.
+    pub tab: Option<crate::CreativeTab>,
+}
+
+/// Every placeable item and the palette section assigned to it.
+pub fn palette_entries() -> Vec<PaletteEntry> {
+    item_ids()
+        .into_iter()
+        .map(|item| PaletteEntry {
+            item,
+            name: item_name(item),
+            tab: item
+                .as_block()
+                .and_then(|block| block_props().creative_tab(block)),
+        })
+        .collect()
+}
+
 /// What breaking `block` yields (one item), by the manifest. Tree data in
 /// `Block::data` never leaks into the item.
 pub fn drop_of(block: Block) -> Option<ItemStack> {

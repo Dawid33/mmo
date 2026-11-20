@@ -113,6 +113,10 @@ pub struct Column {
     /// Recipe for the ground below the band (lazy underground), if any.
     #[serde(default)]
     ground: Option<crate::ground::ColumnGround>,
+    /// Genesis-only lifecycle metadata. Terrain snapshots intentionally
+    /// consume the column without copying this field.
+    #[serde(default)]
+    tree_life: Vec<crate::TreeLifeSeed>,
 }
 
 impl Column {
@@ -125,6 +129,7 @@ impl Column {
             above,
             sub_chunks,
             ground: None,
+            tree_life: Vec::new(),
         };
         c.normalize();
         c
@@ -132,6 +137,11 @@ impl Column {
 
     pub fn with_ground(mut self, ground: crate::ground::ColumnGround) -> Self {
         self.ground = Some(ground);
+        self
+    }
+
+    pub fn with_tree_life(mut self, seeds: Vec<crate::TreeLifeSeed>) -> Self {
+        self.tree_life = seeds;
         self
     }
 
@@ -154,6 +164,7 @@ impl Column {
             above,
             sub_chunks,
             ground: Some(ground),
+            tree_life: Vec::new(),
         };
         c.normalize();
         c
@@ -169,6 +180,20 @@ impl Column {
 
     pub fn sub_chunks(&self) -> &[SubChunk] {
         &self.sub_chunks
+    }
+
+    pub fn tree_life(&self) -> &[crate::TreeLifeSeed] {
+        &self.tree_life
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<SubChunk>,
+        Option<crate::ground::ColumnGround>,
+        Vec<crate::TreeLifeSeed>,
+    ) {
+        (self.sub_chunks, self.ground, self.tree_life)
     }
 
     /// The stored sub-chunk at absolute sub-Y, or None if outside the band.

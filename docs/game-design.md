@@ -155,9 +155,14 @@ settlements get AI adventurers (the old design's answer to troubles nobody takes
 
 The mayor's top-down view is a view inside adventure play, not a mode.
 
-The unapproved creative-mode design (`docs/superpowers/specs/2026-11-14-creative-mode-and-chat-design.md`)
-is the starting point for editor mode. Its availability to every player in both old modes no longer
-holds.
+The editor implementation follows the creative-mode design's editing and palette mechanics
+(`docs/superpowers/specs/2026-11-14-creative-mode-and-chat-design.md`) but not its old
+permission call: capability is a per-world, account-scoped grant. It is authoritative on join,
+persists in the player's sim record, and can be revoked only by kicking/rejoining the active
+session. Trusted local-owner admission (offline wasm/local and `VOXEL_AUTH=local` development or
+LAN) enables the capability; JWT/login worlds still require the coordinator grant and receive no
+broader local trust exception. `/creative` and `/gamemode creative` enter it, `/normal` and
+`/gamemode normal` leave it.
 
 ## 7. Content packages
 

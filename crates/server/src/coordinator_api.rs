@@ -503,7 +503,22 @@ async fn login_orders(
     let Ok(msg) = game::decode_packet::<LoginToHost>(&body) else {
         return text(StatusCode::BAD_REQUEST, "order");
     };
-    let order = crate::login_link::order_from(msg);
+    let editor_allowed = match &msg {
+        LoginToHost::SpawnPlayer { account_id, .. } => {
+            match s.store.editor_granted_async(account_id).await {
+                Ok(allowed) => {
+                    crate::health::Health::global().editor_grant_result(Some(allowed));
+                    allowed
+                }
+                Err(_) => {
+                    crate::health::Health::global().editor_grant_result(None);
+                    return text(StatusCode::SERVICE_UNAVAILABLE, "store");
+                }
+            }
+        }
+        LoginToHost::Kick { .. } => false,
+    };
+    let order = crate::login_link::order_from(msg, editor_allowed);
     let operation_id = headers
         .get("x-mmo-operation-id")
         .and_then(|value| value.to_str().ok())

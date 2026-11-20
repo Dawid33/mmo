@@ -772,7 +772,7 @@ line=$(printf '%s\n' "$reg" | grep -F "$prefix" || true)
 case "$line" in "$prefix"world\ add\ *) ;; *) fail "world-register printed no '${prefix}world add' command: $reg" ;; esac
 args="${line#"$prefix"}"
 # The only command this script runs from text: checked word by word first.
-printf '%s\n' "$args" | grep -Eq "^world add twin --name 'Twin' --link https://coordinator\.$ns\.svc\.cluster\.local:6480 --link-cert [0-9a-f]{64}$" ||
+printf '%s\n' "$args" | grep -Eq "^world add twin --name 'Twin' --region eu-central-1 --link https://coordinator\.$ns\.svc\.cluster\.local:6480 --link-cert [0-9a-f]{64}$" ||
     fail "world-register printed an unexpected command: $line"
 eval "set -- $args"
 said=$(kc -n login exec deploy/login -- login "$@" 2>&1) || fail "login world add failed: $said"

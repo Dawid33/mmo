@@ -89,6 +89,10 @@ const CHANNEL_DEPTH_M: (f64, f64) = (0.8, 3.0);
 const LEVEE_WIDTH_M: f64 = 2.0;
 /// Banks stand at least this far above the water surface (m).
 const FREEBOARD_M: f64 = 0.3;
+/// The engine rounds a column from its 0.5 m block centre sample. A snapped
+/// levee must reach that point to guarantee a bank block at the water's
+/// topmost block.
+const QUANTISED_FREEBOARD_M: f64 = 0.500_001;
 /// Beyond the levee the valley side is cut back no steeper than this (rise/run).
 const BANK_SLOPE: f64 = 0.7;
 /// How far from the channel edge the bank cut can reach (m).
@@ -100,6 +104,23 @@ pub(crate) const BUCKET_M: f64 = 64.0;
 /// and checking all ~20 segments of a river region at each cost 4x the rest
 /// of generation.
 const PATCH_CELL_M: f64 = 8.0;
+
+fn overlap_channel_and_levee(
+    mut ground: f64,
+    mut water: Option<f64>,
+    channel_water: Option<f64>,
+    levee_water: Option<f64>,
+) -> (f64, Option<f64>) {
+    if let Some(level) = channel_water {
+        water = Some(water.map_or(level, |old| old.max(level)));
+    }
+    if let Some(level) = levee_water
+        && channel_water.is_none_or(|channel| level > channel)
+    {
+        ground = ground.max(level + FREEBOARD_M.max(QUANTISED_FREEBOARD_M));
+    }
+    (ground, water)
+}
 
 /// Biome borders at block scale (DF's "pick a neighbouring tile"): each block
 /// column takes the biome of the raster cell nearest to its point displaced
@@ -1923,7 +1944,7 @@ impl ForgedWorld {
                 (-1, -1),
             ] {
                 if let Some(level) = self.lake_level_at(ix + ox, iz + oz) {
-                    g = g.max(snap(level) + FREEBOARD_M);
+                    g = g.max(snap(level) + FREEBOARD_M.max(QUANTISED_FREEBOARD_M));
                 }
             }
         }
@@ -1933,7 +1954,11 @@ impl ForgedWorld {
         // Rivers: nearest centerline decides. Inside the channel the bed is
         // cut below the water surface; a levee ring outside it stands above
         // the water; further out the valley side is cut back to a bank slope.
+        // At a junction a nearer low-water branch may decide the channel but
+        // must not erase the levee of an overlapping higher branch.
         let mut nearest: Option<(f64, f64, Segment)> = None; // (distance, water, segment)
+        let mut levee_water = None;
+        let mut channel_water = None;
         for seg in segments {
             let (vx, vz) = (seg.b.0 - seg.a.0, seg.b.1 - seg.a.1);
             let len2 = vx * vx + vz * vz;
@@ -1950,6 +1975,12 @@ impl ForgedWorld {
             if nearest.as_ref().is_none_or(|n| edge < n.0 - n.2.half_width) {
                 nearest = Some((d, seg.water.0 + (seg.water.1 - seg.water.0) * t, seg));
             }
+            let level = snap(seg.water.0 + (seg.water.1 - seg.water.0) * t);
+            if d < seg.half_width {
+                channel_water = Some(channel_water.map_or(level, |old: f64| old.max(level)));
+            } else if (seg.half_width..seg.half_width + LEVEE_WIDTH_M).contains(&d) {
+                levee_water = Some(levee_water.map_or(level, |old: f64| old.max(level)));
+            }
         }
         if let Some((d, w, seg)) = nearest {
             let w = snap(w);
@@ -1961,12 +1992,18 @@ impl ForgedWorld {
                     // Inside a lake the lake's level stands; elsewhere the river's.
                     water = water.or(Some(w));
                 } else if d < a + LEVEE_WIDTH_M {
-                    g = g.max(w + FREEBOARD_M).min(w + FREEBOARD_M + 1.0);
+                    let freeboard = FREEBOARD_M.max(QUANTISED_FREEBOARD_M);
+                    g = g.max(w + freeboard).min(w + freeboard + 1.0);
                 } else if d < a + LEVEE_WIDTH_M + BANK_REACH_M {
-                    g = g.min(w + FREEBOARD_M + 1.0 + (d - a - LEVEE_WIDTH_M) * BANK_SLOPE);
+                    g = g.min(
+                        w + FREEBOARD_M.max(QUANTISED_FREEBOARD_M)
+                            + 1.0
+                            + (d - a - LEVEE_WIDTH_M) * BANK_SLOPE,
+                    );
                 }
             }
         }
+        (g, water) = overlap_channel_and_levee(g, water, channel_water, levee_water);
         // Water at or below the sea is just the sea.
         let water = water.filter(|&w| w > 0.0);
         (g, water, lake && water.is_some())
@@ -2445,5 +2482,24 @@ fn load_env_world() -> Option<ForgedWorld> {
             Some(world)
         }
         Err(e) => panic!("{WORLD_FILE_ENV}={path}: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the debug-world probe found a 3 m low dry bank when a
+    /// lower branch's levee crossed a higher snapped river channel (the
+    /// overlap now takes the channel's highest level and ignores lower levees).
+    #[test]
+    fn overlapping_channels_keep_the_higher_containment_level() {
+        let (ground, water) =
+            overlap_channel_and_levee(316.0, Some(317.0), Some(320.0), Some(319.0));
+        assert_eq!(water, Some(320.0));
+        assert_eq!(ground, 316.0);
+
+        let (bank, _) = overlap_channel_and_levee(318.0, None, None, Some(319.0));
+        assert!(crate::tile_map::surface_block(bank) >= 319);
     }
 }

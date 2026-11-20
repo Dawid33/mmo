@@ -1,4 +1,4 @@
-//! Play online: signing in, listing the login service's worlds and joining one
+//! Multiplayer: signing in, listing the login service's worlds and joining one
 //! with a login-issued JWT (R2a). The screens are `ui/login.slint` and
 //! `ui/worlds.slint` ([`AppState::Login`], [`AppState::Worlds`]); the
 //! frontend turns their buttons into [`LoginIntent`]s, [`start_login`] sends
@@ -17,8 +17,8 @@
 //! (refresh, join, logout) the session re-reads the store and adopts what is
 //! kept there ([`LoginSession::adopt_kept`]) — another client may have rotated
 //! it meanwhile. For the same reason the native client never refreshes at
-//! startup: the kept token is used only when the player presses Play online.
-//! The browser opens on its login screen, so it still refreshes at startup.
+//! startup: the kept token is used only when the player opens Multiplayer or
+//! Settings. The browser still refreshes a kept token silently at startup.
 //!
 //! Signing in is the identity provider's device flow (RFC 8628, with PKCE;
 //! parsing in [`super::oidc`]): Sign in fetches where the service's players
@@ -270,8 +270,14 @@ pub enum AfterSession {
 /// What a frontend button asked of the login service.
 #[derive(Message, Clone)]
 pub enum LoginIntent {
-    /// The main menu's Play online.
-    PlayOnline,
+    /// Open the signed-in-or-not public world browser.
+    Multiplayer,
+    /// Open account settings.
+    Settings,
+    /// Sign in from Settings.
+    LogIn,
+    /// Refresh the public world list without changing screens.
+    RefreshWorlds,
     /// The login screen's Sign in: start a device sign-in.
     SignIn,
     /// Open the pending sign-in's page (again).
@@ -286,7 +292,7 @@ pub enum LoginIntent {
 
 /// Whether the native client refreshes a kept token at startup. Only the
 /// browser does (it opens on the login screen); a native client uses the kept
-/// token only on Play online, so two clients started on one machine do not
+/// token only on Multiplayer or Settings, so two clients started on one machine do not
 /// both rotate it at once.
 pub const REFRESH_AT_STARTUP: bool = cfg!(target_arch = "wasm32");
 
@@ -620,7 +626,7 @@ impl Step {
 /// Deliberately NOT registered with `add_session_reset`: the login outlives a
 /// world session (an online session ends back on the world list, still
 /// signed in). Exists only when a login service is configured
-/// ([`super::login_url`]); without it the menu has no Play online.
+/// ([`super::login_url`]).
 #[derive(Resource)]
 pub struct LoginSession {
     pub api: LoginApi,
@@ -636,6 +642,8 @@ pub struct LoginSession {
     /// The running world session was joined with a ticket: ending it returns
     /// to the world list.
     pub playing_online: bool,
+    /// The screen a completed sign-in or Login Back returns to.
+    pub return_to: AppState,
     /// The device sign-in the player is confirming at the provider, if any.
     pub pending_device: Option<PendingDevice>,
     /// The world the running online session joined (set with
@@ -684,6 +692,7 @@ impl LoginSession {
             worlds: Vec::new(),
             error: String::new(),
             playing_online: false,
+            return_to: AppState::Worlds,
             pending_device: None,
             joined_world: None,
             rejoin: None,
@@ -787,13 +796,9 @@ impl LoginSession {
         }
     }
 
-    /// Where Log out lands: the browser's online screen is its front door.
-    pub fn logged_out_state() -> AppState {
-        if cfg!(target_arch = "wasm32") {
-            AppState::Login
-        } else {
-            AppState::MainMenu
-        }
+    /// The screen a completed login returns to.
+    pub fn return_to(&self) -> AppState {
+        self.return_to
     }
 
     /// Forget the login locally.
@@ -823,24 +828,45 @@ impl LoginSession {
     }
 
     /// A button on the login screens (`state`: the screen it was pressed on).
-    pub fn intent(&mut self, intent: LoginIntent, state: AppState) -> Step {
+    pub fn intent(&mut self, intent: LoginIntent, _state: AppState) -> Step {
         let busy = self.busy();
         match intent {
-            LoginIntent::PlayOnline => {
+            LoginIntent::Multiplayer => {
                 self.error.clear();
-                if self.logged_in() {
-                    return Step::goto(AppState::Worlds);
-                }
-                let mut step = Step::goto(AppState::Login);
-                // A kept login (native: never refreshed yet; browser: its
-                // startup refresh failed): refresh it now.
-                if let (Some(token), false) = (self.refresh.clone(), busy) {
-                    step.calls.push(LoginCall::Refresh {
-                        token,
-                        silent: true,
-                    });
+                let mut step = Step::goto(AppState::Worlds);
+                step.calls.push(LoginCall::Worlds);
+                if !self.logged_in() {
+                    if let (Some(token), false) = (self.refresh.clone(), busy) {
+                        step.calls.push(LoginCall::Refresh {
+                            token,
+                            silent: true,
+                        });
+                    }
                 }
                 step
+            }
+            LoginIntent::Settings => {
+                self.error.clear();
+                let mut step = Step::goto(AppState::Settings);
+                if !self.logged_in() {
+                    if let (Some(token), false) = (self.refresh.clone(), busy) {
+                        step.calls.push(LoginCall::Refresh {
+                            token,
+                            silent: true,
+                        });
+                    }
+                }
+                step
+            }
+            LoginIntent::LogIn => {
+                self.return_to = AppState::Settings;
+                self.error.clear();
+                Step::goto(AppState::Login)
+            }
+            LoginIntent::RefreshWorlds if busy => Step::none(),
+            LoginIntent::RefreshWorlds => {
+                self.error.clear();
+                Step::call(LoginCall::Worlds)
             }
             LoginIntent::Back => {
                 self.back();
@@ -866,7 +892,7 @@ impl LoginSession {
                 // and left the screen on Login): on to the world list, which
                 // fetches itself on entry (`refresh_worlds`).
                 if self.logged_in() {
-                    return Step::goto(AppState::Worlds);
+                    return Step::goto(self.return_to);
                 }
                 if self.waiting_for_sign_in() {
                     return Step::none();
@@ -881,6 +907,7 @@ impl LoginSession {
                 self.rejoin_ended = None;
                 match self.refresh.clone() {
                     Some(token) => {
+                        self.return_to = AppState::Worlds;
                         self.first_join = Some(FirstJoin {
                             world: world.clone(),
                             starting_since: None,
@@ -890,18 +917,18 @@ impl LoginSession {
                         });
                         Step::call(LoginCall::Join { token, world })
                     }
-                    None => Step::goto(AppState::Login),
+                    None => {
+                        self.return_to = AppState::Worlds;
+                        Step::goto(AppState::Login)
+                    }
                 }
             }
             LoginIntent::Logout => {
                 let token = self.refresh.clone();
                 self.sign_out();
                 self.error.clear();
-                let mut step = Step::goto(Self::logged_out_state());
+                let mut step = Step::none();
                 step.store = StoreOp::Clear;
-                if state == AppState::Login {
-                    step.goto = None;
-                }
                 step.calls
                     .extend(token.map(|token| LoginCall::Logout { token }));
                 step
@@ -962,7 +989,10 @@ impl LoginSession {
             reply => reply,
         };
         let mut step = self.apply_reply(reply, state);
-        if !matches!(state, AppState::Login | AppState::Worlds) {
+        if !matches!(
+            state,
+            AppState::Login | AppState::Worlds | AppState::Settings
+        ) {
             step.goto = None;
         }
         step
@@ -980,10 +1010,10 @@ impl LoginSession {
                 self.error.clear();
                 let mut step = Step::call(LoginCall::Worlds);
                 step.store = StoreOp::Save(response.refresh_token);
-                // A silent refresh moves on only from the login screen (the
-                // browser's start); native stays on its menu.
-                if state == AppState::Login || !silent {
-                    step.goto = Some(AppState::Worlds);
+                // A deliberate sign-in returns where it was entered from. A
+                // silent kept-token refresh never pulls the player away.
+                if !silent && state == AppState::Login {
+                    step.goto = Some(self.return_to);
                 }
                 step
             }
@@ -999,6 +1029,7 @@ impl LoginSession {
                 // or a server-side problem: keep it for the next try.
                 if silent && refused_token(&failure) {
                     self.refresh = None;
+                    self.error.clear();
                     step.store = StoreOp::Clear;
                 }
                 step
@@ -1012,6 +1043,7 @@ impl LoginSession {
             } => self.device_polled(&device_code, result, state),
             LoginReply::Worlds(Ok(worlds)) => {
                 self.worlds = worlds;
+                self.error.clear();
                 Step::none()
             }
             LoginReply::Worlds(Err(failure)) => {
@@ -1637,8 +1669,8 @@ fn perform_step(
 ) {
     match &step.store {
         StoreOp::Keep => {}
-        StoreOp::Save(token) => store::save_refresh(token),
-        StoreOp::Clear => store::clear_refresh(),
+        StoreOp::Save(token) => store::save_refresh_for(login.api.service_url(), token),
+        StoreOp::Clear => store::clear_refresh_for(login.api.service_url()),
     }
     if step.leave {
         commands.queue(crate::session::leave_for_rejoin);
@@ -1672,17 +1704,14 @@ fn open_browser(url: &str) {
 #[cfg(target_arch = "wasm32")]
 fn open_browser(_url: &str) {}
 
-/// `Startup`: with a login service configured, the [`LoginSession`]; in the
-/// browser ([`REFRESH_AT_STARTUP`]) a kept refresh token is refreshed
-/// silently.
+/// `Startup`: the one login service and [`LoginSession`]; in the browser
+/// ([`REFRESH_AT_STARTUP`]) a kept refresh token is refreshed silently.
 pub fn setup_login(mut commands: Commands) {
-    let Some(url) = super::login_url() else {
-        return;
-    };
+    let url = super::api::service_url(super::login_url());
     info!("[login] login service at {url}");
     let mut login = LoginSession::new(LoginApi::new(url));
     if REFRESH_AT_STARTUP {
-        let step = login.resume(store::load_refresh());
+        let step = login.resume(store::load_refresh_for(login.api.service_url()));
         login.send(step.calls);
     }
     commands.insert_resource(login);
@@ -1693,7 +1722,10 @@ pub fn setup_login(mut commands: Commands) {
 fn presents_token(intent: &LoginIntent) -> bool {
     matches!(
         intent,
-        LoginIntent::PlayOnline | LoginIntent::JoinWorld(_) | LoginIntent::Logout
+        LoginIntent::Multiplayer
+            | LoginIntent::Settings
+            | LoginIntent::JoinWorld(_)
+            | LoginIntent::Logout
     )
 }
 
@@ -1711,7 +1743,8 @@ pub fn start_login(
     };
     for intent in intents.read() {
         if presents_token(intent) {
-            login.adopt_kept(store::load_refresh());
+            let kept = store::load_refresh_for(login.api.service_url());
+            login.adopt_kept(kept);
         }
         let step = login.intent(intent.clone(), *state.get());
         perform_step(step, &mut login, &mut commands, &mut next);
@@ -1753,9 +1786,10 @@ pub fn poll_login(
     }
     let step = login.tick(now, *state.get());
     perform_step(step, &mut login, &mut commands, &mut next);
-    let step = login.tick_rejoin(now, *state.get(), store::load_refresh);
+    let service = login.api.service_url().to_string();
+    let step = login.tick_rejoin(now, *state.get(), || store::load_refresh_for(&service));
     perform_step(step, &mut login, &mut commands, &mut next);
-    let step = login.tick_first_join(now, *state.get(), store::load_refresh);
+    let step = login.tick_first_join(now, *state.get(), || store::load_refresh_for(&service));
     perform_step(step, &mut login, &mut commands, &mut next);
     // A rejoin waiting for its world to start says so on the starting screen,
     // and its usual line comes back once an answer says otherwise (only that
@@ -1777,8 +1811,7 @@ pub fn rejoin_arrived(login: Option<ResMut<LoginSession>>) {
     }
 }
 
-/// `OnEnter(Worlds)`: back on the list (an online session over, or from the
-/// menu): fetch the list again.
+/// `OnEnter(Worlds)`: fetch the public list, signed in or not.
 pub fn refresh_worlds(login: Option<ResMut<LoginSession>>) {
     let Some(mut login) = login else { return };
     // Back from a rejoin's starting screen: it stops (a join on its way only
@@ -1786,7 +1819,7 @@ pub fn refresh_worlds(login: Option<ResMut<LoginSession>>) {
     login.back_on_world_list();
     // The list is fetched even while an abandoned join keeps the screens
     // busy: the fetch presents no token.
-    if login.logged_in() && login.in_flight == 0 {
+    if login.in_flight == 0 {
         login.send(vec![LoginCall::Worlds]);
     }
 }

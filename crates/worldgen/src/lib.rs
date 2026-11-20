@@ -797,6 +797,7 @@ fn solid_material(mats: &Materials, depth: i32, by: i32, surface: i32, water_top
 struct PlacedTreeBlock {
     block: Block,
     wood: bool,
+    root: bool,
 }
 
 /// The tree blocks of the window `[x0, x1) x [z0, z1)` (world blocks), keyed
@@ -809,9 +810,10 @@ fn tree_blocks(
     mats: &Materials,
     trees_from: TreeSource,
     surface: &dyn Fn(i32, i32) -> Option<i32>,
-) -> BTreeMap<[i32; 3], PlacedTreeBlock> {
+) -> (BTreeMap<[i32; 3], PlacedTreeBlock>, Vec<game::TreeLifeSeed>) {
     let [x0, z0, x1, z1] = window;
     let mut out: BTreeMap<[i32; 3], PlacedTreeBlock> = BTreeMap::new();
+    let mut seeds = Vec::new();
     for tree in trees_for_window(coords, window, trees_from, surface) {
         let blocks = mats.trees.species[tree.species as usize];
         let sk = trees::skeleton(&trees::SPECIES[tree.species as usize], tree.seed, tree.age);
@@ -833,6 +835,7 @@ fn tree_blocks(
             let placed = PlacedTreeBlock {
                 block: Block::with_tree(id, tree.id, b.limb),
                 wood,
+                root: false,
             };
             match out.entry(p) {
                 std::collections::btree_map::Entry::Vacant(e) => {
@@ -845,8 +848,53 @@ fn tree_blocks(
                 }
             }
         }
+        let mut roots = vec![[tree.base[0], tree.base[1] - 1, tree.base[2]]];
+        roots.push([tree.base[0], tree.base[1] - 2, tree.base[2]]);
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let p = [tree.base[0] + dx, tree.base[1] - 2, tree.base[2] + dz];
+            if surface(p[0], p[2]).is_some_and(|sy| p[1] <= sy) && in_region(coords, p[0], p[2]) {
+                roots.push(p);
+            }
+        }
+        roots.sort_unstable();
+        roots.dedup();
+        for &p in &roots {
+            if p[0] < x0 || p[0] >= x1 || p[2] < z0 || p[2] >= z1 {
+                continue;
+            }
+            out.insert(
+                p,
+                PlacedTreeBlock {
+                    block: Block::with_tree_id(blocks.log, tree.id),
+                    wood: true,
+                    root: true,
+                },
+            );
+        }
+        if tree.base[0] >= x0 && tree.base[0] < x1 && tree.base[2] >= z0 && tree.base[2] < z1 {
+            let origin = [coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS];
+            let local = |p: [i32; 3]| [p[0] - origin[0], p[1], p[2] - origin[1]];
+            let roots: Vec<[i32; 3]> = roots.into_iter().map(local).collect();
+            seeds.push(game::TreeLifeSeed {
+                life: game::TreeLife {
+                    genome: game::TreeGenome {
+                        id: tree.id,
+                        species: tree.species,
+                        seed: tree.seed,
+                        base: local(tree.base),
+                        initial_age: tree.age,
+                        log: blocks.log,
+                        branch: blocks.branch,
+                        leaves: blocks.leaves,
+                    },
+                    original_roots: roots.clone(),
+                    surviving_roots: roots,
+                    state: game::TreeState::Standing,
+                },
+            });
+        }
     }
-    out
+    (out, seeds)
 }
 
 /// Levels the samples (`samples[i * nz + j]` is world column `(x0 + i, z0 + j)`) under the structures'
@@ -1082,6 +1130,8 @@ fn columns_from_patch(
     // `(lx, lz, block y, block)`, footprint-local.
     let mut tree_cols: Vec<Vec<(usize, usize, i32, PlacedTreeBlock)>> =
         (0..xs.len() * zs.len()).map(|_| Vec::new()).collect();
+    let mut tree_life_cols: Vec<Vec<game::TreeLifeSeed>> =
+        (0..xs.len() * zs.len()).map(|_| Vec::new()).collect();
     if with_trees {
         let surface = |x: i32, z: i32| {
             let (bx, bz) = (x - wx, z - wz);
@@ -1091,16 +1141,24 @@ fn columns_from_patch(
             );
             tree_ground(at(bx, bz), slope_at(bx, bz).is_some())
         };
-        for ([x, y, z], placed) in tree_blocks(
+        let (stamped, life) = tree_blocks(
             coords,
             [wx, wz, wx + ww, wz + wd],
             &mats,
             trees_from,
             &surface,
-        ) {
+        );
+        for ([x, y, z], placed) in stamped {
             let (bx, bz) = (x - wx, z - wz);
             let col = (bx / cb) as usize * zs.len() + (bz / cb) as usize;
             tree_cols[col].push(((bx % cb) as usize, (bz % cb) as usize, y, placed));
+        }
+        for seed in life {
+            let bx = seed.life.genome.base[0];
+            let bz = seed.life.genome.base[2];
+            let col = (bx / cb - xs.start as i32) as usize * zs.len()
+                + (bz / cb - zs.start as i32) as usize;
+            tree_life_cols[col].push(seed);
         }
     }
 
@@ -1113,6 +1171,8 @@ fn columns_from_patch(
             let fz = (cz - zs.start) as i32 * cb;
             let col_trees =
                 std::mem::take(&mut tree_cols[(cx - xs.start) * zs.len() + (cz - zs.start)]);
+            let col_life =
+                std::mem::take(&mut tree_life_cols[(cx - xs.start) * zs.len() + (cz - zs.start)]);
 
             // Every footprint has samples, so these only seed the min/max
             // (procedural results equal the old SCAN_TOP / SCAN_BOTTOM - 1 seeds:
@@ -1142,6 +1202,7 @@ fn columns_from_patch(
             }
             // The band reaches the highest tree block too.
             hi = col_trees.iter().fold(hi, |hi, t| hi.max(t.2));
+            lo = col_trees.iter().fold(lo, |lo, t| lo.min(t.2));
             // Extend the band bottom past the shallowest surface in the footprint
             // so the deepest soil (dirt/sand) of the lowest column is still
             // materialized, and down to every open neighbour block.
@@ -1245,7 +1306,7 @@ fn columns_from_patch(
             // Trees, into the air above the ground and any water only.
             for (lx, lz, by, placed) in col_trees {
                 let c = at(fx + lx as i32, fz + lz as i32);
-                if by <= c.top || by <= c.water_top {
+                if !placed.root && (by <= c.top || by <= c.water_top) {
                     continue;
                 }
                 let bi = BlockIndex::from_xyz(lx, by.rem_euclid(cb) as usize, lz);
@@ -1283,7 +1344,8 @@ fn columns_from_patch(
                 })
                 .collect();
             // `above = air` trims air tops; the bottom is kept (`grounded`).
-            let column = Column::grounded(base_sub_y, stone, air, subs, ground);
+            let column =
+                Column::grounded(base_sub_y, stone, air, subs, ground).with_tree_life(col_life);
             columns.push((ColumnCoords::new(cx, cz), column));
         }
     }

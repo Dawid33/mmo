@@ -223,6 +223,9 @@ impl Rollback {
     /// being chopped. Empty when `target` is not tree wood. A whole-tree
     /// flood: callers cache it per target (the client's region runner).
     pub fn shake_blocks(&self, target: BlockPos) -> Vec<(BlockPos, Block)> {
+        if self.is_tree_root(target) {
+            return Vec::new();
+        }
         let Some(felling) = crate::trees::fell(self, target) else {
             return Vec::new();
         };
@@ -284,6 +287,7 @@ impl Rollback {
             return;
         };
         let active = c.mode == PlayMode::Adventure
+            && !c.editor
             && c.fps_cam_mode
             && !c.inventory_open
             && c.input.mouse_held(&BREAK_BUTTON)
@@ -379,6 +383,11 @@ impl Rollback {
     /// block `fell` refuses (leaves, or a tree over `MAX_TREE_BLOCKS`) is
     /// broken alone, like any block. Returns whether anything was cleared.
     pub fn player_chop_safe(&mut self, p: BlockPos, tick: u64) -> bool {
+        if self.is_tree_root(p) {
+            return self
+                .mineable(p)
+                .is_some_and(|block| self.mine_block_safe(p, block, tick));
+        }
         let felled = match crate::TREE_FELLING {
             crate::TreeFelling::Instant => self.fell_instant_safe(p).map(|gone| {
                 let mut columns: std::collections::BTreeMap<[i32; 2], (BlockPos, Vec<Block>)> =
@@ -437,6 +446,18 @@ impl Rollback {
         client: ClientId,
         out: &mut Vec<IntentMsg>,
     ) -> bool {
+        self.place_selected_safe(client, true, out)
+    }
+
+    /// The selected hotbar block placement shared by survival and editor
+    /// clients. Chests open before a placement. Editor placement does not
+    /// consume the selected stack.
+    pub(crate) fn place_selected_safe(
+        &mut self,
+        client: ClientId,
+        consume: bool,
+        out: &mut Vec<IntentMsg>,
+    ) -> bool {
         let Some(hit) = self.eye_hit(client) else {
             return false;
         };
@@ -458,7 +479,11 @@ impl Rollback {
         if selected as usize >= crate::HOTBAR_SLOTS {
             return false;
         }
-        let Some(id) = stack.item.as_block().filter(|id| *id != BlockId::AIR) else {
+        let Some(id) = stack
+            .item
+            .as_block()
+            .filter(|id| *id != BlockId::AIR && (consume || crate::item_exists(stack.item)))
+        else {
             return false;
         };
         if hit.normal == [0; 3] {
@@ -475,8 +500,10 @@ impl Rollback {
         let Some(by) = self.client_body_id(client) else {
             return false;
         };
-        if let Some(c) = self.data.clients.get_mut(&client) {
-            let _ = c.inventory.take_selected(selected, 1);
+        if consume {
+            if let Some(c) = self.data.clients.get_mut(&client) {
+                let _ = c.inventory.take_selected(selected, 1);
+            }
         }
         let p = WorldBlockPos::from_local(
             *self.data.region,
@@ -487,7 +514,7 @@ impl Rollback {
             Intent::PlaceBlock {
                 block: id,
                 by,
-                survival: true,
+                survival: consume,
             },
         );
         true
@@ -546,7 +573,7 @@ impl Rollback {
     /// after [`THROWN_PICKUP_DELAY_TICKS`]. Returns whether anything was
     /// thrown.
     pub fn throw_selected_safe(&mut self, client: ClientId, whole_stack: bool, tick: u64) -> bool {
-        let Some((eye, dir)) = self.eye_ray(client) else {
+        let Some((eye, landing)) = self.throw_landing(client) else {
             return false;
         };
         let Some(c) = self.data.clients.get(&client) else {
@@ -561,6 +588,51 @@ impl Rollback {
         {
             return false;
         }
+        let n = if whole_stack { MAX_STACK } else { 1 };
+        let Some(stack) = self
+            .data
+            .clients
+            .get_mut(&client)
+            .and_then(|c| c.inventory.take_selected(selected, n))
+        else {
+            return false;
+        };
+        self.throw_stack_safe(client, eye, landing, stack, tick);
+        true
+    }
+
+    /// Throws the complete authoritative cursor stack from an open inventory.
+    /// The endpoint is resolved before taking the stack, so invalid throws
+    /// retain it.
+    pub fn throw_cursor_safe(&mut self, client: ClientId, tick: u64) -> bool {
+        if !self
+            .data
+            .clients
+            .get(&client)
+            .is_some_and(|c| c.inventory_open && c.cursor.as_ref().is_some_and(|s| s.count > 0))
+        {
+            return false;
+        }
+        let Some((eye, landing)) = self.throw_landing(client) else {
+            return false;
+        };
+        let Some(stack) = self
+            .data
+            .clients
+            .get_mut(&client)
+            .and_then(|c| c.cursor.take())
+            .filter(|s| s.count > 0)
+        else {
+            return false;
+        };
+        self.throw_stack_safe(client, eye, landing, stack, tick);
+        true
+    }
+
+    /// Resolves an authoritative eye ray and safe landing without mutating any
+    /// item state.
+    fn throw_landing(&self, client: ClientId) -> Option<(rapier3d::math::Vector, [i32; 3])> {
+        let (eye, dir) = self.eye_ray(client)?;
         let bv = BLOCK_VOXELS as f32;
         let cell_of = |p: rapier3d::math::Vector| {
             [
@@ -579,15 +651,23 @@ impl Rollback {
             ],
             None => cell_of(eye + dir * (THROW_DISTANCE_BLOCKS * bv)),
         };
-        let n = if whole_stack { MAX_STACK } else { 1 };
-        let Some(stack) = self
-            .data
-            .clients
-            .get_mut(&client)
-            .and_then(|c| c.inventory.take_selected(selected, n))
-        else {
-            return false;
-        };
+        Some((eye, landing))
+    }
+
+    fn throw_stack_safe(
+        &mut self,
+        client: ClientId,
+        eye: rapier3d::math::Vector,
+        landing: BlockPos,
+        stack: ItemStack,
+        tick: u64,
+    ) {
+        let bv = BLOCK_VOXELS as f32;
+        let origin = [
+            (eye.x / bv).floor() as i32,
+            (eye.y / bv).floor() as i32,
+            (eye.z / bv).floor() as i32,
+        ];
         // A loss to the pile caps is counted where it happens.
         // From the eye: the renderer arcs it to where it lands (`ItemsLanded`).
         // A landing across a seam is a deposit intent to its owner; what its
@@ -595,14 +675,7 @@ impl Rollback {
         let by = self
             .client_body_id(client)
             .unwrap_or(crate::EntityId::of_region(*self.data.region));
-        let _destroyed = self.deposit_items_by_safe(
-            by,
-            cell_of(eye),
-            landing,
-            stack,
-            tick,
-            THROWN_PICKUP_DELAY_TICKS,
-        );
-        true
+        let _destroyed =
+            self.deposit_items_by_safe(by, origin, landing, stack, tick, THROWN_PICKUP_DELAY_TICKS);
     }
 }

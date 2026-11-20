@@ -166,6 +166,7 @@ pub fn forward_input(
     mode: Option<Res<super::commander::CameraMode>>,
     first_person: Option<Res<super::commander::first_person::FirstPerson>>,
     adventure: Option<Res<super::commander::adventure::ClientPlayMode>>,
+    editor: Option<Res<super::commander::adventure::EditorState>>,
     scroll: Res<AccumulatedMouseScroll>,
     mut body_keys: crate::session::SessionLocal<BodyKeys>,
 ) {
@@ -194,7 +195,9 @@ pub fn forward_input(
     // the camera running past the press. Set before the gate is read, so this
     // frame's travel is held back here and in `look::integrate_local_look`
     // (ordered after) alike.
-    let adventure_body = first_person && adventure.as_ref().is_some_and(|m| m.adventure());
+    let body_driven = adventure.as_ref().is_some_and(|m| m.adventure())
+        || editor.as_ref().is_some_and(|e| e.active);
+    let adventure_body = first_person && body_driven;
     if let Some(c) = cursor.as_mut() {
         let now = time.elapsed();
         if c.inventory_opening.is_some_and(|at| {
@@ -240,7 +243,7 @@ pub fn forward_input(
         // E is the sim's inventory key in Adventure; elsewhere it is the
         // fps-cam toggle `first_person` owns. Q reaches the sim only here,
         // never in the commander (where it holds the tool wheel).
-        let adventure = adventure.is_some_and(|m| m.adventure());
+        let adventure = body_driven;
         let send_body = |ev: InputEvent| {
             if adventure
                 || !matches!(

@@ -789,6 +789,7 @@ impl WorldClients {
     pub async fn spawn(
         &self,
         world: &WorldRow,
+        account_id: i64,
         player_token: &str,
         session_epoch: u64,
     ) -> Result<SpawnPlace, SpawnError> {
@@ -803,6 +804,7 @@ impl WorldClients {
             .unwrap_or_else(|p| p.into_inner())
             .insert(key.clone(), tx);
         let order = LoginToHost::SpawnPlayer {
+            account_id: account_id.to_string(),
             player_token: player_token.to_string(),
             session_epoch,
         };

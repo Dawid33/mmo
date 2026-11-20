@@ -1,4 +1,4 @@
-// The login screen (Play online): Sign in hands the player to the identity
+// The login screen: Sign in hands the player to the identity
 // provider's page in the browser (the OAuth device flow); while the game waits
 // for them it shows the code to type, Open browser and Cancel. The client
 // (crates/client/src/login/flow.rs) does the talking; this screen only reports
@@ -43,7 +43,7 @@ export component LoginScreen {
     out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
 
     frame := FrameFace {
-        title: "Play online";
+        title: "Log in";
         width: min(root.width - 48px, 480px);
         height: self.content-y + root.back-top + root.button-height
             + Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;

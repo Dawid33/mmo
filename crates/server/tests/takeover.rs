@@ -650,6 +650,7 @@ impl Takeover {
         login
             .tx
             .send(LoginToHost::SpawnPlayer {
+                account_id: "test-account".into(),
                 player_token: token.into(),
                 session_epoch: epoch,
             })

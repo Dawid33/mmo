@@ -786,6 +786,11 @@ water-proto *args:
     cd prototypes/water && {{cap}} cargo build --release --quiet --bin water_proto
     cd prototypes/water && target/release/water_proto {{args}}
 
+# Production water core/store/server/client type-check (never a benchmark or client test).
+water-check:
+    python3 scripts/test_inventory.py check crates/game
+    {{ cap }} {{ cargo }} check -p game -p world-store -p server -p client
+
 # The same scenarios compiled to wasm32 and run under node; hashes must equal the native ones.
 water-proto-wasm:
     cd prototypes/water && {{cap}} cargo build --release --lib --target wasm32-unknown-unknown
@@ -928,26 +933,18 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
 
 # ---- WASM / browser -------------------------------------------------------
 
-# The server the browser build's main menu prefills in Join server (the deployed
-# game's hostname: the WebTransport certificate is Let's Encrypt's for that name,
-# so the bare deploy_host IP would fail the browser's TLS check). Baked into
-# `web-release` bundles as VOXEL_WEB_SERVER; `just web` leaves it unset,
-# so a dev page prefills 127.0.0.1 (the local `just server`).
-web_server := "orion.factoriosurvivalworld.com"
-
 # The login service the browser page should use (`just login=http://127.0.0.1:8790 web`):
-# `web` prints the page URL with `?login=<url>`, which makes the join-only menu offer
-# Play online — on a localhost page only (127.0.0.1 / localhost / [::1]): on any other
-# host the page ignores `?login=` and uses its build-time VOXEL_LOGIN_URL. Empty = the
-# plain Join-server menu.
+# `web` prints the page URL with `?login=<url>` on localhost only. Release and
+# ordinary pages use their same-origin `/login` route or the official service.
 login := ""
 
-# The browser has no worlds of its own: it opens on the main menu, whose Join
-# server connects to a running server. So this starts the dev server too (the
+# The browser has no worlds of its own. This starts the dev server too (the
 # same as `just server`, built with the same dials; log in target/web-server.log)
 # unless one already listens on UDP 6466, serves the page, and stops the server
-# (orderly: the world is saved) when the page server exits. Then press Join
-# server — the field says 127.0.0.1. ?world=tiny|small|full picks the world scale;
+# (orderly: the world is saved) when the page server exits. The printed
+# `?dev_server=127.0.0.1` URL is a debug-localhost bypass; the plain page always
+# shows the shared main menu and has no join-by-address control.
+# ?world=tiny|small|full picks the world scale;
 # ?workers=0 runs the sim and meshing on the page's main thread instead of in Web
 # Workers (crates/client/src/web_worker/), ?workers=N sizes the compute pool.
 # Needs: rustup target add wasm32-unknown-unknown; cargo install wasm-server-runner.
@@ -968,13 +965,14 @@ web:
     # The page's own player name (local servers): `just user=bob web` -> ?name=bob.
     name=""
     if [ -n "{{user}}" ]; then name="name=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "{{user}}")"; fi
-    if [ -n "{{login}}" ]; then
-        echo "web: open http://127.0.0.1:1334/?login={{login}}${name:+&$name}"
-    elif [ -n "$name" ]; then
-        echo "web: open http://127.0.0.1:1334/?$name (add &login=<login service url> for Play online)"
-    else
-        echo "web: open http://127.0.0.1:1334/ (add ?login=<login service url> for Play online; ?name=<you> picks your player name)"
-    fi
+    query="dev_server=127.0.0.1"
+    if [ -n "{{login}}" ]; then query+="&login={{login}}"; fi
+    if [ -n "$name" ]; then query+="&$name"; fi
+    echo "web: development: open http://127.0.0.1:1334/?$query (starts straight in the local server)"
+    menu_query=""
+    if [ -n "{{login}}" ]; then menu_query="login={{login}}"; fi
+    if [ -n "$name" ]; then menu_query+="${menu_query:+&}$name"; fi
+    echo "web: menu: open http://127.0.0.1:1334/${menu_query:+?$menu_query}"
     WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown
 
@@ -994,10 +992,9 @@ web-check:
 # process tree: MemoryHigh 14G, MemoryMax 16G, no swap. Override with
 # WASM_BUILD_MEMORY_{HIGH,MAX,SWAP_MAX}=none (or a systemd size); unavailable
 # cgroups fail closed. Downloads stay outside the guard. Built at the play
-# region size, like the server it talks to; its Join server field prefills
-# `web_server`. Serve the directory as is.
+# region size, like the server it talks to. Serve the directory as is.
 web-release:
-    VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_WEB_SERVER={{web_server}} CAP="{{cap}}" scripts/web_release.sh
+    VOXEL_REGION_BLOCKS={{play_blocks}} CAP="{{cap}}" scripts/web_release.sh
 
 # ---- Deploy ------------------------------------------------------------------
 
@@ -2026,7 +2023,7 @@ orion-login-push: orion-login-build
 
 # The game world's images (deploy/images/server, deploy/images/web): release `server` + `worldctl`
 # and the browser bundle, both at the play region size (the size the world runs at). The bundle is
-# built with no VOXEL_WEB_SERVER / VOXEL_LOGIN_URL: the web image's nginx serves it beside the
+# built with no VOXEL_LOGIN_URL: the web image's nginx serves it beside the
 # login proxy, so the page needs neither.
 world-images-build:
     #!/usr/bin/env bash
@@ -2038,7 +2035,7 @@ world-images-build:
     mkdir -p target/world-images
     rm -f target/world-images/revision target/world-images/build-dials
     ERRANTRY_BUILD_REVISION="$rev" VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_BUILD_REVISION="$rev" {{cap}} {{cargo}} build --release -p server --bin server -p world-store --bin worldctl --features server/pyroscope
-    env -u VOXEL_WEB_SERVER -u VOXEL_LOGIN_URL VOXEL_REGION_BLOCKS={{play_blocks}} CAP="{{cap}}" scripts/web_release.sh
+    env -u VOXEL_LOGIN_URL VOXEL_REGION_BLOCKS={{play_blocks}} CAP="{{cap}}" scripts/web_release.sh
     printf 'region_blocks=%s\nchunk_blocks=%s\n' '{{play_blocks}}' '{{chunk_blocks}}' > target/world-images/build-dials
     printf '%s' "$rev" > target/world-images/revision
 
@@ -2587,6 +2584,7 @@ world-start:
 # No --quic / --wt: each spawn answer names the endpoint of the host that places the player. A name
 # with a single quote is refused. --map-url is the world map's tiles behind the web Ingress's host
 # (https://<host>/map/<id>; omitted when the namespace has no web Ingress).
+# --region identifies the deployment region in the login service registry.
 world-register $name="Errantry":
     #!/usr/bin/env bash
     set -euo pipefail

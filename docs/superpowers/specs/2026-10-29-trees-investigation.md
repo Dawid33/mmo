@@ -1,9 +1,15 @@
 # Trees — investigation
 
-**Date:** 2026-10-29 · **Status:** implemented 2026-10-30 except growth · **Ask:** trees that grow only
+**Date:** 2026-10-29 · **Status:** implemented; buried-root regrowth added 2026-11-20 · **Ask:** trees that grow only
 where they could survive, deterministic and realistic-looking generation, and chopping that
 makes the part of the tree above the cut fall, like Dwarf Fortress. **Trees only**: shrubs,
 grass and other plants are out of scope.
+
+**As built (2026-11-20):** every newly generated tree has two to six explicit buried log
+roots and a compact region-owned `TreeLife`. Mining is per-root, while a visible trunk cut
+leaves roots and schedules six deterministic shapes at 4-game-day intervals; fewer roots
+slow the interval. Existing saved regions whose `tree_state` is `NULL` remain legacy/rootless
+and are never inferred or regenerated.
 
 **Decided by Dawid (2026-10-29):**
 1. Standing trees are **terrain blocks** (log / branch / leaf blocks written by worldgen), until

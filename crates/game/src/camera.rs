@@ -312,7 +312,7 @@ impl Controller for CameraController {
                 &data.physics.colliders,
                 handle,
                 &movement::MoveParams {
-                    allow_flight: client.mode != crate::PlayMode::Adventure,
+                    allow_flight: client.editor || client.mode != crate::PlayMode::Adventure,
                     ..movement::MoveParams::PLAYER
                 },
             );

@@ -114,6 +114,7 @@ pub enum Reliable {
         session_epoch: u64,
         player: PlayerId,
         record_region: Option<RegionCoords>,
+        editor_allowed: bool,
     },
     /// The answer to a [`Reliable::SpawnOrder`], to its `origin`: `endpoint` is the host
     /// that took it (where the client connects), `None` when refused.

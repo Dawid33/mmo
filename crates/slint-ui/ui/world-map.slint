@@ -39,11 +39,9 @@ export global WorldMapConfig {
     out property <color> hole: #00000001;
 }
 
-// The world map (M, the start screen): the client draws the map itself under this layer, into the
-// view's rect (the "hole"), at any zoom; this window reports drag (pan), wheel (zoom about the
-// pointer) and click (select the region under it) and draws the client's markers over it. The layer
-// buttons pick what the map shows; the side panel shows what is known about the selected tile, and
-// Close (Main menu while the map is the start screen).
+// Reusable world-map page for the arrival screen and the inventory's Map tab.
+// The client draws the map itself under this layer into the view's rect
+// (the "hole"), while this page owns pan, zoom, selection and controls.
 export component WorldMap {
     // The layer buttons' captions; `map-layer` indexes them (0 = default).
     in property <[string]> layer-names;
@@ -73,6 +71,8 @@ export component WorldMap {
     out property <length> margin: root.map-modal ? 0px : WorldMapConfig.margin;
     // Whether the start screen offers Main menu (not on wasm).
     in property <bool> can-leave: true;
+    // An embedded owner (the inventory) closes with Escape instead.
+    in property <bool> show-close: !root.map-modal;
 
     // A drag moved by (dx, dy) view logical pixels since its last report.
     callback map-drag(length, length);
@@ -107,7 +107,10 @@ export component WorldMap {
     // Scroll not yet worth a notch (touchpads scroll in small steps).
     property <length> wheel-acc;
     // The side panel's frame width.
-    property <length> side-frame-width: WorldMapConfig.side-width + WorldMapConfig.side-frame;
+    property <length> side-frame-width: min(
+        WorldMapConfig.side-width + WorldMapConfig.side-frame,
+        root.width * 0.45
+    );
 
     view := Rectangle {
         x: root.margin + root.reserve-left;
@@ -223,7 +226,7 @@ export component WorldMap {
                 text: root.pointer-line;
             }
             close-slot := VerticalLayout {
-                if !root.map-modal: Button {
+                if root.show-close && !root.map-modal: Button {
                     text: "Close";
                     clicked => { root.close-map(); }
                 }

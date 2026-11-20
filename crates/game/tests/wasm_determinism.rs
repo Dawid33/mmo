@@ -85,16 +85,19 @@ use slotmapd::Key as _;
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x38D8_6635);
+/// Re-recorded 2026-11-20 for persisted bounded-water scheduler/cursors and
+/// authoritative editor state.
+const WASM_SCENE_DIGEST: u32 = pinned(0x3A3F_2377, 0xFA11_C3BC);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x69D8_2B74);
+const SCENE_STATE_HASH: u32 = pinned(0xAAE9_ED28, 0x558C_90CC);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x8439_7A8D);
+const UNDERGROUND_DIGEST: u32 = pinned(0xF8AF_B0A2, 0xC08F_BB5B);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x4472_2ECB);
+const UNDERGROUND_STATE_HASH: u32 = pinned(0xDA18_095B, 0x9011_BF8F);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
+/// Re-recorded 2026-11-20 for the three region-owned tree lifecycle maps.
 /// Re-recorded for Task 7.5 (voxel bodies cross seams): the body is now an
 /// `EntityKind::Body` with an `EntityId` (`Ecs.kind` / `id`, `id_index`,
 /// `next_entity_serial`) and `VoxelBody` gained `drops` — state layout only,
@@ -102,9 +105,9 @@ const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x4472_2ECB);
 /// (16-block values only): parry's voxels-vs-compound contacts now look
 /// `prediction` ahead (`contact_manifolds_voxels_composite_shape`, mmo-fork),
 /// which changes the body's contacts with the terrain during its fall.
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x8C03_03BB);
+const VOXEL_BODY_DIGEST: u32 = pinned(0xE052_AA40, 0xD17B_3C0E);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0xD531_954B);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x54E6_83DB, 0xB47E_F155);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;

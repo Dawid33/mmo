@@ -23,7 +23,14 @@ use crate::session::SessionLocal;
 /// (the chat box).
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextEntry {
-    pub on: bool,
+    pub chat: bool,
+    pub palette: bool,
+}
+
+impl TextEntry {
+    pub fn on(self) -> bool {
+        self.chat || self.palette
+    }
 }
 
 /// What [`mute_keys_while_typing`] remembers between frames.
@@ -44,12 +51,13 @@ pub fn mute_keys_while_typing(
     mut policy: Option<ResMut<CursorPolicy>>,
 ) {
     let state = state.get();
-    if let Some(policy) = policy.as_mut().filter(|p| p.typing != entry.on) {
-        policy.typing = entry.on;
+    let on = entry.on();
+    if let Some(policy) = policy.as_mut().filter(|p| p.typing != on) {
+        policy.typing = on;
     }
-    let rising = entry.on && !state.was_on;
-    state.was_on = entry.on;
-    if !entry.on && state.held.is_empty() {
+    let rising = on && !state.was_on;
+    state.was_on = on;
+    if !on && state.held.is_empty() {
         events.clear();
         return;
     }
@@ -58,7 +66,7 @@ pub fn mute_keys_while_typing(
     }
     for event in events.read() {
         match event.state {
-            ButtonState::Pressed if entry.on => {
+            ButtonState::Pressed if on => {
                 state.held.insert(event.key_code);
             }
             ButtonState::Pressed => {}
@@ -67,7 +75,7 @@ pub fn mute_keys_while_typing(
             }
         }
     }
-    if entry.on {
+    if on {
         keys.release_all();
         if !rising {
             // The rising frame keeps its `just_released`, the sim's key-ups.

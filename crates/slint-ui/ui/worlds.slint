@@ -1,115 +1,205 @@
-// The online world list (Play online, once logged in): one button per world
-// the login service lists (a closed world is shown, disabled), the signed-in
-// account, Log out and Back. The client (crates/client/src/login/flow.rs)
-// asks the login service for a join ticket when a world is picked.
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, TextField } from "@widgets";
+import { Dropdown, PickList } from "controls.slint";
 
-import { Button, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
-
-// One world of the login service's registry (`login_api::WorldEntry`). Not
-// the Load screen's `WorldRow`: that one is a saved single-player world.
+// One open, joinable world from the login service's registry.
 export struct OnlineWorldRow {
     id: string,
     name: string,
-    open: bool,
 }
 
-export component WorldsScreen {
+// A public Factorio-style server browser. Authentication is only required
+// after Join; the world list itself is a public GET /v1/worlds.
+export component ServerBrowser {
     in property <[OnlineWorldRow]> worlds;
-    // The signed-in account's display name (its email when the name is unknown).
+    in property <[string]> names;
+    in property <[string]> regions;
+    in-out property <int> region: -1;
+    in-out property <string> search;
+    in-out property <int> selected: -1;
+    in property <string> region-name;
     in property <string> account;
     in property <string> error;
-    // A status line ("" = none) shown when there is no error, e.g. while a
-    // join waits for its world to start (the list stays busy meanwhile).
     in property <string> status;
     in property <bool> busy;
+
+    callback region-chosen(int);
+    callback search-edited(string);
+    callback select(int);
     callback join(string);
-    callback logout();
+    callback refresh();
     callback back();
 
-    property <length> line-height: 28px;
-    property <length> row-height: 32px;
-    property <length> row-gap: 6px;
+    property <bool> has-selection: root.selected >= 0 && root.selected < root.worlds.length;
+    property <OnlineWorldRow> current: root.has-selection
+        ? root.worlds[root.selected]
+        : { id: "", name: "" };
     property <length> gap: 12px;
     property <length> bar-height: 32px;
-    // The list keeps a row's room when empty (for the "no worlds" line).
-    property <int> shown-rows: max(1, root.worlds.length);
+    out property <string> empty-line: root.busy
+        ? "Fetching the world list\u{2026}"
+        : "No worlds are open in this region right now";
 
-    // Where things are, for the headless tests (absolute, logical px).
-    out property <length> row-x: frame.absolute-position.x + (frame.content-x + frame.content-right) / 2;
-    out property <length> row0-y: frame.absolute-position.y + frame.list-top + root.row-height / 2;
-    out property <length> row-pitch: root.row-height + root.row-gap;
-    out property <length> logout-x: logout-btn.absolute-position.x + logout-btn.width / 2;
-    out property <length> logout-y: logout-btn.absolute-position.y + logout-btn.height / 2;
+    out property <length> row-x: list.absolute-position.x + list.width / 2;
+    out property <length> row0-y: list.absolute-position.y + list.first-item-y + list.row-height / 2;
+    out property <length> row-pitch: list.row-height;
+    out property <length> region-x: region-box.absolute-position.x + region-box.width / 2;
+    out property <length> region-y: region-box.absolute-position.y + region-box.height / 2;
+    out property <length> join-x: join-btn.absolute-position.x + join-btn.width / 2;
+    out property <length> join-y: join-btn.absolute-position.y + join-btn.height / 2;
+    out property <length> refresh-x: refresh-btn.absolute-position.x + refresh-btn.width / 2;
+    out property <length> refresh-y: refresh-btn.absolute-position.y + refresh-btn.height / 2;
     out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
     out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
 
     frame := FrameFace {
-        title: "Worlds";
-        width: min(root.width - 48px, 520px);
-        height: self.list-top + root.shown-rows * (root.row-height + root.row-gap) + root.gap
-            + root.line-height + root.gap + root.bar-height
-            + Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
-        x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2;
+        title: "Multiplayer";
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
 
-        property <length> list-top: self.content-y + root.line-height + root.gap;
-        property <length> list-bottom: self.list-top + root.shown-rows * (root.row-height + root.row-gap);
-        property <length> inner-width: self.content-right - self.content-x;
+        property <length> left: self.content-x;
+        property <length> right: self.content-right;
+        property <length> top: self.content-y;
+        property <length> bottom: self.height - Styles.frame.box.padding.bottom - GraphicalSets.inset(Styles.frame.graphics).bottom;
+        property <length> body-top: self.top + 44px;
+        property <length> body-bottom: self.bottom - root.bar-height - root.gap;
+        property <length> split: self.left + (self.right - self.left) * 0.58;
 
         LabelFace {
-            x: frame.content-x;
-            y: frame.content-y;
-            width: frame.inner-width;
-            height: root.line-height;
-            text: root.account == "" ? "" : "Signed in as " + root.account;
+            x: frame.left;
+            y: frame.top;
+            width: 56px;
+            height: root.bar-height;
+            text: "Search";
         }
-        for world[i] in root.worlds: Button {
-            x: frame.content-x;
-            y: frame.list-top + i * (root.row-height + root.row-gap);
-            width: frame.inner-width;
-            height: root.row-height;
-            text: world.open ? world.name : world.name + " (closed)";
-            enabled: world.open && !root.busy;
-            clicked => { root.join(world.id); }
+        search-field := TextField {
+            x: frame.left + 62px;
+            y: frame.top;
+            width: min(258px, frame.split - self.x - root.gap);
+            height: self.preferred-height;
+            text <=> root.search;
+            accepted(text) => { root.search-edited(text); }
+        }
+        LabelFace {
+            x: frame.right - 280px;
+            y: frame.top;
+            width: 64px;
+            height: root.bar-height;
+            text: "Region";
+        }
+        region-box := Dropdown {
+            x: frame.right - 210px;
+            y: frame.top + (root.bar-height - self.preferred-height) / 2;
+            width: 210px;
+            height: self.preferred-height;
+            items: root.regions;
+            selected <=> root.region;
+            chosen(i) => { root.region-chosen(i); }
+        }
+        list := PickList {
+            x: frame.left;
+            y: frame.body-top + 28px;
+            width: frame.split - frame.left;
+            height: frame.body-bottom - self.y;
+            items: root.names;
+            selected <=> root.selected;
+            picked(i) => {
+                root.selected = i;
+                root.select(i);
+            }
+            activated(i) => {
+                root.selected = i;
+                root.select(i);
+                root.join(root.worlds[i].id);
+            }
+        }
+        LabelFace {
+            x: frame.left;
+            y: frame.body-top;
+            width: list.width;
+            height: 24px;
+            text: "Name";
         }
         if root.worlds.length == 0: LabelFace {
-            x: frame.content-x;
-            y: frame.list-top;
-            width: frame.inner-width;
-            height: root.row-height;
+            x: list.x + 8px;
+            y: list.y + 8px;
+            width: list.width - 16px;
+            height: 28px;
             style: Styles.caption-label;
-            text: root.busy ? "Fetching the world list\u{2026}" : "No worlds are listed right now";
+            text: root.empty-line;
+        }
+
+        LabelFace {
+            x: frame.split + root.gap;
+            y: frame.body-top;
+            width: frame.right - self.x;
+            height: 32px;
+            style: Styles.semibold-label;
+            text: root.has-selection ? root.current.name : "";
         }
         LabelFace {
-            x: frame.content-x;
-            y: frame.list-bottom + root.gap;
-            width: frame.inner-width;
-            height: root.line-height;
+            x: frame.split + root.gap;
+            y: frame.body-top + 40px;
+            width: frame.right - self.x;
+            height: 24px;
+            style: Styles.caption-label;
+            text: root.has-selection ? root.current.id : "";
+        }
+        LabelFace {
+            x: frame.split + root.gap;
+            y: frame.body-top + 68px;
+            width: frame.right - self.x;
+            height: 24px;
+            style: Styles.caption-label;
+            text: root.region-name;
+        }
+        LabelFace {
+            x: frame.split + root.gap;
+            y: frame.body-top + 108px;
+            width: frame.right - self.x;
+            height: 52px;
+            style: Styles.caption-label;
+            text: root.account == ""
+                ? "You will be asked to sign in when you join."
+                : "Signed in as " + root.account;
+        }
+        LabelFace {
+            x: frame.split + root.gap;
+            y: frame.body-bottom - 36px;
+            width: frame.right - self.x;
+            height: 28px;
             style: root.error != "" ? Styles.bold-red-label : Styles.caption-label;
-            text: root.error != "" ? root.error
-                : root.status != "" ? root.status
-                : root.busy && root.worlds.length > 0 ? "Talking to the login server\u{2026}"
-                : "";
+            text: root.error != "" ? root.error : root.status;
         }
 
         back-btn := Button {
-            x: frame.content-x;
-            y: frame.list-bottom + root.gap + root.line-height + root.gap;
+            x: frame.left;
+            y: frame.bottom - root.bar-height;
             width: 140px;
             height: root.bar-height;
             style: Styles.back-button;
             text: "Back";
-            // Enabled while busy: Back abandons the call in flight.
             clicked => { root.back(); }
         }
-        logout-btn := Button {
-            x: frame.content-right - 160px;
+        refresh-btn := Button {
+            x: frame.right - 300px - root.gap;
             y: back-btn.y;
-            width: 160px;
+            width: 140px;
             height: root.bar-height;
-            text: "Log out";
+            text: "Refresh";
             enabled: !root.busy;
-            clicked => { root.logout(); }
+            clicked => { root.refresh(); }
+        }
+        join-btn := Button {
+            x: frame.right - 150px;
+            y: back-btn.y;
+            width: 150px;
+            height: root.bar-height;
+            style: Styles.confirm-button;
+            text: "Join";
+            enabled: root.has-selection && !root.busy;
+            clicked => { root.join(root.current.id); }
         }
     }
 }

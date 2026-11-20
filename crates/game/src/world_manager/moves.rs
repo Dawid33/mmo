@@ -593,7 +593,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // flight and the session waits for it — `park_settled` restores it and replays
                     // what it asked meanwhile. Never dropped: the record is on its way.
                     if self.sessions.contains_key(&c) && self.player_of.get(&c) == Some(&player) {
-                        self.awaiting_park.insert(player, (c, None));
+                        self.awaiting_park.insert(player, (c, None, None));
                     }
                     continue;
                 }

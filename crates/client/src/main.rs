@@ -209,8 +209,8 @@ fn main() {
         (command_send, game_send, client_recv, request_send)
     };
 
-    // The browser opens on the main menu with channels to nowhere; Join server
-    // gives each session fresh ones (`session::web_flow`).
+    // The browser opens on the main menu with channels to nowhere; the
+    // localhost debug URL starts a session with fresh ones (`session::web_flow`).
     #[cfg(target_arch = "wasm32")]
     let (game_send, client_recv, request_send) = {
         let channels = client::session::SessionChannels::new();
@@ -297,17 +297,31 @@ fn main() {
     .insert_resource(view_distance)
     .insert_resource(graphics_settings)
     .add_plugins(client::graphics_settings::GraphicsSettingsPlugin);
-    // App states + the session reset registry + the frontend camera. The menu
-    // is the default; the dev bypass starts straight in the world; the browser
-    // with a login service opens on the login screen (else its join-only menu).
-    let login_first = cfg!(target_arch = "wasm32") && client::login::login_url().is_some();
+    // App states + the session reset registry + the frontend camera. Ordinary
+    // web pages show the menu. The localhost debug path (`just web`) can name a
+    // development server and start straight at it.
+    #[cfg(target_arch = "wasm32")]
+    let dev_server = {
+        let location = web_sys::window().map(|window| window.location());
+        let search = location
+            .as_ref()
+            .and_then(|location| location.search().ok())
+            .unwrap_or_default();
+        let hostname = location.and_then(|location| location.hostname().ok());
+        client::web_endpoint::dev_server_from(&search, hostname.as_deref(), cfg!(debug_assertions))
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let dev_server: Option<String> = None;
     app.add_plugins(client::session::SessionPlugin {
         skip_menu,
-        login_first,
+        dev_server: dev_server.is_some(),
     });
+    if let Some(address) = dev_server {
+        app.insert_resource(client::session::PendingServer(address));
+    }
     // The menu screens: on every build, since a bypass session can still end
     // up in the menu (leave, lost server). `skip_menu` only picks the initial
-    // state; the browser's menu only joins a server (`frontend::JOIN_ONLY`).
+    // state.
     app.add_plugins(client::frontend::FrontendPlugin);
     // The logger exists from here on: announce the perf timeline and flush the
     // events the game/netcode threads emitted while Bevy was still starting.

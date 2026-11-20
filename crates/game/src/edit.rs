@@ -357,10 +357,19 @@ impl Rollback {
     /// The one funnel of `set_block_safe` and of the block intents a player's
     /// edit sends (`intents.rs`).
     pub(crate) fn set_block_in(&mut self, pos: BlockPos, block: Block) -> bool {
+        let old = self.block_at(pos).unwrap_or(Block::new(BlockId::AIR));
         let Some((coords, (bx, by, bz))) = locate(pos) else {
             return false;
         };
         let breaking = block.id == BlockId::AIR;
+        let world = crate::WorldBlockPos::from_local(
+            *self.data.region,
+            crate::volume::BlockPos::new(pos[0], pos[1], pos[2]),
+        );
+        let displaced = (!breaking).then(|| self.water_units_at(world)).unwrap_or(0);
+        if !self.can_displace_water(world, displaced) {
+            return false;
+        }
         // Bedrock takes no write at all, implied bedrock included; refused
         // before anything changes.
         if let Some(current) = self.current_block(coords, (bx, by, bz)) {
@@ -394,12 +403,17 @@ impl Rollback {
             }
         }
         if changed {
+            if displaced != 0 {
+                self.displace_water_safe(world, displaced);
+            }
+            self.wake_water_after_block_safe(pos);
             // A chest written gets its container, a chest replaced spills;
             // then a pile pushed up out of the new block, or left
             // unsupported. Any loss is counted where it happens
             // (`item_piles`).
             let _spilled = self.containers_after_write_safe(pos);
             let _destroyed = self.piles_after_write_safe(pos);
+            self.tree_block_changed_safe(pos, old, block);
         }
         changed
     }
@@ -723,6 +737,7 @@ impl Rollback {
         // Chunk (index-key order) → its writable blocks, deduplicated.
         let mut by_chunk: BTreeMap<crate::ChunkIndexKey, BTreeMap<BlockIndex, BlockPos>> =
             BTreeMap::new();
+        let mut old_blocks = BTreeMap::new();
         for &pos in positions {
             let Some((coords, (bx, by, bz))) = locate(pos) else {
                 continue;
@@ -751,6 +766,16 @@ impl Rollback {
                 }
             };
             if writable {
+                if !breaking {
+                    let world = crate::WorldBlockPos::from_local(
+                        *self.data.region,
+                        crate::volume::BlockPos::new(pos[0], pos[1], pos[2]),
+                    );
+                    if self.water_units_at(world) != 0 {
+                        continue;
+                    }
+                }
+                old_blocks.insert(pos, self.block_at(pos).unwrap_or(Block::new(BlockId::AIR)));
                 by_chunk
                     .entry(crate::chunk_index_key(coords))
                     .or_default()
@@ -868,6 +893,123 @@ impl Rollback {
         }
         for &pos in &written {
             let _destroyed = self.piles_after_write_safe(pos);
+            if let Some(old) = old_blocks.get(&pos) {
+                self.tree_block_changed_safe(pos, *old, block);
+            }
+            self.wake_water_after_block_safe(pos);
+        }
+        written
+    }
+
+    /// Heterogeneous tree-growth write, batched per chunk with one chunk undo
+    /// entry and one `SetBlocks` delta. Callers have already filtered
+    /// obstructions; this path deliberately does not feed normal edit/tree
+    /// observers and therefore cannot schedule a repair loop of its own.
+    pub(crate) fn write_tree_blocks_safe(&mut self, writes: &[([i32; 3], Block)]) -> Vec<BlockPos> {
+        use std::collections::BTreeMap;
+
+        let mut by_chunk: BTreeMap<crate::ChunkIndexKey, BTreeMap<BlockIndex, (BlockPos, Block)>> =
+            BTreeMap::new();
+        for &(pos, block) in writes {
+            let Some((coords, (bx, by, bz))) = locate(pos) else {
+                continue;
+            };
+            let current = self.block_at(pos).unwrap_or(Block::new(BlockId::AIR));
+            if current == block
+                || self
+                    .chunk_key_at(coords)
+                    .and_then(|e| self.data.ecs.chunk.try_get(e).as_ref())
+                    .is_some_and(|chunk| {
+                        chunk.chisel.contains_key(&BlockIndex::from_xyz(bx, by, bz))
+                    })
+            {
+                continue;
+            }
+            if block.id != BlockId::AIR && self.water_displaced_by(pos) != 0 {
+                continue;
+            }
+            by_chunk
+                .entry(crate::chunk_index_key(coords))
+                .or_default()
+                .insert(BlockIndex::from_xyz(bx, by, bz), (pos, block));
+        }
+
+        let mut written = Vec::new();
+        for (&key, blocks) in &by_chunk {
+            let coords = crate::chunk_coords_of_index_key(key);
+            self.materialize_ground_safe(coords);
+            let Some(e) = self.chunk_key_at(coords) else {
+                let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
+                for (&index, &(_, block)) in blocks {
+                    let (bx, by, bz) = index.xyz();
+                    chunk.set_block(bx, by, bz, block);
+                }
+                self.spawn_chunk_safe(coords, chunk);
+                written.extend(blocks.values().map(|(pos, _)| *pos));
+                continue;
+            };
+            let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else {
+                continue;
+            };
+            let mut olds = Vec::with_capacity(blocks.len());
+            let mut old_cells = crate::ColliderCells {
+                blocks: Vec::new(),
+                halves: Vec::new(),
+                voxels: Vec::new(),
+            };
+            for &index in blocks.keys() {
+                let cells = crate::collider_cells_of_block(chunk, index);
+                old_cells.blocks.extend(cells.blocks);
+                old_cells.halves.extend(cells.halves);
+                old_cells.voxels.extend(cells.voxels);
+                olds.push(BlockDelta {
+                    index,
+                    block: chunk.blocks.get(index),
+                    chisel: chunk.chisel.get(&index).cloned(),
+                });
+            }
+            let news: Vec<_> = blocks
+                .iter()
+                .map(|(&index, &(_, block))| BlockDelta {
+                    index,
+                    block,
+                    chisel: None,
+                })
+                .collect();
+            self.data.ecs.chunk.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::SetBlocks(e, olds),
+            ));
+            self.data.ecs.chunk.set_chunk_blocks_safe(
+                e,
+                blocks
+                    .iter()
+                    .map(|(&index, &(_, block))| (index, block, None))
+                    .collect(),
+            );
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetBlocks(e, news),
+            ));
+            let chunk = self.data.ecs.chunk.get(e);
+            let mut new_cells = crate::ColliderCells {
+                blocks: Vec::new(),
+                halves: Vec::new(),
+                voxels: Vec::new(),
+            };
+            for &index in blocks.keys() {
+                let cells = crate::collider_cells_of_block(chunk, index);
+                new_cells.blocks.extend(cells.blocks);
+                new_cells.halves.extend(cells.halves);
+                new_cells.voxels.extend(cells.voxels);
+            }
+            self.edit_block_colliders_safe(e, &old_cells, &new_cells);
+            written.extend(blocks.values().map(|(pos, _)| *pos));
+        }
+        for &pos in &written {
+            let _spilled = self.containers_after_write_safe(pos);
+            let _destroyed = self.piles_after_write_safe(pos);
+            self.wake_water_after_block_safe(pos);
         }
         written
     }

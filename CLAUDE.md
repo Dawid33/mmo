@@ -251,7 +251,7 @@ Deployment at 0 to 1. A failed stop leaves `fleet` at 0 (`world-start` brings it
 Deployment (from before Elastic 4) skips that step. `fleet <port_base>` runs the reconciler from the checkout against
 `world_ctx` / `world_ns` through a `kubectl proxy` with your credentials (`VOXEL_WORLD_DB` required) — never beside
 the world's own `fleet` Deployment.
-`world-register` (prints the login service's `world add <id> --name … --link
+`world-register` (prints the login service's `world add <id> --name … --region eu-central-1 --link
 https://coordinator.<ns>.svc.cluster.local:6480 --link-cert <pin>` line, the pin = the SHA-256 of Secret
 `coordinator-identity`'s certificate; it changes nothing). Releases: `just
 orion-world-push` builds and pushes both images and prints digests;
@@ -759,6 +759,14 @@ Verify with:
     only vouches a row dead while hosts run; with no host running it is refused (the first registration takes
     the land, a total crash). `claim` only — the store does not record the policy, so it cannot refuse a
     `static` world.
+  - Editor access is account-scoped and operator-controlled: `worldctl editor-grant <url>
+    <account-id>`, `editor-revoke` and `editor-list`. The coordinator reads a grant only when
+    admitting a spawn, so a change applies to that account's next join; revoke an active session by
+    kicking it and requiring a rejoin. The trusted local-owner path (inline/offline `LocalServer`
+    and `AuthMode::SinglePlayer` selected by `VOXEL_SINGLE_PLAYER=1`) sets the capability directly;
+    ordinary `AuthMode::Local` dev/LAN names stay deny-by-default, while observer and JWT/login
+    admission keep the coordinator grant gate. Migration `0025_editor_grants` must be present.
+    Editor mode uses link protocol 15.
   - **The fleet** (Elastic 4; `game/src/coordinator/fleet.rs`, `world-store/src/fleet.rs`, migration
     `0019_desired_hosts`): the table `desired_hosts` — `name` `h<n>` from `world.next_desired_host` (never reused),
     `slot` (the lowest free at its add, reused after a removal; the reconciler's node ports), `state` wanted /
@@ -939,8 +947,9 @@ Verify with:
   HTTP/2 connection to ONE replica until it breaks (kube-proxy balances connections, not requests). Role `all`
   (`jwt` + a service token) serves the two login routes itself on `VOXEL_HOST_LINK_BIND` (an in-memory answer queue,
   `LOGIN_ANSWERS_HELD_MAX` 4096): the login service has one transport; kicks are durable in its store until acked
-  (login migration 0003). `svc-link` carries host↔host peer links only. `LINK_PROTOCOL_VERSION` is 14
-  (`CoordMsg::LoginTraced` carries only a bounded sampled W3C carrier and opaque operation id through the durable
+  (login migration 0003). `svc-link` carries host↔host peer links only. `LINK_PROTOCOL_VERSION` is 15
+  (the coordinator-authorized editor capability is carried through host spawn placement; version 14's
+  `CoordMsg::LoginTraced` carries only a bounded sampled W3C carrier and opaque operation id through the durable
   mailbox; the old `CoordMsg::Login` remains decodable; 13 was Elastic 5:
   `CoordMsg::BeginCut.moves`, `MoveLand`, `ExpectLand`, `MoveOff`, `CutFailure::MoveRefused`,
   `Reliable::PlayerMove.place`, `ServerPacket::LandMoving`; 12 was the coordinator as an HTTP service: the
@@ -1039,12 +1048,25 @@ Verify with:
   `world_starting`, no earlier than `WORLD_START_WAIT_MS` after the first such answer; revoked → the sign-in screen). Native QUIC keep-alive
   3 s / idle 10 s (`netcode.rs`, as WebTransport).
 - **Native QUIC trust** (`quic_verify.rs`, `policy_for`): a host that advertises a `cert_hash` is pinned to it; with no
-  hash a non-loopback address must present a certificate the public web PKI vouches for (a typed-in "Join server"
-  address of a self-signed host now fails — it retries until the 120 s deadline); verification is skipped only for
-  loopback. The browser page's login is `VOXEL_LOGIN_URL`, else `{origin}/login` on an `https` non-loopback origin
-  (the web image proxies it); otherwise no "Play online".
+  hash a non-loopback address must present a certificate the public web PKI vouches for; verification is skipped
+  only for loopback. The Slint frontend is shared by native/web: Main Menu → Single player / Multiplayer /
+  Settings / Exit (the browser disables single player and omits Exit), with Single player → New / Load. Multiplayer
+  browses the public `GET /v1/worlds` by deployment region (`eu-central-1` today), including before sign-in, and
+  joins only a registry world through the coordinator ticket flow. The player UI has no join-by-address field.
+  Account Settings and the existing graphics Settings window are both retained; login from Join or Account Settings
+  returns to the screen that opened it. `just web` alone prints a localhost debug URL with `?dev_server=` that starts
+  straight at the local server; a release build or non-loopback page ignores it. The login is
+  `VOXEL_LOGIN_URL` / a localhost `?login=`, else `{origin}/login` on a non-loopback `https` page, else the one
+  official login service. Each registry row carries `region` (migration 0006; `0005` is `map_url`), and
+  `login world add` / `world-register` record it.
 - **Session lifecycle** (`session.rs`): any new per-world resource, system `Local` or entity root must be
   registered (`add_session_reset`, `SessionLocal`) or tagged `SessionScoped`, or it leaks into the next world.
+- **Editor mode**: the sim owns `editor` and `editor_allowed`; the client mirrors
+  `UiUpdate::Editor` in the session-reset `EditorState`. `/creative` / `/gamemode creative` and
+  `/give` send `Order::SetEditor` / `UiAction::Editor*`; active editor forces body-driven first
+  person and F5 cannot leave it. The inventory palette is hidden for chests, reads `BlockDef.tab`,
+  and shares the chat's two-owner `TextEntry` gate. Palette clicks never forge items: every
+  take/give/trash is authoritative. Ordinary chat remains `ChatLog`-local, with no packet or journal.
 - **The world map** (`renderer/map/`, plan `docs/superpowers/plans/2026-11-20-block-level-world-map.md`): one tile
   pyramid (`game::map_tile`: 256² samples, level k = 2^k m per sample) behind the minimap, the full map (M) and the
   site choice. A [`MapView`] (centre, m per PHYSICAL px, rect) per surface; `map/pass.rs` draws them in `Core3d`
@@ -1104,6 +1126,13 @@ Forge tunables all live in `forge/knobs.rs` (`just forge-ui` to tune; check at 1
 value; the `forge_quality` gate must pass). `just forge-report --size dev --cell 64 --seeds 8` prints each seed's
 numbers (`height_crc`, land share, land components, biome shares, the seam checks) and min / median / max. Water is
 recipe data (`ColumnGround::water_top`), never blocks. Look at the world with `just world-map` after tuning changes.
+Generated trees share the one deterministic shape/raster contract in `game::tree_shape`. Each newly
+generated standing tree stamps 2–6 explicit buried log roots and a compact region-owned `TreeLife`;
+roots are never inferred from height or `Block.data`. A visible trunk cut schedules six rollbackable
+growth stages every 4 game days (slower with fewer surviving roots), while mining a root is an ordinary
+one-block break. `PortableRegion` and world cuts carry the full `RegionTrees` in the nullable migration
+0023 blob; `NULL` is an old rootless/legacy region and is never resynthesised. Growth uses normal
+terrain/collider deltas and refuses to overwrite terrain, water, bodies, piles, chests or player blocks.
 
 **Assets**
 - Blockbench `.bbmodel` loads natively (`crates/bbmodel`, `renderer/model.rs`); `just model-view`,

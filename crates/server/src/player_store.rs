@@ -125,6 +125,8 @@ pub struct HelloSession {
     pub ticket: Option<crate::auth_edge::SessionTicket>,
     /// The login ticket's epoch (`None` for a local session).
     pub session_epoch: Option<u64>,
+    /// Join-time coordinator-authorized editor capability.
+    pub editor_allowed: bool,
     /// An observer session ([`crate::auth_edge::AdmittedAs::Observer`]): the id its ticket
     /// names, which is the session's id here. No record, no ticket, no epoch.
     pub observer: Option<game::ClientId>,
@@ -288,6 +290,7 @@ pub async fn resolve_session(
                 record: None,
                 ticket: None,
                 session_epoch: None,
+                editor_allowed: false,
                 observer: Some(client),
             });
         }
@@ -314,6 +317,7 @@ pub async fn resolve_session(
             record,
             ticket: admitted.ticket,
             session_epoch: admitted.session_epoch,
+            editor_allowed: admitted.editor_allowed,
             observer: None,
         }),
         Err(why) => {
@@ -351,6 +355,7 @@ pub fn announce_session(
                 client,
                 player,
                 record,
+                editor_allowed: session.editor_allowed,
                 player_token: ticket.player_token.clone(),
                 session_epoch: ticket.session_epoch,
             },
@@ -358,6 +363,7 @@ pub fn announce_session(
                 client,
                 player,
                 record,
+                editor_allowed: session.editor_allowed,
             },
         };
         let _ = send.send(event);

@@ -181,6 +181,12 @@ pub enum Order {
     DevDropBody {
         at: TilePos,
     },
+    /// Switch the issuing client's authoritative editor state. `at` is read
+    /// only while entering, as it is for [`Order::SetMode`].
+    SetEditor {
+        on: bool,
+        at: Option<TilePos>,
+    },
 }
 
 /// Why a tile refuses a designation.
@@ -207,6 +213,11 @@ pub trait TileSource {
     /// The tree limb of the block at `p` (`Block::limb`; 0 = the trunk, or
     /// none).
     fn tree_limb(&self, p: TilePos) -> u8;
+    /// Whether this explicitly recorded root is ordinary one-block mineable
+    /// wood rather than a chop/felling target.
+    fn is_tree_root(&self, _p: TilePos) -> bool {
+        false
+    }
     /// The lowest and highest materialised (or implied-surface) block `y` of
     /// block column `[x, z]`; `None` when unknown. Pathfinding scans this
     /// band instead of the fixed `COLUMN_SCAN_Y_MIN..=MAX` constants, which
@@ -252,7 +263,9 @@ pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Res
             }
         }
         DesignationKind::Chop => {
-            let is_wood = crate::block_props().is_solid(src.block(p)) && src.tree_id(p) != 0;
+            let is_wood = crate::block_props().is_solid(src.block(p))
+                && src.tree_id(p) != 0
+                && !src.is_tree_root(p);
             is_wood.then_some(()).ok_or(Invalid::NotTree)
         }
     }
@@ -400,6 +413,10 @@ impl TileSource for Rollback {
         self.tile_block(p).map_or(0, |b| b.limb())
     }
 
+    fn is_tree_root(&self, p: TilePos) -> bool {
+        self.is_tree_root(p)
+    }
+
     /// Classifies the chisel of the block at `p`; implied ground has none.
     fn slope(&self, p: TilePos) -> Option<crate::SlopeShape> {
         let Some((coords, (bx, by, bz))) = crate::edit::locate(p) else {
@@ -482,6 +499,7 @@ impl Rollback {
             // Sends an intent: `Region::handle_event` routes it too.
             Order::DevBreakBlock(_) => return false,
             Order::DevDropBody { at } => return self.dev_drop_body_safe(at),
+            Order::SetEditor { on, at } => return self.set_editor_safe(client, on, at),
         }
         true
     }
@@ -590,6 +608,8 @@ impl Rollback {
     /// `fell` refuses (not wood, or over `MAX_TREE_BLOCKS`) — left whole.
     pub fn fell_instant_safe(&mut self, p: TilePos) -> Option<Vec<(TilePos, crate::Block)>> {
         let felling = crate::trees::fell(self, p)?;
+        let tree = TileSource::tree_id(self, p);
+        let trunk_cut = felling.trunk_cut;
         let mut all: Vec<TilePos> = felling
             .cut
             .into_iter()
@@ -604,6 +624,7 @@ impl Rollback {
         if self.clear_blocks_safe(&all) == 0 {
             return None;
         }
+        self.tree_felled_safe(tree, trunk_cut);
         // Only what was actually cleared (a refused write keeps its block).
         gone.retain(|&(c, _)| self.block_at(c).is_some_and(|b| b.id == BlockId::AIR));
         // Render-only: the client takes them away top to bottom.
@@ -632,6 +653,7 @@ impl Rollback {
     ) -> Option<(Vec<(TilePos, crate::Block)>, Option<crate::EntityKey>)> {
         let tree = TileSource::tree_id(self, p);
         let felling = crate::trees::fell(self, p)?;
+        let trunk_cut = felling.trunk_cut;
         let mut cut: Vec<(TilePos, crate::Block)> = felling
             .cut
             .iter()
@@ -651,6 +673,7 @@ impl Rollback {
                 .detach_blocks_pivoting_safe(&set, policy, spin, Some(pivot))
                 .or(body);
         }
+        self.tree_felled_safe(tree, trunk_cut);
         Some((cut, body))
     }
 

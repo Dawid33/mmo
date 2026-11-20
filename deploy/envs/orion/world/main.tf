@@ -112,8 +112,9 @@ module "world" {
   auth = { login_url = "http://login.login.svc.cluster.local" }
 
   telemetry = {
-    environment = "production"
-    cluster     = "orion"
+    environment     = "production"
+    cluster         = "orion"
+    profile_enabled = true
   }
 
   # The world panel (../panel) may read, start, stop and forge this world. Literal names:

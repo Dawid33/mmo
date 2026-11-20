@@ -9,7 +9,7 @@
 #   <out>/assets/               the runtime assets (minus the dev cert-hash files)
 # Env: OUT (default target/web), CAP (the justfile's core-pinning prefix),
 # VOXEL_REGION_BLOCKS / VOXEL_CHUNK_BLOCKS (must match the server's build),
-# VOXEL_WEB_SERVER (the main menu's prefilled Join server address).
+# There is no build-time player server address; joins come from login tickets.
 # Memory-intensive stages run in a systemd user scope (including descendants):
 # WASM_BUILD_MEMORY_HIGH=14G, WASM_BUILD_MEMORY_MAX=16G, and
 # WASM_BUILD_MEMORY_SWAP_MAX=0; each accepts `none` as an explicit override.

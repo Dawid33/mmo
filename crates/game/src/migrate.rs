@@ -62,6 +62,10 @@ impl Client {
             // region closes it if it is out of reach or unseen
             // (`Rollback::close_far_containers_safe`).
             open_container,
+            // Join-time authority and active editor state travel with the authoritative
+            // client. Neither is a client-writable session-local reset.
+            editor_allowed,
+            editor,
         } = self;
         Client {
             input,
@@ -76,6 +80,8 @@ impl Client {
             break_cooldown_until: 0,
             place_repeat_at: 0,
             open_container,
+            editor_allowed,
+            editor,
         }
     }
 }

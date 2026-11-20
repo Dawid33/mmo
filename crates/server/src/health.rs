@@ -128,6 +128,9 @@ pub struct Health {
     coordinator_mailbox_oldest_ms: AtomicU64,
     /// Hosts the ticker detached as stalled (a mailbox row unread past `MAILBOX_STALL_MS`).
     coordinator_stalled: AtomicU64,
+    editor_grant_granted: AtomicU64,
+    editor_grant_denied: AtomicU64,
+    editor_grant_failed: AtomicU64,
     /// Per [`API_ROUTES`] × ([`API_CODES`] + `other`): requests the coordinator's API answered.
     api_requests: [[AtomicU64; API_CODES.len() + 1]; API_ROUTES.len()],
     /// The world map's tile route (`map_api.rs`): requests per [`MAP_CODES`] (+ `other`), tiles built,
@@ -192,6 +195,9 @@ impl Health {
             coordinator_mailbox_rows: AtomicU64::new(0),
             coordinator_mailbox_oldest_ms: AtomicU64::new(0),
             coordinator_stalled: AtomicU64::new(0),
+            editor_grant_granted: AtomicU64::new(0),
+            editor_grant_denied: AtomicU64::new(0),
+            editor_grant_failed: AtomicU64::new(0),
             api_requests: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             map_requests: std::array::from_fn(|_| AtomicU64::new(0)),
             map_built: AtomicU64::new(0),
@@ -335,6 +341,16 @@ impl Health {
     /// The coordinator's last read of the `hosts` rows: those dirty and live.
     pub fn hosts_live(&self, n: u64) {
         self.hosts_live.store(n, Ordering::Relaxed);
+    }
+
+    /// One authoritative editor-grant lookup made while admitting a login.
+    pub fn editor_grant_result(&self, allowed: Option<bool>) {
+        match allowed {
+            Some(true) => &self.editor_grant_granted,
+            Some(false) => &self.editor_grant_denied,
+            None => &self.editor_grant_failed,
+        }
+        .fetch_add(1, Ordering::Relaxed);
     }
 
     /// What the last heartbeat sent as this host's load (Elastic 3).
@@ -638,6 +654,140 @@ impl Health {
             "Super-regions this host's fence holds (its land).",
             load(&self.host_land),
         );
+        let water = game::water_observability();
+        gauge(
+            "mmo_water_active_cells",
+            "Water frontier cells held across the host's running regions.",
+            water.active_cells,
+        );
+        gauge(
+            "mmo_water_active_chunks",
+            "Sim chunks activated or touched by runtime water.",
+            water.active_chunks,
+        );
+        gauge(
+            "mmo_water_frontier_cells",
+            "Cells queued by the bounded water scheduler.",
+            water.frontier_cells,
+        );
+        gauge(
+            "mmo_water_frontier_chunks",
+            "Chunks with fair queued water work.",
+            water.frontier_chunks,
+        );
+        gauge(
+            "mmo_water_override_cells",
+            "Sparse absolute recipe overrides, including explicit zero.",
+            water.override_cells,
+        );
+        gauge(
+            "mmo_water_oldest_fair_wait_ticks",
+            "Oldest fair-queue wait among running regions, in world ticks.",
+            water.oldest_fair_wait_ticks,
+        );
+        gauge(
+            "mmo_water_pending_transfers",
+            "Stamped cross-region water credits awaiting apply (0 until cross-region flow is enabled).",
+            water.pending_transfers,
+        );
+        gauge(
+            "mmo_water_oldest_pending_milliseconds",
+            "Age of the oldest pending cross-region water credit.",
+            water.oldest_pending_ms,
+        );
+        let transfers = IntCounterVec::new(
+            opts(
+                "mmo_water_transfers_total",
+                "Water transfers committed, by authority boundary.",
+            ),
+            &["direction"],
+        )
+        .expect("valid metric");
+        transfers
+            .with_label_values(&["local"])
+            .inc_by(water.local_transfers);
+        transfers
+            .with_label_values(&["face"])
+            .inc_by(water.face_transfers);
+        transfers
+            .with_label_values(&["source"])
+            .inc_by(water.source_transfers);
+        transfers
+            .with_label_values(&["sink"])
+            .inc_by(water.sink_transfers);
+        register(Box::new(transfers));
+        counter(
+            "mmo_water_transferred_units_total",
+            "Integer water units moved by local transfers (4096 units per full cell).",
+            water.transferred_units,
+        );
+        counter(
+            "mmo_water_deferred_work_total",
+            "Water frontier cells left deterministically queued beyond the selected slice.",
+            water.deferred_work,
+        );
+        let operations = IntCounterVec::new(
+            opts(
+                "mmo_water_operations_total",
+                "Bounded water scheduler operations by operation kind.",
+            ),
+            &["kind"],
+        )
+        .expect("valid metric");
+        for (kind, count) in [
+            ("hot_candidates", water.hot_visits),
+            ("fair_candidates", water.fair_visits),
+            ("edge_probes", water.edge_probes),
+            ("transfers", water.local_transfers),
+            ("writes", water.unique_writes),
+            ("activations", water.activation_markers),
+            ("activation_recipe_scans", water.activation_recipe_scans),
+            ("wake_attempts", water.wake_attempts),
+            ("wake_deduplications", water.wake_deduplications),
+            ("delta_cells", water.delta_cells),
+        ] {
+            operations.with_label_values(&[kind]).inc_by(count);
+        }
+        register(Box::new(operations));
+        let exhausted = IntCounterVec::new(
+            opts(
+                "mmo_water_budget_exhausted_total",
+                "Water operation refusals caused by a named per-tick cap.",
+            ),
+            &["kind"],
+        )
+        .expect("valid metric");
+        for (kind, count) in [
+            ("donors", water.donor_budget_exhausted),
+            ("edges", water.edge_budget_exhausted),
+            ("transfers", water.transfer_budget_exhausted),
+            ("writes", water.write_budget_exhausted),
+            ("activations", water.activation_budget_exhausted),
+            ("wake", water.wake_budget_exhausted),
+            ("delta", water.delta_budget_exhausted),
+        ] {
+            exhausted.with_label_values(&[kind]).inc_by(count);
+        }
+        register(Box::new(exhausted));
+        let avg_step = if water.step_count == 0 {
+            0.0
+        } else {
+            water.step_ns_sum as f64 / water.step_count as f64 / 1e9
+        };
+        let step = Gauge::with_opts(opts(
+            "mmo_water_step_seconds_average",
+            "Mean native water-step wall time since process start.",
+        ))
+        .expect("valid metric");
+        step.set(avg_step);
+        register(Box::new(step));
+        let step_max = Gauge::with_opts(opts(
+            "mmo_water_step_seconds_max",
+            "Maximum native water-step wall time since process start.",
+        ))
+        .expect("valid metric");
+        step_max.set(water.step_ns_max as f64 / 1e9);
+        register(Box::new(step_max));
         counter(
             "mmo_land_released_total",
             "Super-regions this host released (idle land given back) since it started.",
@@ -733,6 +883,29 @@ impl Health {
             "mmo_coordinator_stalled_total",
             "Hosts this coordinator replica, as the ticker, detached as stalled (a mailbox row unread past MAILBOX_STALL_MS).",
             load(&self.coordinator_stalled),
+        );
+        let editor_grants = IntCounterVec::new(
+            opts(
+                "mmo_login_editor_grant_total",
+                "Authoritative editor capability lookups at login, by fixed result.",
+            ),
+            &["result"],
+        )
+        .expect("valid metric");
+        editor_grants
+            .with_label_values(&["granted"])
+            .inc_by(load(&self.editor_grant_granted));
+        editor_grants
+            .with_label_values(&["denied"])
+            .inc_by(load(&self.editor_grant_denied));
+        editor_grants
+            .with_label_values(&["failed"])
+            .inc_by(load(&self.editor_grant_failed));
+        register(Box::new(editor_grants));
+        counter(
+            "mmo_editor_actions_refused_total",
+            "Authoritative editor orders and inventory actions refused by the simulation.",
+            game::editor::editor_observability().refusals,
         );
         let requests = IntCounterVec::new(
             opts(

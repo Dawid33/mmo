@@ -29,6 +29,18 @@ impl BlockId {
     pub const AIR: BlockId = BlockId(0);
 }
 
+/// A placeable block's section in the editor palette.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum CreativeTab {
+    Natural,
+    Wood,
+    Building,
+    Colour,
+    Functional,
+}
+
 /// How a block's faces are textured. `Untextured` blocks (air) never mesh.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TextureSpec {
@@ -65,6 +77,9 @@ pub struct BlockDef {
     /// What breaking it yields (`Same` when absent).
     #[serde(default)]
     pub drop: Option<DropDef>,
+    /// The editor palette section. Air and liquids have none.
+    #[serde(default)]
+    pub tab: Option<CreativeTab>,
 }
 
 /// A manifest drop: item names are resolved (and checked) at registry load.
@@ -92,6 +107,8 @@ pub enum RegistryError {
     DuplicateName(String),
     MissingAir,
     BadAir,
+    MissingCreativeTab(String),
+    CreativeTabOnNonItem(String),
     UnknownDropItem { block: String, item: String },
 }
 
@@ -106,6 +123,12 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "block id 0 must be name \"air\" with Untextured textures"
             ),
+            RegistryError::MissingCreativeTab(block) => {
+                write!(f, "placeable block {block:?} has no creative tab")
+            }
+            RegistryError::CreativeTabOnNonItem(block) => {
+                write!(f, "air or liquid block {block:?} has a creative tab")
+            }
             RegistryError::UnknownDropItem { block, item } => {
                 write!(f, "block {block:?} drops unknown item {item:?}")
             }
@@ -154,6 +177,12 @@ impl BlockRegistry {
 
         let reg = Self { defs, by_name };
         for def in reg.defs.values() {
+            if (def.id == 0 || def.kind == crate::BlockKind::Liquid) && def.tab.is_some() {
+                return Err(RegistryError::CreativeTabOnNonItem(def.name.clone()));
+            }
+            if def.id != 0 && def.kind != crate::BlockKind::Liquid && def.tab.is_none() {
+                return Err(RegistryError::MissingCreativeTab(def.name.clone()));
+            }
             if let Some(DropDef::Item(name)) = &def.drop {
                 if reg.drop_item(name).is_none() {
                     return Err(RegistryError::UnknownDropItem {
@@ -196,6 +225,9 @@ impl BlockRegistry {
                 p.half_collider.insert(id.0);
             }
             p.names.insert(id.0, def.name.clone());
+            if let Some(tab) = def.tab {
+                p.creative_tabs.insert(id.0, tab);
+            }
             if let Some(h) = def.hardness.filter(|h| *h != crate::DEFAULT_HARDNESS_CENTI) {
                 p.hardness.insert(id.0, h);
             }

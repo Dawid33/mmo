@@ -7,10 +7,10 @@ import { DebugPane, DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
 import { MenuColumn, MenuLayout } from "menu-column.slint";
 import { StubWindow } from "stub-window.slint";
 import { SettingsWindow } from "settings.slint";
-import { InventoryScreen, ItemSlot } from "inventory.slint";
+import { CreativePaletteEntry, InventoryScreen, ItemSlot } from "inventory.slint";
 import { ChatBox, ChatConfig, ChatRow } from "chat.slint";
 
-export { ChatRow, ItemSlot, LegendsFilterRow, MapMarker, RadialItem, WorldMapConfig }
+export { ChatRow, CreativePaletteEntry, ItemSlot, LegendsFilterRow, MapMarker, RadialItem, WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
@@ -119,7 +119,21 @@ export component GameUi inherits Window {
     // The pointer, UI logical pixels (the held stack follows it).
     in property <length> inventory-pointer-x;
     in property <length> inventory-pointer-y;
+    in-out property <int> inventory-tab: 0;
+    in property <bool> editor-active;
+    in property <[CreativePaletteEntry]> editor-palette;
+    in-out property <string> editor-search;
+    in-out property <int> editor-tab: 0;
+    out property <bool> editor-search-focused: inventory.editor-search-focused;
     callback inventory-slot-pressed(bool, int, bool);
+    callback inventory-throw-cursor-stack();
+    callback editor-palette-pressed(int, bool, bool, bool);
+    public function inventory-take-focus() {
+        inventory.take-focus();
+    }
+    public function inventory-drop-focus() {
+        inventory.drop-focus();
+    }
     out property <length> inventory-grid-left: inventory.grid-left;
     out property <length> inventory-container-top: inventory.container-top;
     // Where the client draws the player's model, and whether it should
@@ -164,6 +178,12 @@ export component GameUi inherits Window {
     // client keeps them exclusive (opening the map closes the menu).
     in-out property <bool> menu-open;
     in-out property <bool> map-open;
+    // The renderer has one map view: arrival fullscreen, or inventory Map
+    // in play. The standalone in-play map is gone.
+    out property <bool> map-active: (root.map-modal && root.map-open)
+        || (root.inventory-open && root.inventory-tab == 2);
+    property <bool> inventory-map-active: !root.map-modal
+        && root.inventory-open && root.inventory-tab == 2;
     // The map's layer buttons (captions) and the picked one (the client
     // draws the map itself, under this layer: `renderer/map/`).
     in property <[string]> map-layer-names;
@@ -182,9 +202,9 @@ export component GameUi inherits Window {
     // Block, region and height under the map pointer.
     in property <string> map-pointer-line;
     // The pointer over the map view (view logical pixels).
-    out property <bool> map-pointer-in: map.pointer-in;
-    out property <length> map-pointer-x: map.pointer-x;
-    out property <length> map-pointer-y: map.pointer-y;
+    out property <bool> map-pointer-in: root.inventory-map-active ? inventory.map-pointer-in : map.pointer-in;
+    out property <length> map-pointer-x: root.inventory-map-active ? inventory.map-pointer-x : map.pointer-x;
+    out property <length> map-pointer-y: root.inventory-map-active ? inventory.map-pointer-y : map.pointer-y;
     callback map-drag(length, length);
     callback map-wheel(length, length, float);
     callback map-click(length, length);
@@ -229,13 +249,13 @@ export component GameUi inherits Window {
     out property <length> legends-filter-row-height: arrival.legends-filter-row-height;
     // Hit-test positions for headless tests (window logical pixels): the
     // map view's top-left.
-    out property <length> map-view-x: map.view-x;
-    out property <length> map-view-y: map.view-y;
-    out property <length> map-view-width: map.view-width;
-    out property <length> map-view-height: map.view-height;
-    out property <length> layer-button-x: map.layer-button-x;
-    out property <length> layer-buttons-top: map.layer-buttons-top;
-    out property <length> layer-button-pitch: map.layer-button-pitch;
+    out property <length> map-view-x: root.inventory-map-active ? inventory.map-view-x : map.view-x;
+    out property <length> map-view-y: root.inventory-map-active ? inventory.map-view-y : map.view-y;
+    out property <length> map-view-width: root.inventory-map-active ? inventory.map-view-width : map.view-width;
+    out property <length> map-view-height: root.inventory-map-active ? inventory.map-view-height : map.view-height;
+    out property <length> layer-button-x: root.inventory-map-active ? inventory.map-layer-button-x : map.layer-button-x;
+    out property <length> layer-buttons-top: root.inventory-map-active ? inventory.map-layer-buttons-top : map.layer-buttons-top;
+    out property <length> layer-button-pitch: root.inventory-map-active ? inventory.map-layer-button-pitch : map.layer-button-pitch;
 
     callback open-map();
     callback close-menu();
@@ -389,7 +409,28 @@ export component GameUi inherits Window {
         selected: root.inventory-selected;
         pointer-x: root.inventory-pointer-x;
         pointer-y: root.inventory-pointer-y;
+        editor: root.editor-active;
+        editor-palette: root.editor-palette;
+        editor-search <=> root.editor-search;
+        editor-tab <=> root.editor-tab;
+        tab <=> root.inventory-tab;
+        map-layer-names: root.map-layer-names;
+        map-layer <=> root.map-layer;
+        map-available: root.map-available;
+        map-selected-col <=> root.selected-col;
+        map-selected-row <=> root.selected-row;
+        map-tile-lines: root.tile-lines;
+        map-markers: root.map-markers;
+        map-status: root.map-status;
+        map-pointer-line: root.map-pointer-line;
         slot-pressed(c, i, r) => { root.inventory-slot-pressed(c, i, r); }
+        throw-cursor-stack => { root.inventory-throw-cursor-stack(); }
+        editor-palette-pressed(item, right, shift, held) => {
+            root.editor-palette-pressed(item, right, shift, held);
+        }
+        map-drag(dx, dy) => { root.map-drag(dx, dy); }
+        map-wheel(x, y, notches) => { root.map-wheel(x, y, notches); }
+        map-click(x, y) => { root.map-click(x, y); }
     }
 
     // Centred where it was opened, and large enough to cover the window
@@ -439,7 +480,7 @@ export component GameUi inherits Window {
     // Over everything else. `visible` rather than `if`, so its hit-test
     // positions above stay readable.
     map := WorldMap {
-        visible: root.map-open;
+        visible: root.map-open && root.map-modal;
         width: 100%;
         height: 100%;
         layer-names: root.map-layer-names;

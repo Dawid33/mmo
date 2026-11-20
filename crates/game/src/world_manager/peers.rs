@@ -2742,13 +2742,13 @@ pub(super) fn handoff_record(
     })
 }
 
-/// A server-authored event that was to follow a moved player's creation, applied to the
-/// `Client` it carries to another host instead: a mode change, as the region applies it
-/// (`set_play_mode_safe`). Nothing else follows a creation.
+/// An event that was to follow a moved player's creation, applied to the `Client`
+/// it carries to another host instead. Editor item actions are applied only when
+/// they conserve the whole stack; otherwise the player can retry after arrival.
 ///
 /// Leaving survival here differs from a local move in one way: what does not fit back
 /// into the inventory stays on the cursor (the record keeps it; the restore stows it
-/// again) instead of being dropped at the player's feet. Only a mode order sent while a
+/// again) instead of being dropped at the player's feet. Only an event sent while a
 /// move is in flight gets here (otherwise it reaches the home
 /// before the move, where the drop happens as locally), and by then the body is parked or
 /// being parked: there is no region and no feet to drop at.
@@ -2762,6 +2762,62 @@ fn carry_event(carried: &mut crate::Client, kind: GameEventKind) {
                         carried.cursor = Some(rest);
                     }
                 }
+            }
+        }
+        GameEventKind::Order(_, Order::SetEditor { on, .. }) => {
+            if !carried.editor_allowed || carried.editor == on {
+                return;
+            }
+            let mut next = carried.clone();
+            next.editor = on;
+            if on {
+                next.mining = None;
+                next.damaged.clear();
+            } else if next.leave_survival().is_some() {
+                return;
+            }
+            *carried = next;
+        }
+        GameEventKind::UiAction(
+            _,
+            action @ (crate::UiAction::EditorTake { .. }
+            | crate::UiAction::EditorGive { .. }
+            | crate::UiAction::EditorTrash),
+        ) => {
+            if !carried.editor_allowed || !carried.editor {
+                return;
+            }
+            match action {
+                crate::UiAction::EditorTrash => {
+                    if carried.inventory_open {
+                        carried.cursor = None;
+                    }
+                }
+                crate::UiAction::EditorTake { item, count } => {
+                    if !carried.inventory_open
+                        || !crate::item_exists(item)
+                        || !(1..=crate::MAX_STACK).contains(&count)
+                    {
+                        return;
+                    }
+                    let mut next = carried.clone();
+                    if next.stow_cursor().is_some() {
+                        return;
+                    }
+                    next.cursor = Some(crate::ItemStack { item, count });
+                    *carried = next;
+                }
+                crate::UiAction::EditorGive { item, count } => {
+                    if !crate::item_exists(item) || !(1..=crate::MAX_STACK).contains(&count) {
+                        return;
+                    }
+                    let mut next = carried.clone();
+                    if next.inventory.add(crate::ItemStack { item, count }) != 0 {
+                        return;
+                    }
+                    *carried = next;
+                }
+                _ => unreachable!(),
             }
         }
         other => log::error!(

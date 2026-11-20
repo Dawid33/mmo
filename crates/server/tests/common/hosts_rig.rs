@@ -316,7 +316,12 @@ impl Sim {
             region: rc,
             adventure: None,
         };
-        let ev = ServerEvent::ClientConnected { client, player, record: Some(record) };
+        let ev = ServerEvent::ClientConnected {
+            client,
+            player,
+            record: Some(record),
+            editor_allowed: false,
+        };
         assert!(self.manager.handle_server_event(ev, now));
     }
 

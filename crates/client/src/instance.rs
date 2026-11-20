@@ -314,6 +314,8 @@ pub struct GameInstanceManager {
         Vec<(game::edit::BlockPos, crate::regions::runner::ShakeSet)>,
     ),
     prev_play_mode: game::PlayMode,
+    /// Last authoritative editor projection sent to the owning client.
+    prev_editor: Option<(bool, bool)>,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
     /// Shared debug toggles; the render thread's F3 dev panel flips them.
@@ -1074,6 +1076,7 @@ impl GameInstanceManager {
             prev_damage: (None, Vec::new()),
             prev_shake: (None, Vec::new()),
             prev_play_mode: game::PlayMode::default(),
+            prev_editor: None,
             last_cursor_grab: true,
             debug_flags,
             recon: ReconMetrics::default(),
@@ -2076,6 +2079,15 @@ impl GameInstanceManager {
             if mode != self.prev_play_mode {
                 self.prev_play_mode = mode;
                 let _ = self.ui_update_send.send(game::UiUpdate::PlayMode(mode));
+            }
+        }
+        if let Some(editor) = view.map(|v| (v.editor, v.editor_allowed)) {
+            if self.prev_editor != Some(editor) {
+                self.prev_editor = Some(editor);
+                let _ = self.ui_update_send.send(game::UiUpdate::Editor {
+                    active: editor.0,
+                    allowed: editor.1,
+                });
             }
         }
 

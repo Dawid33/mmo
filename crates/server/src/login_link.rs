@@ -195,14 +195,16 @@ pub fn link_world_from(value: Option<&str>) -> String {
 }
 
 /// The login service's message, as the coordinator relays it to the gate host.
-pub fn order_from(msg: LoginToHost) -> game::LoginOrder {
+pub fn order_from(msg: LoginToHost, editor_allowed: bool) -> game::LoginOrder {
     match msg {
         LoginToHost::SpawnPlayer {
             player_token,
             session_epoch,
+            account_id: _,
         } => game::LoginOrder::Spawn {
             player_token,
             session_epoch,
+            editor_allowed,
         },
         LoginToHost::Kick {
             player_token,
@@ -276,6 +278,7 @@ enum Waiting {
     Spawn {
         player_token: String,
         session_epoch: u64,
+        editor_allowed: bool,
         read: Option<Resolving>,
         trace: Option<game::coordinator::TraceCarrier>,
     },
@@ -348,11 +351,13 @@ impl OrderResolver {
             game::LoginOrder::Spawn {
                 player_token,
                 session_epoch,
+                editor_allowed,
             } => {
                 let read = resolve_later(players, &player_token);
                 Waiting::Spawn {
                     player_token,
                     session_epoch,
+                    editor_allowed,
                     read,
                     trace: incoming.trace,
                 }
@@ -389,6 +394,7 @@ impl OrderResolver {
                 Waiting::Spawn {
                     player_token,
                     session_epoch,
+                    editor_allowed,
                     read,
                     trace,
                 } => match read.as_mut().map(Resolving::poll) {
@@ -406,6 +412,7 @@ impl OrderResolver {
                             session_epoch: *session_epoch,
                             player,
                             record_region: record.map(|r| r.region),
+                            editor_allowed: *editor_allowed,
                         },
                         trace: trace.take(),
                     }),
@@ -535,6 +542,8 @@ struct Kicked {
 #[derive(Default)]
 struct OrderState {
     pending: PendingSpawns,
+    /// Capability snapshot for each pending order, keyed only while the order is pending.
+    pending_editor_allowed: BTreeMap<String, bool>,
     /// The epoch of each player's live session (admitted, not ended).
     admitted: BTreeMap<String, u64>,
     /// The newest epoch whose ticket was used, after its session ended, until it expires
@@ -567,6 +576,8 @@ impl OrderState {
         self.pending
             .by_token
             .retain(|_, (_, expires)| now < *expires);
+        self.pending_editor_allowed
+            .retain(|token, _| self.pending.by_token.contains_key(token));
         self.used.retain(|_, (_, expires)| now < *expires);
         self.kicked.retain(|_, k| now < k.expires);
     }
@@ -704,13 +715,19 @@ impl SpawnOrders {
 
     /// Record `SpawnPlayer { token, epoch }`.
     pub fn order(&self, token: &str, epoch: u64) -> SpawnOrder {
-        self.order_then(token, epoch, || {})
+        self.order_then(token, epoch, false, || {})
     }
 
     /// [`order`](Self::order), calling `on_new` for a [`SpawnOrder::New`] while the lock is
     /// held: the supersede of the player's session goes out before any session can be
     /// announced after it (an announcement takes the same lock).
-    pub fn order_then(&self, token: &str, epoch: u64, on_new: impl FnOnce()) -> SpawnOrder {
+    pub fn order_then(
+        &self,
+        token: &str,
+        epoch: u64,
+        editor_allowed: bool,
+        on_new: impl FnOnce(),
+    ) -> SpawnOrder {
         let now = (self.now)();
         let mut state = self.state();
         state.prune(now);
@@ -726,6 +743,9 @@ impl SpawnOrders {
                     .pending
                     .by_token
                     .insert(token.to_string(), (epoch, expires));
+                state
+                    .pending_editor_allowed
+                    .insert(token.to_string(), editor_allowed);
                 on_new();
                 SpawnOrder::New
             }
@@ -761,6 +781,7 @@ impl SpawnOrders {
             .is_some_and(|(epoch, _)| *epoch <= up_to)
         {
             state.pending.by_token.remove(token);
+            state.pending_editor_allowed.remove(token);
         }
         match state.admitted.get(token) {
             None => KickApplied::NoSession,
@@ -830,15 +851,16 @@ impl SpawnOrders {
     /// A verified ticket of `token` with `epoch` connects: admitted (its order consumed) only
     /// if it is the pending order's epoch and the order has not expired; else the refusal.
     /// Checked and consumed under one lock: of two connects with one ticket only one wins.
-    pub fn admit(&self, token: &str, epoch: u64) -> Result<(), &'static str> {
+    pub fn admit(&self, token: &str, epoch: u64) -> Result<bool, &'static str> {
         let now = (self.now)();
         let mut state = self.state();
         state.prune(now);
         match state.pending.by_token.get(token).copied() {
             Some((ordered, _)) if ordered == epoch => {
                 state.pending.by_token.remove(token);
+                let editor_allowed = state.pending_editor_allowed.remove(token).unwrap_or(false);
                 state.admitted.insert(token.to_string(), epoch);
-                Ok(())
+                Ok(editor_allowed)
             }
             Some((ordered, _)) if epoch < ordered => Err(REFUSE_SUPERSEDED),
             _ if state.known(token, now).is_some_and(|known| epoch < known) => {
@@ -929,12 +951,14 @@ impl LoginLink {
 /// What the login routes share.
 struct RouteState {
     auth: Auth,
+    store: Option<world_store::StoreHandle>,
     orders: Sender<QueuedOrder>,
     answers: Arc<LoginAnswers>,
 }
 
 struct QueuedOrder {
     message: LoginToHost,
+    editor_allowed: bool,
     trace: Option<observability::TraceCarrier>,
 }
 
@@ -951,6 +975,7 @@ pub fn start(
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
+    store: Option<world_store::StoreHandle>,
 ) -> io::Result<LoginLink> {
     if orders.relays() {
         return Err(io::Error::other(
@@ -981,6 +1006,7 @@ pub fn start(
     let (orders_tx, orders_rx) = crossbeam::channel::unbounded();
     let state = Arc::new(RouteState {
         auth: Auth { token, world },
+        store,
         orders: orders_tx,
         answers: answers.clone(),
     });
@@ -1047,6 +1073,25 @@ async fn take_order(
     let Ok(msg) = game::decode_packet::<LoginToHost>(&body) else {
         return crate::coordinator_api::text(StatusCode::BAD_REQUEST, "order");
     };
+    let editor_allowed = match &msg {
+        LoginToHost::SpawnPlayer { account_id, .. } => match &s.store {
+            Some(store) => match store.editor_granted_async(account_id).await {
+                Ok(allowed) => {
+                    crate::health::Health::global().editor_grant_result(Some(allowed));
+                    allowed
+                }
+                Err(_) => {
+                    crate::health::Health::global().editor_grant_result(None);
+                    return crate::coordinator_api::text(StatusCode::SERVICE_UNAVAILABLE, "store");
+                }
+            },
+            None => {
+                crate::health::Health::global().editor_grant_result(Some(false));
+                false
+            }
+        },
+        LoginToHost::Kick { .. } => false,
+    };
     let operation_id = headers
         .get("x-mmo-operation-id")
         .and_then(|value| value.to_str().ok())
@@ -1062,6 +1107,7 @@ async fn take_order(
     if s.orders
         .send(QueuedOrder {
             message: msg,
+            editor_allowed,
             trace,
         })
         .is_err()
@@ -1107,8 +1153,16 @@ fn serve(
             LoginToHost::SpawnPlayer {
                 player_token,
                 session_epoch,
+                account_id: _,
             } => {
-                let ok = spawn(&orders, &players, &events, &player_token, session_epoch);
+                let ok = spawn(
+                    &orders,
+                    &players,
+                    &events,
+                    &player_token,
+                    session_epoch,
+                    queued.editor_allowed,
+                );
                 answers.push(spawn_ack(player_token, session_epoch, ok, None));
             }
             LoginToHost::Kick {
@@ -1209,11 +1263,12 @@ fn spawn(
     events: &Sender<ServerEvent>,
     token: &str,
     epoch: u64,
+    editor_allowed: bool,
 ) -> bool {
     let Some(player) = player_of(players, token) else {
         return false;
     };
-    order_player(orders, events, token, epoch, player)
+    order_player(orders, events, token, epoch, player, editor_allowed)
 }
 
 /// A spawn order of `player` (resolved) recorded: whether it is acked ok.
@@ -1223,6 +1278,7 @@ fn order_player(
     token: &str,
     epoch: u64,
     player: game::PlayerId,
+    editor_allowed: bool,
 ) -> bool {
     // Any session of the player parks now, before the new ticket is handed out (and, sent
     // under the orders' lock, before any session can be announced after the order).
@@ -1232,7 +1288,7 @@ fn order_player(
             reason: LOGGED_IN_ELSEWHERE.to_string(),
         });
     };
-    match orders.order_then(token, epoch, supersede) {
+    match orders.order_then(token, epoch, editor_allowed, supersede) {
         SpawnOrder::New => {
             log::info!(
                 "[login-link] spawn order for player {} (epoch {epoch})",
@@ -1431,6 +1487,7 @@ impl LoginRelay {
                     &order.player_token,
                     order.session_epoch,
                     order.player,
+                    order.editor_allowed,
                 )
             });
             manager.spawn_answered(order, ok);

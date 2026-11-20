@@ -330,6 +330,49 @@ macro_rules! engine_rows {
                 Ok(WorldInfo { content_crc, world_tick: u(tick), has_artifact })
             }
 
+            pub(crate) async fn editor_granted(
+                pool: &Pool,
+                account_id: &str,
+            ) -> Result<bool, StoreError> {
+                let row = sqlx::query("SELECT 1 FROM editor_grants WHERE account_id = $1")
+                    .bind(account_id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(row.is_some())
+            }
+
+            pub(crate) async fn grant_editor(
+                pool: &Pool,
+                account_id: &str,
+            ) -> Result<bool, StoreError> {
+                let result =
+                    sqlx::query("INSERT INTO editor_grants (account_id) VALUES ($1) ON CONFLICT (account_id) DO NOTHING")
+                        .bind(account_id)
+                        .execute(pool)
+                        .await?;
+                Ok(result.rows_affected() == 1)
+            }
+
+            pub(crate) async fn revoke_editor(
+                pool: &Pool,
+                account_id: &str,
+            ) -> Result<bool, StoreError> {
+                let result = sqlx::query("DELETE FROM editor_grants WHERE account_id = $1")
+                    .bind(account_id)
+                    .execute(pool)
+                    .await?;
+                Ok(result.rows_affected() == 1)
+            }
+
+            pub(crate) async fn editor_grants(pool: &Pool) -> Result<Vec<String>, StoreError> {
+                let rows = sqlx::query("SELECT account_id FROM editor_grants ORDER BY account_id")
+                    .fetch_all(pool)
+                    .await?;
+                rows.into_iter()
+                    .map(|row| Ok(row.try_get::<String, _>(0)?))
+                    .collect()
+            }
+
             /// `world.super_region_regions`: the super-region side the fences use.
             pub(crate) async fn super_region_regions(pool: &Pool) -> Result<u32, StoreError> {
                 let s: i64 = sqlx::query("SELECT super_region_regions FROM world WHERE id = 1")
@@ -1251,14 +1294,14 @@ macro_rules! engine_rows {
             }
 
             /// The `regions` row's `(meta, ground)` blobs, if the region was ever saved.
-            async fn region_row(tx: &mut Tx, rc: RegionCoords) -> Result<Option<(Vec<u8>, Vec<u8>)>, StoreError> {
-                let row = sqlx::query("SELECT meta, ground FROM regions WHERE rx = $1 AND rz = $2")
+            async fn region_row(tx: &mut Tx, rc: RegionCoords) -> Result<Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)>, StoreError> {
+                let row = sqlx::query("SELECT meta, ground, tree_state, water_state FROM regions WHERE rx = $1 AND rz = $2")
                     .bind(rc.x as i64)
                     .bind(rc.z as i64)
                     .fetch_optional(&mut **tx)
                     .await?;
                 Ok(match row {
-                    Some(r) => Some((r.try_get(0)?, r.try_get(1)?)),
+                    Some(r) => Some((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?, r.try_get(3)?)),
                     None => None,
                 })
             }
@@ -1347,13 +1390,25 @@ macro_rules! engine_rows {
             ) -> Result<Option<StoredRegion>, StoreError> {
                 let mut tx = begin_read(pool).await?;
                 check_fence(&mut *tx, fence, &[load_check(rc, s)].into(), SHARE_LOCK).await?;
-                let Some((meta, ground)) = region_row(&mut tx, rc).await? else {
+                let Some((meta, ground, tree_state, water_state)) = region_row(&mut tx, rc).await? else {
                     tx.commit().await?;
                     return Ok(None);
                 };
                 let meta: RegionMeta = decode(FORMAT_REGION_META, &meta)
                     .map_err(|e| StoreError::Corrupt(format!("region {rc:?} meta: {e}")))?;
                 let ground = decode_ground(rc, &ground)?;
+                let trees = match tree_state {
+                    Some(blob) => decode(FORMAT_REGION_TREES, &blob).map_err(|e| {
+                        StoreError::Corrupt(format!("region {rc:?} tree state: {e}"))
+                    })?,
+                    None => game::RegionTrees::new(),
+                };
+                let water = match water_state {
+                    Some(blob) => decode_region_water(rc, &ground, &blob).map_err(|e| {
+                        StoreError::Corrupt(format!("region {rc:?} water state: {e}"))
+                    })?,
+                    None => game::WaterRegion::default(),
+                };
                 let chunks = load_chunks(&mut tx, rc).await?;
                 let rows = sqlx::query("SELECT bundle FROM entities WHERE rx = $1 AND rz = $2")
                     .bind(rc.x as i64)
@@ -1369,12 +1424,12 @@ macro_rules! engine_rows {
                     entities.push(bundle);
                 }
                 entities.sort_by_key(|b| b.id);
-                Ok(Some(StoredRegion { meta, chunks, ground, entities }))
+                Ok(Some(StoredRegion { meta, trees, water, chunks, ground, entities }))
             }
 
             pub(crate) async fn load_terrain(pool: &Pool, rc: RegionCoords) -> Result<Option<TerrainSnapshot>, StoreError> {
                 let mut tx = begin_read(pool).await?;
-                let Some((_, ground)) = region_row(&mut tx, rc).await? else {
+                let Some((_, ground, _, _)) = region_row(&mut tx, rc).await? else {
                     tx.commit().await?;
                     return Ok(None);
                 };
@@ -1906,13 +1961,15 @@ macro_rules! engine_rows {
                     }
                     let bump = i64::from(!region.chunks.is_empty());
                     let version: i64 = sqlx::query(
-                        "INSERT INTO regions (rx, rz, saved_tick, terrain_version, meta, ground) \
-                         VALUES ($1, $2, $3, $4, $5, $6) \
+                        "INSERT INTO regions (rx, rz, saved_tick, terrain_version, meta, ground, tree_state, water_state) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
                          ON CONFLICT (rx, rz) DO UPDATE SET \
                            saved_tick = excluded.saved_tick, \
                            terrain_version = regions.terrain_version + excluded.terrain_version, \
                            meta = excluded.meta, \
-                           ground = CASE WHEN $7 = 1 THEN excluded.ground ELSE regions.ground END \
+                           ground = CASE WHEN $9 = 1 THEN excluded.ground ELSE regions.ground END, \
+                           tree_state = excluded.tree_state, \
+                           water_state = excluded.water_state \
                          RETURNING terrain_version",
                     )
                     .bind(rx)
@@ -1921,6 +1978,8 @@ macro_rules! engine_rows {
                     .bind(bump)
                     .bind(encode(FORMAT_REGION_META, &region.meta))
                     .bind(ground_blob(region.ground.as_ref()))
+                    .bind(encode(FORMAT_REGION_TREES, &region.trees))
+                    .bind(encode(FORMAT_REGION_WATER, &region.water))
                     .bind(i64::from(region.ground.is_some()))
                     .fetch_one(&mut *conn)
                     .await?

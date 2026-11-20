@@ -78,7 +78,9 @@ pub use target::LinkTarget;
 /// `ServerPacket::LandMoving`.
 /// 14: a sampled login order may cross the coordinator's durable mailbox as the
 /// append-only `CoordMsg::LoginTraced` variant; `CoordMsg::Login` remains decodable.
-pub const LINK_PROTOCOL_VERSION: u32 = 14;
+/// 15: the login coordinator join order carries a coordinator-authorized editor capability,
+/// forwarded through host spawn placement and peer relays.
+pub const LINK_PROTOCOL_VERSION: u32 = 15;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

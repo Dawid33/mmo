@@ -3,6 +3,18 @@ quests from content packages, claim land → settlement run as mayor, no embark.
 2026-11-17 (plans/2026-11-17-embark-removal.md). Next: specs/2026-11-16-quests-in-the-world-design.md §13. Paragraphs below that
 assume fortress mode as the default are history.
 
+Editor mode, phases 4–6 client/ops integration (2026-11-20) — BUILT, NOT accepted. `Order::SetEditor`,
+the authoritative grant bridge, instant edits/flight, client `EditorState`, local chat commands and
+the searchable tabbed palette are type-checked. Owed:
+- Live native: unauthorized `/creative`, grant-on-next-join, F5 suppression, E/Q/digits/wheel while
+  editing, palette left/right/shift/held-stack click semantics, and a chest hiding the palette;
+  single-player/local `/creative` succeeds without an `editor_grants` row while JWT remains refused.
+- Browser: palette search focus, grid scrolling and icon rendering, and the same direct commands
+  through the predicted wire path.
+- Multi-host: editor state survives park/handoff/rejoin, and revoke applies only after kick + join.
+  Check `mmo_login_editor_grant_total{result=…}` and `mmo_editor_actions_refused_total`
+  without account identifiers.
+
 Regression-only tests (plans/2026-11-19-regression-only-tests.md, inventory beside it) — DONE 2026-11-19: every test
 outside the vendored forks that does not reproduce a bug seen in play or in a log was deleted (~3,900); 40 regression
 tests and 69 gates remain, `just test-audit` (in `smoke`) refuses an unmarked test, `just test` / `test-full` run

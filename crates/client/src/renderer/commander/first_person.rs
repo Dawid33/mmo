@@ -32,7 +32,7 @@ use game::InputEvent;
 use game::movement::UNITS_PER_METER;
 
 use super::CommanderCamera;
-use super::adventure::ClientPlayMode;
+use super::adventure::{ClientPlayMode, EditorState};
 use super::level::WorkingLevel;
 use super::tiles::TileMirror;
 use crate::renderer::bridge::{LocalBody, SimEntity, SimTarget};
@@ -114,8 +114,8 @@ pub fn inactive(fp: Option<Res<FirstPerson>>) -> bool {
 /// Whether the body view should be on: always in Adventure once the world has
 /// the screen; while the frontend has it, it stays as it is (it is not entered
 /// behind a menu screen); never outside Adventure.
-pub fn wanted(on: bool, adventure: bool, world_owns: bool) -> bool {
-    adventure && (on || world_owns)
+pub fn wanted(on: bool, adventure: bool, editor: bool, world_owns: bool) -> bool {
+    (adventure || editor) && (on || world_owns || editor)
 }
 
 /// Keeps the body view on in Adventure and off elsewhere — level-triggered,
@@ -124,6 +124,7 @@ pub fn wanted(on: bool, adventure: bool, world_owns: bool) -> bool {
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn ensure_first_person(
     mode: Res<ClientPlayMode>,
+    editor: Option<Res<EditorState>>,
     state: Option<Res<State<AppState>>>,
     in_play: Option<Res<InPlay>>,
     mut policy: ResMut<CursorPolicy>,
@@ -138,7 +139,16 @@ pub fn ensure_first_person(
     mut top_down: Option<ResMut<super::top_down::TopDown>>,
 ) {
     let world_owns = !crate::session::frontend_has_screen(state.as_deref(), in_play.as_deref());
-    let want = wanted(fp.on, mode.adventure(), world_owns);
+    let editor = editor.as_deref().is_some_and(|e| e.active);
+    let want = wanted(fp.on, mode.adventure(), editor, world_owns);
+    if editor {
+        if fp.view != BodyView::First {
+            fp.view = BodyView::First;
+        }
+        if policy.released {
+            policy.released = false;
+        }
+    }
     if want == fp.on {
         return;
     }
@@ -146,7 +156,7 @@ pub fn ensure_first_person(
     fp.on = want;
     // Nobody pressed for the eyes (Adventure starting): the pointer stays free
     // until a click in the window (`cursor::retake_pointer`).
-    policy.released = want;
+    policy.released = want && !editor;
     let _ = events.0.send(game::GameEventKind::PlayerInput(
         client,
         InputEvent::FpsCam(want),
@@ -187,9 +197,16 @@ pub fn cycle_body_view(
     keys: Res<ButtonInput<KeyCode>>,
     policy: Res<CursorPolicy>,
     mode: Res<ClientPlayMode>,
+    editor: Option<Res<EditorState>>,
     mut fp: ResMut<FirstPerson>,
 ) {
-    if keys.just_pressed(BODY_VIEW_KEY) && !policy.blocks_game() && mode.adventure() && fp.on {
+    let editor = editor.as_deref().is_some_and(|e| e.active);
+    if keys.just_pressed(BODY_VIEW_KEY)
+        && !policy.blocks_game()
+        && mode.adventure()
+        && fp.on
+        && !editor
+    {
         fp.view = fp.view.toggled();
     }
 }

@@ -24,7 +24,7 @@ use crate::session::SessionResetExt;
 
 /// Tile fetches in flight at once.
 pub const MAP_FETCH_IN_FLIGHT: usize = 6;
-/// A native client joining a server by address (`just client`, Join server) reads the map from this
+/// A native client joining a debug server by address (`just client`) reads the map from this
 /// base URL (the dev server's `VOXEL_MAP_BIND`); unset = no map for such a session.
 pub const MAP_URL_ENV: &str = "VOXEL_MAP_URL";
 

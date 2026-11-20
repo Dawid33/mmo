@@ -79,7 +79,7 @@ use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 pub const USAGE: &str = "usage: worldctl forge --db <url> \
 [--preset <earth-like|great ranges|highlands|lowlands|dry|wet>] \
 [--size <tiny|small|medium|large|dev> (default dev) | --width <m> --height <m>] [--cell <m>] \
-[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl hosts <url>\n       worldctl desired <url>\n       worldctl drain <url> <host id> [--in <secs>]\n       worldctl retire-host <url> <host id>\n       worldctl rollback <url> --yes";
+[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>\n       worldctl hosts <url>\n       worldctl desired <url>\n       worldctl drain <url> <host id> [--in <secs>]\n       worldctl retire-host <url> <host id>\n       worldctl rollback <url> --yes\n       worldctl editor-grant <url> <account id>\n       worldctl editor-revoke <url> <account id>\n       worldctl editor-list <url>";
 
 /// Runs one `worldctl` command (`args` without the program name); `Ok` is what it
 /// prints. Neither that nor an error ever shows a Postgres URL's credentials.
@@ -151,8 +151,68 @@ pub fn run(args: &[String]) -> Result<String, String> {
                  abandoned): every host restarts from the last save"
             ))
         }
+        Some("editor-grant") => {
+            let (db, account_id) = parse_editor_account(&args[1..])?;
+            let added = editor_grant(&db, &account_id)?;
+            let action = if added { "granted" } else { "already granted" };
+            Ok(format!(
+                "worldctl: editor access {action} for account {account_id:?} in {db}; it applies at that account's next join"
+            ))
+        }
+        Some("editor-revoke") => {
+            let (db, account_id) = parse_editor_account(&args[1..])?;
+            let removed = editor_revoke(&db, &account_id)?;
+            let action = if removed { "revoked" } else { "already denied" };
+            Ok(format!(
+                "worldctl: editor access {action} for account {account_id:?} in {db}; an active session must be kicked and rejoin"
+            ))
+        }
+        Some("editor-list") => {
+            let [url] = &args[1..] else {
+                return Err(USAGE.to_string());
+            };
+            let db = StoreUrl::parse(url)
+                .map_err(|e| format!("editor-list: the world store URL: {e}"))?;
+            editor_list(&db)
+        }
         _ => Err(USAGE.to_string()),
     }
+}
+
+fn parse_editor_account(args: &[String]) -> Result<(StoreUrl, String), String> {
+    let [url, account_id] = args else {
+        return Err(USAGE.to_string());
+    };
+    let db = StoreUrl::parse(url).map_err(|e| format!("editor: the world store URL: {e}"))?;
+    if account_id.is_empty() || account_id.len() > 256 {
+        return Err("editor: account id must be 1..=256 bytes".into());
+    }
+    Ok((db, account_id.clone()))
+}
+
+fn editor_grant(db: &StoreUrl, account_id: &str) -> Result<bool, String> {
+    let store = open(db, OpenMode::Writer)?;
+    store
+        .grant_editor(account_id)
+        .map_err(|e| format!("world store {db}: {e}"))
+}
+
+fn editor_revoke(db: &StoreUrl, account_id: &str) -> Result<bool, String> {
+    let store = open(db, OpenMode::Writer)?;
+    store
+        .revoke_editor(account_id)
+        .map_err(|e| format!("world store {db}: {e}"))
+}
+
+fn editor_list(db: &StoreUrl) -> Result<String, String> {
+    let store = open(db, OpenMode::ReadOnly)?;
+    let accounts = store
+        .editor_grants()
+        .map_err(|e| format!("world store {db}: {e}"))?;
+    if accounts.is_empty() {
+        return Ok("worldctl: no editor grants".into());
+    }
+    Ok(accounts.join("\n"))
 }
 
 fn parse_db(value: &str) -> Result<StoreUrl, String> {

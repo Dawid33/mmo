@@ -160,6 +160,10 @@ pub(crate) enum Request {
     LoadHistory(Reply<Option<Vec<u8>>>),
     CommitCut(Box<WorldCut>, Fence, Reply<CutCommitted>),
     ResolvePlayer(String, Reply<(PlayerId, Option<PlayerRecord>)>),
+    EditorGranted(String, Reply<bool>),
+    GrantEditor(String, Reply<bool>),
+    RevokeEditor(String, Reply<bool>),
+    EditorGrants(Reply<Vec<String>>),
     /// Claim the list; with a boot, only while that boot's `hosts` row is live.
     ClaimSuperRegions(HostId, Vec<SuperRegion>, Option<u64>, Reply<Fence>),
     /// Elastic 2b Task 3: the coordinator row's first write (first writer wins).
@@ -266,6 +270,8 @@ impl Request {
             | Request::ResolvePrepared(..)
             | Request::RollbackWorldOperator(..)
             | Request::VouchHost(..)
+            | Request::GrantEditor(..)
+            | Request::RevokeEditor(..)
             | Request::TestHook(..) => "write",
             Request::MailboxRead(..) | Request::LoginAnswersRead(..) => "read_ack",
             Request::Shutdown => "control",
@@ -775,6 +781,20 @@ async fn serve(
                 };
                 r.send(on_pool!(&pool, resolve_player(&token)))
             }),
+            Request::EditorGranted(account_id, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, editor_granted(&account_id))) })
+            }
+            Request::GrantEditor(account_id, r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, grant_editor(&account_id)))
+            }),
+            Request::RevokeEditor(account_id, r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, revoke_editor(&account_id)))
+            }),
+            Request::EditorGrants(r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, editor_grants())) })
+            }
             Request::ClaimSuperRegions(owner, srs, live, r) => {
                 let lock_ms = cuts.claim_lock_timeout_ms.load(Ordering::SeqCst);
                 tokio::spawn(async move {
@@ -1288,6 +1308,8 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::CutDecided(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RollbackWorldOperator(r) => r.send(Err(StoreError::ReadOnly)),
         Request::VouchHost(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::GrantEditor(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RevokeEditor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::DrainHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         // A mailbox read deletes the rows it was asked past.
         Request::MailboxRead(_, _, _, _, r) => r.send(Err(StoreError::ReadOnly)),

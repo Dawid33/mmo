@@ -113,7 +113,9 @@ pub fn player_block(
 /// What the markers were last pushed for.
 #[derive(Default)]
 struct Pushed {
-    open: bool,
+    /// Arrival and in-play are separate view requests; tab switches within
+    /// either one retain the current pan and zoom.
+    modal: Option<bool>,
     key: Option<(i64, i64, u32, u32, i32, i32, i32, i32, u64)>,
     readout: String,
     /// The selection as this view last saw it: a change made elsewhere (the arrival list) is brought
@@ -152,7 +154,7 @@ fn drive_full_map(
     };
     let ui = slint.overlay.ui();
     let pushed = pushed.get();
-    let open = ui.get_map_open() && state.map.is_some();
+    let open = ui.get_map_active() && state.map.is_some();
     // Window physical pixels per view logical pixel.
     let scale = slint.ui_scale() * window.single().map_or(1.0, |w| w.scale_factor());
     let origin = Vec2::new(ui.get_map_view_x(), ui.get_map_view_y());
@@ -167,7 +169,7 @@ fn drive_full_map(
         .map
         .as_ref()
         .map_or(1.0, |m| (1u64 << top_level_of(m)) as f32);
-    if open && !pushed.open {
+    if open && pushed.modal != Some(ui.get_map_modal()) {
         // Opening: centred on the player at the minimap's zoom.
         if let Some(at) = player_block(&body, cam.as_deref()) {
             view.centre = at;
@@ -175,8 +177,8 @@ fn drive_full_map(
         // The minimap's zoom is per window (logical) pixel; the view's per physical pixel.
         let dpi = window.single().map_or(1.0, |w| w.scale_factor());
         view.m_per_px = (MINIMAP_M_PER_PX / dpi).clamp(FULL_MAP_MIN_M_PER_PX, max_m);
+        pushed.modal = Some(ui.get_map_modal());
     }
-    pushed.open = open;
     // View logical px → window physical px.
     let to_px = |x: f32, y: f32| (origin + Vec2::new(x, y)) * scale;
     for input in inputs.0.borrow_mut().drain(..) {

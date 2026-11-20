@@ -14,15 +14,21 @@ pub const REFRESH_FILE_NAME: &str = "login_refresh";
 
 /// The kept refresh token, if any.
 pub fn load_refresh() -> Option<String> {
+    load_refresh_for(crate::login::api::OFFICIAL_LOGIN_URL)
+}
+
+/// The kept token for this exact login service. Development overrides never
+/// present their token to the official service, or vice versa.
+pub fn load_refresh_for(service: &str) -> Option<String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        read_at(&refresh_path()?)
+        read_at(&refresh_path_for(service)?)
     }
     #[cfg(target_arch = "wasm32")]
     {
         let storage = web_sys::window()?.local_storage().ok().flatten()?;
         storage
-            .get_item(REFRESH_STORAGE_KEY)
+            .get_item(&refresh_storage_key(service))
             .ok()
             .flatten()
             .map(|t| t.trim().to_string())
@@ -32,9 +38,13 @@ pub fn load_refresh() -> Option<String> {
 
 /// Keeps `token` (replacing the old one). A failure is logged, never fatal.
 pub fn save_refresh(token: &str) {
+    save_refresh_for(crate::login::api::OFFICIAL_LOGIN_URL, token)
+}
+
+pub fn save_refresh_for(service: &str, token: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(path) = refresh_path() else {
+        let Some(path) = refresh_path_for(service) else {
             log::warn!("[login] no home directory: the login is not kept");
             return;
         };
@@ -46,7 +56,10 @@ pub fn save_refresh(token: &str) {
     {
         let storage = web_sys::window().and_then(|w| w.local_storage().ok().flatten());
         match storage {
-            Some(storage) if storage.set_item(REFRESH_STORAGE_KEY, token).is_ok() => {}
+            Some(storage)
+                if storage
+                    .set_item(&refresh_storage_key(service), token)
+                    .is_ok() => {}
             _ => log::warn!("[login] localStorage unavailable: the login is not kept"),
         }
     }
@@ -54,18 +67,43 @@ pub fn save_refresh(token: &str) {
 
 /// Forgets the kept refresh token (logout, or the service said it is revoked).
 pub fn clear_refresh() {
+    clear_refresh_for(crate::login::api::OFFICIAL_LOGIN_URL)
+}
+
+pub fn clear_refresh_for(service: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Some(path) = refresh_path() {
+        if let Some(path) = refresh_path_for(service) {
             clear_at(&path);
         }
     }
     #[cfg(target_arch = "wasm32")]
     {
         if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-            let _ = storage.remove_item(REFRESH_STORAGE_KEY);
+            let _ = storage.remove_item(&refresh_storage_key(service));
         }
     }
+}
+
+fn service_scope(service: &str) -> Option<String> {
+    let normalized = service.trim_end_matches('/');
+    if normalized == crate::login::api::OFFICIAL_LOGIN_URL {
+        return None;
+    }
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Some(format!("{hash:016x}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn refresh_storage_key(service: &str) -> String {
+    service_scope(service).map_or_else(
+        || REFRESH_STORAGE_KEY.to_string(),
+        |scope| format!("{REFRESH_STORAGE_KEY}.{scope}"),
+    )
 }
 
 /// The refresh file: [`REFRESH_FILE_ENV`], else `login_refresh` in the
@@ -78,6 +116,16 @@ pub fn refresh_path() -> Option<std::path::PathBuf> {
         var("XDG_DATA_HOME").as_deref(),
         var("HOME").as_deref(),
     )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn refresh_path_for(service: &str) -> Option<std::path::PathBuf> {
+    let path = refresh_path()?;
+    let Some(scope) = service_scope(service) else {
+        return Some(path);
+    };
+    let name = path.file_name()?.to_string_lossy();
+    Some(path.with_file_name(format!("{name}.{scope}")))
 }
 
 /// [`refresh_path`] from the variables' values (empty counts as unset).

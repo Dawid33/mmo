@@ -125,6 +125,8 @@ pub struct Felling {
     pub cut: Vec<TilePos>,
     /// Each falling piece, sorted (at most one).
     pub falling: Vec<Vec<TilePos>>,
+    /// A limb-0 trunk cut, which starts sapling regrowth after the roots.
+    pub trunk_cut: bool,
 }
 
 /// Whether `p` is solid wood of tree `tree`.
@@ -139,6 +141,9 @@ fn is_wood(src: &impl TileSource, p: TilePos, tree: u32) -> bool {
 /// else (a branch, a limb's log), just `cut`. Empty when `cut` is not solid
 /// tree wood.
 pub fn cut_blocks(src: &impl TileSource, cut: TilePos) -> Vec<TilePos> {
+    if src.is_tree_root(cut) {
+        return Vec::new();
+    }
     let tree = src.tree_id(cut);
     if tree == 0 || !is_wood(src, cut, tree) {
         return Vec::new();
@@ -241,6 +246,7 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
     };
     if is_trunk_cut || limb != 0 {
         falls.retain(|p| !cuts.contains(p));
+        falls.retain(|p| !src.is_tree_root(*p));
         // Support (trunk and branch cuts alike): whatever is left that no
         // longer joins (26-connected, through any standing block of the
         // tree) the standing wood of the lowest level falls too, so nothing
@@ -274,7 +280,11 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
     } else {
         vec![falls]
     };
-    Some(Felling { cut: cuts, falling })
+    Some(Felling {
+        cut: cuts,
+        falling,
+        trunk_cut: is_trunk_cut,
+    })
 }
 
 /// The limb pieces of a tree: for each limb index `L ≥ 1`, the 26-connected

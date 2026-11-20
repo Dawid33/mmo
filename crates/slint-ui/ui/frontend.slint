@@ -4,7 +4,8 @@ import { LoadWorld, WorldRow } from "load-world.slint";
 import { Starting } from "starting.slint";
 import { Loading } from "loading.slint";
 import { LoginScreen } from "login.slint";
-import { OnlineWorldRow, WorldsScreen } from "worlds.slint";
+import { OnlineWorldRow, ServerBrowser } from "worlds.slint";
+import { AccountSettings } from "account-settings.slint";
 import { GameTheme } from "theme.slint";
 import { SettingsWindow } from "settings.slint";
 
@@ -21,12 +22,15 @@ export component FrontendUi inherits Window {
     background: transparent;
 
     // 0 menu, 1 generator, 2 load, 3 starting, 4 loading (over the world),
-    // 5 login, 6 the online world list.
+    // 5 login, 6 the online world list, 7 account settings.
     in property <int> screen;
     in property <bool> shown: true;
     in property <string> game-title: "Errantry";
     in property <bool> can-load;
     in property <string> menu-error;
+    in property <int> menu-page;
+    in property <bool> single-player-available;
+    in property <bool> can-exit;
     // The main menu's backdrop: a saved world's map preview (empty = none).
     in property <image> menu-background;
     // The starting screen (screen 3, starting.slint), forwarded with a
@@ -74,24 +78,13 @@ export component FrontendUi inherits Window {
     out property <length> settings-close-x: settings.close-x;
     out property <length> settings-close-y: settings.close-y;
 
+    callback single-player();
+    callback multiplayer();
+    callback settings();
     callback new-world();
     callback load-world();
     callback exit();
     callback back();
-    // The browser build has no local-world controls. Direct server joins are
-    // enabled only by debug builds.
-    in property <bool> join-only;
-    in property <bool> debug-direct-join;
-    in-out property <string> server-address <=> menu.server-address;
-    callback join-server(string);
-    out property <length> join-button-x: menu.join-button-x;
-    out property <length> join-button-y: menu.join-button-y;
-    // A login service is configured: the menu offers Play online (the
-    // browser's join-only menu too, beside Join server).
-    in property <bool> online-available;
-    callback play-online();
-    out property <length> play-online-button-x: menu.play-online-button-x;
-    out property <length> play-online-button-y: menu.play-online-button-y;
 
     // The login screen (screen 5, login.slint) and the online world list
     // (screen 6, worlds.slint); their Back is `back` above. `login-error`
@@ -105,26 +98,43 @@ export component FrontendUi inherits Window {
     in property <bool> login-busy;
     // The world list's status line ("" = none; under `login-error`, which wins),
     // e.g. while a join waits for its world to start.
-    in property <string> login-status <=> online-worlds.status;
+    in property <string> login-status;
     // The signed-in account's display name (its email when the name is unknown).
     in property <string> login-account;
     in property <[OnlineWorldRow]> worlds;
+    in property <[string]> world-names;
+    in property <[string]> world-regions;
+    in-out property <int> world-region;
+    in-out property <string> world-search;
+    in-out property <int> world-selected;
+    in property <string> world-region-name;
     callback login-sign-in();
     callback login-open-browser();
     callback login-cancel();
     callback world-join(string);
-    callback logout();
+    callback world-refresh();
+    callback world-region-chosen(int);
+    callback world-select(int);
+    callback world-search-edited(string);
+    callback settings-log-in();
+    callback settings-log-out();
     out property <length> login-sign-in-x: login.sign-in-x;
     out property <length> login-sign-in-y: login.sign-in-y;
     out property <length> login-open-browser-x: login.open-browser-x;
     out property <length> login-open-browser-y: login.open-browser-y;
     out property <length> login-cancel-x: login.cancel-x;
     out property <length> login-cancel-y: login.cancel-y;
-    out property <length> worlds-row-x: online-worlds.row-x;
-    out property <length> worlds-row0-y: online-worlds.row0-y;
-    out property <length> worlds-row-pitch: online-worlds.row-pitch;
-    out property <length> logout-x: online-worlds.logout-x;
-    out property <length> logout-y: online-worlds.logout-y;
+    out property <length> worlds-row-x: browser.row-x;
+    out property <length> worlds-row0-y: browser.row0-y;
+    out property <length> worlds-row-pitch: browser.row-pitch;
+    out property <length> worlds-join-x: browser.join-x;
+    out property <length> worlds-join-y: browser.join-y;
+    out property <length> worlds-refresh-x: browser.refresh-x;
+    out property <length> worlds-refresh-y: browser.refresh-y;
+    out property <length> settings-log-in-x: account-settings.log-in-x;
+    out property <length> settings-log-in-y: account-settings.log-in-y;
+    out property <length> settings-log-out-x: account-settings.log-out-x;
+    out property <length> settings-log-out-y: account-settings.log-out-y;
 
     out property <length> new-button-x: menu.new-button-x;
     out property <length> new-button-y: menu.new-button-y;
@@ -134,9 +144,13 @@ export component FrontendUi inherits Window {
     out property <length> exit-button-y: menu.exit-button-y;
     // The shown screen's Back.
     out property <length> back-button-x: root.screen == 1 ? generator.back-x : root.screen == 2 ? loader.back-x
-        : root.screen == 5 ? login.back-x : root.screen == 6 ? online-worlds.back-x : starting.back-x;
+        : root.screen == 5 ? login.back-x : root.screen == 6 ? browser.back-x
+        : root.screen == 7 ? account-settings.back-x
+        : root.screen == 0 && root.menu-page == 1 ? menu.back-button-x : starting.back-x;
     out property <length> back-button-y: root.screen == 1 ? generator.back-y : root.screen == 2 ? loader.back-y
-        : root.screen == 5 ? login.back-y : root.screen == 6 ? online-worlds.back-y : starting.back-y;
+        : root.screen == 5 ? login.back-y : root.screen == 6 ? browser.back-y
+        : root.screen == 7 ? account-settings.back-y
+        : root.screen == 0 && root.menu-page == 1 ? menu.back-button-y : starting.back-y;
 
     // The world list (screen 2, load-world.slint), forwarded with a `load-`
     // prefix; its Back is `back` above.
@@ -213,16 +227,17 @@ export component FrontendUi inherits Window {
         title: root.game-title;
         can-load: root.can-load;
         menu-error: root.menu-error;
+        menu-page: root.menu-page;
+        single-player-available: root.single-player-available;
+        can-exit: root.can-exit;
         background-image: root.menu-background;
-        join-only: root.join-only;
-        debug-direct-join: root.debug-direct-join;
-        online-available: root.online-available;
+        single-player => { root.single-player(); }
+        multiplayer => { root.multiplayer(); }
+        settings => { root.settings(); }
         new-world => { root.new-world(); }
         load-world => { root.load-world(); }
         exit => { root.exit(); }
-        join-server(address) => { root.join-server(address); }
-        play-online => { root.play-online(); }
-        open-settings => { root.settings-open = true; }
+        back => { root.back(); }
     }
     generator := MapGenerator {
         visible: root.shown && root.screen == 1;
@@ -253,16 +268,38 @@ export component FrontendUi inherits Window {
         cancel => { root.login-cancel(); }
         back => { root.back(); }
     }
-    online-worlds := WorldsScreen {
+    browser := ServerBrowser {
         visible: root.shown && root.screen == 6;
         width: root.width;
         height: root.height;
         worlds: root.worlds;
+        names: root.world-names;
+        regions: root.world-regions;
+        region <=> root.world-region;
+        search <=> root.world-search;
+        selected <=> root.world-selected;
+        region-name: root.world-region-name;
         account: root.login-account;
         error: root.login-error;
+        status: root.login-status;
         busy: root.login-busy;
+        region-chosen(i) => { root.world-region-chosen(i); }
+        search-edited(text) => { root.world-search-edited(text); }
+        select(i) => { root.world-select(i); }
         join(id) => { root.world-join(id); }
-        logout => { root.logout(); }
+        refresh => { root.world-refresh(); }
+        back => { root.back(); }
+    }
+    account-settings := AccountSettings {
+        visible: root.shown && root.screen == 7;
+        width: root.width;
+        height: root.height;
+        account: root.login-account;
+        busy: root.login-busy;
+        error: root.login-error;
+        log-in => { root.settings-log-in(); }
+        log-out => { root.settings-log-out(); }
+        graphics => { root.settings-open = true; }
         back => { root.back(); }
     }
     loading := Loading {
@@ -270,9 +307,10 @@ export component FrontendUi inherits Window {
         width: root.width;
         height: root.height;
     }
-    // Over the main menu only (another screen leaves it shut).
+    // The graphics window is opened from the account Settings screen, and also
+    // remains available in the in-world UI through the same component.
     settings := SettingsWindow {
-        visible: root.shown && root.screen == 0 && root.settings-open;
+        visible: root.shown && root.screen == 7 && root.settings-open;
         width: root.width;
         height: root.height;
         close => { root.settings-open = false; }

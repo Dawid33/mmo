@@ -17,6 +17,11 @@ pub enum Command {
     Leave,
     Where,
     Clear,
+    SetEditor(bool),
+    Give {
+        item: game::ItemId,
+        count: u32,
+    },
     /// Every designation done at once (the debug pane's button).
     #[cfg(feature = "dev_ui")]
     Complete,
@@ -35,6 +40,10 @@ pub const HELP: &[&str] = &[
     "/leave - end the adventure",
     "/where - the region and block you are in",
     "/clear - empty the chat",
+    "/creative - enter editor mode",
+    "/normal - return to normal play",
+    "/gamemode creative|normal - switch editor mode",
+    "/give <item> [count] - give an editor item (default 64)",
     #[cfg(feature = "dev_ui")]
     "/complete - finish every designation at once",
     #[cfg(feature = "dev_ui")]
@@ -97,6 +106,17 @@ fn parse(verb: &str, args: &[&str]) -> Result<Command, String> {
         "leave" => alone(Command::Leave),
         "where" => alone(Command::Where),
         "clear" => alone(Command::Clear),
+        "creative" => alone(Command::SetEditor(true)),
+        "normal" => alone(Command::SetEditor(false)),
+        "gamemode" => match args {
+            [mode] if mode.eq_ignore_ascii_case("creative") => Ok(Command::SetEditor(true)),
+            [mode] if mode.eq_ignore_ascii_case("normal") => Ok(Command::SetEditor(false)),
+            [mode] => Err(format!(
+                "/gamemode does not know \"{mode}\" (use creative or normal)"
+            )),
+            _ => Err("/gamemode takes creative or normal".to_string()),
+        },
+        "give" => parse_give(args),
         #[cfg(feature = "dev_ui")]
         "complete" => alone(Command::Complete),
         #[cfg(feature = "dev_ui")]
@@ -115,4 +135,23 @@ fn parse(verb: &str, args: &[&str]) -> Result<Command, String> {
         },
         _ => Err(format!("Unknown command: /{verb}. Try /help")),
     }
+}
+
+fn parse_give(args: &[&str]) -> Result<Command, String> {
+    let item = args
+        .first()
+        .ok_or_else(|| "/give takes an item and an optional count".to_string())?;
+    let item =
+        game::item_named(item).ok_or_else(|| format!("/give does not know item \"{}\"", item))?;
+    let count = match args {
+        [_] => game::MAX_STACK,
+        [_, count] => count
+            .parse::<u32>()
+            .map_err(|_| format!("/give count must be 1..={}", game::MAX_STACK))?,
+        _ => return Err("/give takes an item and at most one count".to_string()),
+    };
+    if !(1..=game::MAX_STACK).contains(&count) {
+        return Err(format!("/give count must be 1..={}", game::MAX_STACK));
+    }
+    Ok(Command::Give { item, count })
 }

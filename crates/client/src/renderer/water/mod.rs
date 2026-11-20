@@ -31,7 +31,7 @@ use bevy::prelude::*;
 use bevy::tasks::{Task, block_on, futures_lite::future};
 use game::{
     BlockId, CHUNK_BLOCKS, Chunk, ColumnCoords, ColumnGround, REGION_BLOCKS, REGION_CHUNKS,
-    RegionId,
+    RegionId, WaterDelta, WaterRegion, WorldBlockPos,
 };
 
 use self::material::{WaterMaterial, WaterMaterialHandle, sync_water_material_cut};
@@ -79,6 +79,7 @@ pub enum WaterMsg {
     Region {
         region: RegionId,
         ground: Arc<BTreeMap<ColumnCoords, ColumnGround>>,
+        water: WaterRegion,
     },
     /// The region left the window.
     RemoveRegion { region: RegionId },
@@ -88,6 +89,8 @@ pub enum WaterMsg {
         region: RegionId,
         column: ColumnCoords,
     },
+    /// Dynamic authoritative/predicted cell and chunk changes for one region.
+    Delta { region: RegionId, delta: WaterDelta },
 }
 
 /// One water tile: its drawn entity, whether it needs a (re)mesh, and the
@@ -107,6 +110,9 @@ pub struct WaterTiles(pub BTreeMap<(RegionId, [i32; 2]), WaterTile>);
 /// Each loaded region's ground recipes (from [`WaterMsg::Region`]).
 #[derive(Resource, Default)]
 pub struct WaterGround(pub BTreeMap<RegionId, Arc<BTreeMap<ColumnCoords, ColumnGround>>>);
+
+#[derive(Resource, Default)]
+pub struct WaterState(pub BTreeMap<RegionId, WaterRegion>);
 
 /// The bridge, after applying a `SetBlocks` to `chunk` of `region`: tell the
 /// water pass which column it was in (from the chunk's region-local origin).
@@ -168,7 +174,8 @@ fn tiles_touching(column: ColumnCoords) -> impl Iterator<Item = [i32; 2]> {
 /// What a cell holds, for the water rule.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cell {
-    /// Air or a liquid block: water where the recipe has it.
+    Water,
+    /// Open but dry.
     Open,
     /// Any other block (ground, ice, a placed block).
     Solid,
@@ -183,8 +190,10 @@ enum Cell {
 /// edge are marked in `edge` and left empty.
 pub fn tile_input<'a>(
     region: RegionId,
+    alias: RegionId,
     tile: [i32; 2],
     ground: &BTreeMap<ColumnCoords, ColumnGround>,
+    water: &WaterRegion,
     chunk_at: impl Fn([i32; 3]) -> Option<&'a Chunk>,
 ) -> WaterTileInput {
     let t = WATER_TILE_BLOCKS;
@@ -207,6 +216,28 @@ pub fn tile_input<'a>(
         Some((g, (x % cb) as usize, (z % cb) as usize))
     };
     let recipe = |x: i32, z: i32| column_of(x, z).and_then(|(g, lx, lz)| g.recipe_water(lx, lz));
+    let mut dynamic = BTreeMap::<(i32, i32), (i32, i32)>::new();
+    for (pos, units) in &water.cells {
+        if *units == 0 {
+            continue;
+        }
+        let (owner, local) = pos.to_local();
+        if owner == region {
+            dynamic
+                .entry((local.x, local.z))
+                .and_modify(|span| {
+                    span.0 = span.0.min(local.y);
+                    span.1 = span.1.max(local.y);
+                })
+                .or_insert((local.y, local.y));
+        }
+    }
+    let wet_span = |x: i32, z: i32| {
+        let static_span = recipe(x, z);
+        dynamic.get(&(x, z)).copied().map_or(static_span, |d| {
+            Some(static_span.map_or(d, |s| (s.0.min(d.0), s.1.max(d.1))))
+        })
+    };
     // Cells `lo..=hi` of column (x, z), one chunk lookup per chunk crossed.
     let cells = |x: i32, z: i32, lo: i32, hi: i32| -> Vec<Cell> {
         let surface =
@@ -218,32 +249,38 @@ pub fn tile_input<'a>(
             let cy = y.div_euclid(cb);
             let end = hi.min(cy * cb + cb - 1);
             let key = [
-                region.x * REGION_CHUNKS as i32 + x / cb,
+                alias.x * REGION_CHUNKS as i32 + x / cb,
                 cy,
-                region.z * REGION_CHUNKS as i32 + z / cb,
+                alias.z * REGION_CHUNKS as i32 + z / cb,
             ];
-            // `game::static_water_units`: only air inside the recipe is water.
-            let open = |id: BlockId| {
-                if id == BlockId::AIR {
-                    Cell::Open
-                } else {
-                    Cell::Solid
+            let cell = |id: BlockId, y: i32| {
+                if id != BlockId::AIR {
+                    return Cell::Solid;
+                }
+                let pos = WorldBlockPos::from_local(region, game::volume::BlockPos::new(x, y, z));
+                match water.units_at(pos) {
+                    Some(units) if units != 0 => Cell::Water,
+                    Some(_) => Cell::Open,
+                    None if recipe(x, z).is_some_and(|(lo, hi)| (lo..=hi).contains(&y)) => {
+                        Cell::Water
+                    }
+                    None => Cell::Open,
                 }
             };
             match chunk_at(key) {
                 Some(chunk) => match chunk.blocks.uniform() {
-                    Some(b) => out.extend((y..=end).map(|_| open(b.id))),
-                    None => out.extend(
-                        (y..=end)
-                            .map(|y| open(chunk.block_at(lx, y.rem_euclid(cb) as usize, lz).id)),
-                    ),
+                    Some(b) => out.extend((y..=end).map(|y| cell(b.id, y))),
+                    None => out
+                        .extend((y..=end).map(|y| {
+                            cell(chunk.block_at(lx, y.rem_euclid(cb) as usize, lz).id, y)
+                        })),
                 },
                 // No chunk: implied ground at or below the surface, else air.
                 None => out.extend((y..=end).map(|y| {
                     if surface.is_some_and(|s| y <= s) {
                         Cell::Solid
                     } else {
-                        Cell::Open
+                        cell(BlockId::AIR, y)
                     }
                 })),
             }
@@ -261,10 +298,10 @@ pub fn tile_input<'a>(
             }
             // The y span this column's cells matter over: its own water and
             // its neighbours' (side faces look at it), one above for a top.
-            let own = recipe(wx, wz);
+            let own = wet_span(wx, wz);
             let span = SIDES
                 .iter()
-                .filter_map(|[dx, dz]| recipe(wx + dx, wz + dz))
+                .filter_map(|[dx, dz]| wet_span(wx + dx, wz + dz))
                 .chain(own)
                 .fold(None, |acc: Option<(i32, i32)>, (lo, hi)| {
                     Some(acc.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))))
@@ -287,12 +324,12 @@ pub fn tile_input<'a>(
             if let Some((wlo, whi)) = own {
                 let mut y = wlo;
                 while y <= whi {
-                    if at(y) == Cell::Solid {
+                    if at(y) != Cell::Water {
                         y += 1;
                         continue;
                     }
                     let start = y;
-                    while y < whi && at(y + 1) == Cell::Open {
+                    while y < whi && at(y + 1) == Cell::Water {
                         y += 1;
                     }
                     column.runs.push(WaterRun {
@@ -336,12 +373,26 @@ fn apply_water_msgs(
     mut msgs: MessageReader<WaterMsg>,
     mut tiles: ResMut<WaterTiles>,
     mut grounds: ResMut<WaterGround>,
+    mut states: ResMut<WaterState>,
 ) {
     for msg in msgs.read() {
         match msg {
-            WaterMsg::Region { region, ground } => {
+            WaterMsg::Region {
+                region,
+                ground,
+                water,
+            } => {
                 remove_region(&mut commands, &mut tiles, *region);
-                for tile in water_tiles(ground) {
+                let mut initial = water_tiles(ground);
+                for chunk in water.activated.keys() {
+                    let (owner, local) = chunk.to_local();
+                    if owner == *region {
+                        let x = local.x as i32 * CHUNK_BLOCKS as i32;
+                        let z = local.z as i32 * CHUNK_BLOCKS as i32;
+                        initial.insert(tile_of(x, z));
+                    }
+                }
+                for tile in initial {
                     tiles.0.insert(
                         (*region, tile),
                         WaterTile {
@@ -351,10 +402,12 @@ fn apply_water_msgs(
                     );
                 }
                 grounds.0.insert(*region, ground.clone());
+                states.0.insert(*region, water.clone());
             }
             WaterMsg::RemoveRegion { region } => {
                 remove_region(&mut commands, &mut tiles, *region);
                 grounds.0.remove(region);
+                states.0.remove(region);
             }
             WaterMsg::ChunkEdited { region, column } => {
                 for tile in tiles_touching(*column) {
@@ -363,7 +416,40 @@ fn apply_water_msgs(
                     }
                 }
             }
+            WaterMsg::Delta { region, delta } => {
+                let state = states.0.entry(*region).or_default();
+                state.merge_delta(delta);
+                let mut dirty_columns = BTreeSet::new();
+                for chunk in delta.activated.keys() {
+                    let (owner, local) = chunk.to_local();
+                    if owner == *region {
+                        dirty_columns.insert(ColumnCoords::new(local.x, local.z));
+                    }
+                }
+                for cell in &delta.cells {
+                    let (owner, local) = cell.pos.to_local();
+                    if owner == *region {
+                        dirty_columns.insert(ColumnCoords::new(
+                            local.x.div_euclid(CHUNK_BLOCKS as i32) as usize,
+                            local.z.div_euclid(CHUNK_BLOCKS as i32) as usize,
+                        ));
+                    }
+                }
+                for column in dirty_columns {
+                    ensure_dirty_tiles(&mut tiles, *region, column);
+                }
+            }
         }
+    }
+}
+
+fn ensure_dirty_tiles(tiles: &mut WaterTiles, region: RegionId, column: ColumnCoords) {
+    let max = REGION_BLOCKS as i32 / WATER_TILE_BLOCKS;
+    for tile in tiles_touching(column) {
+        if tile[0] < 0 || tile[0] >= max || tile[1] < 0 || tile[1] >= max {
+            continue;
+        }
+        tiles.0.entry((region, tile)).or_default().dirty = true;
     }
 }
 
@@ -385,6 +471,7 @@ fn remove_region(commands: &mut Commands, tiles: &mut WaterTiles, region: Region
 fn schedule_water_meshes(
     mut tiles: ResMut<WaterTiles>,
     grounds: Res<WaterGround>,
+    states: Res<WaterState>,
     roots: Res<super::bridge::RegionRoots>,
     index: Option<Res<super::bricks::SimChunkIndex>>,
     chunks: Query<&super::bricks::SimChunk>,
@@ -403,11 +490,11 @@ fn schedule_water_meshes(
         chunks.get(*e).ok().map(|c| &c.0)
     };
     let mut built = 0;
-    for ((region, tile), state) in tiles.0.iter_mut() {
+    for ((region, tile), tile_state) in tiles.0.iter_mut() {
         if built >= WATER_TILE_BUILDS_PER_FRAME || in_flight >= MAX_WATER_MESH_TASKS {
             break;
         }
-        if !state.dirty || state.task.is_some() {
+        if !tile_state.dirty || tile_state.task.is_some() {
             continue;
         }
         let ready = roots
@@ -417,13 +504,16 @@ fn schedule_water_meshes(
         let Some(ground) = grounds.0.get(region).filter(|_| ready) else {
             continue;
         };
+        let Some(state) = states.0.get(region) else {
+            continue;
+        };
         // Its chunks are keyed where its tree is drawn.
         let Some(alias) = roots.alias(*region) else {
             continue;
         };
-        let input = tile_input(alias, *tile, ground, chunk_at);
-        state.task = Some(super::compute::spawn(WaterMeshJob(input), tile_mesh));
-        state.dirty = false;
+        let input = tile_input(*region, alias, *tile, ground, state, chunk_at);
+        tile_state.task = Some(super::compute::spawn(WaterMeshJob(input), tile_mesh));
+        tile_state.dirty = false;
         built += 1;
         in_flight += 1;
     }
@@ -493,6 +583,7 @@ impl Plugin for WaterPlugin {
             .add_session_message_clear::<WaterMsg>()
             .add_session_reset::<WaterTiles>()
             .add_session_reset::<WaterGround>()
+            .add_session_reset::<WaterState>()
             .init_resource::<WaterMaterialHandle>()
             .add_systems(
                 Update,

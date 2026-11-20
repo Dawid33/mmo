@@ -571,6 +571,7 @@ impl RegionRunner {
                 None => self.send_people_listed(epoch),
             },
             RegionInput::Shutdown => {
+                crate::forget_water_observation(self.id);
                 // A save cut at a tick this region will not reach now: it
                 // parks there, so its answer is its state with what is held
                 // for the slots before the cut tick applied (the slots it

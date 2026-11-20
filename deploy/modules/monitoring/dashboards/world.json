@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "One Errantry world on Kubernetes: coordinator and host health, world cuts, successions, restarts and the perf event log.",
+  "description": "Operational landing page for Errantry worlds and their supporting platform. Aggregate signals identify the subsystem to open next; focused dashboards hold the detail.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -23,12 +23,77 @@
     {
       "asDropdown": false,
       "icon": "external link",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "World coordinator",
+      "type": "link",
+      "url": "/d/world-coordinator/world-coordinator"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Fleet and hosts",
+      "type": "link",
+      "url": "/d/world-fleet-hosts/fleet-and-hosts"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
       "includeVars": false,
       "keepTime": true,
       "tags": [],
       "targetBlank": false,
+      "title": "Identity and edge",
+      "type": "link",
+      "url": "/d/identity-edge/identity-and-edge"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Databases and backups",
+      "type": "link",
+      "url": "/d/databases-backups/databases-and-backups"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Kubernetes and releases",
+      "type": "link",
+      "url": "/d/kubernetes-releases/kubernetes-and-releases"
+    },
+    {
+      "asDropdown": false,
+      "icon": "bell",
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Firing alerts",
+      "type": "link",
+      "url": "/alerting/list?search=World&view=state"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
       "title": "Telemetry for this world",
-      "tooltip": "Open traces, logs and profiles for the selected world",
       "type": "link",
       "url": "/d/telemetry/errantry-telemetry?orgId=1&var-world=$world"
     }
@@ -38,8 +103,8 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Hosts live",
-      "description": "Hosts whose row is dirty and live at the coordinator's last read. Set only while world cuts run (several hosts).",
+      "title": "Coordinator availability",
+      "description": "Registered coordinator replicas divided by desired replicas. No value while a world is intentionally stopped (desired replicas = 0).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -47,7 +112,7 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 6,
+        "w": 4,
         "h": 5
       },
       "targets": [
@@ -57,15 +122,33 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "mmo_hosts_live{role=\"coordinator\",namespace=~\"$namespace\"}",
+          "expr": "(sum by (namespace) (mmo_registered{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"}) / clamp_min(max by (namespace) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=~\"$namespace\",deployment=\"coordinator\"}), 1)) and on (namespace) (max by (namespace) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=~\"$namespace\",deployment=\"coordinator\"}) > 0)",
           "legendFormat": "{{namespace}}",
-          "refId": "A",
-          "range": true
+          "range": true,
+          "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -86,16 +169,16 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "World generation",
-      "description": "Rises on every world rollback.",
+      "title": "Coordinator tickers",
+      "description": "Exactly one registered coordinator must be the ticker.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "x": 6,
+        "x": 4,
         "y": 0,
-        "w": 6,
+        "w": 4,
         "h": 5
       },
       "targets": [
@@ -105,15 +188,35 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "mmo_world_generation{role=\"coordinator\",namespace=~\"$namespace\"}",
+          "expr": "sum by (namespace) (mmo_coordinator_is_ticker{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"}) and on (namespace) (sum by (namespace) (mmo_registered{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"}) > 0)",
           "legendFormat": "{{namespace}}",
-          "refId": "A",
-          "range": true
+          "range": true,
+          "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -134,16 +237,16 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Seconds since the last committed cut",
-      "description": "Blank until the first commit. WorldNoCommittedCut fires above 300 s.",
+      "title": "Hosts live / desired rows",
+      "description": "The coordinator's live dirty hosts compared with desired wanted+draining rows. Short drain/start differences are expected.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "x": 12,
+        "x": 8,
         "y": 0,
-        "w": 6,
+        "w": 4,
         "h": 5
       },
       "targets": [
@@ -153,10 +256,137 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "(time() - mmo_cut_last_committed_timestamp_seconds{role=\"coordinator\",namespace=~\"$namespace\"}) and mmo_cut_last_committed_timestamp_seconds{role=\"coordinator\",namespace=~\"$namespace\"} > 0",
+          "expr": "max by (namespace) (mmo_hosts_live{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"} and on (namespace,pod) (mmo_coordinator_is_ticker{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"} == 1))",
+          "legendFormat": "live {{namespace}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_fleet_wanted{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"}) + max by (namespace) (mmo_fleet_draining{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"})",
+          "legendFormat": "desired {{namespace}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Mailbox oldest age",
+      "description": "The ticker detaches stalled hosts after 15 s. WorldMailboxStalled fires above 30 s for 2 minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_coordinator_mailbox_oldest_ms{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"}) / 1000",
           "legendFormat": "{{namespace}}",
-          "refId": "A",
-          "range": true
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Last committed cut age",
+      "description": "WorldNoCommittedCut fires above 300 s only while the world has a live host.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "((time() - max by (namespace) (mmo_cut_last_committed_timestamp_seconds{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"})) and on (namespace) (max by (namespace) (mmo_cut_last_committed_timestamp_seconds{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"}) > 0))",
+          "legendFormat": "{{namespace}}",
+          "range": true,
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -200,18 +430,18 @@
       }
     },
     {
-      "id": 4,
+      "id": 6,
       "type": "stat",
-      "title": "Successions open",
-      "description": "Above 0 for 2 minutes raises WorldSuccessionStuck.",
+      "title": "Open successions / generation",
+      "description": "Successions should normally settle on the next committed cut. A generation rise is a world rollback.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "x": 18,
+        "x": 20,
         "y": 0,
-        "w": 6,
+        "w": 4,
         "h": 5
       },
       "targets": [
@@ -221,10 +451,21 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "mmo_successions_open{role=\"coordinator\",namespace=~\"$namespace\"}",
-          "legendFormat": "{{namespace}}",
-          "refId": "A",
-          "range": true
+          "expr": "max by (namespace) (mmo_successions_open{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"})",
+          "legendFormat": "open {{namespace}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_world_generation{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"})",
+          "legendFormat": "generation {{namespace}}",
+          "range": true,
+          "refId": "B"
         }
       ],
       "fieldConfig": {
@@ -242,7 +483,270 @@
               },
               {
                 "color": "red",
-                "value": 1
+                "value": 1000000000
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Fleet demand and reconciled objects",
+      "description": "Wanted/draining are coordinator rows; desired/deployments are the reconciler view. A short mismatch during a drain or cold start is expected.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_fleet_wanted{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"})",
+          "legendFormat": "wanted {{namespace}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_fleet_draining{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"})",
+          "legendFormat": "draining {{namespace}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_fleet_desired{cluster=~\"$cluster\",role=\"fleet\",namespace=~\"$namespace\"})",
+          "legendFormat": "reconciler desired {{namespace}}",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_fleet_deployments{cluster=~\"$cluster\",role=\"fleet\",namespace=~\"$namespace\"})",
+          "legendFormat": "host Deployments {{namespace}}",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Cut outcomes and host pressure",
+      "description": "Cut outcomes are coordinator rates. Tick pressure uses the worst registered host heartbeat (600‰ is the existing scale-up boundary).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 5,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (namespace,outcome) (rate(mmo_cuts_decided_total{cluster=~\"$cluster\",role=\"coordinator\",namespace=~\"$namespace\"}[5m])) * 60",
+          "legendFormat": "cuts {{outcome}}/min {{namespace}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_host_load_tick_permille{cluster=~\"$cluster\",role=\"host\",namespace=~\"$namespace\"} and on (namespace,pod) (mmo_registered{cluster=~\"$cluster\",role=\"host\",namespace=~\"$namespace\"} == 1)) / 10",
+          "legendFormat": "max tick % {{namespace}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/max tick/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 60
+                    },
+                    {
+                      "color": "red",
+                      "value": 90
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Fleet pass age",
+      "description": "A healthy reconciler pass must be newer than its 6 s readiness boundary. No value when the world/fleet is intentionally stopped.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 5,
+        "w": 4,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (namespace) (mmo_fleet_pass_age_ms{cluster=~\"$cluster\",role=\"fleet\",namespace=~\"$namespace\"}) / 1000 and on (namespace) (max by (namespace) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=~\"$namespace\",deployment=\"fleet\"}) > 0)",
+          "legendFormat": "{{namespace}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 6
               }
             ]
           }
@@ -264,204 +768,18 @@
       }
     },
     {
-      "id": 5,
-      "type": "timeseries",
-      "title": "Registered, per pod",
-      "description": "1 once a host registered or a coordinator listens.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 5,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "mmo_registered{namespace=~\"$namespace\"}",
-          "legendFormat": "{{namespace}}/{{pod}} ({{role}})",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 6,
-      "type": "timeseries",
-      "title": "Cut decisions per minute, by outcome",
-      "description": "World cuts the coordinator recorded; only with several hosts.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 5,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (namespace, outcome) (increase(mmo_cuts_decided_total{role=\"coordinator\",namespace=~\"$namespace\"}[1m]))",
-          "legendFormat": "{{namespace}} {{outcome}}",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 7,
-      "type": "timeseries",
-      "title": "Successions declared / settled",
-      "description": "Per 5 minutes.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 13,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(mmo_successions_declared_total{role=\"coordinator\",namespace=~\"$namespace\"}[5m])",
-          "legendFormat": "declared {{namespace}}",
-          "refId": "A",
-          "range": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(mmo_successions_settled_total{role=\"coordinator\",namespace=~\"$namespace\"}[5m])",
-          "legendFormat": "settled {{namespace}}",
-          "refId": "B",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 8,
-      "type": "timeseries",
-      "title": "World generation over time",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 13,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "mmo_world_generation{role=\"coordinator\",namespace=~\"$namespace\"}",
-          "legendFormat": "{{namespace}}",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 9,
-      "type": "timeseries",
-      "title": "Loop age, per pod",
-      "description": "Seconds since the process's main loop last passed; 0 before its first pass.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 21,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "mmo_loop_age_seconds{namespace=~\"$namespace\"}",
-          "legendFormat": "{{namespace}}/{{pod}} ({{role}})",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 10,
-      "type": "timeseries",
-      "title": "Container restarts (15 min)",
-      "description": "WorldPodRestartLoop fires above 3.",
+      "type": "stat",
+      "title": "Edge 5xx share",
+      "description": "Aggregate Traefik HTTP 5xx share. Open Traefik for service/router detail.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 21,
-        "w": 12,
+        "x": 20,
+        "y": 5,
+        "w": 4,
         "h": 8
       },
       "targets": [
@@ -471,59 +789,272 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\"}[15m])",
-          "legendFormat": "{{namespace}}/{{pod}} {{container}}",
-          "refId": "A",
-          "range": true
+          "expr": "100 * sum(rate(traefik_service_requests_total{cluster=~\"$cluster\",protocol=\"http\",code=~\"5..\"}[5m])) / clamp_min(sum(rate(traefik_service_requests_total{cluster=~\"$cluster\",protocol=\"http\"}[5m])), 1)",
+          "legendFormat": "5xx",
+          "range": true,
+          "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "percent",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
       }
     },
     {
       "id": 11,
-      "type": "logs",
-      "title": "Perf events",
+      "type": "timeseries",
+      "title": "Identity and site readiness",
+      "description": "Kubernetes workload readiness across login, Keycloak, site, panel and world web. Login end-to-end outcomes are an instrumentation gap.",
       "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
         "x": 0,
-        "y": 29,
-        "w": 24,
-        "h": 10
+        "y": 13,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "datasource": {
-            "type": "loki",
-            "uid": "${DS_LOKI}"
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "{namespace=~\"$namespace\"} |= \"[perf] event=\"",
-          "queryType": "range",
+          "expr": "((sum by (namespace) (kube_deployment_status_replicas_ready{cluster=~\"$cluster\",namespace=~\"login|keycloak|site|panel\"}) / clamp_min(sum by (namespace) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=~\"login|keycloak|site|panel\"}), 1)) and on (namespace) (sum by (namespace) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=~\"login|keycloak|site|panel\"}) > 0)) or ((sum by (namespace) (kube_deployment_status_replicas_ready{cluster=~\"$cluster\",namespace=~\"$namespace\",deployment=\"web\"}) / clamp_min(sum by (namespace) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=~\"$namespace\",deployment=\"web\"}), 1)) and on (namespace) (sum by (namespace) (kube_deployment_spec_replicas{cluster=~\"$cluster\",namespace=~\"$namespace\",deployment=\"web\"}) > 0))",
+          "legendFormat": "Deployment {{namespace}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (namespace) (kube_statefulset_status_replicas_ready{cluster=~\"$cluster\",namespace=~\"login|keycloak\"}) / clamp_min(sum by (namespace) (kube_statefulset_replicas{cluster=~\"$cluster\",namespace=~\"login|keycloak\"}), 1)",
+          "legendFormat": "StatefulSet {{namespace}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Database pods and latest backup success",
+      "description": "Readiness is workload-level only. The age is the latest successful pg-dump Job completion; exact CNPG engine/query metrics are a gap.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 13,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (namespace) (kube_pod_status_ready{cluster=~\"$cluster\",namespace=~\"postgres|pg-management\",pod!~\"pg-dump-.*\",condition=\"true\"}) / clamp_min(count by (namespace) (kube_pod_info{cluster=~\"$cluster\",namespace=~\"postgres|pg-management\",pod!~\"pg-dump-.*\"}), 1)",
+          "legendFormat": "pods ready {{namespace}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "time() - max by (namespace) (kube_job_status_completion_time{cluster=~\"$cluster\",namespace=~\"postgres|pg-management\",job_name=~\"pg-dump.*\"})",
+          "legendFormat": "backup age {{namespace}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/pods ready/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/backup age/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Backup bucket summary",
+      "description": "World and management backup buckets are per-bucket Garage exporter series. Open Garage S3 for storage detail.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 13,
+        "w": 4,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (bucket,tenant) (garage_bucket_bytes{cluster=~\"$cluster\",bucket=~\"world-backups|management-backups\"})",
+          "legendFormat": "{{tenant}}/{{bucket}}",
+          "range": true,
           "refId": "A"
         }
       ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
       "options": {
-        "showTime": true,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending",
-        "enableLogDetails": true,
-        "dedupStrategy": "none"
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 14,
+      "type": "text",
+      "title": "Triage links and current gaps",
+      "gridPos": {
+        "x": 20,
+        "y": 13,
+        "w": 4,
+        "h": 7
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Open the **World coordinator**, **Fleet and hosts**, **Identity and edge**, **Databases and backups**, or **Kubernetes and releases** dashboard from the header.\n\nExisting focused views: [Traefik](/d/traefik/traefik) and [Garage S3](/d/garage-s3/garage-s3-buckets).\n\n**Instrumentation gaps:** occupied-land moves, end-to-end login results/latency, exact Keycloak Micrometer series, CNPG engine/query/connection/WAL metrics, and historical release events. The dashboards do not infer these from logs, readiness, or counters with different semantics."
       }
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "tags": [
-    "world",
-    "errantry"
+    "errantry",
+    "operations",
+    "overview"
   ],
   "templating": {
     "list": [
@@ -546,22 +1077,35 @@
         "type": "datasource"
       },
       {
-        "current": {
-          "selected": false,
-          "text": "Loki",
-          "value": "loki"
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
         },
+        "query": {
+          "query": "label_values(kube_pod_info, cluster)",
+          "refId": "StandardVariableQuery"
+        },
+        "definition": "label_values(kube_pod_info, cluster)",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
         "hide": 0,
-        "includeAll": false,
-        "multi": false,
-        "name": "DS_LOKI",
-        "label": "logs",
-        "options": [],
-        "query": "loki",
-        "refresh": 1,
         "regex": "",
-        "skipUrlSync": false,
-        "type": "datasource"
+        "options": []
       },
       {
         "name": "namespace",
@@ -572,10 +1116,10 @@
           "uid": "${DS_PROMETHEUS}"
         },
         "query": {
-          "query": "label_values(mmo_registered, namespace)",
+          "query": "label_values(mmo_registered{cluster=~\"$cluster\",namespace=~\"world-.*\"}, namespace)",
           "refId": "StandardVariableQuery"
         },
-        "definition": "label_values(mmo_registered, namespace)",
+        "definition": "label_values(mmo_registered{cluster=~\"$cluster\",namespace=~\"world-.*\"}, namespace)",
         "current": {
           "selected": true,
           "text": [
@@ -603,12 +1147,12 @@
           "uid": "${DS_PROMETHEUS}"
         },
         "query": {
-          "query": "label_values(mmo_registered{namespace=~\"$namespace\"}, namespace)",
+          "query": "label_values(mmo_registered{cluster=~\"$cluster\",namespace=~\"$namespace\"}, namespace)",
           "refId": "StandardVariableQuery"
         },
-        "definition": "label_values(mmo_registered{namespace=~\"$namespace\"}, namespace)",
+        "definition": "label_values(mmo_registered{cluster=~\"$cluster\",namespace=~\"$namespace\"}, namespace)",
         "current": {
-          "selected": false,
+          "selected": true,
           "text": [
             "All"
           ],
@@ -628,12 +1172,24 @@
     ]
   },
   "time": {
-    "from": "now-3h",
+    "from": "now-6h",
     "to": "now"
   },
-  "timepicker": {},
+  "timepicker": {
+    "refresh_intervals": [
+      "30s",
+      "1m",
+      "5m"
+    ],
+    "time_options": [
+      "1h",
+      "6h",
+      "24h",
+      "7d"
+    ]
+  },
   "timezone": "browser",
-  "title": "Errantry world",
+  "title": "Errantry Operations Overview",
   "uid": "world",
-  "version": 1
+  "version": 2
 }

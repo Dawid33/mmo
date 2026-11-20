@@ -62,6 +62,7 @@ pub struct BlockProps {
     /// Non-`Same` drops only.
     pub(crate) drops: BTreeMap<u16, crate::BlockDrop>,
     pub(crate) names: BTreeMap<u16, String>,
+    pub(crate) creative_tabs: BTreeMap<u16, crate::CreativeTab>,
 }
 
 impl BlockProps {
@@ -122,6 +123,11 @@ impl BlockProps {
         self.names.get(&id.0).map(String::as_str)
     }
 
+    /// The block's editor-palette section, absent for air and liquids.
+    pub fn creative_tab(&self, id: BlockId) -> Option<crate::CreativeTab> {
+        self.creative_tabs.get(&id.0).copied()
+    }
+
     /// The block called `name` in the manifest.
     pub fn id_named(&self, name: &str) -> Option<BlockId> {
         self.names
@@ -169,6 +175,7 @@ pub fn block_props() -> &'static BlockProps {
         hardness: BTreeMap::new(),
         drops: BTreeMap::new(),
         names: BTreeMap::new(),
+        creative_tabs: BTreeMap::new(),
     };
     PROPS.get().unwrap_or(&DEFAULT)
 }

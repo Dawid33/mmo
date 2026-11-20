@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     Chunk, ChunkCoords, ClientId, ColumnCoords, ColumnGround, Ecs, EntityBundle, EntityKind,
-    GameData, PlayerRecord, Region, RegionId, Rollback, Tick,
+    GameData, PlayerRecord, Region, RegionId, RegionTrees, Rollback, Tick, WaterRegion,
 };
 
 /// Every terrain chunk's `chunk_terrain_term` (its coordinates + content
@@ -51,6 +51,10 @@ pub struct RegionMeta {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PortableRegion {
     pub meta: RegionMeta,
+    /// The full region-owned tree lifecycle state at this cut tick.
+    pub trees: RegionTrees,
+    /// Authoritative dynamic water. Empty means legacy static recipe water.
+    pub water: WaterRegion,
     /// Only the chunks whose term differs from the saved terms (all of them
     /// against empty terms).
     pub chunks: BTreeMap<ChunkCoords, Chunk>,
@@ -71,12 +75,16 @@ impl PortableRegion {
     pub fn merge(&mut self, newer: PortableRegion) {
         let PortableRegion {
             meta,
+            trees,
+            water,
             chunks,
             ground,
             entities,
             players,
         } = newer;
         self.meta = meta;
+        self.trees = trees;
+        self.water = water;
         self.chunks.extend(chunks);
         if self.ground.is_none() {
             self.ground = ground;
@@ -92,6 +100,8 @@ impl PortableRegion {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredRegion {
     pub meta: RegionMeta,
+    pub trees: RegionTrees,
+    pub water: WaterRegion,
     pub chunks: Vec<(ChunkCoords, Chunk)>,
     pub ground: Vec<(ColumnCoords, ColumnGround)>,
     pub entities: Vec<EntityBundle>,
@@ -103,6 +113,8 @@ impl From<PortableRegion> for StoredRegion {
     fn from(p: PortableRegion) -> Self {
         StoredRegion {
             meta: p.meta,
+            trees: p.trees,
+            water: p.water,
             chunks: p.chunks.into_iter().collect(),
             ground: p.ground.unwrap_or_default(),
             entities: p.entities,
@@ -186,6 +198,8 @@ impl Rollback {
         (
             PortableRegion {
                 meta,
+                trees: (*d.tree_lives).clone(),
+                water: d.water_region(),
                 chunks,
                 ground,
                 entities,
@@ -210,6 +224,8 @@ impl Rollback {
 pub fn restore_portable(id: RegionId, stored: StoredRegion) -> (Region, ChunkTerms) {
     let StoredRegion {
         meta,
+        trees,
+        water,
         chunks,
         ground,
         entities,
@@ -232,6 +248,8 @@ pub fn restore_portable(id: RegionId, stored: StoredRegion) -> (Region, ChunkTer
     rb.seed_terrain_genesis(chunks);
     rb.seed_ground_genesis(ground);
     rb.seed_water_genesis(water_bodies);
+    rb.seed_trees_restore(trees);
+    rb.seed_water_restore(id, water);
     {
         let d = &mut rb.data;
         for (k, v) in designations {
@@ -313,8 +331,22 @@ pub fn classify(d: &GameData) {
         chunk_index: _,
         // Persist: `PortableRegion::ground`, first snapshot only.
         ground: _,
+        // Persist: the full region-owned lifecycle blob.
+        tree_lives: _,
+        // Derive on load from `tree_lives`.
+        tree_due: _,
+        tree_roots: _,
         // Persist: `RegionMeta::water_bodies` (labelled at genesis only).
         water_bodies: _,
+        // Persist: `PortableRegion::water`.
+        water_chunks: _,
+        water_cells: _,
+        // Persist scheduler masks/cursors and signed recipe-volume delta.
+        water_hot: _,
+        water_fair: _,
+        water_fair_oldest_counts: _,
+        water_scheduler_meta: _,
+        water_volume_delta: _,
         // Persist: `RegionMeta`.
         designations: _,
         constructed: _,

@@ -24,7 +24,7 @@
 //!   (default [`DEFAULT_ONLINE_WORLD`]) with the ticket's JWT, then start an
 //!   adventure as `world` does (or resume the account's). `just run-online`
 //!   starts the login service and a jwt server and runs this. The login goes
-//!   through the Play online flow (`login::flow`: its `login-http` worker, the
+//!   through the Multiplayer flow (`login::flow`: its `login-http` worker, the
 //!   kept refresh token, the ticket's [`crate::session::PendingJoin`]): the
 //!   scenario only presses its buttons ([`LoginIntent`]s), no password
 //!   involved. A refused kept login, a failed login or a failed join prints
@@ -379,10 +379,11 @@ impl DebugLaunchPlugin {
     /// is missing (like a bad command line, before any window opens).
     pub fn from_env(scenario: DebugScenario) -> Result<Self, String> {
         if matches!(scenario, DebugScenario::Online { .. }) {
-            online_login_from(
-                crate::login::login_url().as_deref(),
-                crate::login::store::load_refresh().as_deref(),
-            )?;
+            let service = crate::login::login_url();
+            let kept = service
+                .as_deref()
+                .and_then(crate::login::store::load_refresh_for);
+            online_login_from(service.as_deref(), kept.as_deref())?;
         }
         Ok(Self { scenario })
     }
@@ -505,10 +506,11 @@ fn boot(
             ..
         } => (*reset, *port, *join, prefab.clone(), town.clone()),
         DebugScenario::Online { world } => {
-            // The Play online flow from its login screen: `drive_online_login` presses its buttons.
+            // The Multiplayer flow from the menu: `drive_online_login` presses
+            // the same button as a player.
             info!("[debug] logging in to join the login service's world {world}");
             launch.phase = Phase::Online(OnlineStep::Login);
-            next.set(AppState::Login);
+            next.set(AppState::MainMenu);
             return;
         }
     };
@@ -632,7 +634,7 @@ fn online_login_verdict(
     if state == AppState::Worlds && logged_in {
         return Some(Ok(()));
     }
-    if state == AppState::Login && !logged_in {
+    if state == AppState::Worlds && !logged_in {
         return Some(Err("login failed: the kept login was refused".into()));
     }
     None
@@ -672,13 +674,13 @@ fn drive_online_login(
     }
     match step {
         OnlineStep::Login => {
-            if state != AppState::Login {
-                return; // the login screen first: its answer moves on only from there
+            if state != AppState::MainMenu {
+                return;
             }
-            // Entering the login screens by a state change sends nothing on native: the
-            // menu's Play online is what refreshes the kept login, so press it.
+            // Entering the browser through Multiplayer refreshes a kept login
+            // silently while the public world list loads.
             info!("[debug] starting from the kept login");
-            intents.write(LoginIntent::PlayOnline);
+            intents.write(LoginIntent::Multiplayer);
             launch.phase = Phase::Online(OnlineStep::Presented);
         }
         OnlineStep::Presented => launch.phase = Phase::Online(OnlineStep::LoggingIn),

@@ -184,7 +184,7 @@ impl Rollback {
     /// Teleports `client`'s body onto the standable tile nearest `at` in
     /// its column, else over the region's spawn column (`CreateClient`'s
     /// spawn rule). Keeps the body's rotation.
-    fn place_body_safe(&mut self, client: ClientId, at: TilePos) {
+    pub(crate) fn place_body_safe(&mut self, client: ClientId, at: TilePos) {
         let Some(key) = self.data.player_entites.get(&client).copied() else {
             return;
         };
@@ -514,7 +514,7 @@ fn reached(p: TilePos, feet: Vector) -> bool {
 /// `t` with its level clamped to its column's scan range
 /// ([`crate::column_scan_range`]); `None` when its column lies outside the
 /// region (untrusted input).
-fn clamp_tile(src: &impl TileSource, t: TilePos) -> Option<TilePos> {
+pub(crate) fn clamp_tile(src: &impl TileSource, t: TilePos) -> Option<TilePos> {
     let n = REGION_BLOCKS as i32;
     ((0..n).contains(&t[0]) && (0..n).contains(&t[2])).then(|| {
         let (lo, hi) = crate::column_scan_range(src, [t[0], t[2]]);

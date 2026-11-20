@@ -94,9 +94,14 @@ module "login" {
   issuer_host_alias_ip = var.issuer_host_alias_ip
   database             = var.use_management_db ? data.terraform_remote_state.pg_management.outputs.databases["login"] : null
   own_postgres         = var.own_postgres
+  memory_limits = {
+    login    = "256Mi"
+    postgres = "256Mi"
+  }
   telemetry = {
-    environment = "production"
-    cluster     = "orion"
+    environment     = "production"
+    cluster         = "orion"
+    profile_enabled = true
   }
 }
 

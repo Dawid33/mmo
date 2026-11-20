@@ -45,7 +45,7 @@ use super::ClientRequests;
 use super::arrival_tabs;
 use super::bridge::{LocalBody, SimEntity, SimKind};
 use super::commander::CommanderCamera;
-use super::commander::adventure::ClientPlayMode;
+use super::commander::adventure::{ClientPlayMode, EditorState};
 use super::commander::designate::{DesignateState, DragReadout, TOOL_KEYS, Tool};
 use super::commander::follow::{Follow, FollowTarget};
 use super::commander::height::HeightGrid;
@@ -66,7 +66,7 @@ use crate::session::{
 /// Closes the world map if it is open, else opens / closes the menu —
 /// unless a designation is in progress, which it cancels instead.
 pub const MENU_KEY: KeyCode = KeyCode::Escape;
-/// Opens / closes the world map (opening it closes the menu).
+/// Opens the inventory on its Map tab (or selects Map if it is already open).
 pub const MAP_KEY: KeyCode = KeyCode::KeyM;
 /// Held, opens the tool wheel at the pointer ([`tool_wheel`]).
 pub const WHEEL_KEY: KeyCode = KeyCode::KeyQ;
@@ -205,6 +205,9 @@ pub enum UiAction {
     LegendsMore,
     /// A Legends line clicked (index into `LegendsState::lines`).
     LegendsLine(i32),
+    /// The inventory outside-panel press requests one authoritative cursor
+    /// throw. No client-side stack data accompanies it.
+    ThrowCursorStack,
 }
 
 /// Which modal game screens are open. The client keeps them exclusive.
@@ -264,19 +267,6 @@ impl Screens {
         }
     }
 
-    /// [`MAP_KEY`].
-    pub fn toggle_map(self) -> Self {
-        if self.map {
-            Self {
-                map: false,
-                wheel: false,
-                ..self
-            }
-        } else {
-            Self::open_map()
-        }
-    }
-
     pub fn open_map() -> Self {
         Self {
             map: true,
@@ -314,12 +304,6 @@ impl Screens {
         }
     }
 
-    /// [`MAP_KEY`] with the arrival map `modal`: nothing (the map is up
-    /// whenever the Esc menu is not).
-    pub fn toggle_map_in(self, modal: bool) -> Self {
-        if modal { self } else { self.toggle_map() }
-    }
-
     /// The arrival map stays up while `modal` unless the Esc menu is over it:
     /// Close and the rest leave it open.
     pub fn held(self, modal: bool) -> Self {
@@ -343,6 +327,10 @@ fn map_modal(in_play: Option<&InPlay>, world_map: &WorldMapState) -> bool {
 /// Slot presses on the inventory screen: (in the chest, index within its
 /// inventory, right button).
 struct InventoryClicks(Rc<RefCell<Vec<(bool, i32, bool)>>>);
+
+/// An editor palette press as delivered by Slint. The held stack bit is
+/// advisory; the action system uses the authoritative inventory projection.
+struct EditorPaletteClicks(Rc<RefCell<Vec<(i32, bool, bool, bool)>>>);
 
 /// The sim slot a screen press names: container slots are `Container(i)`,
 /// the player's are `Player(i)` (hotbar `0..9`, main grid `9..36`).
@@ -588,7 +576,9 @@ impl Plugin for SlintOverlayPlugin {
             Update,
             (
                 sync_inventory_screen.before(menu_keys),
+                editor_search_keys,
                 inventory_clicks,
+                editor_palette_clicks,
                 // Before every commander input system (the chain starts
                 // at `minimap_pointer`, `designate_keys` is in it), so
                 // `CursorPolicy::ui_modal` holds this frame and one Esc
@@ -628,6 +618,7 @@ pub struct HudItems {
 pub fn drain_ui_updates(
     updates: Res<UiUpdates>,
     mut items: ResMut<HudItems>,
+    mut editor: ResMut<EditorState>,
     mut cursor_policy: ResMut<CursorPolicy>,
     mut play_mode: Option<ResMut<ClientPlayMode>>,
 ) {
@@ -639,6 +630,11 @@ pub fn drain_ui_updates(
             game::UiUpdate::Hotbar(hotbar) => items.hotbar = hotbar,
             game::UiUpdate::Inventory(view) => items.inventory = view,
             game::UiUpdate::Mining(m) => items.mining = m,
+            game::UiUpdate::Editor { active, allowed } => {
+                editor.active = active;
+                editor.allowed = allowed;
+                editor.allowed_known = true;
+            }
             game::UiUpdate::PlayMode(mode) => {
                 if let Some(play_mode) = play_mode.as_mut() {
                     play_mode.set_if_neq(ClientPlayMode(mode));
@@ -693,14 +689,16 @@ fn push_hud_state(
     items: Option<Res<HudItems>>,
     first_person: Option<Res<super::commander::first_person::FirstPerson>>,
     adventure: Option<Res<ClientPlayMode>>,
+    editor: Option<Res<EditorState>>,
     mut hotbar_shown: crate::session::SessionLocal<Option<game::HotbarView>>,
 ) {
     let Some(hud) = hud else { return };
     let ui = hud.overlay.ui();
 
     // The hotbar strip and the mining bar: Adventure first person only.
-    let hotbar_on =
-        adventure.is_some_and(|m| m.adventure()) && first_person.as_ref().is_some_and(|f| f.on);
+    let hotbar_on = (adventure.is_some_and(|m| m.adventure())
+        || editor.as_ref().is_some_and(|e| e.active))
+        && first_person.as_ref().is_some_and(|f| f.on);
     let third_person = first_person.as_ref().and_then(|f| f.body_view())
         == Some(super::commander::first_person::BodyView::Third);
     let hotbar_shown = hotbar_shown.get();
@@ -816,6 +814,67 @@ fn inventory_clicks(
     }
 }
 
+fn editor_palette_clicks(
+    clicks: Option<NonSend<EditorPaletteClicks>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    items: Res<HudItems>,
+    editor: Res<EditorState>,
+    player: Option<Res<super::LocalPlayer>>,
+    events: Option<Res<super::GameEvents>>,
+) {
+    let Some(clicks) = clicks else { return };
+    let pressed: Vec<_> = clicks.0.borrow_mut().drain(..).collect();
+    let (Some(Some(player)), Some(events)) = (player.map(|p| p.0), events) else {
+        return;
+    };
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    for (item, right, callback_shift, _held) in pressed {
+        if !editor.active || !items.inventory.open || items.inventory.container.is_some() {
+            continue;
+        }
+        let Ok(item) = u16::try_from(item) else {
+            continue;
+        };
+        let item = game::ItemId(item);
+        if !game::item_exists(item) {
+            continue;
+        }
+        let action = if items.inventory.cursor.is_some() {
+            game::UiAction::EditorTrash
+        } else if shift || callback_shift {
+            game::UiAction::EditorGive {
+                item,
+                count: game::MAX_STACK,
+            }
+        } else {
+            game::UiAction::EditorTake {
+                item,
+                count: if right { 1 } else { game::MAX_STACK },
+            }
+        };
+        let _ = events.0.send(game::GameEventKind::UiAction(player, action));
+    }
+}
+
+fn editor_search_keys(
+    mut events: MessageReader<KeyboardInput>,
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
+    mut entry: ResMut<crate::renderer::text_entry::TextEntry>,
+) {
+    if !entry.palette {
+        return;
+    }
+    let escape = events.read().any(|event| {
+        event.state == ButtonState::Pressed && matches!(event.logical_key, Key::Escape)
+    });
+    if escape {
+        if let Some(slint) = slint {
+            slint.overlay.ui().invoke_inventory_drop_focus();
+        }
+        entry.palette = false;
+    }
+}
+
 /// One sim slot as the Slint item slot.
 pub fn item_slot(slot: &Option<game::SlotView>) -> slint_ui::ItemSlot {
     match slot {
@@ -840,6 +899,55 @@ fn item_model(slots: &[Option<game::SlotView>]) -> ModelRc<slint_ui::ItemSlot> {
     ))
 }
 
+fn palette_tab(tab: Option<game::CreativeTab>) -> i32 {
+    match tab {
+        Some(game::CreativeTab::Natural) => 1,
+        Some(game::CreativeTab::Wood) => 2,
+        Some(game::CreativeTab::Building) => 3,
+        Some(game::CreativeTab::Colour) => 4,
+        Some(game::CreativeTab::Functional) => 5,
+        None => 6,
+    }
+}
+
+fn palette_model(tab: i32, search: &str) -> ModelRc<slint_ui::CreativePaletteEntry> {
+    let search = search.trim().to_ascii_lowercase();
+    let mut entries: Vec<slint_ui::CreativePaletteEntry> = game::palette_entries()
+        .into_iter()
+        .filter_map(|entry| {
+            let entry_tab = palette_tab(entry.tab);
+            if tab != 0 && tab != entry_tab {
+                return None;
+            }
+            let name = entry.name;
+            (search.is_empty() || name.to_ascii_lowercase().contains(&search)).then(|| {
+                slint_ui::CreativePaletteEntry {
+                    item: i32::from(entry.item.0),
+                    name: super::look_target::display_name(name).into(),
+                    icon: super::item_icons::icon(entry.item),
+                    tab: entry_tab,
+                }
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        a.name
+            .to_string()
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_string().to_ascii_lowercase())
+    });
+    ModelRc::new(VecModel::from(entries))
+}
+
+#[derive(Default, PartialEq, Eq, Clone)]
+struct EditorPaletteShown {
+    active: bool,
+    open: bool,
+    chest: bool,
+    tab: i32,
+    search: String,
+}
+
 /// The sim's inventory screen → the game UI: open state, slot models (only
 /// when the projection changed), the held stack and the pointer it follows.
 /// Each opening puts the pointer in the middle of the window, once the grab
@@ -848,9 +956,13 @@ fn item_model(slots: &[Option<game::SlotView>]) -> ModelRc<slint_ui::ItemSlot> {
 fn sync_inventory_screen(
     slint: Option<NonSend<SlintLayer<GameUi>>>,
     items: Res<HudItems>,
+    editor: Res<EditorState>,
+    mut entry: ResMut<crate::renderer::text_entry::TextEntry>,
     mut window: Query<(&mut Window, &bevy::window::CursorOptions), With<PrimaryWindow>>,
     mut shown: crate::session::SessionLocal<Option<game::InventoryView>>,
     mut center_pending: crate::session::SessionLocal<bool>,
+    mut was_open: crate::session::SessionLocal<bool>,
+    mut palette_shown: crate::session::SessionLocal<EditorPaletteShown>,
 ) {
     let Some(slint) = slint else { return };
     let ui = slint.overlay.ui();
@@ -858,6 +970,47 @@ fn sync_inventory_screen(
     if ui.get_inventory_open() != view.open {
         ui.set_inventory_open(view.open);
         *center_pending.get() = view.open;
+        if view.open {
+            ui.invoke_inventory_take_focus();
+        } else {
+            ui.invoke_inventory_drop_focus();
+        }
+    }
+    if *was_open.get() && !view.open && ui.get_inventory_tab() != 0 {
+        ui.set_inventory_tab(0);
+    }
+    *was_open.get() = view.open;
+    let editor_active = editor.active;
+    if ui.get_editor_active() != editor_active {
+        ui.set_editor_active(editor_active);
+    }
+    if ui.get_editor_search_focused()
+        && (!view.open || !editor_active || view.container.is_some() || ui.get_inventory_tab() != 0)
+    {
+        ui.invoke_inventory_drop_focus();
+    }
+    let palette_focus =
+        view.open && editor_active && view.container.is_none() && ui.get_editor_search_focused();
+    if entry.palette != palette_focus {
+        entry.palette = palette_focus;
+    }
+    let current = EditorPaletteShown {
+        active: editor_active,
+        open: view.open,
+        chest: view.container.is_some(),
+        tab: ui.get_editor_tab(),
+        search: ui.get_editor_search().to_string(),
+    };
+    let shown_palette = palette_shown.get();
+    if *shown_palette != current {
+        if current.active && current.open && !current.chest {
+            ui.set_editor_palette(palette_model(current.tab, &current.search));
+        } else {
+            ui.set_editor_palette(ModelRc::new(VecModel::from(Vec::<
+                slint_ui::CreativePaletteEntry,
+            >::new())));
+        }
+        *shown_palette = current;
     }
     if !view.open {
         *shown.get() = None;
@@ -931,7 +1084,17 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_inventory_slot_pressed(move |container, index, right| {
         queue.borrow_mut().push((container, index, right))
     });
+    let queue = actions.clone();
+    ui.on_inventory_throw_cursor_stack(move || {
+        queue.borrow_mut().push(UiAction::ThrowCursorStack);
+    });
+    let palette_clicks = Rc::new(RefCell::new(Vec::new()));
+    let queue = palette_clicks.clone();
+    ui.on_editor_palette_pressed(move |item, right, shift, held| {
+        queue.borrow_mut().push((item, right, shift, held))
+    });
     world.insert_non_send(InventoryClicks(clicks));
+    world.insert_non_send(EditorPaletteClicks(palette_clicks));
     world.insert_non_send(GameUiActions(actions));
     super::chat::ui::connect(ui, world);
     #[cfg(feature = "dev_ui")]
@@ -1287,17 +1450,20 @@ fn menu_keys(
     status: Res<HudStatus>,
     in_play: Option<Res<InPlay>>,
     items: Res<HudItems>,
+    time: Res<Time>,
     (player, game): (
         Option<Res<super::LocalPlayer>>,
         Option<Res<super::GameEvents>>,
     ),
 ) {
     let Some(slint) = slint else { return };
+    let player = player.as_deref().and_then(|p| p.0);
+    let game = game.as_deref();
     // Esc closes the inventory: the sim owns it, so ask the sim to. Close,
     // never toggle: `HudItems` may lag the sim, and a toggle on a stale view
     // would reopen a screen just closed.
     if items.inventory.open && keys.just_pressed(MENU_KEY) {
-        if let (Some(Some(player)), Some(game)) = (player.map(|p| p.0), game) {
+        if let (Some(player), Some(game)) = (player, game) {
             let _ = game.0.send(game::GameEventKind::UiAction(
                 player,
                 game::UiAction::CloseInventory,
@@ -1328,7 +1494,31 @@ fn menu_keys(
         }
     }
     if keys.just_pressed(MAP_KEY) {
-        to = to.toggle_map_in(modal);
+        if modal {
+            to = to.held(true);
+        } else {
+            ui.set_inventory_tab(2);
+            if items.inventory.open {
+                ui.invoke_inventory_take_focus();
+            }
+            to.menu = false;
+            to.map = false;
+            to.wheel = false;
+            to.settings = false;
+            to.encyclopedia = false;
+            if let (Some(player), Some(game)) = (player, game) {
+                let _ = game.0.send(game::GameEventKind::UiAction(
+                    player,
+                    game::UiAction::OpenInventory,
+                ));
+            }
+            if !items.inventory.open {
+                if let Some(policy) = policy.as_mut() {
+                    policy.inventory_opening = Some(time.elapsed());
+                }
+            }
+            keys.clear_just_pressed(MAP_KEY);
+        }
     }
     let in_play = in_play.is_none_or(|e| e.0);
     set_screens(
@@ -1394,11 +1584,18 @@ fn apply_ui_actions(
     mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
     mut in_play: Option<ResMut<InPlay>>,
     mut history: ResMut<HistoryView>,
+    time: Res<Time>,
+    (player, game): (
+        Option<Res<super::LocalPlayer>>,
+        Option<Res<super::GameEvents>>,
+    ),
 ) {
     let (Some(actions), Some(slint)) = (actions, slint) else {
         return;
     };
     let ui = slint.overlay.ui();
+    let player = player.as_deref().and_then(|p| p.0);
+    let game = game.as_deref();
     for action in actions.0.borrow_mut().drain(..) {
         let is_in_play = in_play.as_ref().is_none_or(|e| e.0);
         let mut to = Screens::of(ui);
@@ -1557,7 +1754,40 @@ fn apply_ui_actions(
                     arrival_tabs::select_map_tile(ui, tile);
                 }
             }
-            UiAction::OpenMap => to = Screens::open_map(),
+            UiAction::OpenMap => {
+                if is_in_play {
+                    ui.set_inventory_tab(2);
+                    if ui.get_inventory_open() {
+                        ui.invoke_inventory_take_focus();
+                    }
+                    if let (Some(player), Some(game)) = (player, game) {
+                        let _ = game.0.send(game::GameEventKind::UiAction(
+                            player,
+                            game::UiAction::OpenInventory,
+                        ));
+                    }
+                    to.menu = false;
+                    to.map = false;
+                    to.wheel = false;
+                    to.settings = false;
+                    to.encyclopedia = false;
+                    if !ui.get_inventory_open() {
+                        if let Some(policy) = policy.as_mut() {
+                            policy.inventory_opening = Some(time.elapsed());
+                        }
+                    }
+                } else {
+                    to = Screens::open_map();
+                }
+            }
+            UiAction::ThrowCursorStack => {
+                if let (Some(player), Some(game)) = (player, game) {
+                    let _ = game.0.send(game::GameEventKind::UiAction(
+                        player,
+                        game::UiAction::ThrowCursorStack,
+                    ));
+                }
+            }
             UiAction::CloseMap => to.map = false,
             UiAction::CloseMenu => to.menu = false,
             UiAction::MainMenu => {
@@ -1766,6 +1996,7 @@ fn tool_wheel(
     mut level: Option<ResMut<WorkingLevel>>,
     mirror: Option<Res<TileMirror>>,
     mode: Option<Res<ClientPlayMode>>,
+    editor: Option<Res<EditorState>>,
     mut policy: Option<ResMut<CursorPolicy>>,
     mut world_map: ResMut<WorldMapState>,
     status: Res<HudStatus>,
@@ -1784,7 +2015,8 @@ fn tool_wheel(
     // tool hotkeys.
     let available = designate.is_some()
         && mirror.as_ref().is_some_and(|m| m.region().is_some())
-        && !mode.as_ref().is_some_and(|m| m.adventure());
+        && !mode.as_ref().is_some_and(|m| m.adventure())
+        && !editor.as_ref().is_some_and(|e| e.active);
     let free = policy
         .as_ref()
         .is_none_or(|p| !p.blocks_game() && !p.ui_pointer);
@@ -1865,6 +2097,7 @@ struct ToolbarParams<'w, 's> {
     cam: Option<Res<'w, CommanderCamera>>,
     mirror: Option<Res<'w, TileMirror>>,
     mode: Option<Res<'w, ClientPlayMode>>,
+    editor: Option<Res<'w, EditorState>>,
     follow: Option<Res<'w, Follow>>,
     top_down: Option<Res<'w, super::commander::top_down::TopDown>>,
     window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
@@ -1878,7 +2111,8 @@ struct ToolbarParams<'w, 's> {
 fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     // No home region (not joined yet) or Adventure: no tools, as with the
     // hotkeys.
-    let adventure = p.mode.as_ref().is_some_and(|m| m.adventure());
+    let adventure = p.mode.as_ref().is_some_and(|m| m.adventure())
+        || p.editor.as_ref().is_some_and(|e| e.active);
     if ui.get_adventure() != adventure {
         ui.set_adventure(adventure);
     }

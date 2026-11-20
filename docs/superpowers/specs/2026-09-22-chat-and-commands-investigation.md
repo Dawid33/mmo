@@ -1,6 +1,9 @@
 # In-game chat + slash commands (Minecraft-like): investigation
 
-Status: investigation only, 2026-09-22. Nothing built.
+Status: investigation, 2026-09-22; superseded for the client-local MVP by the editor/chat
+implementation of 2026-11-20. A session-local Slint chat log, parser and typing gate now exist,
+including local editor commands. Ordinary chat still has no transport or journal. The networked
+manager-thread design below remains the direction for shared chat, not current behavior.
 
 ## TL;DR
 

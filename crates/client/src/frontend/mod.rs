@@ -40,14 +40,18 @@ use crate::session::{
 /// What a frontend button asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrontendAction {
+    SinglePlayer,
+    Multiplayer,
+    Settings,
+    LogIn,
+    RefreshWorlds,
+    PickRegion(String),
+    SelectWorld(String),
+    Search(String),
     NewWorld,
     LoadWorld,
     Exit,
     Back,
-    /// The browser menu's Join server, with the address in [`JoinAddress`].
-    JoinServer,
-    /// The main menu's Play online.
-    PlayOnline,
     /// The login screen's Sign in (the identity provider's device sign-in),
     /// Open browser (its page again) and Cancel.
     SignIn,
@@ -63,6 +67,7 @@ pub enum FrontendAction {
 pub enum ActionEffect {
     Goto(AppState),
     Exit,
+    Browser,
     /// Handed to the login flow (`login::flow::LoginIntent`).
     Login,
 }
@@ -70,14 +75,8 @@ pub enum ActionEffect {
 /// Actions queued by Slint callbacks, applied by [`apply_frontend_actions`].
 struct FrontendActions(Rc<RefCell<Vec<FrontendAction>>>);
 
-/// The address the last Join server named (the Slint callback's argument).
-struct JoinAddress(Rc<RefCell<String>>);
-
-/// Whether the menu is the browser's (the browser cannot make or keep worlds).
-pub const JOIN_ONLY: bool = cfg!(target_arch = "wasm32");
-/// Direct server addresses are a local-development escape hatch. Release
-/// browser builds use the login-backed Play online flow instead.
-pub const DEBUG_DIRECT_JOIN: bool = cfg!(all(target_arch = "wasm32", debug_assertions));
+pub const SINGLE_PLAYER_AVAILABLE: bool = cfg!(not(target_arch = "wasm32"));
+pub const CAN_EXIT: bool = cfg!(not(target_arch = "wasm32"));
 
 /// Whether any saved world exists, refreshed on entering the main menu.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,19 +87,79 @@ pub const LOADING_SCREEN: i32 = 4;
 /// `FrontendUi.screen` of the login screen and the online world list.
 pub const LOGIN_SCREEN: i32 = 5;
 pub const WORLDS_SCREEN: i32 = 6;
+pub const SETTINGS_SCREEN: i32 = 7;
+
+/// The server browser's durable selection. It outlives world sessions, like
+/// the login, so opening another world does not reset the player's filters.
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+pub struct Browser {
+    pub region: String,
+    pub selected: Option<String>,
+    pub search: String,
+}
+
+impl Default for Browser {
+    fn default() -> Self {
+        Self {
+            region: login_api::DEFAULT_REGION.to_string(),
+            selected: None,
+            search: String::new(),
+        }
+    }
+}
+
+pub fn regions(worlds: &[login_api::WorldEntry]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let rest: BTreeSet<&str> = worlds
+        .iter()
+        .map(|world| world.region.as_str())
+        .filter(|region| *region != login_api::DEFAULT_REGION)
+        .collect();
+    let mut result = vec![login_api::DEFAULT_REGION.to_string()];
+    result.extend(rest.into_iter().map(str::to_string));
+    result
+}
+
+pub fn shown_worlds(
+    worlds: &[login_api::WorldEntry],
+    region: &str,
+    search: &str,
+) -> Vec<(String, String)> {
+    let search = search.to_lowercase();
+    worlds
+        .iter()
+        .filter(|world| {
+            world.status == login_api::WorldStatus::Open
+                && world.region == region
+                && world.name.to_lowercase().contains(&search)
+        })
+        .map(|world| (world.id.clone(), world.name.clone()))
+        .collect()
+}
+
+pub fn selected_index(shown: &[(String, String)], selected: Option<&str>) -> i32 {
+    selected
+        .and_then(|id| shown.iter().position(|world| world.0 == id))
+        .map_or(-1, |index| index as i32)
+}
 
 /// The `FrontendUi.screen` an [`AppState`] shows (`InWorld` shows the
 /// starting screen: the layer is visible there only until the world map
 /// arrives, and hidden once in play).
 pub fn screen_index(state: AppState) -> i32 {
     match state {
-        AppState::MainMenu => 0,
+        AppState::MainMenu | AppState::SinglePlayer => 0,
         AppState::MapGenerator => 1,
         AppState::LoadWorld => 2,
         AppState::Starting | AppState::InWorld => 3,
         AppState::Login => LOGIN_SCREEN,
         AppState::Worlds => WORLDS_SCREEN,
+        AppState::Settings => SETTINGS_SCREEN,
     }
+}
+
+pub fn menu_page(state: AppState) -> i32 {
+    i32::from(state == AppState::SinglePlayer)
 }
 
 pub const STARTING_SERVER: &str = "Starting server\u{2026}";
@@ -133,24 +192,52 @@ pub fn starting_lines(status: &str, launched: bool, in_world: bool, failed: bool
 /// [`apply_frontend_actions`] adjusts that.)
 pub fn action_target(action: &FrontendAction) -> ActionEffect {
     match action {
+        FrontendAction::SinglePlayer => ActionEffect::Goto(AppState::SinglePlayer),
         FrontendAction::NewWorld => ActionEffect::Goto(AppState::MapGenerator),
         FrontendAction::LoadWorld => ActionEffect::Goto(AppState::LoadWorld),
         FrontendAction::Back => ActionEffect::Goto(AppState::MainMenu),
-        FrontendAction::JoinServer => ActionEffect::Goto(AppState::Starting),
         FrontendAction::Exit => ActionEffect::Exit,
-        FrontendAction::PlayOnline
+        FrontendAction::Multiplayer
+        | FrontendAction::Settings
+        | FrontendAction::LogIn
+        | FrontendAction::RefreshWorlds
         | FrontendAction::SignIn
         | FrontendAction::OpenBrowser
         | FrontendAction::CancelSignIn
         | FrontendAction::JoinWorld(_)
         | FrontendAction::Logout => ActionEffect::Login,
+        FrontendAction::PickRegion(_)
+        | FrontendAction::SelectWorld(_)
+        | FrontendAction::Search(_) => ActionEffect::Browser,
+    }
+}
+
+pub fn allowed_on(action: &FrontendAction, single_player: bool, can_exit: bool) -> bool {
+    match action {
+        FrontendAction::SinglePlayer | FrontendAction::NewWorld | FrontendAction::LoadWorld => {
+            single_player
+        }
+        FrontendAction::Exit => can_exit,
+        _ => true,
+    }
+}
+
+pub fn back_target(state: AppState, return_to: AppState) -> AppState {
+    match state {
+        AppState::MapGenerator | AppState::LoadWorld => AppState::SinglePlayer,
+        AppState::SinglePlayer | AppState::Worlds | AppState::Settings => AppState::MainMenu,
+        AppState::Login => return_to,
+        AppState::MainMenu | AppState::Starting | AppState::InWorld => AppState::MainMenu,
     }
 }
 
 /// The login call an action makes.
 pub fn login_intent(action: &FrontendAction) -> Option<LoginIntent> {
     Some(match action {
-        FrontendAction::PlayOnline => LoginIntent::PlayOnline,
+        FrontendAction::Multiplayer => LoginIntent::Multiplayer,
+        FrontendAction::Settings => LoginIntent::Settings,
+        FrontendAction::LogIn => LoginIntent::LogIn,
+        FrontendAction::RefreshWorlds => LoginIntent::RefreshWorlds,
         FrontendAction::SignIn => LoginIntent::SignIn,
         FrontendAction::OpenBrowser => LoginIntent::OpenBrowser,
         FrontendAction::CancelSignIn => LoginIntent::CancelSignIn,
@@ -169,12 +256,13 @@ impl Plugin for FrontendPlugin {
                 .order(FRONTEND_LAYER_ORDER)
                 .with_init(connect_frontend),
         )
+        .init_resource::<Browser>()
         .init_resource::<CanLoad>()
         .init_resource::<LastSessionError>()
         .init_resource::<StartingLog>()
         .add_systems(OnEnter(AppState::MainMenu), refresh_can_load)
         .add_session_reset::<loading::LoadingCover>()
-        // Play online (`login::flow`): the login outlives world sessions, so
+        // Multiplayer (`login::flow`): the login outlives world sessions, so
         // none of it is session-reset.
         .add_message::<LoginIntent>()
         .add_systems(Startup, crate::login::flow::setup_login)
@@ -218,22 +306,42 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
     ui.on_load_world(push(FrontendAction::LoadWorld));
     ui.on_exit(push(FrontendAction::Exit));
     ui.on_back(push(FrontendAction::Back));
-    let address = Rc::new(RefCell::new(String::new()));
+    ui.on_single_player(push(FrontendAction::SinglePlayer));
+    ui.on_multiplayer(push(FrontendAction::Multiplayer));
+    ui.on_settings(push(FrontendAction::Settings));
+    ui.on_settings_log_in(push(FrontendAction::LogIn));
+    ui.on_settings_log_out(push(FrontendAction::Logout));
+    ui.on_world_refresh(push(FrontendAction::RefreshWorlds));
     {
-        let (queue, address) = (actions.clone(), address.clone());
-        ui.on_join_server(move |typed| {
-            *address.borrow_mut() = typed.trim().to_string();
-            queue.borrow_mut().push(FrontendAction::JoinServer);
+        let queue = actions.clone();
+        ui.on_world_region_chosen(move |index| {
+            queue
+                .borrow_mut()
+                .push(FrontendAction::PickRegion(index.to_string()))
         });
     }
-    ui.on_play_online(push(FrontendAction::PlayOnline));
-    ui.on_logout(push(FrontendAction::Logout));
     {
         let queue = actions.clone();
         ui.on_world_join(move |id| {
             queue
                 .borrow_mut()
                 .push(FrontendAction::JoinWorld(id.to_string()))
+        });
+    }
+    {
+        let queue = actions.clone();
+        ui.on_world_select(move |index| {
+            queue
+                .borrow_mut()
+                .push(FrontendAction::SelectWorld(index.to_string()))
+        });
+    }
+    {
+        let queue = actions.clone();
+        ui.on_world_search_edited(move |text| {
+            queue
+                .borrow_mut()
+                .push(FrontendAction::Search(text.to_string()))
         });
     }
     ui.on_login_sign_in(push(FrontendAction::SignIn));
@@ -269,11 +377,6 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
     }
     // The Settings window over the main menu (graphics_settings.rs).
     crate::graphics_settings::connect_settings!(ui, world);
-    ui.set_join_only(JOIN_ONLY);
-    ui.set_debug_direct_join(DEBUG_DIRECT_JOIN);
-    #[cfg(target_arch = "wasm32")]
-    ui.set_server_address(initial_server_address().into());
-    world.insert_non_send(JoinAddress(address));
     world.insert_non_send(FrontendActions(actions));
     #[cfg(not(target_arch = "wasm32"))]
     generator::connect(ui, world);
@@ -291,31 +394,11 @@ fn refresh_can_load(mut can_load: ResMut<CanLoad>) {
 #[cfg(target_arch = "wasm32")]
 fn refresh_can_load() {}
 
-/// The browser menu's prefilled server (`web_endpoint::default_server_address`).
-#[cfg(target_arch = "wasm32")]
-fn initial_server_address() -> String {
-    let location = web_sys::window().map(|w| w.location());
-    let protocol = location
-        .as_ref()
-        .and_then(|l| l.protocol().ok())
-        .unwrap_or_default();
-    let hostname = location
-        .as_ref()
-        .and_then(|l| l.hostname().ok())
-        .unwrap_or_default();
-    crate::web_endpoint::default_server_address(
-        crate::web_endpoint::BUILT_FOR_SERVER,
-        &protocol,
-        &hostname,
-    )
-}
-
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 fn apply_frontend_actions(
     actions: Option<NonSend<FrontendActions>>,
-    join_address: Option<NonSend<JoinAddress>>,
     (login, mut login_intents): (Option<Res<LoginSession>>, MessageWriter<LoginIntent>),
-    mut commands: Commands,
+    mut browser: ResMut<Browser>,
     state: Res<State<AppState>>,
     in_play: Res<InPlay>,
     world_map: Option<Res<WorldMapState>>,
@@ -331,6 +414,9 @@ fn apply_frontend_actions(
         return;
     }
     for action in queued {
+        if !allowed_on(&action, SINGLE_PLAYER_AVAILABLE, CAN_EXIT) {
+            continue;
+        }
         // Back from the starting screen: its error has been read there, the
         // main menu need not repeat it.
         if action == FrontendAction::Back
@@ -340,21 +426,39 @@ fn apply_frontend_actions(
             log.0.clear();
         }
         // Back off the login screens abandons the login calls in flight (a
-        // hung one must not leave Play online busy).
+        // hung one must leave the screen usable again).
         if action == FrontendAction::Back
-            && matches!(state.get(), AppState::Login | AppState::Worlds)
+            && matches!(
+                state.get(),
+                AppState::Login | AppState::Worlds | AppState::Settings
+            )
         {
             login_intents.write(LoginIntent::Back);
         }
-        if action == FrontendAction::JoinServer {
-            let address = join_address
-                .as_ref()
-                .map(|a| a.0.borrow().clone())
-                .unwrap_or_default();
-            if address.is_empty() || *state.get() != AppState::MainMenu {
+        match &action {
+            FrontendAction::PickRegion(index) => {
+                if let (Some(login), Ok(index)) = (login.as_deref(), index.parse::<usize>()) {
+                    if let Some(region) = regions(&login.worlds).get(index) {
+                        browser.region.clone_from(region);
+                        browser.selected = None;
+                    }
+                }
                 continue;
             }
-            commands.insert_resource(crate::session::PendingServer(address));
+            FrontendAction::SelectWorld(index) => {
+                if let (Some(login), Ok(index)) = (login.as_deref(), index.parse::<usize>()) {
+                    browser.selected =
+                        shown_worlds(&login.worlds, &browser.region, &browser.search)
+                            .get(index)
+                            .map(|world| world.0.clone());
+                }
+                continue;
+            }
+            FrontendAction::Search(text) => {
+                browser.search.clone_from(text);
+                continue;
+            }
+            _ => {}
         }
         match action_target(&action) {
             // Back from a session's starting screen: where the session ends
@@ -363,6 +467,12 @@ fn apply_frontend_actions(
                 if matches!(state.get(), AppState::Starting | AppState::InWorld) =>
             {
                 next.set(LoginSession::home(login.as_deref()));
+            }
+            ActionEffect::Goto(AppState::MainMenu) if action == FrontendAction::Back => {
+                let return_to = login
+                    .as_deref()
+                    .map_or(AppState::Worlds, LoginSession::return_to);
+                next.set(back_target(*state.get(), return_to));
             }
             ActionEffect::Goto(target) => next.set(target),
             ActionEffect::Exit => {
@@ -373,6 +483,7 @@ fn apply_frontend_actions(
                     login_intents.write(intent);
                 }
             }
+            ActionEffect::Browser => {}
         }
     }
 }
@@ -390,9 +501,11 @@ fn push_frontend_state(
     #[cfg(not(target_arch = "wasm32"))] host: Option<Res<crate::local_host::LocalHost>>,
     (cover, time): (Res<loading::LoadingCover>, Res<Time<Real>>),
     mut shown_lines: Local<Vec<String>>,
-    (login, mut shown_worlds): (
+    mut browser: ResMut<Browser>,
+    (login, mut cached_worlds, mut cached_regions): (
         Option<Res<LoginSession>>,
-        Local<Vec<(String, String, bool)>>,
+        Local<Vec<(String, String)>>,
+        Local<Vec<String>>,
     ),
 ) {
     let Some(layer) = layer else { return };
@@ -424,8 +537,20 @@ fn push_frontend_state(
     if ui.get_screen() != screen {
         ui.set_screen(screen);
     }
+    if ui.get_menu_page() != menu_page(*state.get()) {
+        ui.set_menu_page(menu_page(*state.get()));
+    }
+    if ui.get_single_player_available() != SINGLE_PLAYER_AVAILABLE {
+        ui.set_single_player_available(SINGLE_PLAYER_AVAILABLE);
+    }
+    if ui.get_can_exit() != CAN_EXIT {
+        ui.set_can_exit(CAN_EXIT);
+    }
     if ui.get_can_load() != can_load.0 {
         ui.set_can_load(can_load.0);
+    }
+    if screen != SETTINGS_SCREEN && ui.get_settings_open() {
+        ui.set_settings_open(false);
     }
     let text = error.0.as_deref().unwrap_or("");
     if ui.get_menu_error() != text {
@@ -461,21 +586,28 @@ fn push_frontend_state(
     if ui.get_start_log() != start_log {
         ui.set_start_log(start_log.into());
     }
-    push_login_state(ui, login, &mut shown_worlds);
+    push_login_state(
+        ui,
+        login,
+        &mut browser,
+        &mut cached_worlds,
+        &mut cached_regions,
+    );
 }
 
 /// The login screens' properties from the [`LoginSession`] (none: no login
-/// service, so no Play online).
+/// service is unexpected now that native has an official URL fallback).
 fn push_login_state(
     ui: &FrontendUi,
     login: Option<Res<LoginSession>>,
-    shown_worlds: &mut Vec<(String, String, bool)>,
+    browser: &mut Browser,
+    cached_worlds: &mut Vec<(String, String)>,
+    cached_regions: &mut Vec<String>,
 ) {
     use slint_ui::slint::{ModelRc, VecModel};
-    if ui.get_online_available() != login.is_some() {
-        ui.set_online_available(login.is_some());
-    }
-    let Some(login) = login else { return };
+    let Some(login) = login else {
+        return;
+    };
     if ui.get_login_error() != login.error.as_str() {
         ui.set_login_error(login.error.as_str().into());
     }
@@ -503,27 +635,55 @@ fn push_login_state(
     if ui.get_login_account() != account {
         ui.set_login_account(account.into());
     }
-    let worlds: Vec<(String, String, bool)> = login
-        .worlds
+    let all_regions = regions(&login.worlds);
+    if !all_regions.contains(&browser.region) {
+        browser.region = login_api::DEFAULT_REGION.to_string();
+        browser.selected = None;
+    }
+    let world_region = all_regions
         .iter()
-        .map(|w| {
-            (
-                w.id.clone(),
-                w.name.clone(),
-                w.status == login_api::WorldStatus::Open,
-            )
-        })
-        .collect();
-    if *shown_worlds != worlds {
+        .position(|region| region == &browser.region)
+        .unwrap_or(0) as i32;
+    if ui.get_world_region() != world_region {
+        ui.set_world_region(world_region);
+    }
+    if ui.get_world_region_name() != browser.region.as_str() {
+        ui.set_world_region_name(browser.region.as_str().into());
+    }
+    let typed_search = ui.get_world_search().to_string();
+    if typed_search != browser.search {
+        browser.search = typed_search;
+    }
+    let worlds = shown_worlds(&login.worlds, &browser.region, &browser.search);
+    let selected = selected_index(&worlds, browser.selected.as_deref());
+    if selected < 0 {
+        browser.selected = None;
+    }
+    if ui.get_world_selected() != selected {
+        ui.set_world_selected(selected);
+    }
+    if *cached_regions != all_regions {
+        let model: Vec<slint_ui::slint::SharedString> = all_regions
+            .iter()
+            .map(|region| region.as_str().into())
+            .collect();
+        ui.set_world_regions(ModelRc::new(VecModel::from(model)));
+        *cached_regions = all_regions;
+    }
+    if *cached_worlds != worlds {
         let rows: Vec<slint_ui::OnlineWorldRow> = worlds
             .iter()
-            .map(|(id, name, open)| slint_ui::OnlineWorldRow {
+            .map(|(id, name)| slint_ui::OnlineWorldRow {
                 id: id.into(),
                 name: name.into(),
-                open: *open,
             })
             .collect();
+        let names: Vec<slint_ui::slint::SharedString> = worlds
+            .iter()
+            .map(|(_, name)| name.as_str().into())
+            .collect();
         ui.set_worlds(ModelRc::new(VecModel::from(rows)));
-        *shown_worlds = worlds;
+        ui.set_world_names(ModelRc::new(VecModel::from(names)));
+        *cached_worlds = worlds;
     }
 }

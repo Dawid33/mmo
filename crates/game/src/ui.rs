@@ -29,6 +29,18 @@ pub enum UiAction {
     /// Close the inventory if it is open (a no-op when it is closed): Esc,
     /// which must never open it from a stale view of the state.
     CloseInventory,
+    /// Open the inventory if it is closed; opening an open inventory is a
+    /// no-op. Map tab selection stays client-side.
+    OpenInventory,
+    /// Throw the complete cursor-held stack at the current authoritative
+    /// look target. The client supplies neither an item nor a count.
+    ThrowCursorStack,
+    /// Put an editor item stack on the inventory cursor.
+    EditorTake { item: crate::ItemId, count: u32 },
+    /// Give an editor item stack to the player's inventory.
+    EditorGive { item: crate::ItemId, count: u32 },
+    /// Destroy the editor inventory cursor stack.
+    EditorTrash,
 }
 
 /// One filled hotbar slot.
@@ -62,6 +74,8 @@ pub enum UiUpdate {
     /// The block being mined, 0..=1000 (`None` = not mining); sent only when
     /// it changes.
     Mining(Option<u32>),
+    /// The owning player's authoritative editor state and capability.
+    Editor { active: bool, allowed: bool },
 }
 
 /// What the inventory screen shows while it is open (client-side projection).

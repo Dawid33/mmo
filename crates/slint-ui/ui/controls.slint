@@ -246,6 +246,10 @@ export component Tabs inherits Rectangle {
     // a wider minimum here widens them all.
     in property <length> min-tab-width;
     callback changed(int);
+    accessible-role: tab-list;
+    accessible-label: "Pages";
+    accessible-item-count: root.tabs.length;
+    accessible-delegate-focus: max(0, root.selected);
     // One tab's width (they are all the same).
     out property <length> tab-width: probe.preferred-width;
     // Where the last tab ends (x within the component), so a parent can put
@@ -273,6 +277,16 @@ export component Tabs inherits Rectangle {
         + Styles.tabbed-pane.container.box.padding.bottom + Styles.tabbed-pane.vertical-spacing;
     property <length> tab-pitch: tab-width + Styles.tabbed-pane.container.h-spacing;
     property <length> pad: Styles.tabbed-pane.content-frame.box.padding.left;
+
+    function choose(index: int) {
+        if index != root.selected && index >= 0 && index < root.tabs.length {
+            root.selected = index;
+            root.changed(index);
+        }
+    }
+    public function take-focus() {
+        keyboard-focus.focus();
+    }
 
     function index-at(x: length, y: length) -> int {
         if y < Styles.tabbed-pane.container.box.padding.top || y > root.row-height { return -1; }
@@ -314,12 +328,35 @@ export component Tabs inherits Rectangle {
         }
         clicked => {
             let i = root.index-at(self.mouse-x, self.mouse-y);
+            keyboard-focus.focus();
             if i >= 0 && i != root.selected {
-                root.selected = i;
-                root.changed(i);
+                root.choose(i);
             } else if i >= 0 && root.collapsible {
                 root.selected = -1;
                 root.changed(-1);
+            }
+        }
+        keyboard-focus := FocusScope {
+            width: 0px;
+            height: 0px;
+            key-pressed(event) => {
+                if event.text == Key.LeftArrow {
+                    root.choose(max(0, root.selected - 1));
+                    return accept;
+                }
+                if event.text == Key.RightArrow {
+                    root.choose(min(root.tabs.length - 1, root.selected + 1));
+                    return accept;
+                }
+                if event.text == Key.Home {
+                    root.choose(0);
+                    return accept;
+                }
+                if event.text == Key.End {
+                    root.choose(root.tabs.length - 1);
+                    return accept;
+                }
+                return reject;
             }
         }
     }

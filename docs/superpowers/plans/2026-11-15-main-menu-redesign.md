@@ -1,5 +1,13 @@
 # Main Menu Redesign — One Client for Web and Native Implementation Plan
 
+> **As implemented 2026-11-20:** reconciled against the landed Play Online,
+> coordinator HTTP/mailbox, rejoin, world-start retry, map URL, and graphics
+> settings work. The later `0005_map_url` migration means world region is
+> migration `0006_world_region`; the existing graphics `SettingsWindow` remains
+> available from the new account Settings screen rather than being replaced.
+> The regression-only repository policy supersedes this old plan's proposed
+> feature tests; verification uses existing targeted builds and safe checks.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Web and native show the same menus: a main menu of Single player / Multiplayer / Settings / Exit, a single-player sub-menu (New world / Load world), a Factorio-style server browser with a region box (`eu-central-1`) listing the worlds the player can join, and a Settings screen with the account and Log in / Log out.

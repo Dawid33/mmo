@@ -1,5 +1,6 @@
 import { GraphicalSetView, LabelFace, LayerView, Styles } from "@widgets";
 import { Tabs } from "controls.slint";
+import { MapMarker, WorldMap } from "world-map.slint";
 
 // One item slot as the sim's projection gives it (`game::ui::SlotView`):
 // `icon` is empty (zero-sized) for an item with no texture of its own.
@@ -9,6 +10,13 @@ export struct ItemSlot {
     icon: image,
     // What the tooltip says ("" = none).
     name: string,
+}
+
+export struct CreativePaletteEntry {
+    item: int,
+    name: string,
+    icon: image,
+    tab: int,
 }
 
 export global InventoryConfig {
@@ -164,8 +172,39 @@ export component InventoryScreen {
     in property <length> pointer-x;
     in property <length> pointer-y;
     callback slot-pressed(bool, int, bool);
-    // The open tab: 0 the slots, 1 the journal.
+    callback throw-cursor-stack();
+    in property <bool> editor;
+    in property <[CreativePaletteEntry]> editor-palette;
+    in-out property <string> editor-search;
+    in-out property <int> editor-tab: 0;
+    callback editor-palette-pressed(int, bool, bool, bool);
+    out property <bool> editor-search-focused: root.tab == 0 && root.palette && search-input.has-focus;
+    // The open tab: 0 the slots, 1 the journal, 2 the map.
     in-out property <int> tab: 0;
+    // The reusable map page. These stay client-only and mirror GameUi's
+    // existing world-map properties.
+    in property <[string]> map-layer-names;
+    in-out property <int> map-layer;
+    in property <bool> map-available;
+    in-out property <int> map-selected-col: -1;
+    in-out property <int> map-selected-row: -1;
+    in property <[string]> map-tile-lines;
+    in property <[MapMarker]> map-markers;
+    in property <string> map-status;
+    in property <string> map-pointer-line;
+    callback map-drag(length, length);
+    callback map-wheel(length, length, float);
+    callback map-click(length, length);
+    out property <bool> map-pointer-in: map-page.pointer-in;
+    out property <length> map-pointer-x: map-page.pointer-x;
+    out property <length> map-pointer-y: map-page.pointer-y;
+    out property <length> map-view-x: map-page.view-x;
+    out property <length> map-view-y: map-page.view-y;
+    out property <length> map-view-width: map-page.view-width;
+    out property <length> map-view-height: map-page.view-height;
+    out property <length> map-layer-button-x: map-page.layer-button-x;
+    out property <length> map-layer-buttons-top: map-page.layer-buttons-top;
+    out property <length> map-layer-button-pitch: map-page.layer-button-pitch;
     // The character panel's lines. FILLER until the sim has player stats:
     // the client sets nothing yet.
     in property <string> character-name: "Wanderer";
@@ -194,6 +233,7 @@ export component InventoryScreen {
     }
 
     property <bool> chest: root.container-slots.length > 0;
+    property <bool> palette: root.editor && !root.chest;
     // The margin around the slot grids inside the tab page.
     property <length> margin: 12px;
     // What the window leaves the page's rows (the top block's and the
@@ -202,11 +242,19 @@ export component InventoryScreen {
         - InventoryConfig.block-gap;
     property <length> columns-room: root.width * InventoryConfig.screen-share - 2 * root.margin
         - 2 * Styles.tabbed-pane.content-frame.box.padding.left;
-    property <length> cell: clamp(floor(min(root.rows-room / (InventoryConfig.character-rows + 1), root.columns-room / 9) / 1px) * 1px
+    property <length> cell: clamp(floor(min(root.rows-room / (InventoryConfig.character-rows + 1 + (root.palette ? 2 : 0)), root.columns-room / 9) / 1px) * 1px
         - InventoryConfig.slot-gap, InventoryConfig.slot-size, InventoryConfig.slot-size-max);
     property <length> pitch: root.cell + InventoryConfig.slot-gap;
     // The block above the hotbar: the chest's grid, or the character panel.
-    property <length> top-height: (root.chest ? 3 : InventoryConfig.character-rows) * root.pitch - InventoryConfig.slot-gap;
+    property <length> normal-top-height: (root.chest ? 3 : InventoryConfig.character-rows) * root.pitch - InventoryConfig.slot-gap;
+    property <length> palette-tabs-height: palette-tabs.collapsed-height;
+    property <length> palette-search-height: 28px;
+    // One visible row; the palette remains a 9-column scrolling grid.
+    property <length> palette-grid-height: root.cell;
+    property <length> palette-height: root.palette-tabs-height + 4px + root.palette-search-height
+        + 4px + root.palette-grid-height;
+    property <length> palette-offset: root.palette ? root.palette-height + InventoryConfig.block-gap : 0px;
+    property <length> top-height: root.normal-top-height + root.palette-offset;
     property <length> slots-width: 9 * root.pitch - InventoryConfig.slot-gap;
     // The hotbar row, measured from the top block's top.
     property <length> hotbar-offset: root.top-height + InventoryConfig.block-gap;
@@ -223,22 +271,53 @@ export component InventoryScreen {
     out property <bool> character-shown: root.tab == 0 && !root.chest;
     property <length> view-inset: 4px;
     out property <length> character-x: slots.absolute-position.x + root.view-inset;
-    out property <length> character-y: slots.absolute-position.y + root.view-inset;
+    out property <length> character-y: slots.absolute-position.y + root.palette-offset + root.view-inset;
     out property <length> character-width: root.view-width - 2 * root.view-inset;
-    out property <length> character-height: root.top-height - 2 * root.view-inset;
+    out property <length> character-height: root.normal-top-height - 2 * root.view-inset;
     property <length> view-width: InventoryConfig.character-columns * root.pitch - InventoryConfig.slot-gap;
 
-    // Swallows presses outside the slots.
-    TouchArea { }
+    public function take-focus() {
+        if root.tab == 2 {
+            map-tabs.take-focus();
+        } else {
+            tabs.take-focus();
+        }
+    }
+
+    public function drop-focus() {
+        search-input.clear-focus();
+    }
+
+    // Behind the panel, an outside left press with a held stack throws it.
+    // Controls in the tabs are above this TouchArea and retain their own
+    // press origin, so releasing a slot outside cannot become a throw.
+    TouchArea {
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left
+                && event.kind == PointerEventKind.down
+                && root.cursor-slot.filled {
+                root.throw-cursor-stack();
+            }
+        }
+    }
+    // The tab frame is still inventory-owned even where a page has no
+    // control. This catcher above the world catcher swallows panel presses.
+    TouchArea {
+        x: tabs.x;
+        y: tabs.y;
+        width: tabs.width;
+        height: tabs.height;
+    }
 
     // On whole physical pixels: at a fractional interface scale a frame that
     // starts between two pixels leaves a see-through seam under its tab row.
     tabs := Tabs {
+        visible: root.tab != 2;
         width: ceil((root.slots-width + 2 * root.margin + 2 * Styles.tabbed-pane.content-frame.box.padding.left) / 1phx) * 1phx;
         height: ceil((self.collapsed-height + root.slots-height + 2 * root.margin) / 1phx) * 1phx;
         x: round((root.width - self.width) / 2 / 1phx) * 1phx;
         y: round((root.height - self.height) / 2 / 1phx) * 1phx;
-        tabs: [root.chest ? "Chest" : "Inventory", "Journal"];
+        tabs: [root.chest ? "Chest" : "Inventory", "Journal", "Map"];
         collapsible: false;
         selected <=> root.tab;
 
@@ -251,12 +330,62 @@ export component InventoryScreen {
                 width: root.slots-width;
                 height: root.slots-height;
 
+                palette-tabs := Tabs {
+                    visible: root.palette;
+                    width: 100%;
+                    tabs: ["All", "Natural", "Wood", "Building", "Colour", "Functional", "Items"];
+                    collapsible: false;
+                    selected <=> root.editor-tab;
+                }
+                Rectangle {
+                    visible: root.palette;
+                    x: 0px;
+                    y: root.palette-tabs-height + 4px;
+                    width: 100%;
+                    height: root.palette-search-height;
+                    background: rgba(20, 14, 10, 0.9);
+                    border-width: 1px;
+                    border-color: rgba(190, 150, 70, 0.6);
+                    search-input := TextInput {
+                        x: 6px;
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        single-line: true;
+                        vertical-alignment: center;
+                        color: #ffffff;
+                        text <=> root.editor-search;
+                    }
+                }
+                Flickable {
+                    visible: root.palette;
+                    x: 0px;
+                    y: root.palette-tabs-height + 4px + root.palette-search-height + 4px;
+                    width: 100%;
+                    height: root.palette-grid-height;
+                    content-width: self.width;
+                    content-height: max(self.height, ((root.editor-palette.length + 8) / 9) * root.pitch);
+                    for entry[i] in root.editor-palette: SlotCell {
+                        x: mod(i, 9) * root.pitch;
+                        y: floor(i / 9) * root.pitch;
+                        size: root.cell;
+                        slot: {
+                            filled: true,
+                            count: "",
+                            icon: entry.icon,
+                            name: entry.name,
+                        };
+                        pressed(right) => {
+                            root.editor-palette-pressed(entry.item, right, false, root.cursor-slot.filled);
+                        }
+                    }
+                }
+
                 // The character panel: the model's deep frame, the stats.
                 if !root.chest: Rectangle {
                     x: 0px;
-                    y: 0px;
+                    y: root.palette-offset;
                     width: root.view-width;
-                    height: root.top-height;
+                    height: root.normal-top-height;
                     LayerView {
                         width: 100%;
                         height: 100%;
@@ -273,9 +402,9 @@ export component InventoryScreen {
                 }
                 if !root.chest: VerticalLayout {
                     x: root.view-width + InventoryConfig.block-gap;
-                    y: 0px;
+                    y: root.palette-offset;
                     width: root.slots-width - self.x;
-                    height: root.top-height;
+                    height: root.normal-top-height;
                     alignment: start;
                     spacing: 2px;
                     LabelFace {
@@ -303,7 +432,7 @@ export component InventoryScreen {
 
                 for slot[i] in root.container-slots: SlotCell {
                     x: mod(i, 9) * root.pitch;
-                    y: floor(i / 9) * root.pitch;
+                    y: root.palette-offset + floor(i / 9) * root.pitch;
                     slot: slot;
                     size: root.cell;
                     pressed(right) => { root.slot-pressed(true, i, right); }
@@ -331,6 +460,41 @@ export component InventoryScreen {
                 text: "Nothing here yet";
             }
         }
+    }
+
+    // The tab row is drawn without a full opaque content frame while the
+    // Map page is active. The map's alpha-1 view must reach the Bevy map
+    // render beneath this Slint layer.
+    map-tabs := Tabs {
+        visible: root.tab == 2;
+        width: tabs.width;
+        height: self.collapsed-height;
+        x: tabs.x;
+        y: tabs.y;
+        tabs: [root.chest ? "Chest" : "Inventory", "Journal", "Map"];
+        collapsible: false;
+        selected <=> root.tab;
+    }
+    map-page := WorldMap {
+        visible: root.tab == 2;
+        x: tabs.x;
+        y: tabs.y + tabs.collapsed-height;
+        width: tabs.width;
+        height: tabs.height - tabs.collapsed-height;
+        layer-names: root.map-layer-names;
+        map-layer <=> root.map-layer;
+        map-available: root.map-available;
+        selected-col <=> root.map-selected-col;
+        selected-row <=> root.map-selected-row;
+        tile-lines: root.map-tile-lines;
+        markers: root.map-markers;
+        map-status: root.map-status;
+        pointer-line: root.map-pointer-line;
+        map-modal: false;
+        show-close: false;
+        map-drag(dx, dy) => { root.map-drag(dx, dy); }
+        map-wheel(x, y, notches) => { root.map-wheel(x, y, notches); }
+        map-click(x, y) => { root.map-click(x, y); }
     }
 
     // The hovered item's tooltip, beside the pointer and inside the window;

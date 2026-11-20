@@ -1162,6 +1162,36 @@ impl StoreHandle {
         rx.await.map_err(|_| stopped())?
     }
 
+    /// Whether `account_id` is granted editor access in this world. Missing rows deny.
+    pub fn editor_granted(&self, account_id: &str) -> Result<bool, StoreError> {
+        self.ask(|r| Request::EditorGranted(account_id.to_string(), r))
+    }
+
+    /// [`Self::editor_granted`] for the coordinator API's async request thread.
+    pub async fn editor_granted_async(&self, account_id: &str) -> Result<bool, StoreError> {
+        let (tx, rx) = oneshot::channel();
+        let reply = Reply::asynch(tx, self.engine());
+        reply.span().record("db.operation", "editor_grant_read");
+        self.send(Request::EditorGranted(account_id.to_string(), reply))
+            .map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
+    }
+
+    /// Grants editor access to an opaque login account identity.
+    pub fn grant_editor(&self, account_id: &str) -> Result<bool, StoreError> {
+        self.ask(|r| Request::GrantEditor(account_id.to_string(), r))
+    }
+
+    /// Revokes editor access. A live session changes capability only at its next join.
+    pub fn revoke_editor(&self, account_id: &str) -> Result<bool, StoreError> {
+        self.ask(|r| Request::RevokeEditor(account_id.to_string(), r))
+    }
+
+    /// Every opaque account identity currently granted editor access, sorted.
+    pub fn editor_grants(&self) -> Result<Vec<String>, StoreError> {
+        self.ask(Request::EditorGrants)
+    }
+
     /// Claims `srs` for `owner` (one transaction): each super-region's epoch
     /// goes up by one (a new one starts at 1), fencing whoever held it.
     /// Unguarded: a boot's claim before it registered (`AllInOne`, `Static`), tools and tests.

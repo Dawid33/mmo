@@ -1113,6 +1113,7 @@ pub fn drain_client_updates(
                 let (piles, mirrors) = (local(data.item_piles()), local(data.halo_piles()));
                 // The water pass's recipe (its tiles mesh once the chunks land).
                 let water_ground = Arc::new(data.ground_recipes().clone());
+                let water_state = data.water_region();
                 commands.queue(move |world: &mut World| {
                     if let Some(mut msgs) =
                         world.get_resource_mut::<Messages<super::water::WaterMsg>>()
@@ -1120,6 +1121,7 @@ pub fn drain_client_updates(
                         msgs.write(super::water::WaterMsg::Region {
                             region: id,
                             ground: water_ground,
+                            water: water_state,
                         });
                     }
                     if let Some(mut msgs) =
@@ -1609,6 +1611,15 @@ pub fn drain_region_updates(
                     commands.queue(move |world: &mut World| {
                         super::bricks::apply_block_deltas(world, e, deltas);
                         super::water::chunk_edited(world, region, e);
+                    });
+                }
+                GameDataUpdateKind::SetWater(delta) => {
+                    commands.queue(move |world: &mut World| {
+                        if let Some(mut msgs) =
+                            world.get_resource_mut::<Messages<super::water::WaterMsg>>()
+                        {
+                            msgs.write(super::water::WaterMsg::Delta { region, delta });
+                        }
                     });
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, None) => {

@@ -38,6 +38,15 @@ impl ClientPlayMode {
     }
 }
 
+/// The local client's authoritative editor state and per-world capability.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EditorState {
+    pub active: bool,
+    pub allowed: bool,
+    /// `allowed` came from an authoritative projection, not the reset default.
+    pub allowed_known: bool,
+}
+
 /// Switch Overview ↔ Adventure. Written only by the autopilot
 /// (`renderer/autopilot.rs`), which flies in the overview; the player has no
 /// key or button for it.

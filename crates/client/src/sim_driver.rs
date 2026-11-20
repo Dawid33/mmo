@@ -1,6 +1,6 @@
 //! The browser's sim, in place of the native tick-generator thread,
 //! tokio/netcode thread, and blocking game thread. One [`SimDriverRes`] per
-//! joined server (`session::web_flow`): built on Join server, dropped on
+//! joined server (`session::web_flow`): built for a selected session, dropped on
 //! leaving, which hangs up its WebTransport connection.
 //!
 //! Two backends: normally the sim and its connection run in a Web Worker

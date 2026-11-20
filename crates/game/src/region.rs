@@ -870,14 +870,44 @@ impl Region {
                 // Block edits: a click this tick breaks or places, from the
                 // pose the controllers just produced, before the input step
                 // consumes the press.
-                let edits: Vec<(ClientId, crate::edit::EditAction)> = self
+                let editor_edits: Vec<(ClientId, crate::edit::EditAction)> = self
                     .data
                     .clients
                     .iter()
-                    // Not while the inventory is open: its clicks are UI.
-                    // Adventure (survival) clients mine instead, below.
+                    .filter(|(_, c)| c.editor && c.fps_cam_mode && !c.inventory_open)
+                    .filter_map(|(id, c)| {
+                        if c.input.mouse_pressed(&crate::edit::BREAK_BUTTON) {
+                            Some((*id, crate::edit::EditAction::Break))
+                        } else if c.input.mouse_pressed(&crate::edit::PLACE_BUTTON)
+                            || (c.input.mouse_held(&crate::edit::PLACE_BUTTON)
+                                && self.data.pillar_target(*id))
+                        {
+                            Some((*id, crate::edit::EditAction::Place))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for (client_id, action) in editor_edits {
+                    if action == crate::edit::EditAction::Place {
+                        self.data.placed_at_safe(client_id, tick);
+                        self.data.editor_place_safe(client_id, &mut intents_out);
+                    } else {
+                        self.data
+                            .player_edit_safe(client_id, action, &mut intents_out);
+                    }
+                }
+                // Preserve the legacy Overview first-person instant dirt
+                // path for clients without editor authority.
+                let legacy_edits: Vec<(ClientId, crate::edit::EditAction)> = self
+                    .data
+                    .clients
+                    .iter()
                     .filter(|(_, c)| {
-                        c.mode != crate::PlayMode::Adventure && c.fps_cam_mode && !c.inventory_open
+                        !c.editor
+                            && c.mode != crate::PlayMode::Adventure
+                            && c.fps_cam_mode
+                            && !c.inventory_open
                     })
                     .filter_map(|(id, c)| {
                         if c.input.mouse_pressed(&crate::edit::BREAK_BUTTON) {
@@ -889,7 +919,7 @@ impl Region {
                         }
                     })
                     .collect();
-                for (client_id, action) in edits {
+                for (client_id, action) in legacy_edits {
                     if action == crate::edit::EditAction::Place {
                         self.data.placed_at_safe(client_id, tick);
                     }
@@ -908,22 +938,25 @@ impl Region {
                 // Survival (Adventure): left held mines with break times,
                 // right places the selected block (held: again every
                 // `PLACE_REPEAT_TICKS`), Q / Ctrl+Q throw.
-                let survivors: Vec<(ClientId, bool, Option<bool>)> = self
+                let hands: Vec<(ClientId, bool, bool, Option<bool>)> = self
                     .data
                     .clients
                     .iter()
-                    .filter(|(_, c)| c.mode == crate::PlayMode::Adventure)
+                    .filter(|(_, c)| c.has_hands())
                     .map(|(id, c)| {
-                        let hands = c.fps_cam_mode && !c.inventory_open;
-                        let place = hands && self.data.place_due(*id, tick);
-                        let throw = (hands && c.input.key_pressed(&Key::KeyQ))
+                        let survival = c.mode == crate::PlayMode::Adventure && !c.editor;
+                        let active = c.fps_cam_mode && !c.inventory_open;
+                        let place = survival && active && self.data.place_due(*id, tick);
+                        let throw = (active && c.input.key_pressed(&Key::KeyQ))
                             .then(|| c.input.key_held(&Key::ControlLeft));
-                        (*id, place, throw)
+                        (*id, survival, place, throw)
                     })
                     .collect();
-                for (client_id, place, throw) in survivors {
-                    self.data
-                        .tick_mining_safe(client_id, tick, &mut intents_out);
+                for (client_id, survival, place, throw) in hands {
+                    if survival {
+                        self.data
+                            .tick_mining_safe(client_id, tick, &mut intents_out);
+                    }
                     if place {
                         self.data.placed_at_safe(client_id, tick);
                         self.data.survival_place_safe(client_id, &mut intents_out);
@@ -946,10 +979,11 @@ impl Region {
                     // input step are both covered by one delta.
                     let toggled = {
                         let client = data.clients.get_mut(&client_id).unwrap();
-                        let adventure = client.mode == crate::PlayMode::Adventure;
+                        let hands = client.has_hands();
                         let e_pressed = client.input.key_pressed(&Key::KeyE);
-                        if adventure {
-                            // Survival: E is the inventory, not a camera mode.
+                        if hands {
+                            // First-person hands: E is the inventory, not a
+                            // camera mode.
                             if e_pressed {
                                 if let Some(rest) = toggle_inventory(client) {
                                     drops.push((client_id, rest));
@@ -965,7 +999,7 @@ impl Region {
                                 client.selected = slot;
                             }
                         }
-                        let toggle = !adventure && e_pressed;
+                        let toggle = !hands && e_pressed;
                         if toggle {
                             client.fps_cam_mode = !client.fps_cam_mode;
                         }
@@ -981,6 +1015,39 @@ impl Region {
                 }
                 for (client_id, rest) in drops {
                     self.data.drop_at_feet_safe(client_id, rest);
+                }
+                self.data.tick_tree_growth_safe();
+                let water = self.data.tick_water_safe();
+                crate::observe_water_step(self.id, water);
+                if *self.data.tick % 20 == 0 && water.active_chunks != 0 {
+                    log::info!(
+                        "[water] region={},{} frontier_cells={} frontier_chunks={} overrides={} work={} hot={} fair={} edges={} transfers={} writes={} activations={} scans={} wake_attempts={} wake_dedup={} oldest_wait_ticks={} units={} mass_delta={} exhausted=donors:{},edges:{},transfers:{},writes:{},activations:{},wake:{},delta:{}",
+                        self.id.x,
+                        self.id.z,
+                        water.frontier_cells,
+                        water.frontier_chunks,
+                        water.override_cells,
+                        water.work,
+                        water.hot_visits,
+                        water.fair_visits,
+                        water.edge_probes,
+                        water.local_transfers,
+                        water.unique_writes,
+                        water.activation_markers,
+                        water.activation_recipe_scans,
+                        water.wake_attempts,
+                        water.wake_deduplications,
+                        water.oldest_fair_wait_ticks,
+                        water.transferred_units,
+                        water.local_mass_delta,
+                        water.donor_budget_exhausted,
+                        water.edge_budget_exhausted,
+                        water.transfer_budget_exhausted,
+                        water.write_budget_exhausted,
+                        water.activation_budget_exhausted,
+                        water.wake_budget_exhausted,
+                        water.delta_budget_exhausted,
+                    );
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 let input_done = Instant::now();
@@ -1006,11 +1073,7 @@ impl Region {
                         crate::InputEvent::MouseWheel { y, .. } => {
                             // The wheel steps the hotbar while the body is
                             // driven and no inventory window holds the pointer.
-                            if c.mode == crate::PlayMode::Adventure
-                                && c.fps_cam_mode
-                                && !c.inventory_open
-                                && y != 0.0
-                            {
+                            if c.has_hands() && c.fps_cam_mode && !c.inventory_open && y != 0.0 {
                                 let n = crate::HOTBAR_SLOTS as i32;
                                 // Minecraft: wheel down (negative y) = next slot.
                                 let step = if y > 0.0 { -1 } else { 1 };
@@ -1105,46 +1168,70 @@ impl Region {
                 self.data.apply_halo_update_safe(&update);
             }
             GameEventKind::UiAction(client_id, action) => {
-                let data: &mut GameData = self.data.deref_mut();
-                if let Some(c) = data.clients.get_mut(&client_id) {
-                    match action {
-                        // Clicks land only on an open screen.
-                        crate::UiAction::Click { .. } if !c.inventory_open => {}
-                        // With a chest open: what moves in or out of it is an
-                        // intent to its owner, here or across a seam
-                        // (`containers.rs`).
-                        crate::UiAction::Click {
-                            slot,
-                            button,
-                            shift,
-                        } if c.open_container.is_some() => {
-                            self.data.container_click_safe(
-                                client_id,
+                let tick = *self.data.tick;
+                if matches!(
+                    action,
+                    crate::UiAction::EditorTake { .. }
+                        | crate::UiAction::EditorGive { .. }
+                        | crate::UiAction::EditorTrash
+                ) {
+                    self.data.editor_action_safe(client_id, action);
+                    // Editor actions have their own authority checks and do
+                    // not use the ordinary inventory screen branches below.
+                } else {
+                    let data: &mut GameData = self.data.deref_mut();
+                    if let Some(c) = data.clients.get_mut(&client_id) {
+                        match action {
+                            // Clicks land only on an open screen.
+                            crate::UiAction::Click { .. } if !c.inventory_open => {}
+                            // With a chest open: what moves in or out of it is an
+                            // intent to its owner, here or across a seam
+                            // (`containers.rs`).
+                            crate::UiAction::Click {
                                 slot,
                                 button,
                                 shift,
-                                &mut intents_out,
-                            );
-                        }
-                        crate::UiAction::Click {
-                            slot,
-                            button,
-                            shift,
-                        } => {
-                            let Client {
-                                cursor, inventory, ..
-                            } = c;
-                            crate::click(cursor, inventory, None, slot, button, shift);
-                        }
-                        crate::UiAction::ToggleInventory => {
-                            if let Some(rest) = toggle_inventory(c) {
-                                self.data.drop_at_feet_safe(client_id, rest);
+                            } if c.open_container.is_some() => {
+                                self.data.container_click_safe(
+                                    client_id,
+                                    slot,
+                                    button,
+                                    shift,
+                                    &mut intents_out,
+                                );
                             }
-                        }
-                        crate::UiAction::CloseInventory => {
-                            if let Some(rest) = close_inventory(c) {
-                                self.data.drop_at_feet_safe(client_id, rest);
+                            crate::UiAction::Click {
+                                slot,
+                                button,
+                                shift,
+                            } => {
+                                let Client {
+                                    cursor, inventory, ..
+                                } = c;
+                                crate::click(cursor, inventory, None, slot, button, shift);
                             }
+                            crate::UiAction::ToggleInventory => {
+                                if let Some(rest) = toggle_inventory(c) {
+                                    self.data.drop_at_feet_safe(client_id, rest);
+                                }
+                            }
+                            crate::UiAction::CloseInventory => {
+                                if let Some(rest) = close_inventory(c) {
+                                    self.data.drop_at_feet_safe(client_id, rest);
+                                }
+                            }
+                            crate::UiAction::OpenInventory => {
+                                if !c.inventory_open {
+                                    c.inventory_open = true;
+                                }
+                            }
+                            crate::UiAction::ThrowCursorStack if !c.inventory_open => {}
+                            crate::UiAction::ThrowCursorStack => {
+                                self.data.throw_cursor_safe(client_id, tick);
+                            }
+                            crate::UiAction::EditorTake { .. }
+                            | crate::UiAction::EditorGive { .. }
+                            | crate::UiAction::EditorTrash => unreachable!(),
                         }
                     }
                 }
@@ -1282,6 +1369,10 @@ impl Region {
     /// (`label_water_bodies`; a recipe cell holding a solid block — ice —
     /// is no volume).
     pub fn from_columns(id: RegionId, columns: Vec<(ColumnCoords, Column)>) -> Self {
+        let tree_seeds: Vec<crate::TreeLifeSeed> = columns
+            .iter()
+            .flat_map(|(_, column)| column.tree_life().iter().cloned())
+            .collect();
         let mut ground: Vec<(ColumnCoords, crate::ColumnGround)> = columns
             .iter()
             .filter_map(|(c, col)| col.ground().map(|g| (*c, g.clone())))
@@ -1311,6 +1402,7 @@ impl Region {
         let mut region = Region::from_chunks(id, chunks);
         region.data.seed_ground_genesis(ground);
         region.data.seed_water_genesis(bodies);
+        region.data.seed_trees_genesis(tree_seeds);
         region
     }
 

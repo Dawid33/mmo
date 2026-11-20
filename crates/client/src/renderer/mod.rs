@@ -158,6 +158,7 @@ impl Plugin for SimBridgePlugin {
         // `drain_ui_updates` (below) runs in both camera modes and fills these;
         // the overlay that shows them exists only in commander mode.
         .add_session_reset::<slint_overlay::HudItems>()
+        .add_session_reset::<commander::adventure::EditorState>()
         .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
         .add_session_reset::<collider_debug::DebugColliderLines>()
         .init_resource::<grid_debug::GridDebug>()

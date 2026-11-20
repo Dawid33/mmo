@@ -11,6 +11,7 @@ use super::ChatLog;
 use super::command::{Command, HELP, Submitted};
 use super::ui::ChatSubmitted;
 use crate::renderer::bridge::{LocalBody, SimEntity, SimTarget};
+use crate::renderer::commander::adventure::EditorState;
 #[cfg(feature = "dev_ui")]
 use crate::renderer::dev_ui::{self, DevAction, DevToggle};
 use crate::renderer::history_view::HistoryView;
@@ -29,6 +30,9 @@ pub struct RunContext {
     pub adventure_pending: bool,
     /// The Adventure tab has a site picked.
     pub site_picked: bool,
+    pub editor_active: bool,
+    pub editor_allowed: bool,
+    pub editor_allowed_known: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +44,8 @@ pub enum Effect {
     StartAdventure,
     /// What the End-adventure button does.
     EndAdventure,
+    SetEditor(bool),
+    Give(game::ItemId, u32),
     #[cfg(feature = "dev_ui")]
     Complete,
     #[cfg(feature = "dev_ui")]
@@ -55,6 +61,26 @@ pub fn effects(command: Command, ctx: &RunContext) -> Vec<Effect> {
     match command {
         Command::Help => HELP.iter().map(|line| info(line)).collect(),
         Command::Clear => vec![Effect::ClearLog],
+        Command::SetEditor(on) if on && ctx.editor_allowed_known && !ctx.editor_allowed => {
+            vec![error(
+                "Editor mode is not allowed for this account on this world",
+            )]
+        }
+        Command::SetEditor(on) => vec![
+            Effect::SetEditor(on),
+            info(if on {
+                "Requesting editor mode"
+            } else {
+                "Returning to normal mode"
+            }),
+        ],
+        Command::Give { .. } if !ctx.editor_active => {
+            vec![error("Editor mode must be active to use /give")]
+        }
+        Command::Give { item, count } => vec![
+            Effect::Give(item, count),
+            Effect::Info(format!("Gave {count} {}", game::item_name(item))),
+        ],
         Command::Where => match (ctx.home, ctx.body_block) {
             (Some(home), Some([x, y, z])) => {
                 vec![Effect::Info(format!(
@@ -116,6 +142,15 @@ fn context(world: &mut World) -> RunContext {
         adventuring: history.is_some_and(|h| h.adventuring.is_some()),
         adventure_pending: history.is_some_and(|h| h.adventure_pending),
         site_picked: history.is_some_and(|h| h.adventure.site.is_some()),
+        editor_active: world
+            .get_resource::<EditorState>()
+            .is_some_and(|e| e.active),
+        editor_allowed: world
+            .get_resource::<EditorState>()
+            .is_some_and(|e| e.allowed),
+        editor_allowed_known: world
+            .get_resource::<EditorState>()
+            .is_some_and(|e| e.allowed_known),
     }
 }
 
@@ -153,6 +188,20 @@ fn apply(effect: Effect, world: &mut World, now: f64) {
         Effect::ClearLog => world.resource_mut::<ChatLog>().clear(),
         Effect::StartAdventure => press(world, slint_overlay::UiAction::AdventureStart, now),
         Effect::EndAdventure => press(world, slint_overlay::UiAction::EndAdventure, now),
+        Effect::SetEditor(on) => send_editor(
+            world,
+            move |client| {
+                game::GameEventKind::Order(client, game::Order::SetEditor { on, at: None })
+            },
+            now,
+        ),
+        Effect::Give(item, count) => send_editor(
+            world,
+            move |client| {
+                game::GameEventKind::UiAction(client, game::UiAction::EditorGive { item, count })
+            },
+            now,
+        ),
         #[cfg(feature = "dev_ui")]
         Effect::Complete => dev_ui::apply_dev_action(DevAction::CompleteOrders, world),
         #[cfg(feature = "dev_ui")]
@@ -167,6 +216,25 @@ fn apply(effect: Effect, world: &mut World, now: f64) {
                 .info(format!("{}: {state}", toggle.label()), now);
         }
     }
+}
+
+fn send_editor(world: &mut World, event: impl Fn(game::ClientId) -> game::GameEventKind, now: f64) {
+    let Some(client) = world
+        .get_resource::<crate::renderer::LocalPlayer>()
+        .and_then(|p| p.0)
+    else {
+        world
+            .resource_mut::<ChatLog>()
+            .error("No player is connected yet", now);
+        return;
+    };
+    let Some(game) = world.get_resource::<crate::renderer::GameEvents>() else {
+        world
+            .resource_mut::<ChatLog>()
+            .error("The game thread is not running", now);
+        return;
+    };
+    let _ = game.0.send(event(client));
 }
 
 /// Presses a game UI button for the player; says so when there is no game UI

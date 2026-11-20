@@ -2132,6 +2132,7 @@ impl MultiRig {
             client: CLIENT,
             player: PlayerId(h.0),
             record: Some(record),
+            editor_allowed: false,
         });
     }
 
@@ -2150,6 +2151,7 @@ impl MultiRig {
             client,
             player,
             record: Some(record),
+            editor_allowed: false,
         });
         // Its body, if the restore already gave it one, is tracked from now on.
         self.assert_conserved_world();

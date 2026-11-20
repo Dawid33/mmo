@@ -30,6 +30,8 @@ pub const LOGIN_URL_ENV: &str = "VOXEL_LOGIN_URL";
 pub const LOGIN_URL_QUERY: &str = "login";
 /// Where the login service sits behind the page's own origin.
 pub const LOGIN_PATH_ON_PAGE_ORIGIN: &str = "/login";
+/// The one public login service. It serves every current deployment region.
+pub const OFFICIAL_LOGIN_URL: &str = "https://login.errantry.renownandruin.com";
 /// Page hostnames on which the browser honours `?login=`: the local machine
 /// only (as `Location.hostname` spells them; IPv6 comes bracketed).
 pub const LOGIN_OVERRIDE_HOSTS: [&str; 4] = ["localhost", "127.0.0.1", "[::1]", "::1"];
@@ -152,6 +154,10 @@ impl LoginApi {
         #[cfg(target_arch = "wasm32")]
         let http = reqwest::Client::new();
         Self { base, http }
+    }
+
+    pub fn service_url(&self) -> &str {
+        &self.base
     }
 
     /// Where this service's players sign in; [`LoginFailure::NoSignIn`] when
@@ -348,14 +354,15 @@ fn network(e: reqwest::Error) -> LoginFailure {
 /// a local page only — see [`login_override_allowed`]), else `built`, the
 /// build-time `VOXEL_LOGIN_URL`, else `{page_origin}/login` when `page_origin`
 /// (the browser's `location.origin`; `None` on native) is an `https://` origin
-/// whose host is not loopback, else none (no Play online: the menu stays as it
-/// was). Empty strings count as unset; a trailing `/` is dropped.
+/// whose host is not loopback, else none. Empty strings count as unset; a
+/// trailing `/` is dropped. Callers layer the official service fallback with
+/// [`service_url`].
 ///
 /// The fallback was dropped once (nothing served `/login`, so a deployed page
 /// opened on a dead login screen). It is back for pages whose own origin
-/// proxies `/login/` to the login service (the web image); `https` plus a
-/// non-loopback host keeps a dev page (`http://127.0.0.1:…`, `localhost`) on
-/// its join-only menu.
+/// proxies `/login/` to the login service (the web image); the official
+/// service fallback keeps the menu useful on a localhost page without an
+/// explicit development login override.
 pub fn resolve_login_url(
     override_: Option<&str>,
     build_time: Option<&str>,
@@ -399,13 +406,21 @@ pub fn login_override_allowed(page_host: Option<&str>) -> bool {
     })
 }
 
-/// The login service this client talks to, if there is one (no "Play online"
-/// otherwise).
+/// Use a resolved development/build/page override, else the one official login.
+pub fn service_url(resolved: Option<String>) -> String {
+    resolved.unwrap_or_else(|| OFFICIAL_LOGIN_URL.to_string())
+}
+
+/// The login service this client talks to.
 pub fn login_url() -> Option<String> {
     let built = option_env!("VOXEL_LOGIN_URL");
     #[cfg(not(target_arch = "wasm32"))]
     {
-        resolve_login_url(std::env::var(LOGIN_URL_ENV).ok().as_deref(), built, None)
+        Some(service_url(resolve_login_url(
+            std::env::var(LOGIN_URL_ENV).ok().as_deref(),
+            built,
+            None,
+        )))
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -433,6 +448,10 @@ pub fn login_url() -> Option<String> {
             explicit = None;
         }
         let origin = location.as_ref().and_then(|l| l.origin().ok());
-        resolve_login_url(explicit.as_deref(), built, origin.as_deref())
+        Some(service_url(resolve_login_url(
+            explicit.as_deref(),
+            built,
+            origin.as_deref(),
+        )))
     }
 }

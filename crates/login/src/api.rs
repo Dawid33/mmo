@@ -483,6 +483,7 @@ async fn worlds(State(s): State<AppState>) -> Result<Json<Vec<WorldEntry>>, Fail
                 id: w.world_id,
                 name: w.name,
                 status: w.status,
+                region: w.region,
                 map_url: w.map_url,
             })
             .collect(),
@@ -580,7 +581,7 @@ async fn join_inner(s: &AppState, req: JoinRequest) -> Result<Json<JoinResponse>
     // ticket names the addresses its ack gave (else the world row's).
     let place = match s
         .world_clients
-        .spawn(&world, &player_token, session_epoch)
+        .spawn(&world, account.account_id, &player_token, session_epoch)
         .instrument(tracing::info_span!("login.coordinator_order"))
         .await
     {

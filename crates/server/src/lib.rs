@@ -876,6 +876,9 @@ pub fn run() -> claims::ServerExit {
         log::warn!("[server] {warning}");
     }
     match &auth_mode {
+        auth_edge::AuthMode::SinglePlayer => {
+            info!("auth: trusted single-player owner (local player names)");
+        }
         auth_edge::AuthMode::Local => {
             info!("auth: local player names (no login; anyone may claim any name)")
         }
@@ -914,7 +917,7 @@ pub fn run() -> claims::ServerExit {
                 }
             }
         }
-        auth_edge::AuthMode::Local => None,
+        auth_edge::AuthMode::SinglePlayer | auth_edge::AuthMode::Local => None,
     };
     // `claim` (any number of hosts): only as `host`, on Postgres, with the login link (ids and
     // placement come from it).
@@ -1093,7 +1096,16 @@ pub fn run() -> claims::ServerExit {
             login_link::cert_hash_file_from(std::env::var(login_link::HOST_LINK_CERT_HASH_FILE_ENV).ok().as_deref());
         let world = login_link::link_world_from(std::env::var(auth_edge::WORLD_ID_ENV).ok().as_deref());
         let events = client_packet_send.clone();
-        let link = login_link::start(bind, token, world, pin_file.clone(), orders, players.clone(), events)
+        let link = login_link::start(
+            bind,
+            token,
+            world,
+            pin_file.clone(),
+            orders,
+            players.clone(),
+            events,
+            store.clone(),
+        )
             .unwrap_or_else(|e| fatal(&format!("the login routes on {bind}: {e}")));
         info!(
             "auth: login tickets need the login service's spawn orders, posted to {} (pin {} in {})",

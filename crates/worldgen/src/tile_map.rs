@@ -71,7 +71,9 @@ fn block_m() -> f64 {
 ///
 /// v2: width x height worlds (the tiles span `width_m` by `height_m`).
 /// v3: `WorldMap::wrap_x` (east–west wrap).
-pub const WORLD_MAP_VERSION: u32 = 3;
+/// 4: quantised overlapping river channels/levees no longer create a low dry
+/// bank beside a higher snapped water block.
+pub const WORLD_MAP_VERSION: u32 = 4;
 
 /// Whether `world` wraps east–west.
 fn wraps(world: &ForgedWorld) -> bool {

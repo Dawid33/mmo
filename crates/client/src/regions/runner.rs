@@ -124,6 +124,8 @@ pub struct HomeView {
     /// [`RunnerState`]'s cache, so comparing two views is a pointer check.
     pub shake: Vec<(game::edit::BlockPos, ShakeSet)>,
     pub mode: game::PlayMode,
+    pub editor: bool,
+    pub editor_allowed: bool,
     pub inventory_open: bool,
     /// The local player's 36 slots and the stack on its cursor (the
     /// inventory screen).
@@ -468,6 +470,8 @@ fn home_view(
         damage,
         shake,
         mode: c.mode,
+        editor: c.editor,
+        editor_allowed: c.editor_allowed,
         inventory_open: c.inventory_open,
         inventory: c.inventory.clone(),
         cursor: c.cursor,

@@ -12,8 +12,7 @@ use game::Biome;
 
 /// Side of one placement cell, blocks.
 pub const TREE_LATTICE_BLOCKS: i32 = 8;
-/// Oldest tree age (the age is a growth stage in `0..=MAX_AGE`).
-pub const MAX_AGE: u16 = 100;
+pub use game::tree_shape::MAX_AGE;
 /// Widest crown over all species (checked against the table in a test).
 pub const MAX_CROWN_RADIUS_BLOCKS: i32 = 8;
 /// Tallest tree over all species (checked against the table in a test).
@@ -108,14 +107,8 @@ pub struct TreeSeed {
     pub id: u32,
 }
 
-/// Splitmix-style mix of `(seed, a, b)`; also seeds tree shapes (`skeleton.rs`).
-pub(super) fn hash64(seed: u64, a: u64, b: u64) -> u64 {
-    let mut z =
-        seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
+/// Compatibility alias: placement, worldgen and simulation share this hash.
+pub(super) use game::tree_shape::tree_hash64 as hash64;
 
 /// Uniform in [0, 1) of (seed, cell, salt).
 fn hash01(seed: u64, lx: i32, lz: i32, salt: u64) -> f64 {

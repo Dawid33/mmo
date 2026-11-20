@@ -621,7 +621,7 @@ impl Rollback {
             BlockPos,
         )> = Vec::new();
         for (id, c) in self.data.clients.iter() {
-            if c.mode != crate::PlayMode::Adventure {
+            if !c.has_hands() {
                 continue;
             }
             let Some(&e) = self.data.player_entites.get(id) else {

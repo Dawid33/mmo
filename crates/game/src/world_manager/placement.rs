@@ -117,6 +117,8 @@ pub struct SpawnRequest {
     pub player: PlayerId,
     /// The region of the player's stored record (`None`: no record).
     pub record_region: Option<RegionCoords>,
+    /// Join-time capability authorized by the coordinator.
+    pub editor_allowed: bool,
 }
 
 /// A kick another host relayed here, for the server to apply to its admission state
@@ -189,6 +191,8 @@ pub enum LoginOrder {
     Spawn {
         player_token: String,
         session_epoch: u64,
+        /// Coordinator-adopted, world-store owned capability for this join.
+        editor_allowed: bool,
     },
     Kick {
         player_token: String,
@@ -220,10 +224,15 @@ impl std::fmt::Debug for LoginOrder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         const HIDDEN: &str = "<redacted>";
         match self {
-            LoginOrder::Spawn { session_epoch, .. } => f
+            LoginOrder::Spawn {
+                session_epoch,
+                editor_allowed,
+                ..
+            } => f
                 .debug_struct("Spawn")
                 .field("player_token", &HIDDEN)
                 .field("session_epoch", session_epoch)
+                .field("editor_allowed", editor_allowed)
                 .finish(),
             LoginOrder::Kick {
                 session_epoch,
@@ -515,6 +524,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         session_epoch,
                         player,
                         record_region,
+                        editor_allowed,
                     } = req;
                     let order = Reliable::SpawnOrder {
                         origin,
@@ -523,6 +533,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         session_epoch,
                         player,
                         record_region,
+                        editor_allowed,
                     };
                     self.queue_to_peer(owner, order);
                 } else {
@@ -840,6 +851,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 session_epoch,
                 player,
                 record_region,
+                editor_allowed,
             } => {
                 let req = SpawnRequest {
                     origin,
@@ -848,6 +860,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     session_epoch,
                     player,
                     record_region,
+                    editor_allowed,
                 };
                 self.departed_denied(from, &req);
                 self.spawn_order(req);

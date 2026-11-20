@@ -123,12 +123,20 @@ pub struct JoinResponse {
     pub refresh_token: String,
 }
 
+pub const DEFAULT_REGION: &str = "eu-central-1";
+
+fn default_region() -> String {
+    DEFAULT_REGION.to_string()
+}
+
 /// One world of the registry, as the world list shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldEntry {
     pub id: String,
     pub name: String,
     pub status: WorldStatus,
+    #[serde(default = "default_region")]
+    pub region: String,
     /// The world map's tile route base (`<url>/v1/map/tiles/{level}/{x}/{z}`), if it serves one.
     #[serde(default)]
     pub map_url: Option<String>,
@@ -185,6 +193,9 @@ pub enum LoginToHost {
     /// A join was granted: the host admits exactly this epoch's ticket for the player (and
     /// parks any session of the player it has, newest-wins), then acks.
     SpawnPlayer {
+        /// Opaque identity of the authenticated login account. The coordinator, not
+        /// the client, uses it to decide world-local privileges.
+        account_id: String,
         player_token: String,
         session_epoch: u64,
     },
@@ -257,10 +268,12 @@ impl std::fmt::Debug for LoginToHost {
         let hidden = format_args!("{REDACTED}");
         match self {
             LoginToHost::SpawnPlayer {
+                account_id: _,
                 player_token: _,
                 session_epoch,
             } => f
                 .debug_struct("SpawnPlayer")
+                .field("account_id", &hidden)
                 .field("player_token", &hidden)
                 .field("session_epoch", session_epoch)
                 .finish(),

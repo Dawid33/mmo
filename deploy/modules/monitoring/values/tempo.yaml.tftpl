@@ -8,18 +8,8 @@ tempo:
     enabled: true
     # Prometheus' remote-write receiver is enabled by kube-prometheus-stack.
     remoteWriteUrl: "http://prometheus-operated.${namespace}.svc:9090/api/v1/write"
-    processor:
-      local_blocks:
-        flush_to_storage: true
     storage:
       path: /var/tempo/metrics
-    traces_storage:
-      path: /var/tempo/traces
-  overrides:
-    defaults:
-      metrics_generator:
-        processors:
-          - local-blocks
   # No static key: the S3 client's credential chain reads the telemetry-s3 env.
   extraEnvFrom:
     - secretRef:

@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use login_api::WorldStatus;
+use login_api::{DEFAULT_REGION, WorldStatus};
 
 use crate::{LoginConfig, LoginStore, WorldRow, normalize_email};
 
@@ -21,7 +21,7 @@ pub const KEY_DIR_MODE: u32 = 0o700;
 const USAGE: &str = "usage: login [--db <url>] <command>
   serve
   keygen [--dir <d>]
-  world add <id> --name <n> [--quic host:port] [--wt url] [--cert-hash h] [--closed]
+  world add <id> --name <n> [--region <id>] [--quic host:port] [--wt url] [--cert-hash h] [--closed]
             [--link <https://host:port[,…]> --link-cert <sha256>]   (the world coordinator's API and pin: join posts SpawnPlayer)
             [--map-url <url>]   (the world map's tile route base, sent to native clients)
   world list | remove <id> | open <id> | close <id>
@@ -59,6 +59,19 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     }
 }
 
+fn region_id(value: String) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let valid = !bytes.is_empty()
+        && bytes.len() <= 32
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+    valid
+        .then_some(value)
+        .ok_or_else(|| "--region must match ^[a-z0-9][a-z0-9-]{0,31}$".to_string())
+}
+
 /// How the binary routes its command line: the global `--db <url>` (if any) and whether the
 /// command is `serve` (also when there is none).
 #[derive(Debug, PartialEq, Eq)]
@@ -87,6 +100,8 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
     let link = take_opt(&mut args, "--link")?;
     let link_cert = take_opt(&mut args, "--link-cert")?;
     let map_url = take_opt(&mut args, "--map-url")?;
+    let region =
+        region_id(take_opt(&mut args, "--region")?.unwrap_or_else(|| DEFAULT_REGION.into()))?;
     let closed = take_flag(&mut args, "--closed");
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -121,6 +136,7 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
                 host_link,
                 host_link_cert,
                 map_url,
+                region,
             };
             let cleared = block_on(async {
                 let store = open(&db_url()?).await?;
@@ -162,8 +178,9 @@ pub fn run_ctl(args: &[String], out: &mut dyn Write) -> Result<(), String> {
                 };
                 writeln!(
                     out,
-                    "{}\t{status}\t{}\tquic={}\twt={}\tcert_hash={}\tlink={}\tmap={}",
+                    "{}\t{status}\tregion={}\t{}\tquic={}\twt={}\tcert_hash={}\tlink={}\tmap={}",
                     w.world_id,
+                    w.region,
                     w.name,
                     w.quic.as_deref().unwrap_or("-"),
                     w.webtransport.as_deref().unwrap_or("-"),

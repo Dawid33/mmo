@@ -1,6 +1,6 @@
-//! Which WebTransport server the browser build dials (`netcode_web.rs`), from
-//! the address the player typed on the main menu's Join server row. Pure and
-//! target-independent so it is unit-tested natively.
+//! Which WebTransport server the browser build dials (`netcode_web.rs`).
+//! Player-facing joins come from login tickets; a localhost debug page may
+//! additionally name a local development server with `?dev_server=`.
 //!
 //! - A real hostname (`game.errantry.renownandruin.com`, optionally
 //!   `host:port`, a pasted `https://host:port/` is fine too) is a deployment
@@ -15,21 +15,14 @@
 //!   `assets/webtransport-cert-hash.json` for its self-signed certificate's
 //!   hash and port, and dial `127.0.0.1`.
 //!
-//! The field is prefilled by [`default_server_address`]: the server the
-//! bundle was built for (`VOXEL_WEB_SERVER` at build time — `just web-release`
-//! / `just deploy` set it to `web_server` in the justfile), else the page's own
-//! host when it is served over https, else `127.0.0.1`.
-
 /// The server's WebTransport port (`server::WEBTRANSPORT_PORT`; the client does
 /// not depend on the server crate).
 pub const DEFAULT_WEBTRANSPORT_PORT: u16 = 6467;
 
-/// The build-time default server (`VOXEL_WEB_SERVER`), if the bundle was
-/// built for one.
-pub const BUILT_FOR_SERVER: Option<&str> = option_env!("VOXEL_WEB_SERVER");
-
-/// What the Join server field shows before the player types.
+/// The development server's loopback address.
 pub const LOCAL_SERVER_ADDRESS: &str = "127.0.0.1";
+/// The localhost-only debug query parameter used by `just web`.
+pub const DEV_SERVER_QUERY: &str = "dev_server";
 
 /// How to reach the server.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -88,7 +81,7 @@ fn split_address(address: &str) -> Result<(&str, Option<u16>), String> {
     Ok((host, port))
 }
 
-/// The server a typed address names.
+/// The localhost development address named by `?dev_server=`.
 pub fn web_server_for(address: &str) -> Result<WebServer, String> {
     let (host, port) = split_address(address)?;
     if is_local_host(host) {
@@ -155,15 +148,47 @@ fn pinned(url: &str, cert_hash: Option<&str>) -> Result<Option<WebServer>, Strin
     }
 }
 
-/// The Join server field's initial text: [`BUILT_FOR_SERVER`], else the
-/// page's own host when served over https from a real hostname
-/// (`location.protocol`, `location.hostname`), else [`LOCAL_SERVER_ADDRESS`].
-pub fn default_server_address(built_for: Option<&str>, protocol: &str, hostname: &str) -> String {
-    if let Some(server) = built_for.map(str::trim).filter(|s| !s.is_empty()) {
-        return server.to_string();
+fn query_value<'a>(search: &'a str, name: &str) -> Option<&'a str> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let high = (hex[0] as char).to_digit(16)? as u8;
+            let low = (hex[1] as char).to_digit(16)? as u8;
+            decoded.push((high << 4) | low);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
     }
-    if protocol == "https:" && !is_local_host(hostname) {
-        return hostname.to_string();
+    String::from_utf8(decoded).ok()
+}
+
+/// A local debug server supplied by the page URL. A release bundle and any
+/// non-loopback page ignore it; the supplied value is never logged.
+pub fn dev_server_from(search: &str, hostname: Option<&str>, debug_build: bool) -> Option<String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    let supplied = query_value(search, DEV_SERVER_QUERY)?;
+    let allowed = debug_build && crate::login::api::login_override_allowed(hostname);
+    if !allowed {
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            bevy::log::warn!("[web] ignoring ?{DEV_SERVER_QUERY}= (debug localhost pages only)");
+        }
+        return None;
     }
-    LOCAL_SERVER_ADDRESS.to_string()
+    percent_decode(supplied)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }

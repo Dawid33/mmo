@@ -1,8 +1,25 @@
 # Creative mode and chat: design
 
-Status: written 2026-11-14 from the user's request, **not yet approved**. The user asked for a plan
-while away, so every choice the request left open was made here and is marked **(call)**. The plan
+Status: written 2026-11-14 and **implemented as editor mode on 2026-11-20**, with the permission
+decision refreshed below. The original **(call)** notes are historical. The plan
 (`docs/superpowers/plans/2026-11-14-creative-mode-and-chat.md`) argues from this file.
+
+## As built
+
+- The public name is **editor mode**; the sim interfaces are `Client.editor`,
+  `Order::SetEditor`, `UiUpdate::Editor` and `UiAction::Editor*`.
+- Editor permission is not a client-controlled flag. The coordinator reads the world's
+  `editor_grants` table for the authenticated account at login and sends one authoritative
+  `editor_allowed` bit in the spawn order. Revocation therefore applies at the next join.
+- A process-owned local world has no coordinator/account grant boundary: the inline
+  `LocalServer` and trusted `AuthMode::Local` player admission set `editor_allowed=true`.
+  Observer redirects and JWT/login admission remain grant-controlled; local mode does not widen
+  them.
+- `/creative`, `/normal`, `/gamemode creative|normal` and `/give <item> [count]` are parsed locally.
+  They send the existing authoritative `Order` / `UiAction`; crafted events are still rejected by
+  the sim. Ordinary chat text remains only in the local `ChatLog`.
+- The palette metadata is `CreativeTab` in `blocks.ron`. Air and liquids are absent; extra items
+  are in the client-side Items tab. Protocol 15 carries the editor-bearing packet shapes.
 
 ## What was asked
 

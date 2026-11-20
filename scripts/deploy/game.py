@@ -201,6 +201,7 @@ def register_args(r: Runner, target: Target, world_ns: str, name: str = "Errantr
         raise DeployError("no usable link.cert-sha256.cert in Secret coordinator-identity")
     args = [
         "world", "add", world_id, "--name", name,
+        "--region", "eu-central-1",
         "--link", f"https://coordinator.{world_ns}.svc.cluster.local:6480",
         "--link-cert", pin,
     ]

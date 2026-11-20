@@ -1,0 +1,74 @@
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+
+// Main-menu account settings. Graphics controls remain in SettingsWindow and
+// are opened from here so the same UI is still available in-world.
+export component AccountSettings {
+    in property <string> account;
+    in property <bool> busy;
+    in property <string> error;
+
+    callback log-in();
+    callback log-out();
+    callback graphics();
+    callback back();
+
+    out property <string> account-line: root.busy && root.account == ""
+        ? "Checking your sign-in\u{2026}"
+        : root.account != "" ? "Signed in as " + root.account : "Not signed in";
+    out property <length> log-in-x: login-btn.absolute-position.x + login-btn.width / 2;
+    out property <length> log-in-y: login-btn.absolute-position.y + login-btn.height / 2;
+    out property <length> log-out-x: logout-btn.absolute-position.x + logout-btn.width / 2;
+    out property <length> log-out-y: logout-btn.absolute-position.y + logout-btn.height / 2;
+    out property <length> graphics-x: graphics-btn.absolute-position.x + graphics-btn.width / 2;
+    out property <length> graphics-y: graphics-btn.absolute-position.y + graphics-btn.height / 2;
+    out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
+    out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
+
+    frame := FrameFace {
+        title: "Settings";
+        width: min(root.width - 32px, 520px);
+        height: self.content-y + body.preferred-height
+            + Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        body := VerticalFlow {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: frame.content-right - frame.content-x;
+
+            LabelFace {
+                text: "Account";
+                style: Styles.semibold-label;
+            }
+            LabelFace {
+                text: root.account-line;
+            }
+            login-btn := Button {
+                text: "Log in";
+                visible: root.account == "";
+                enabled: !root.busy;
+                clicked => { root.log-in(); }
+            }
+            logout-btn := Button {
+                text: "Log out";
+                visible: root.account != "";
+                enabled: !root.busy;
+                clicked => { root.log-out(); }
+            }
+            graphics-btn := Button {
+                text: "Graphics";
+                clicked => { root.graphics(); }
+            }
+            if root.error != "": LabelFace {
+                text: root.error;
+                style: Styles.bold-red-label;
+            }
+            back-btn := Button {
+                text: "Back";
+                style: Styles.back-button;
+                clicked => { root.back(); }
+            }
+        }
+    }
+}
