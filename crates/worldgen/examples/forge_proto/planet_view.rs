@@ -195,8 +195,9 @@ fn state_crc(s: &PlateState) -> String {
     }
     h.update(&s.mark_ttl);
     for c in (0..PLANET_CELLS).filter(|&c| s.mark_ttl[c] > 0) {
-        h.update(&[s.mark_contact[c] as u8, s.mark_over[c], s.mark_under[c]]);
-        for v in [s.mark_speed[c], s.mark_relief[c], s.mark_dir[c][0], s.mark_dir[c][1]] {
+        let m = &s.mark[c];
+        h.update(&[m.contact as u8, m.over, m.under]);
+        for v in [m.speed, m.relief, m.dir[0], m.dir[1]] {
             h.update(&v.to_le_bytes());
         }
     }

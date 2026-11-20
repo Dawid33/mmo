@@ -184,19 +184,9 @@ pub struct PlateState {
     /// while its `mark_ttl > 0` (they are not cleared when it falls to 0).
     /// A mark moves with its cell's record and is dropped with it.
     pub mark_ttl: Vec<u8>,
-    /// A collision contact (`true`) or a subduction front.
-    pub mark_contact: Vec<bool>,
-    /// The overriding plate (the winner's) and the plate going under.
-    pub mark_over: Vec<u8>,
-    pub mark_under: Vec<u8>,
-    /// `min(1, |vel_under − vel_over| / 2)`: a RELATIVE speed as a share of
-    /// the largest possible (two plates each capped at 1 cell per step), not
-    /// Ruling 1's per-plate cap.
-    pub mark_speed: Vec<f32>,
-    /// Cortial's `h(z̃) = z̃²` of the cell that went under (Ruling 12).
-    pub mark_relief: Vec<f32>,
-    /// `unit(vel_under − vel_over)` (east, south); `[0, 0]` for equal velocities.
-    pub mark_dir: Vec<[f32; 2]>,
+    /// The rest of the cell's mark (one record: pass B copies it only while
+    /// the mark lives).
+    pub mark: Vec<Mark>,
     /// Per plate: cells per step (east, south), each component in −1 … 1.
     pub vel: Vec<[f64; 2]>,
     /// Per plate: the fractional remainder of its motion.
@@ -223,6 +213,24 @@ struct Scratch {
     stack: Vec<u32>,
 }
 
+/// A mark's payload (`PlateState::mark`; its life is `mark_ttl`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Mark {
+    /// A collision contact (`true`) or a subduction front.
+    pub contact: bool,
+    /// The overriding plate (the winner's) and the plate going under.
+    pub over: u8,
+    pub under: u8,
+    /// `min(1, |vel_under − vel_over| / 2)`: a RELATIVE speed as a share of
+    /// the largest possible (two plates each capped at 1 cell per step), not
+    /// Ruling 1's per-plate cap.
+    pub speed: f32,
+    /// Cortial's `h(z̃) = z̃²` of the cell that went under (Ruling 12).
+    pub relief: f32,
+    /// `unit(vel_under − vel_over)` (east, south); `[0, 0]` for equal velocities.
+    pub dir: [f32; 2],
+}
+
 /// What a step writes before the swap, and pass A's winners.
 #[derive(Clone, Default)]
 struct Next {
@@ -235,12 +243,7 @@ struct Next {
     kind: Vec<u8>,
     fold: Vec<[f32; 2]>,
     mark_ttl: Vec<u8>,
-    mark_contact: Vec<bool>,
-    mark_over: Vec<u8>,
-    mark_under: Vec<u8>,
-    mark_speed: Vec<f32>,
-    mark_relief: Vec<f32>,
-    mark_dir: Vec<[f32; 2]>,
+    mark: Vec<Mark>,
     /// Per destination: the best source cell seen (`NO_SOURCE` = none).
     winner: Vec<u32>,
     /// Per SOURCE cell: its destination this step (`NO_DEST` = past a pole).
@@ -450,12 +453,7 @@ impl PlateState {
             kind,
             fold,
             mark_ttl: vec![0; PLANET_CELLS],
-            mark_contact: vec![false; PLANET_CELLS],
-            mark_over: vec![0; PLANET_CELLS],
-            mark_under: vec![0; PLANET_CELLS],
-            mark_speed: vec![0.0; PLANET_CELLS],
-            mark_relief: vec![0.0; PLANET_CELLS],
-            mark_dir: vec![[0.0; 2]; PLANET_CELLS],
+            mark: vec![Mark::default(); PLANET_CELLS],
             vel,
             acc: vec![[0.0; 2]; PLATES_MAX],
             alive,
@@ -512,13 +510,8 @@ impl PlateState {
             v.resize(PLANET_CELLS, 0.0);
         }
         next.fold.resize(PLANET_CELLS, [0.0; 2]);
-        for v in [&mut next.mark_ttl, &mut next.mark_over, &mut next.mark_under] {
-            v.resize(PLANET_CELLS, 0);
-        }
-        next.mark_contact.resize(PLANET_CELLS, false);
-        next.mark_speed.resize(PLANET_CELLS, 0.0);
-        next.mark_relief.resize(PLANET_CELLS, 0.0);
-        next.mark_dir.resize(PLANET_CELLS, [0.0; 2]);
+        next.mark_ttl.resize(PLANET_CELLS, 0);
+        next.mark.resize(PLANET_CELLS, Mark::default());
         // Pass A, first loop (row-major): each source's destination, once
         // (`NO_DEST` past a pole; the row wrap by a compare), and the per-plate
         // snapshot the contest reads. Every pass below works on local slices
@@ -533,12 +526,7 @@ impl PlateState {
             kind: n_kind,
             fold: n_fold,
             mark_ttl: n_ttl,
-            mark_contact: n_contact,
-            mark_over: n_over,
-            mark_under: n_under,
-            mark_speed: n_speed,
-            mark_relief: n_relief,
-            mark_dir: n_dir,
+            mark: n_mark,
             winner,
             dest,
             consumed,
@@ -625,24 +613,8 @@ impl PlateState {
             &mut n_kind[..PLANET_CELLS],
             &mut n_fold[..PLANET_CELLS],
         );
-        let (ttl, contact, over, under, speed, relief, dir) = (
-            &self.mark_ttl[..PLANET_CELLS],
-            &self.mark_contact[..PLANET_CELLS],
-            &self.mark_over[..PLANET_CELLS],
-            &self.mark_under[..PLANET_CELLS],
-            &self.mark_speed[..PLANET_CELLS],
-            &self.mark_relief[..PLANET_CELLS],
-            &self.mark_dir[..PLANET_CELLS],
-        );
-        let (n_ttl, n_contact, n_over, n_under, n_speed, n_relief, n_dir) = (
-            &mut n_ttl[..PLANET_CELLS],
-            &mut n_contact[..PLANET_CELLS],
-            &mut n_over[..PLANET_CELLS],
-            &mut n_under[..PLANET_CELLS],
-            &mut n_speed[..PLANET_CELLS],
-            &mut n_relief[..PLANET_CELLS],
-            &mut n_dir[..PLANET_CELLS],
-        );
+        let (ttl, mark) = (&self.mark_ttl[..PLANET_CELLS], &self.mark[..PLANET_CELLS]);
+        let (n_ttl, n_mark) = (&mut n_ttl[..PLANET_CELLS], &mut n_mark[..PLANET_CELLS]);
         let mut counters = self.counters.clone();
         counters.polar_lost_oceanic += lost[0];
         counters.polar_lost_continental += lost[1];
@@ -668,12 +640,7 @@ impl PlateState {
                 let t = ttl[c];
                 n_ttl[d] = t.saturating_sub(1);
                 if t > 1 {
-                    n_contact[d] = contact[c];
-                    n_over[d] = over[c];
-                    n_under[d] = under[c];
-                    n_speed[d] = speed[c];
-                    n_relief[d] = relief[c];
-                    n_dir[d] = dir[c];
+                    n_mark[d] = mark[c];
                 }
             } else {
                 consumed.push((d as u32, c as u32));
@@ -702,12 +669,14 @@ impl PlateState {
                 *p = p.saturating_add(1);
             }
             n_ttl[d] = FRONT_TTL_STEPS;
-            n_contact[d] = is_contact;
-            n_over[d] = o as u8;
-            n_under[d] = u as u8;
-            n_speed[d] = (0.5 * dv[0].hypot(dv[1])).min(1.0) as f32;
-            n_relief[d] = (z * z) as f32;
-            n_dir[d] = unit(dv);
+            n_mark[d] = Mark {
+                contact: is_contact,
+                over: o as u8,
+                under: u as u8,
+                speed: (0.5 * dv[0].hypot(dv[1])).min(1.0) as f32,
+                relief: (z * z) as f32,
+                dir: unit(dv),
+            };
         }
         // 3. Gaps: new oceanic crust, born at the step's end, owned by the
         // plate that held the cell before the step (two plates moving apart
@@ -740,12 +709,7 @@ impl PlateState {
         std::mem::swap(&mut self.kind, &mut next.kind);
         std::mem::swap(&mut self.fold, &mut next.fold);
         std::mem::swap(&mut self.mark_ttl, &mut next.mark_ttl);
-        std::mem::swap(&mut self.mark_contact, &mut next.mark_contact);
-        std::mem::swap(&mut self.mark_over, &mut next.mark_over);
-        std::mem::swap(&mut self.mark_under, &mut next.mark_under);
-        std::mem::swap(&mut self.mark_speed, &mut next.mark_speed);
-        std::mem::swap(&mut self.mark_relief, &mut next.mark_relief);
-        std::mem::swap(&mut self.mark_dir, &mut next.mark_dir);
+        std::mem::swap(&mut self.mark, &mut next.mark);
         self.step += 1;
     }
 
@@ -768,30 +732,35 @@ impl PlateState {
         let rate = SUBDUCTION_U0_M_PER_MY / OROGEN_HEIGHT_M[OrogenyKind::Andean as usize]
             * (f64::from(FIELD_EVERY_STEPS) * PLATE_DT_MY);
         let Scratch { dist, src, .. } = &mut self.scratch;
-        let (ttl, contact) = (&self.mark_ttl, &self.mark_contact);
-        chamfer_into(|c| ttl[c] > 0 && !contact[c], PLANET_DEG_PER_CELL, reach, dist, src);
-        for c in 0..PLANET_CELLS {
+        let (ttl, mark) = (&self.mark_ttl, &self.mark);
+        let active = chamfer_into(|c| ttl[c] > 0 && !mark[c].contact, PLANET_DEG_PER_CELL, reach, dist, src);
+        // Only the chamfer's active tiles can hold a distance below the reach.
+        let cells = (0..CHAMFER_TX * CHAMFER_TZ).filter(|&t| active[t]).flat_map(|t| {
+            let (x0, z0) = ((t % CHAMFER_TX) * CHAMFER_TILE, (t / CHAMFER_TX) * CHAMFER_TILE);
+            (z0..z0 + CHAMFER_TILE).flat_map(move |z| (z * PLANET_NX + x0)..(z * PLANET_NX + x0 + CHAMFER_TILE))
+        });
+        for c in cells {
             let d = dist[c];
             if d >= reach {
                 continue;
             }
-            let m = src[c] as usize;
-            if self.plate[c] != self.mark_over[m] {
+            let m = self.mark[src[c] as usize];
+            if self.plate[c] != m.over {
                 continue;
             }
             let f = if d < peak { smoothstep(0.0, peak, d) } else { 1.0 - smoothstep(peak, reach, d) };
             let lat = planet_lat_deg(c / PLANET_NX);
             let gain = rate
                 * f
-                * f64::from(self.mark_speed[m])
-                * f64::from(self.mark_relief[m])
+                * f64::from(m.speed)
+                * f64::from(m.relief)
                 * polar_fade(lat);
             if gain <= 1e-5 {
                 continue;
             }
             self.strength[c] = orogeny_strength(self.strength[c], self.orogeny_my[c], time, gain);
             self.orogeny_my[c] = time as f32;
-            self.fold[c] = self.mark_dir[m];
+            self.fold[c] = m.dir;
             if self.crust[c] == CrustKind::Continental as u8 {
                 self.kind[c] = OrogenyKind::Andean as u8;
             } else {
@@ -832,9 +801,9 @@ impl PlateState {
         let in_u = |c: usize| self.plate[c] as usize == u && self.crust[c] == continental;
         for c in 0..PLANET_CELLS {
             let is_mark = self.mark_ttl[c] > 0
-                && self.mark_contact[c]
-                && self.mark_over[c] as usize == o
-                && self.mark_under[c] as usize == u;
+                && self.mark[c].contact
+                && self.mark[c].over as usize == o
+                && self.mark[c].under as usize == u;
             if !is_mark {
                 continue;
             }
@@ -1051,13 +1020,20 @@ fn chamfer(seed: &[bool], unit: f64) -> Vec<f64> {
 /// the cap is built only from values below it. For the same reason the passes
 /// skip every `CHAMFER_TILE`² tile farther from all seed tiles (Chebyshev,
 /// x wrapping) than a cap's worth of cells: no cell there can come below the
-/// cap (every step costs at least `unit`), so it would never change.
-fn chamfer_into(seed: impl Fn(usize) -> bool, unit: f64, cap: f64, d: &mut Vec<f64>, src: &mut Vec<u32>) {
+/// cap (every step costs at least `unit`), so it would never change. Returns
+/// those active tiles (`CHAMFER_TX` per row of tiles).
+fn chamfer_into(
+    seed: impl Fn(usize) -> bool,
+    unit: f64,
+    cap: f64,
+    d: &mut Vec<f64>,
+    src: &mut Vec<u32>,
+) -> [bool; CHAMFER_TX * CHAMFER_TZ] {
     const PAIRS_MAX: usize = 3;
     const NX: usize = PLANET_NX;
     const T: usize = CHAMFER_TILE;
-    const TX: usize = PLANET_NX / CHAMFER_TILE;
-    const TZ: usize = PLANET_NZ / CHAMFER_TILE;
+    const TX: usize = CHAMFER_TX;
+    const TZ: usize = CHAMFER_TZ;
     let diag = std::f64::consts::SQRT_2 * unit;
     d.clear();
     d.resize(PLANET_CELLS, f64::INFINITY);
@@ -1220,10 +1196,13 @@ fn chamfer_into(seed: impl Fn(usize) -> bool, unit: f64, cap: f64, d: &mut Vec<f
             break;
         }
     }
+    active
 }
 
 /// The chamfer's skipping tile, cells (divides both grid sides).
-const CHAMFER_TILE: usize = 16;
+const CHAMFER_TILE: usize = 8;
+const CHAMFER_TX: usize = PLANET_NX / CHAMFER_TILE;
+const CHAMFER_TZ: usize = PLANET_NZ / CHAMFER_TILE;
 
 /// `initial`, then `advance` until `key.plate_duration_my`; `on_frame` sees the state every `every` steps (0 = never).
 pub fn simulate(key: &PlanetKey, every: u32, on_frame: &mut dyn FnMut(&PlateState)) -> PlateState {
