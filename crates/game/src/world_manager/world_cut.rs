@@ -237,6 +237,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         tick: crate::Tick,
         hosts: &[HostId],
         leaving: &[HostId],
+        moves: &[crate::LandMove],
     ) -> Result<(), CutFailure> {
         let me = self.ordinal();
         if hosts.iter().chain(leaving).any(|h| *h == me) {
@@ -279,6 +280,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             return Err(CutFailure::Aborted);
         }
         let peers: BTreeSet<HostId> = all.into_iter().filter(|h| *h != me).collect();
+        // Elastic 5: a move this host gives that it cannot give refuses the part; the taker's and
+        // the peers' notes of the moves are made.
+        let participants: BTreeSet<HostId> = peers.iter().copied().chain([me]).collect();
+        self.check_cut_moves(cut, &participants, moves)?;
         // Hosts outside the cut (Elastic 1 Task 4: registered after it began). One this host
         // exchanged state with that no committed cut of both has saved may hold some of this
         // cut's state, which no part would write: this part is refused ("wait, never guess";
@@ -346,6 +351,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             // A dead region thread: the part failed; the caller sends the one `CutFailed`.
             // Nothing of it was staged: its mask lifts now (its `CutDone` may never come).
             self.release_aborted(cut);
+            self.move_aborted(cut);
             if let Some(run) = self.world_cut.take() {
                 for o in &run.outsiders {
                     if let Some(peer) = self.peers.get_mut(o) {
@@ -385,6 +391,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
+        // Elastic 5: land this host gives in the cut is masked, its players parked keeping their
+        // sessions, its regions stopped (their `Stopped` answers are the cut's).
+        self.begin_moves_out(cut, moves);
         if i_leave {
             // Everything here parks for it: the regions' `Stopped` answers are the cut's.
             log::info!("[server] world cut {} at tick {tick}: this host leaves in it; parking everything", cut.0);
@@ -808,7 +817,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The coordinator's `BeginCut`: begun, or refused with `CutFailed`.
-    pub(super) fn world_begin_cut(&mut self, cut: CutId, tick: crate::Tick, hosts: &[HostId], leaving: &[HostId], generation: u64) {
+    pub(super) fn world_begin_cut(
+        &mut self,
+        cut: CutId,
+        tick: crate::Tick,
+        hosts: &[HostId],
+        leaving: &[HostId],
+        generation: u64,
+        moves: &[crate::LandMove],
+    ) {
         if !self.world_attached() {
             // Sent before the coordinator applied our latest `Attach`, which aborted it.
             log::debug!("world cut {}: begun before our latest attach; dropped", cut.0);
@@ -822,7 +839,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.world_cut_seen = Some(self.world_cut_seen.map_or(cut, |s| s.max(cut)));
             return self.world_send(HostMsg::CutFailed { cut, why: CutFailure::Aborted });
         }
-        if let Err(why) = self.begin_world_cut(cut, tick, hosts, leaving) {
+        if let Err(why) = self.begin_world_cut(cut, tick, hosts, leaving, moves) {
             self.world_send(HostMsg::CutFailed { cut, why });
         }
     }
@@ -841,6 +858,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         if committed {
             // What this host exchanged with the participants is saved by this cut.
             self.unsaved_traffic.retain(|h| !participants.contains(h));
+            // Elastic 5: the taker and the peers read the directory for the moved land.
+            self.move_cut_committed(cut);
+        } else {
+            // Elastic 5: the taker's and the peers' notes of the cut's moves go (the giver's mask
+            // lifts with the cut's settle, `cut_failed`).
+            self.expecting.values_mut().filter(|m| m.cut_is(cut)).for_each(|m| m.uncut());
+            self.peer_moving.retain(|_, (c, _)| *c != cut);
         }
         if let Some(run) = self.world_cut.take_if(|r| r.cut == cut) {
             for o in &run.outsiders {

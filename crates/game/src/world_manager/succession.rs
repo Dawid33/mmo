@@ -330,6 +330,9 @@ macro_rules! host_fields {
             value_sets: [kicks_pending],
             journal: [journal],
             other: [
+            // Elastic 5: `moving_out` / `expecting` name a live peer only while its move runs —
+            // `forget_host` of either ends it by `MoveOff` or a cut's abort; `peer_moving` holds no host.
+            moving_out, expecting, peer_moving,
             spawner, generator, regions, parked, terrain_cache, pristine_terrain, pristine_terrain_max,
             sessions, homes, world_map, route_map, pending_events, world, world_view, spawn_waiting,
             world_live, world_attach, attach_epoch, world_generation, host_generation, world_boot,

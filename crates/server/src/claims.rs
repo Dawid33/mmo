@@ -606,6 +606,13 @@ pub trait ClaimingManager {
     fn forget_absent_hosts(&mut self, _present: BTreeSet<HostId>, _next_host_id: u64) {}
     /// Every dead `hosts` row of a read ([`WorldManager::note_dead_rows`]).
     fn note_dead_rows(&mut self, _dead: Vec<HostId>) {}
+    /// Elastic 5: land a committed move brings here and not claimed yet
+    /// ([`WorldManager::expected_committed`]): fenced from the first read that shows it as this
+    /// host's, even while a succession is open (it came by its cut's `CutDone`, in commit order —
+    /// no declaration's moved row). The tests' fakes expect none.
+    fn expected_committed(&self) -> Vec<SuperRegion> {
+        Vec::new()
+    }
 }
 
 impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
@@ -638,6 +645,9 @@ impl<S: RegionSpawner> ClaimingManager for WorldManager<S> {
     }
     fn take_directory_wanted(&mut self) -> bool {
         WorldManager::take_directory_wanted(self)
+    }
+    fn expected_committed(&self) -> Vec<SuperRegion> {
+        WorldManager::expected_committed(self)
     }
 }
 
@@ -687,11 +697,19 @@ impl DirectoryKeeper {
                         let fence = self.claims.fence();
                         let me = i64::try_from(fence.owner.0).unwrap_or(i64::MAX);
                         let open_run = hosts.iter().any(|r| r.succeeding);
+                        let expected: BTreeSet<SuperRegion> = manager.expected_committed().into_iter().collect();
                         let lost: Vec<(SuperRegion, u64)> = rows
                             .iter()
                             .filter(|row| unfenced(&fence, me, row) && row.2 > manager.known_epoch(row.0).unwrap_or(0))
                             .map(|(sr, _, epoch)| (*sr, *epoch))
                             .collect();
+                        // Elastic 5: a committed move's land, once the read shows it as this host's
+                        // (`COMMIT PREPARED` ran): fenced and taken even while a run is open.
+                        let (moved, lost): (Vec<_>, Vec<_>) = lost.into_iter().partition(|(sr, _)| expected.contains(sr));
+                        if !moved.is_empty() && !self.claims.fenced().is_set() {
+                            log::info!("[server] the directory shows super-region(s) {moved:?} moved to this host: fenced and taken");
+                            self.fence_then_tell(moved, manager);
+                        }
                         if !lost.is_empty() && !open_run && !self.claims.fenced().is_set() {
                             log::info!("[server] the directory shows super-region(s) {lost:?} assigned to this host: fenced and taken");
                             self.fence_then_tell(lost, manager);
@@ -737,6 +755,11 @@ impl DirectoryKeeper {
             }
         }
         if manager.take_directory_wanted() {
+            self.read_wanted = true;
+        }
+        // Elastic 5: a committed move's land not shown as this host's yet (its part's `COMMIT
+        // PREPARED` not run yet): read again, spaced.
+        if self.reading.is_none() && !manager.expected_committed().is_empty() {
             self.read_wanted = true;
         }
         let now = Instant::now();

@@ -1113,6 +1113,12 @@ pub fn drain_client_updates(
                     map.0 = hosts.into_iter().collect();
                 }
             }
+            // Elastic 5: the countdown of a move of the land under the player.
+            ClientUpdateEvent::LandMoving { remaining_secs } => {
+                if let Some(drain) = drain.as_mut() {
+                    drain.moving_secs = remaining_secs;
+                }
+            }
             // Only the native autopilot reads the region -> host map; the browser never sends it.
             #[cfg(target_arch = "wasm32")]
             ClientUpdateEvent::RegionHosts(_) => {

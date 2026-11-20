@@ -26,6 +26,7 @@ use crate::save_cut::{
 
 mod drain;
 mod land;
+mod moves;
 mod peers;
 mod placement;
 mod succession;
@@ -1284,6 +1285,13 @@ pub struct WorldManager<S: RegionSpawner> {
     /// masked ([`Self::owner_of`] answers `Unknown`) from its `BeginCut` until it is decided
     /// here.
     releasing: BTreeMap<crate::SuperRegion, (CutId, u64)>,
+    /// Elastic 5 (`moves.rs`): land this host gives in a move, by super-region.
+    moving_out: BTreeMap<crate::SuperRegion, moves::MoveOut>,
+    /// Elastic 5: land moved here, expected, by super-region.
+    expecting: BTreeMap<crate::SuperRegion, moves::MoveIn>,
+    /// Elastic 5: land another pair of hosts moves in a running cut: masked here, with the cut and
+    /// the epoch the directory knew it at.
+    peer_moving: BTreeMap<crate::SuperRegion, (CutId, u64)>,
     /// Super-regions this host released, with the free row's epoch, until the directory shows
     /// them owned again.
     recently_released: BTreeMap<crate::SuperRegion, u64>,
@@ -1639,6 +1647,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             land_idle_since: BTreeMap::new(),
             idle_scanned_ms: 0,
             releasing: BTreeMap::new(),
+            moving_out: BTreeMap::new(),
+            expecting: BTreeMap::new(),
+            peer_moving: BTreeMap::new(),
             recently_released: BTreeMap::new(),
             land_released_total: 0,
             parked_written: BTreeMap::new(),
@@ -2495,6 +2506,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn maintain(&mut self, now_ms: u64) {
         self.pump_peers(now_ms);
         self.clock_ms = self.clock_ms.max(now_ms);
+        // Elastic 5: move notices, held hand-offs, peers' masks.
+        self.maintain_moves(now_ms);
         self.world_ms = self.world_ms.max(now_ms);
         self.expire_overdue_cut();
         // A world cut whose regions all answered marks once the world tick reaches it.
@@ -2736,6 +2749,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         for rc in stale {
             self.invalidate_region_lod(rc);
         }
+        // Elastic 5: its moves (the server shrank its fence by them too): the taker's now, their
+        // players sent there — before `drop_stored_parked` would drop those records.
+        self.land_moved(id);
         // Its releases (the server shrank its fence first): free now, the mask lifts.
         self.land_released(id);
         // Records the cut wrote that are parked here on land not this host's: the store's now.
@@ -2754,6 +2770,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         // at `world_cut_failed`: a part that failed may still be staged (a backend error), and
         // a region load in that land waits for its decision meanwhile.
         self.release_aborted(id);
+        // Elastic 5: a move it carried stays here; its players are restored at their pose.
+        self.move_aborted(id);
     }
 
     /// [`Self::cut_failed`] without the journal: this host's part failed before any decision.
@@ -3267,8 +3285,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Masked since its `BeginCut`, or above for a leave (`land.rs`): the store frees
             // them with the commit.
             releases,
-            // Elastic 5: filled by the giver's move path (Task 4).
-            moves: Vec::new(),
+            // Elastic 5: masked since its `BeginCut` (`moves.rs`): the store hands them to their
+            // takers with the commit.
+            moves: self.moves_of(cut.id),
         };
         log::debug!(
             "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",
@@ -3739,6 +3758,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     && s.asked_elsewhere.is_empty()
                     && !self.in_flight.values().any(|f| f.bundle.client.as_ref().is_some_and(|(b, _)| b == *c))
                     && now_ms.saturating_sub(s.idle_since_ms) >= OBSERVER_IDLE_CLOSE_MS
+                    // Elastic 5: while a move brings land here, an idle observer may be a standby
+                    // session of a player on that land (the expectation ends with the move).
+                    && self.expecting.is_empty()
             })
             .map(|(c, _)| *c)
             .collect();

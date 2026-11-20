@@ -888,6 +888,15 @@ pub enum ServerPacket {
     /// deadline moves earlier; never to an observer session. A hand-off away (`HomeHop` on
     /// another connection) ends what it says.
     HostDraining { at_tick: u64 },
+    /// Elastic 5: the land under the player's body (`super_region`) moves to another host at
+    /// world tick `at_tick` (`None`: the move is off, or the body left that land): a notice, then
+    /// a pause of seconds; `standby`: that host's endpoint and a ticket for an observer connection
+    /// the client opens ahead of the move, so the hop needs no reconnect. From the home only.
+    LandMoving {
+        super_region: crate::SuperRegion,
+        at_tick: Option<u64>,
+        standby: Option<(crate::HostEndpoint, ObserverTicket)>,
+    },
 }
 
 /// What a client presents to another host (`Credential::Observer`) to subscribe to its

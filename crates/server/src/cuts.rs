@@ -505,7 +505,7 @@ impl CutWriter {
                 // store freed the rows). Lifting the mask as for a failure would leave manager
                 // and fence holding land the store gave up (a false fenced exit at the next
                 // load or part): it is settled by the store's decision instead, as a part is.
-                _ if committed && !manager.releases_of(cut).is_empty() => {
+                _ if committed && (!manager.releases_of(cut).is_empty() || manager.gives_land_in(cut)) => {
                     log::warn!(
                         "[server] world cut {} committed and this host masked land for its release, but no part of it is \
                          tracked here: settled by the store's decision",

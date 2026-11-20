@@ -321,6 +321,9 @@ pub enum ConnectionState {
 /// channels in (a deserialized one is `never()`).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum ClientUpdateEvent {
+    /// Elastic 5: whole seconds until the land under the player moves to another host (0: the
+    /// move is under way; `None`: none, or it is off). Sent when the whole seconds change.
+    LandMoving { remaining_secs: Option<u64> },
     NewRegion(
         RegionId,
         GameData,

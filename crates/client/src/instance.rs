@@ -226,6 +226,9 @@ pub struct GameInstanceManager {
     clock: crate::regions::clock::PredictedClock,
     /// The home host's drain deadline (a world tick) and what the renderer was told of it.
     drain: crate::renderer::drain_notice::DrainDeadline,
+    /// Elastic 5: the tick the land under the player moves at (`ServerPacket::LandMoving`), and
+    /// what the render side was last told — the drain's pacing.
+    land_moving: crate::renderer::drain_notice::DrainDeadline,
     /// `(tick, state hash)` per region from the last `region_probe`.
     probe: BTreeMap<RegionId, (game::Tick, u32)>,
     /// The finite world's extent and coarse-route map, from the server's
@@ -955,6 +958,7 @@ impl GameInstanceManager {
             probe: BTreeMap::new(),
             clock: Default::default(),
             drain: Default::default(),
+            land_moving: Default::default(),
             route_map: None,
             frame: WrapFrame::default(),
             frame_sent: None,
@@ -2222,6 +2226,9 @@ impl GameInstanceManager {
         );
         // The old home's drain says nothing of the new one (which sends its own).
         self.drain.clear();
+        // Elastic 5: nor its move (the move happened: this is the new home).
+        self.land_moving.clear();
+        self.conns.end_standby();
         self.tell_drain();
         // The subscribes left unanswered at the old home get no answer the client reads
         // any more (it reads only region traffic there; a `RegionElsewhere` from it is
@@ -2260,6 +2267,32 @@ impl GameInstanceManager {
         if let Some(remaining_secs) = self.drain.poll(self.clock.tick()) {
             let _ = self.client_event_send.send(ClientUpdateEvent::HostDraining { remaining_secs });
         }
+        // Elastic 5: the move's countdown rides the same pacing (once per whole second).
+        if let Some(remaining_secs) = self.land_moving.poll(self.clock.tick()) {
+            let _ = self.client_event_send.send(ClientUpdateEvent::LandMoving { remaining_secs });
+        }
+    }
+
+    /// Elastic 5: the home says the land under the player moves at `at_tick` (`None`: it is off,
+    /// or the body left that land): the countdown, and a standby connection to the taker opened
+    /// now so the hop needs no new connection; spared until the move's deadline.
+    fn land_moving(&mut self, at_tick: Option<u64>, standby: Option<(game::HostEndpoint, game::ObserverTicket)>) {
+        self.land_moving.clear();
+        match at_tick {
+            Some(at) => {
+                self.land_moving.offer(at);
+                if let Some((endpoint, ticket)) = standby {
+                    let left_ticks = self.clock.tick().map_or(0, |now| at.saturating_sub(now));
+                    let until = self.conn_clock_ms + left_ticks * game::TICK_RATE + game::MOVE_DEADLINE_MS;
+                    let opener = self.opener.as_deref_mut().map(|o| o as &mut dyn ConnOpener);
+                    if !self.conns.open_standby(&endpoint, ticket, opener, until) {
+                        log::info!("[client] no standby connection to host {} (it is the home's, or this transport has one)", endpoint.id);
+                    }
+                }
+            }
+            None => self.conns.end_standby(),
+        }
+        self.tell_drain();
     }
 
     /// Another host refused (and closes) its connection: its regions are asked
@@ -2707,6 +2740,12 @@ impl GameInstanceManager {
             game::ServerPacket::HostDraining { at_tick } => {
                 if conn == self.conns.home() && self.drain.offer(at_tick) {
                     self.tell_drain();
+                }
+            }
+            // Elastic 5: only the home's (`handle_packet` drops it from any other connection).
+            game::ServerPacket::LandMoving { at_tick, standby, .. } => {
+                if conn == self.conns.home() {
+                    self.land_moving(at_tick, standby);
                 }
             }
             // The first packet of every session: which host the home is.

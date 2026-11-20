@@ -607,6 +607,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             CoordMsg::Attached { epoch } => match self.world_attach {
                 WorldAttach::Sent { epoch: sent } if sent == epoch => {
+                    // Elastic 5: orders not begun in a cut are dropped; the coordinator re-sends them.
+                    self.moves_reattached();
                     log::info!("world link: attach {epoch} applied");
                     self.world_attach = WorldAttach::Attached;
                     // The coordinator has those hand-overs; later ones wait for the next.
@@ -696,19 +698,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             CoordMsg::ClaimIs { player, claim, report } => self.claim_is(player, claim, report),
             CoordMsg::HopIs { player, reported, hop } => self.hop_is(player, reported, hop),
-            // Elastic 5: `moves` reach the host side in Tasks 4 and 5.
-            CoordMsg::BeginCut { cut, tick, hosts, leaving, generation, moves: _ } => {
-                self.world_begin_cut(cut, tick, &hosts, &leaving, generation)
+            CoordMsg::BeginCut { cut, tick, hosts, leaving, generation, moves } => {
+                self.world_begin_cut(cut, tick, &hosts, &leaving, generation, &moves)
             }
             CoordMsg::CutDone { cut, committed } => self.world_cut_decided(cut, committed),
-            // Elastic 5: the giver's and the taker's orders (Tasks 4 and 5).
-            CoordMsg::MoveLand { id, sr, taker, at_tick } => {
-                log::info!("[server] move {}: super-region {sr:?} is to move to host {taker} at tick {at_tick}", id.0)
-            }
-            CoordMsg::ExpectLand { id, sr, giver, at_tick } => {
-                log::info!("[server] move {}: super-region {sr:?} is to come from host {giver} at tick {at_tick}", id.0)
-            }
-            CoordMsg::MoveOff { id, sr } => log::info!("[server] move {} of super-region {sr:?} is called off", id.0),
+            // Elastic 5 (`moves.rs`).
+            CoordMsg::MoveLand { id, sr, taker, at_tick } => self.move_land(id, sr, taker, at_tick),
+            CoordMsg::ExpectLand { id, sr, giver, at_tick } => self.expect_land(id, sr, giver, at_tick),
+            CoordMsg::MoveOff { id, sr } => self.move_off(id, sr),
             CoordMsg::CutPeerCount { cut, from, received_through, boot } => {
                 self.world_cut_peer_count(cut, from, received_through, boot)
             }

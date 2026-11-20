@@ -7,17 +7,32 @@
 
 use bevy::prelude::Resource;
 
-/// Whole seconds until the home host leaves; `None`: no drain is known.
+/// Whole seconds until the home host leaves; `None`: no drain is known. Elastic 5: and until the
+/// land under the player moves to another host (`moving_secs`, `ClientUpdateEvent::LandMoving`):
+/// that line wins (the move comes first, and no reconnect follows it).
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DrainNotice {
     pub remaining_secs: Option<u64>,
+    pub moving_secs: Option<u64>,
 }
 
 impl DrainNotice {
     /// The line to draw (`""` draws nothing).
     pub fn line(&self) -> String {
-        self.remaining_secs.map(drain_line).unwrap_or_default()
+        match self.moving_secs {
+            Some(secs) => move_line(secs),
+            None => self.remaining_secs.map(drain_line).unwrap_or_default(),
+        }
     }
+}
+
+/// Elastic 5: the line for a move of the land under the player, `remaining_secs` away (`0`: the
+/// move is under way — a pause of seconds).
+pub fn move_line(remaining_secs: u64) -> String {
+    if remaining_secs == 0 {
+        return "Moving this area to another server\u{2026}".to_string();
+    }
+    format!("This area moves to another server in {}:{:02}.", remaining_secs / 60, remaining_secs % 60)
 }
 
 /// The game thread's side: the deadline (a world tick) the home host leaves at, and what the

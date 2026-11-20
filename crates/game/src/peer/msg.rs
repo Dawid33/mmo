@@ -40,6 +40,15 @@ pub struct PeerHello {
     pub received_from_boot: Option<u64>,
 }
 
+/// Where a moved player's body is made ([`Reliable::PlayerMove`], Elastic 5).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovePlace {
+    /// At the target region's landing (a move into another host's region).
+    Landing,
+    /// At the record's own pose (its land moved to that host: it stands where it stood).
+    Pose,
+}
+
 /// A player handed from one host to another with an entity or a record.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PlayerHandoff {
@@ -73,8 +82,10 @@ pub enum Reliable {
     /// An entity crossing into a region of the other host, applied at `stamp`.
     Transfer { target: RegionCoords, stamp: Tick, bundle: Box<EntityBundle>, player: Option<PlayerHandoff> },
     Intent(IntentMsg),
-    /// A player without a body (parked, observing) moving to a region of the other host.
-    PlayerMove { handoff: PlayerHandoff, record: Box<PlayerRecord>, target: RegionCoords },
+    /// A player without a body (parked, observing) moving to a region of the other host;
+    /// `place` (Elastic 5): created at the target's landing, or restored at the record's pose
+    /// (a player whose land moved under it).
+    PlayerMove { handoff: PlayerHandoff, record: Box<PlayerRecord>, target: RegionCoords, place: MovePlace },
     /// Admit `client` (of `player`) presenting `nonce` for `ttl_secs` from receipt (the
     /// receiving edge dates it by its own clock).
     ObserverOrder { client: ClientId, player: PlayerId, nonce: Nonce, ttl_secs: u64 },

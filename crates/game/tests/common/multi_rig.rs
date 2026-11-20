@@ -798,7 +798,9 @@ impl MultiRig {
     pub fn prepare_part(&mut self, h: HostId, cut: WorldCut) -> Result<(), String> {
         assert!(cut.history.is_none(), "a host's part never carries the history");
         assert_eq!(cut.host, h, "a part is its host's");
-        self.part_releases.insert((cut.id, h), cut.releases.clone());
+        // Elastic 5: the moved rows leave the giver's fence with the commit, as released ones do.
+        let given: Vec<game::SuperRegion> = cut.releases.iter().copied().chain(cut.moves.iter().map(|(sr, _)| *sr)).collect();
+        self.part_releases.insert((cut.id, h), given);
         if let Some(&committed) = self.decided.get(&cut.id) {
             if committed {
                 self.apply_part(h, &cut);
@@ -1053,6 +1055,12 @@ impl MultiRig {
                     *row = (None, row.1 + 1);
                 }
                 self.released.insert(*sr);
+            }
+            // Elastic 5: its moves: the taker's at `epoch + 1`, with its commit (`cut_rows`).
+            for (sr, taker) in &part.moves {
+                if let Some(row) = store.get_mut(sr) {
+                    *row = (Some(*taker), row.1 + 1);
+                }
             }
         }
     }

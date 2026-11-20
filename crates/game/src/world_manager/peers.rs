@@ -147,7 +147,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub(super) fn owner_of_sr(&self, sr: crate::SuperRegion) -> crate::Owner {
         // Land being inherited, and land this host's pending part releases (`land.rs`): no
         // region of it starts until the cut is decided.
-        if self.inheriting.contains_key(&sr) || self.releasing.contains_key(&sr) {
+        if self.inheriting.contains_key(&sr) || self.releasing.contains_key(&sr) || self.move_masked(sr) {
             return crate::Owner::Unknown;
         }
         self.ownership.0.owner_of(sr)
@@ -571,7 +571,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let handoff = crate::PlayerHandoff { client, player, claim, login, park: false, hop };
         // Parked after `m.from` answered the pending cut: its snapshot holds the body.
         let view = self.in_cut_view(m.from);
-        self.send_reliable(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target }, view);
+        self.send_reliable(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target, place: crate::MovePlace::Landing }, view);
         self.refresh_keepalive(m.from, now_ms);
         let _ = self.redirect(client, m.target);
     }
@@ -581,7 +581,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ([`HANDOFF_SESSION_GRACE_MS`]) — its body created at `target`'s landing with what it
     /// carries, as a move within one host creates it. A `target` that cannot be loaded
     /// parks the record here ([`Self::park_handed`]).
-    fn accept_move(&mut self, from: HostId, h: crate::PlayerHandoff, record: PlayerRecord, target: RegionCoords) {
+    pub(super) fn accept_move(&mut self, from: HostId, h: crate::PlayerHandoff, record: PlayerRecord, target: RegionCoords, place: crate::MovePlace) {
+        // Elastic 5: land a move brings here and not claimed yet: held until it is.
+        if self.hold_for_move(from, &h, &record, target, place) {
+            return;
+        }
         let now_ms = self.clock_ms;
         let c = h.client;
         log::info!("[server] player {} (client {c}) moved here by host {from} into {target:?}", h.player.0);
@@ -607,10 +611,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         let promoted = self.promote_session(c, from, now_ms);
         // In no region while its creation is on its way to the target.
         self.cut_transit(h.player, &record);
-        let landing = self.landing_in(target);
         self.homes.insert(c, target);
         self.creating.insert(c, (target, h.player, record.clone()));
-        self.send_play_event(target, GameEventKind::CreateClientAt(c, landing, Some(Box::new(record.client))));
+        match place {
+            crate::MovePlace::Landing => {
+                let landing = self.landing_in(target);
+                self.send_play_event(target, GameEventKind::CreateClientAt(c, landing, Some(Box::new(record.client))));
+            }
+            // Its land moved here under it: it stands where it stood.
+            crate::MovePlace::Pose => self.send_play_event(target, GameEventKind::RestorePlayer(c, Box::new(record))),
+        }
         if promoted {
             self.send_home_hop(c, h.player);
         }
@@ -805,7 +815,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// that follows the claim forgets what waited ([`Self::forget_home_answers`]); a client
     /// never told has no connection to `owner`, where its player would park for want of a
     /// session (`HANDOFF_SESSION_GRACE_MS`).
-    fn name_new_home(&mut self, client: ClientId, target: RegionCoords, owner: HostId) {
+    pub(super) fn name_new_home(&mut self, client: ClientId, target: RegionCoords, owner: HostId) {
         if self.sessions.get(&client).map(|s| s.kind) != Some(SessionKind::Home) {
             return;
         }
@@ -827,7 +837,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// `client`'s home session here sent it to host `owner` for `rc`.
-    fn redirected_to(&mut self, client: ClientId, rc: RegionCoords, owner: HostId) {
+    pub(super) fn redirected_to(&mut self, client: ClientId, rc: RegionCoords, owner: HostId) {
         if let Some(session) = self.sessions.get_mut(&client) {
             session.asked_elsewhere.remove(&rc);
         }
@@ -933,7 +943,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// `client` is told to go to the host that owns `rc` (its endpoint as last known, a
     /// ticket that host is told to expect — queued like everything to it).
-    fn redirect(&mut self, client: ClientId, rc: RegionCoords) -> Redirect {
+    pub(super) fn redirect(&mut self, client: ClientId, rc: RegionCoords) -> Redirect {
         let Some(owner) = self.foreign_host(rc) else {
             log::warn!("client {client}: {rc:?} is not another host's ({:?}); subscribe dropped", self.owner_of(rc));
             return Redirect::Never;
@@ -973,7 +983,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the owner told to expect it — [`Reliable::ObserverOrder`], valid for
     /// [`OBSERVER_ORDER_TTL_SECS`] from its receipt there), handed out again while at
     /// least half its life is left (by this host's `now_ms`), then minted anew.
-    fn observer_ticket(&mut self, client: ClientId, owner: HostId, now_ms: u64) -> crate::ObserverTicket {
+    pub(super) fn observer_ticket(&mut self, client: ClientId, owner: HostId, now_ms: u64) -> crate::ObserverTicket {
         let reuse_ms = OBSERVER_ORDER_TTL_SECS * 1000 / 2;
         if let Some(&(nonce, minted)) = self.observer_tickets.get(&(client, owner)) {
             if now_ms.saturating_sub(minted) < reuse_ms {
@@ -1380,11 +1390,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         for &(sr, _) in &rows {
             self.forget_land_need(sr);
         }
+        // Elastic 5: land a move brought here: its held players are placed (below, after `Owns`).
+        let moved: Vec<crate::SuperRegion> = rows.iter().map(|(sr, _)| *sr).filter(|sr| self.expects_land(*sr)).collect();
         // Not to a host that left (its session is held; each message queued for it would
         // re-arm the re-route of what is held for it, `reroute_held_for_landless_leavers`).
         let peers: Vec<HostId> = self.peers.keys().copied().filter(|p| !self.left_peers.contains_key(p)).collect();
         for p in peers {
             self.queue_to_peer(p, Reliable::Owns { rows: rows.clone() });
+        }
+        for sr in moved {
+            self.moved_in(sr);
         }
         self.flush_unowned();
     }
@@ -1994,13 +2009,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            Reliable::PlayerMove { handoff, record, target } => {
+            Reliable::PlayerMove { handoff, record, target, place } => {
                 if !self.owns(target) && !self.masked_or_released(target) {
                     // Parked here (`accept_move`): a region this host does not own is never
                     // started here, so its body could not be created. Never lost.
                     log::error!("[server] host {from} moved a player into {target:?}, which this host does not own");
                 }
-                self.accept_move(from, handoff, *record, target);
+                self.accept_move(from, handoff, *record, target, place);
             }
             Reliable::PlayerParked { client, player } => self.player_parked_elsewhere(from, client, player),
             Reliable::Owns { rows } => self.peer_owns(from, rows),
@@ -2021,7 +2036,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 }
 
 /// The claim a player's adventure is.
-fn claim_of(adventure: Option<SiteId>) -> Option<Claim> {
+pub(super) fn claim_of(adventure: Option<SiteId>) -> Option<Claim> {
     adventure.map(Claim::Adventure)
 }
 
@@ -2134,7 +2149,7 @@ pub(super) struct CountedPart {
 }
 
 /// What [`WorldManager::redirect`] did with a subscribe.
-enum Redirect {
+pub(super) enum Redirect {
     /// The client was sent to this host (`RegionElsewhere`).
     Sent(HostId),
     /// Not now (the owner's endpoint is not known yet): it may be later.

@@ -137,6 +137,9 @@ pub struct ConnectionSet {
     hop_of: BTreeMap<u32, u64>,
     /// The world's extent: region keys are canonical under it (`None`: as given).
     extent: Option<MapExtent>,
+    /// Elastic 5: standby connections opened ahead of a move of the land under the player
+    /// (`ServerPacket::LandMoving`), each spared by [`Self::close_idle`] until this session time.
+    standby: BTreeMap<u32, u64>,
 }
 
 impl ConnectionSet {
@@ -151,7 +154,40 @@ impl ConnectionSet {
             home_hop: 0,
             hop_of: BTreeMap::new(),
             extent: None,
+            standby: BTreeMap::new(),
         }
+    }
+
+    /// Elastic 5: a standby connection to `endpoint`'s host, opened now with `ticket` unless one
+    /// is open (it serves no region until the move makes that host the home), spared by
+    /// [`Self::close_idle`] until `until_ms` (session time). `false`: no opener, or the host is
+    /// the home's.
+    pub fn open_standby(&mut self, endpoint: &HostEndpoint, ticket: ObserverTicket, opener: Option<&mut dyn ConnOpener>, until_ms: u64) -> bool {
+        let ordinal = endpoint.id;
+        if self.home_ordinal() == Some(ordinal) {
+            return false;
+        }
+        let key = match self.conn_to(ordinal) {
+            Some(key) => key,
+            None => {
+                let Some(opener) = opener else { return false };
+                let key = self.next_key;
+                self.next_key += 1;
+                log::info!("[client] opening a standby connection to host {ordinal} ahead of a move (connection {key})");
+                let credential = Credential::Observer { client: ticket.client, nonce: ticket.nonce };
+                let handle = opener.open(key, endpoint, credential);
+                self.conns.insert(key, Conn { handle, ordinal: Some(ordinal), idle_since: None });
+                key
+            }
+        };
+        self.standby.insert(key, until_ms);
+        true
+    }
+
+    /// Elastic 5: the move is off (or it happened): no connection is spared any more; an idle one
+    /// closes as any other ([`Self::close_idle`]).
+    pub fn end_standby(&mut self) {
+        self.standby.clear();
     }
 
     /// The world's extent is `extent` now (its `WorldMap`): region keys are folded to
@@ -412,8 +448,9 @@ impl ConnectionSet {
     /// closes its connection).
     pub fn close_idle(&mut self, now_ms: u64) -> Vec<u32> {
         let mut closed = Vec::new();
+        self.standby.retain(|_, until| now_ms < *until);
         for (key, conn) in self.conns.iter_mut() {
-            if *key == self.home || self.region_conn.values().any(|c| c == key) {
+            if *key == self.home || self.region_conn.values().any(|c| c == key) || self.standby.contains_key(key) {
                 conn.idle_since = None;
                 continue;
             }

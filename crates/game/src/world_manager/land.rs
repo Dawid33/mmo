@@ -127,6 +127,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         let s = self.ownership.1;
         let mut needs: BTreeSet<SuperRegion> = std::mem::take(&mut self.land_needed);
         needs.extend(self.unowned_waiting.keys().copied());
+        // Elastic 5: land a move brings here, or masked by a move, is not asked for.
+        needs.retain(|sr| !self.expects_land(*sr) && !self.move_masked(*sr));
         let scan = !self.left_peers.is_empty() && !self.land_scanned_ms.is_some_and(|at| now_ms < at + LAND_NEEDED_EVERY_MS);
         if scan {
             self.land_scanned_ms = Some(now_ms);
@@ -409,8 +411,14 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// [`Self::releases_of`], each with the epoch it was masked — and is released — at (the
     /// server shrinks its fence by them when that part commits, a row only at that epoch).
+    ///
+    /// Elastic 5: and the rows its part MOVES to a taker, each at its masked epoch (they leave this
+    /// host's fence with the commit exactly as released ones do).
     pub fn release_epochs_of(&self, cut: CutId) -> Vec<(SuperRegion, u64)> {
-        self.releasing.iter().filter(|(_, (c, _))| *c == cut).map(|(sr, (_, epoch))| (*sr, *epoch)).collect()
+        let mut rows: Vec<(SuperRegion, u64)> =
+            self.releasing.iter().filter(|(_, (c, _))| *c == cut).map(|(sr, (_, epoch))| (*sr, *epoch)).collect();
+        rows.extend(self.move_epochs_of(cut));
+        rows
     }
 
     /// Cut `cut` committed — with this host's part, the server's fence already shrunk by its
